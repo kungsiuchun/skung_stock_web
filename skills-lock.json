@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "web-design": {
+      "source": "countbot-ai/CountBot",
+      "sourceType": "github",
+      "computedHash": "c857cdb461c7a3ad922d2b267ea33ba380de290528ba803ec4b2a2285e174034"
+    }
+  }
+}

@@ -1,0 +1,15 @@
+name = "spx-trading-pua"
+main = "scripts/worker-spx-bot.ts"
+compatibility_date = "2024-12-30"
+compatibility_flags = [ "nodejs_compat" ]
+
+[triggers]
+# 美東時間 09:00 - 17:00 (UTC 13-21) 每 15 分鐘執行一次，週一至週五
+crons = [ "*/15 14-20 * * 1-5" ]
+
+[vars]
+# 這裡放置非敏感的默認變量
+OPENROUTER_MODEL = "google/gemma-4-26b-a4b-it"
+
+# 敏感變量 (TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, OPENROUTER_API_KEY) 
+# 應使用 `wrangler secret put` 設置，不要寫在文件中。
