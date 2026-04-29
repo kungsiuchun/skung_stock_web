@@ -1,5 +1,5 @@
 import { RSI, BollingerBands, SMA, MACD, EMA } from 'technicalindicators';
-import { PERSONAS, ORCHESTRATOR_PROMPT, SYSTEM_PROMPT_PREFIX } from './prompts';
+import { PERSONAS, ORCHESTRATOR_PROMPT, SYSTEM_PROMPT_PREFIX, AUDIT_AGENT_PROMPT, ALPHA_EAR_SENTIMENT_PROMPT } from './prompts';
 
 // Cloudflare Worker Environment Types
 interface Env {
@@ -7,6 +7,38 @@ interface Env {
   TELEGRAM_CHAT_ID: string;
   OPENROUTER_API_KEY: string;
   OPENROUTER_MODEL?: string;
+  WEBHOOK_SECRET?: string; // 🔒 防護互聯網隨機觸發的安全金鑰
+  SPX_MEMORY: any;
+}
+
+interface ActionLogItem {
+  time: string;
+  price: number;
+  action: string;
+  reasoning: string;
+  pnl?: number;
+}
+interface DailyMemory {
+  currentPosition: "NONE" | "CALL" | "PUT";
+  entryPrice: number | null;
+  entryTime: string | null;
+  actionLog: ActionLogItem[];
+}
+interface TgGexData {
+  spot?: number;
+  gammaFlipLevel?: number;
+  gammaStatus?: string;
+  mostLongStrike?: number;
+  mostLongGex?: string;
+  mostShortStrike?: number;
+  mostShortGex?: string;
+  longWalls?: { strike: number; gex: string }[];
+  shortPockets?: { strike: number; gex: string }[];
+  netFlowUpper?: { strike: number; gex: string };
+  netFlowLower?: { strike: number; gex: string };
+  putCallIvSkew?: number;
+  generatedAt?: string;
+  parsedAt?: string;
 }
 
 // --- Helper: Fetch with Timeout ---
@@ -56,32 +88,32 @@ async function fetchYahooOptionsPCR(symbol: string = '^SPX') {
   try {
     const cookieRes = await fetch('https://fc.yahoo.com', {
       headers: { 'User-Agent': 'Mozilla/5.0' },
-      redirect: 'manual' 
+      redirect: 'manual'
     });
     const cookies = cookieRes.headers.get('set-cookie') || '';
-    
+
     const crumbRes = await fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', {
       headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies }
     });
     const crumb = await crumbRes.text();
     if (!crumb) return null;
-    
+
     const url = `https://query1.finance.yahoo.com/v7/finance/options/${encodeURIComponent(symbol)}?crumb=${crumb}`;
     const res = await fetch(url, {
       headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies }
     });
     if (!res.ok) return null;
-    
+
     const data = await res.json() as any;
     const options = data.optionChain.result[0].options[0];
     if (!options) return null;
-    
+
     const calls = options.calls || [];
     const puts = options.puts || [];
     const totalCallVolume = calls.reduce((acc: number, curr: any) => acc + (curr.volume || 0), 0);
     const totalPutVolume = puts.reduce((acc: number, curr: any) => acc + (curr.volume || 0), 0);
     if (totalCallVolume === 0) return null;
-    
+
     return totalPutVolume / totalCallVolume;
   } catch (e) {
     console.error('Fetch PCR Error:', e);
@@ -90,6 +122,46 @@ async function fetchYahooOptionsPCR(symbol: string = '^SPX') {
 }
 
 // --- 分析與邏輯函數 ---
+
+async function fetchNewsAndSentiment(env: Env) {
+  try {
+    const res = await fetchWithTimeout('https://newsnow.busiyi.world/api/s?id=wallstreetcn', {
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    }, 10000);
+    if (!res.ok) return { score: 0, label: 'neutral', reason: 'News API error' };
+    const data = await res.json() as any;
+    const items = data.items?.slice(0, 10).map((i: any) => i.title).join('\n') || '';
+
+    if (!items) return { score: 0, label: 'neutral', reason: 'No news found' };
+
+    const response = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://spx-trading-pua.kungsiuchun0.workers.dev',
+        'X-OpenRouter-Title': 'SPX PUA Agent'
+      },
+      body: JSON.stringify({
+        model: env.OPENROUTER_MODEL || 'google/gemma-4-26b-a4b-it:free',
+        messages: [
+          { role: 'system', content: ALPHA_EAR_SENTIMENT_PROMPT },
+          { role: 'user', content: `News Headlines:\n${items}` }
+        ]
+      })
+    }, 15000);
+
+    if (response.ok) {
+      const gData = await response.json() as any;
+      let content = gData.choices[0].message.content;
+      content = content.replace(/```json/gi, '').replace(/```/g, '').trim();
+      return JSON.parse(content);
+    }
+  } catch (e) {
+    console.error('Sentiment Error:', e);
+  }
+  return { score: 0, label: 'neutral', reason: 'Sentiment calculation failed' };
+}
 
 async function calculateIndicators(quotes: any[]) {
   const closes = quotes.map(q => q.close).filter(c => c !== null) as number[];
@@ -245,7 +317,8 @@ async function sendTelegramMessage(token: string, chatId: string, text: string) 
 
 function tgEscape(str: string): string {
   if (!str) return "";
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // 處理 AI 返回的字面 "\n" 符號，將其轉換為真實的換行
+  return str.replace(/\\n/g, '\n').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 // --- 主要執行邏輯 ---
@@ -260,10 +333,33 @@ async function runTradingAgents(env: Env) {
     console.log('[DEBUG] 💓 任務啟動：發送心跳...');
     await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, "💓 <b>系統心跳：診斷任務已啟動...</b>\n正在獲取市場數據中...");
 
-    console.log('[DEBUG] Step 1: Fetching Yahoo Quotes & Options...');
-    const spxQuotes = await fetchYahooChart('^GSPC', '15m', '7d');
-    const vixQuotes = await fetchYahooChart('^VIX', '15m', '7d');
-    const pcrValue = await fetchYahooOptionsPCR('^SPX');
+    // Memory Fetch
+    const etNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+    const etDateStr = etNow.getFullYear() + "-" + (etNow.getMonth() + 1).toString().padStart(2, '0') + "-" + etNow.getDate().toString().padStart(2, '0');
+    const memoryKey = `spx_memory_${etDateStr}`;
+
+    const etTime = new Intl.DateTimeFormat('zh-TW', {
+      timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+    }).format(new Date());
+
+    // 並行讀取日內記憶 + Telegram GEX 快照
+    const [rawMemory, rawTgGex] = await Promise.all([
+      env.SPX_MEMORY.get(memoryKey),
+      env.SPX_MEMORY.get('tg_gex_latest')
+    ]);
+    let dailyMemory: DailyMemory = rawMemory ? JSON.parse(rawMemory) : { currentPosition: "NONE", entryPrice: null, entryTime: null, actionLog: [] };
+    const tgGex: TgGexData | null = rawTgGex ? JSON.parse(rawTgGex) : null;
+    const tgGexAge = tgGex?.parsedAt ? Math.round((Date.now() - new Date(tgGex.parsedAt).getTime()) / 60000) : null;
+
+    console.log('[DEBUG] Step 1: Fetching Yahoo Quotes, Options & News...');
+    const [spxQuotes, spxQuotesM5, vixQuotes, pcrValue, sentimentData] = await Promise.all([
+      fetchYahooChart('^GSPC', '15m', '7d'),
+      fetchYahooChart('^GSPC', '5m', '2d'),
+      fetchYahooChart('^VIX', '15m', '7d'),
+      fetchYahooOptionsPCR('^SPX'),
+      fetchNewsAndSentiment(env)
+    ]);
 
     console.log('[DEBUG] Step 2: Calculating Indicators...');
     const spxInd = await calculateIndicators(spxQuotes);
@@ -271,6 +367,20 @@ async function runTradingAgents(env: Env) {
 
     if (!spxInd) {
       throw new Error('無法計算技術指標');
+    }
+
+    const m5Quotes = spxQuotesM5.filter((q: any) => q.close !== null);
+    let m5Analysis = { boxHigh: 0, boxLow: 0, volumeSurge: 1, currentM5Vol: 0, avgM5Vol: 0 };
+    if (m5Quotes.length >= 24) {
+      const last24 = m5Quotes.slice(-24); // 2 hours
+      m5Analysis.boxHigh = Math.max(...last24.map((q: any) => q.high));
+      m5Analysis.boxLow = Math.min(...last24.map((q: any) => q.low));
+    }
+    if (m5Quotes.length >= 11) {
+      const last10 = m5Quotes.slice(-11, -1);
+      m5Analysis.avgM5Vol = last10.reduce((sum: number, q: any) => sum + (q.volume || 0), 0) / 10;
+      m5Analysis.currentM5Vol = m5Quotes[m5Quotes.length - 1].volume || 0;
+      m5Analysis.volumeSurge = m5Analysis.avgM5Vol > 0 ? (m5Analysis.currentM5Vol / m5Analysis.avgM5Vol) : 1;
     }
 
     const pcrStatus = !pcrValue ? '數據缺失' : (pcrValue > 1.25 ? '⚠️ 極度恐慌避險 (反轉契機)' : pcrValue < 0.8 ? '極度貪婪 (回調風險)' : '情緒中性');
@@ -294,18 +404,58 @@ async function runTradingAgents(env: Env) {
     };
 
     const fundFlow = await getFundFlow(spxQuotes);
-    const extendedContext = { ...context, macd: spxInd.macd, fundFlow };
+
+    // Skavinski TG GEX 整合到 AI context
+    const tgGexContext = tgGex ? {
+      source: `Skavinski GEX (${tgGex.generatedAt || 'unknown'}, ${tgGexAge != null ? `${tgGexAge}min ago` : 'unknown age'})`,
+      gammaFlipLevel: tgGex.gammaFlipLevel,
+      gammaStatus: tgGex.gammaStatus,
+      mostLongGammaStrike: `${tgGex.mostLongStrike} (${tgGex.mostLongGex})`,
+      mostShortGammaStrike: `${tgGex.mostShortStrike} (${tgGex.mostShortGex})`,
+      longGammaWalls: tgGex.longWalls?.map(w => `${w.strike}(${w.gex})`).join(' > '),
+      shortGammaPockets: tgGex.shortPockets?.map(p => `${p.strike}(${p.gex})`).join(' > '),
+      netFlowTarget: `Upper:${tgGex.netFlowUpper?.strike} Lower:${tgGex.netFlowLower?.strike}`,
+      putCallIvSkew: tgGex.putCallIvSkew ? `${tgGex.putCallIvSkew}% (puts more expensive)` : null
+    } : null;
+
+    const extendedContext = {
+      currentTime: etTime,
+      ...context,
+      macd: spxInd.macd,
+      fundFlow,
+      m5Analysis: {
+        boxHigh: m5Analysis.boxHigh.toFixed(2),
+        boxLow: m5Analysis.boxLow.toFixed(2),
+        volumeSurge: m5Analysis.volumeSurge.toFixed(2) + 'x',
+      },
+      newsSentiment: {
+        score: sentimentData.score,
+        label: sentimentData.label,
+        reason: sentimentData.reason
+      },
+      skavinskiGEX: tgGexContext,
+      TODAYS_MEMORY: {
+        currentPosition: dailyMemory.currentPosition,
+        entryPrice: dailyMemory.entryPrice,
+        recentActions: dailyMemory.actionLog.slice(-3)
+      }
+    };
 
     console.log('[DEBUG] Step 3: Triggering AI Agents (Gemma Free)...');
     const [agent1, agent2, agent3] = await Promise.all([
-      analyzeWithAgent('Goldman', PERSONAS.GOLDMAN_WARRIOR, extendedContext, env),
-      analyzeWithAgent('Citadel', PERSONAS.CITADEL_QUANT, extendedContext, env),
-      analyzeWithAgent('OptionsFlow', PERSONAS.REVERSION_OPTIONS_SPECIALIST, extendedContext, env)
+      analyzeWithAgent('QM', PERSONAS.QM_MOMENTUM_SNIPER, extendedContext, env),
+      analyzeWithAgent('CM', PERSONAS.CM_OPTIONS_MAKER, extendedContext, env),
+      analyzeWithAgent('NT', PERSONAS.NT_MACRO_SENTIMENT, extendedContext, env)
     ]);
 
-    const buyVotes = [agent1.decision, agent2.decision, agent3.decision].filter(d => d === 'BUY').length;
-    const sellVotes = [agent1.decision, agent2.decision, agent3.decision].filter(d => d === 'SELL').length;
-    const holdVotes = [agent1.decision, agent2.decision, agent3.decision].filter(d => d === 'HOLD').length;
+    const normalizeDecision = (d: string) => d ? d.toString().trim().toUpperCase() : "HOLD";
+    const d1 = normalizeDecision(agent1.decision);
+    const d2 = normalizeDecision(agent2.decision);
+    const d3 = normalizeDecision(agent3.decision);
+
+    const buyVotes = [d1, d2, d3].filter(d => d === 'BUY' || d === 'LONG').length;
+    const sellVotes = [d1, d2, d3].filter(d => d === 'SELL' || d === 'SHORT' || d === 'PUT').length;
+    const holdVotes = 3 - buyVotes - sellVotes;
     let consensusVote = buyVotes > sellVotes ? 'LONG 📈' : sellVotes > buyVotes ? 'SHORT 📉' : 'NEUTRAL ⚖️';
 
     console.log('[DEBUG] Step 4: Triggering Orchestrator...');
@@ -335,10 +485,42 @@ async function runTradingAgents(env: Env) {
       console.error('[ERR] Orchestrator error', e);
     }
 
-    const etTime = new Intl.DateTimeFormat('zh-TW', {
-      timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
-    }).format(new Date());
+    // Update Memory based on Action
+    const tradeAction = (orchestratorPlan as any).trade_action || "HOLD";
+    const currentPriceStr = spxInd.currentClose;
+
+    if (tradeAction === 'OPEN_CALL' && dailyMemory.currentPosition === 'NONE') {
+      dailyMemory.currentPosition = 'CALL';
+      dailyMemory.entryPrice = currentPriceStr;
+      dailyMemory.entryTime = etTime;
+      dailyMemory.actionLog.push({ time: etTime, price: currentPriceStr, action: '買入 Call', reasoning: orchestratorPlan.logic });
+    } else if (tradeAction === 'OPEN_PUT' && dailyMemory.currentPosition === 'NONE') {
+      dailyMemory.currentPosition = 'PUT';
+      dailyMemory.entryPrice = currentPriceStr;
+      dailyMemory.entryTime = etTime;
+      dailyMemory.actionLog.push({ time: etTime, price: currentPriceStr, action: '買入 Put', reasoning: orchestratorPlan.logic });
+    } else if (tradeAction === 'CLOSE' && dailyMemory.currentPosition !== 'NONE') {
+      const pnlRaw = dailyMemory.currentPosition === 'CALL'
+        ? (currentPriceStr - dailyMemory.entryPrice!)
+        : (dailyMemory.entryPrice! - currentPriceStr);
+      dailyMemory.actionLog.push({
+        time: etTime,
+        price: currentPriceStr,
+        action: `平倉 ${dailyMemory.currentPosition}`,
+        reasoning: orchestratorPlan.logic,
+        pnl: parseFloat(pnlRaw.toFixed(2))
+      });
+      dailyMemory.currentPosition = 'NONE';
+      dailyMemory.entryPrice = null;
+      dailyMemory.entryTime = null;
+    } else if (tradeAction === 'HOLD' && dailyMemory.currentPosition === 'NONE') {
+      dailyMemory.actionLog.push({ time: etTime, price: currentPriceStr, action: '觀望防守', reasoning: orchestratorPlan.logic });
+    }
+
+    // Save Memory
+    const etNowDateStr = etTime.split(' ')[0].replace(/\//g, '-');
+    const dbKey = `spx_memory_${etNowDateStr}`;
+    await env.SPX_MEMORY.put(dbKey, JSON.stringify(dailyMemory));
 
     const toM = (val: number) => (val / 1000000).toFixed(1) + 'M';
     const message = `
@@ -346,6 +528,8 @@ async function runTradingAgents(env: Env) {
 
 ⚡ <b>[市場雷達 · 實時全景]</b>
 今日 SPX 現報 <code>${context.currentPrice}</code> | VIX <code>${context.currentVix}</code>
+M5 級別：2H Box <code>[${m5Analysis.boxLow.toFixed(2)} - ${m5Analysis.boxHigh.toFixed(2)}]</code> | 量能 <code>${m5Analysis.volumeSurge.toFixed(2)}x</code>
+新聞情緒：<code>${sentimentData.score}</code> (${sentimentData.label}) - ${tgEscape(sentimentData.reason)}
 技術面：RSI <code>${context.rsi14}</code> | Bollinger <code>${context.bollingerBandwidth}</code>
 📦 通道狀態：${context.isSqueeze ? '⚠️ 處於劇烈擠壓，能量正在蓄積' : '通道正常擴張，趨勢慣性延續'}
 
@@ -353,31 +537,40 @@ async function runTradingAgents(env: Env) {
 6H 累計淨流入：<code>$${((fundFlow?.mainNetInflow || 0) / 1000000).toFixed(2)}M</code>
 解讀：${tgEscape(fundFlow?.interpretation || '數據缺失')}
 
-📊 <b>[期權籌碼與回歸動態]</b>
-Put/Call Ratio：<code>${context.pcrValue}</code>
-EMA9 短均線：<code>${context.ema9}</code> (${context.ema9Trend})
-VWAP 乖離：價格偏離今日 VWAP 達 <code>${context.vwapDeviation}</code>
-狀態解讀：${tgEscape(context.pcrStatus)}
+📊 <b>[期權籌碼 · PCR 指標]</b>
+Put/Call Ratio：<code>${context.pcrValue}</code> — ${tgEscape(context.pcrStatus)}
+EMA9：<code>${context.ema9}</code> (${context.ema9Trend}) | VWAP 乖離：<code>${context.vwapDeviation}</code>
+
+📡 <b>[Skavinski GEX 信號]</b>${tgGex ? ` (${tgGex.generatedAt}${tgGexAge != null ? `, ${tgGexAge}min ago` : ''})` : ' 數據缺失'}
+${tgGex ? `系統態勢：<b>${tgGex.gammaStatus === 'positive_gamma' ? '✅ Positive Gamma — 做市商吸收波動' : '⚠️ Negative Gamma — 波動放大模式'}</b>
+🔄 Gamma Flip：<code>${tgGex.gammaFlipLevel}</code> (${(spxInd.currentClose > (tgGex.gammaFlipLevel || 0)) ? '在 Flip 之上↑ 多方有利' : '在 Flip 之下↓ 空方佔優'})
+🟢 最強多方：<code>${tgGex.mostLongStrike}</code> (${tgGex.mostLongGex}) | 🔴 最強空方：<code>${tgGex.mostShortStrike}</code> (${tgGex.mostShortGex})
+📊 Long Walls：${tgGex.longWalls?.slice(0, 3).map(w => `${w.strike}(${w.gex})`).join(' ► ') || 'N/A'}
+📊 Short Pockets：${tgGex.shortPockets?.slice(0, 3).map(p => `${p.strike}(${p.gex})`).join(' ► ') || 'N/A'}
+↕️ 流動目標：Upper <code>${tgGex.netFlowUpper?.strike}</code> ∣ Lower <code>${tgGex.netFlowLower?.strike}</code>
+IV Skew： Puts 比 Calls 貴 <code>${tgGex.putCallIvSkew}%</code>` : '⚠️ 執行 <code>node scripts/tg-gex-scraper.cjs</code> 更新數據'}  
 
 ⚖️ <b>[理事會決議 · 專家辯論]</b>
 🟢 <code>${buyVotes}</code> | 🔴 <code>${sellVotes}</code> | ⚪ <code>${holdVotes}</code> [🔥 核心共識: <b>${consensusVote}</b>]
-🗣️ <b>專家銳評</b> (Expert Rapid-Fire)
+🗣️ <b>專家深度腦爆</b> (Expert Rapid-Fire)
 
-🦁 <b>Shark</b>:
+🦁 <b>QM (Momentum)</b>:
 ${tgEscape(agent1.reasoning)}
 
-🦅 <b>Quant</b>:
+🌊 <b>CM (Options)</b>:
 ${tgEscape(agent2.reasoning)}
 
-🦢 <b>Grizzly</b>:
+🦢 <b>NT (Sentiment)</b>:
 ${tgEscape(agent3.reasoning)}
 
-🛡️ <b>[雷霆執行計劃 · 風控方案]</b>
-<b>策略：</b> ${tgEscape(orchestratorPlan.strategy)}
-<b>邏輯：</b> ${tgEscape(orchestratorPlan.logic)}
-<b>風控：</b> <code>${tgEscape(orchestratorPlan.risk_management)}</code>
+🛡️ <b>[雷霆一擊 · 終極執行]</b> (Thor Execution Plan)
+<b>操作：</b> <code>${tgEscape((orchestratorPlan as any).trade_action || "HOLD")}</code>
+<b>買點：</b> ${tgEscape((orchestratorPlan as any).buy_zone || "N/A")}
+<b>止損：</b> ${tgEscape((orchestratorPlan as any).stop_loss || "N/A")}
+<b>止盈：</b> ${tgEscape((orchestratorPlan as any).take_profit || "N/A")}
+<b>風控：</b> ${tgEscape((orchestratorPlan as any).risk_warning || "N/A")}
 
-<pre>-- CF Worker v2.2.2 | Production Stable --</pre>
+<pre>-- CF Worker v3.0.0 | M5/Sentiment Engine --</pre>
 `;
 
     console.log('[DEBUG] Step 6: Sending Final Report...');
@@ -393,14 +586,76 @@ ${tgEscape(agent3.reasoning)}
   }
 }
 
+async function runEndOfDayAudit(env: Env) {
+  const etNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const etDateStr = etNow.getFullYear() + "-" + (etNow.getMonth() + 1).toString().padStart(2, '0') + "-" + etNow.getDate().toString().padStart(2, '0');
+  const memoryKey = `spx_memory_${etDateStr}`;
+  const rawMemory = await env.SPX_MEMORY.get(memoryKey);
+
+  if (!rawMemory) {
+    console.log("[AUDIT] No memory found for today.");
+    return;
+  }
+  const memory: DailyMemory = JSON.parse(rawMemory);
+
+  try {
+    const response = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: env.OPENROUTER_MODEL || 'google/gemma-4-26b-a4b-it:free',
+        messages: [
+          { role: 'system', content: AUDIT_AGENT_PROMPT },
+          { role: 'user', content: `Today's Action Log: ${JSON.stringify(memory.actionLog)}` }
+        ]
+      })
+    }, 30000);
+
+    if (!response.ok) throw new Error("Audit generation failed");
+    const data = await response.json() as any;
+    const report = data.choices[0].message.content;
+    const finalMsg = `📅 <b>【每日審計清單】 (${etDateStr})</b>\n\n<pre>${tgEscape(report)}</pre>`;
+
+    await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, finalMsg);
+  } catch (e: any) {
+    console.error('[AUDIT] Failed to generate audit', e);
+  }
+}
+
 // --- Worker Entry Point ---
 
 export default {
   async scheduled(event: any, env: Env, ctx: any) {
-    ctx.waitUntil(runTradingAgents(env));
+    // audit cron 必須與 wrangler.spx.toml 的 crons 陣列完全一致
+    // 15 20 * * 1-5 -> UTC 20:15 (EDT 16:15，即美東時間下午 4:15 收盤後 15 分鐘)
+    if (event.cron === "15 20 * * 1-5") {
+      ctx.waitUntil(runEndOfDayAudit(env));
+    } else {
+      ctx.waitUntil(runTradingAgents(env));
+    }
   },
   async fetch(request: Request, env: Env, ctx: any) {
     const url = new URL(request.url);
+
+    // 🔒 安全防護：驗證請求，防止互聯網掃描器/爬蟲隨機觸發 AI API (浪費您的錢)
+    const reqToken = url.searchParams.get('token');
+
+    // 如果沒有在 Cloudflare 設置 WEBHOOK_SECRET，則預設使用 TELEGRAM_CHAT_ID 作為簡單驗證密碼
+    const expectedToken = env.WEBHOOK_SECRET || env.TELEGRAM_CHAT_ID;
+
+    if (reqToken !== expectedToken) {
+      return new Response('Unauthorized: Please provide a valid ?token parameter to protect your AI credits!', { status: 401 });
+    }
+
+    // ?audit — 手動觸發盤後審計報告
+    if (url.searchParams.has('audit')) {
+      ctx.waitUntil(runEndOfDayAudit(env));
+      return new Response('Audit triggered — check Telegram in ~30s.');
+    }
+
     if (url.searchParams.has('debug')) {
       const logs: string[] = [];
       const originalLog = console.log;
