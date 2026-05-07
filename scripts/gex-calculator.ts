@@ -70,11 +70,15 @@ export async function fetchAndCalculateGEX() {
         const gexByStrike = new Map<number, { callGEX: number, putGEX: number, netGEX: number }>();
         let totalCallGex = 0;
         let totalPutGex = 0;
+        let zeroDteCallGex = 0;
+        let zeroDtePutGex = 0;
 
         const now = Date.now() / 1000;
 
         // Process all options across all fetched expirations for Spot GEX
-        for (const opt of allOptions) {
+        for (let optIndex = 0; optIndex < allOptions.length; optIndex++) {
+            const opt = allOptions[optIndex];
+            const isNearestExpiry = optIndex === 0;
             let T = (opt.expirationDate - now) / (365 * 24 * 3600);
             if (T <= 0.001) T = 0.001;
             
@@ -93,6 +97,7 @@ export async function fetchAndCalculateGEX() {
                 entry.netGEX += gex;
                 gexByStrike.set(call.strike, entry);
                 totalCallGex += gex;
+                if (isNearestExpiry) zeroDteCallGex += gex;
             }
 
             for (const put of opt.puts || []) {
@@ -108,6 +113,7 @@ export async function fetchAndCalculateGEX() {
                 entry.netGEX += gex;
                 gexByStrike.set(put.strike, entry);
                 totalPutGex += gex;
+                if (isNearestExpiry) zeroDtePutGex += gex;
             }
         }
 
@@ -170,11 +176,17 @@ export async function fetchAndCalculateGEX() {
 
         const totalNetGEX = totalCallGex + totalPutGex;
         const gammaStatus = totalNetGEX > 0 ? 'positive_gamma' : 'negative_gamma';
+        const zeroDteNetGEX = zeroDteCallGex + zeroDtePutGex;
+        const zeroDteGammaStatus = zeroDteNetGEX > 0 ? 'positive_gamma' : 'negative_gamma';
 
         return {
             spot,
             gammaFlipLevel: Math.round(flipLevel),
             gammaStatus,
+            broadGammaStatus: gammaStatus,
+            zeroDteGammaStatus,
+            totalNetGex: Number(totalNetGEX.toFixed(4)),
+            zeroDteNetGex: Number(zeroDteNetGEX.toFixed(4)),
             mostLongStrike,
             mostLongGex: '+' + mostLongGex,
             mostShortStrike,

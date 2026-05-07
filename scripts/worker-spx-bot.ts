@@ -25,14 +25,38 @@ interface DailyMemory {
   entryTime: string | null;
   actionLog: ActionLogItem[];
   // Iron Condor tracking
-  icPosition: "NONE" | "DEPLOYED" | "ROLLING";
+  icPosition: "NONE" | "DEPLOYED" | "PARTIAL" | "ROLLING";
   icDeployTime: string | null;
   icAction: string | null;
+}
+interface TrendDayContext {
+  regime: "BULL_TREND_DAY" | "BEAR_TREND_DAY" | "RANGE_OR_MIXED";
+  directionalBias: "CALL" | "PUT" | "NONE";
+  confidence: number;
+  recommendedAction: "OPEN_CALL" | "OPEN_PUT" | "HOLD";
+  icAllowed: boolean;
+  icBlockReason: string | null;
+  previousClose: number | null;
+  dayOpen: number | null;
+  dayChangePct: number | null;
+  fromOpenPct: number | null;
+  rangePositionPct: number | null;
+  priorBoxHigh: number | null;
+  priorBoxLow: number | null;
+  aboveVWAP: boolean;
+  aboveEMA9: boolean;
+  aboveGammaFlip: boolean | null;
+  nearestExpiryGammaStatus: string | null;
+  rationale: string;
 }
 interface TgGexData {
   spot?: number;
   gammaFlipLevel?: number;
   gammaStatus?: string;
+  broadGammaStatus?: string;
+  zeroDteGammaStatus?: string;
+  totalNetGex?: number;
+  zeroDteNetGex?: number;
   mostLongStrike?: number;
   mostLongGex?: string;
   mostShortStrike?: number;
@@ -216,6 +240,157 @@ async function calculateIndicators(quotes: any[]) {
     currentVWAP,
     vwapDeviation
   };
+}
+
+function computeTrendDayContext(m5Quotes: any[], indicators: any, tgGex: TgGexData | null): TrendDayContext {
+  const fallback: TrendDayContext = {
+    regime: "RANGE_OR_MIXED",
+    directionalBias: "NONE",
+    confidence: 0,
+    recommendedAction: "HOLD",
+    icAllowed: true,
+    icBlockReason: null,
+    previousClose: null,
+    dayOpen: null,
+    dayChangePct: null,
+    fromOpenPct: null,
+    rangePositionPct: null,
+    priorBoxHigh: null,
+    priorBoxLow: null,
+    aboveVWAP: false,
+    aboveEMA9: false,
+    aboveGammaFlip: null,
+    nearestExpiryGammaStatus: tgGex?.zeroDteGammaStatus || tgGex?.gammaStatus || null,
+    rationale: "M5 data insufficient; treat tape as range/mixed."
+  };
+
+  const validQuotes = m5Quotes.filter((q: any) => q?.close != null && q?.date instanceof Date);
+  if (validQuotes.length < 12) return fallback;
+
+  const latest = validQuotes[validQuotes.length - 1];
+  const latestDate = latest.date.toDateString();
+  const todayQuotes = validQuotes.filter((q: any) => q.date.toDateString() === latestDate);
+  const priorQuotes = validQuotes.filter((q: any) => q.date.toDateString() !== latestDate);
+  if (todayQuotes.length < 6) return fallback;
+
+  const currentClose = Number(indicators.currentClose ?? latest.close);
+  const previousClose = priorQuotes.length > 0 ? Number(priorQuotes[priorQuotes.length - 1].close) : null;
+  const dayOpen = Number(todayQuotes[0].open ?? todayQuotes[0].close);
+  const dayHigh = Math.max(...todayQuotes.map((q: any) => Number(q.high ?? q.close)));
+  const dayLow = Math.min(...todayQuotes.map((q: any) => Number(q.low ?? q.close)));
+  const dayRange = dayHigh - dayLow;
+  const dayChangePct = previousClose ? ((currentClose - previousClose) / previousClose) * 100 : null;
+  const fromOpenPct = dayOpen ? ((currentClose - dayOpen) / dayOpen) * 100 : null;
+  const rangePositionPct = dayRange > 0 ? ((currentClose - dayLow) / dayRange) * 100 : 50;
+  const priorWindow = todayQuotes.slice(Math.max(0, todayQuotes.length - 25), Math.max(0, todayQuotes.length - 1));
+  const priorBoxHigh = priorWindow.length > 0 ? Math.max(...priorWindow.map((q: any) => Number(q.high ?? q.close))) : null;
+  const priorBoxLow = priorWindow.length > 0 ? Math.min(...priorWindow.map((q: any) => Number(q.low ?? q.close))) : null;
+  const aboveVWAP = currentClose > Number(indicators.currentVWAP ?? currentClose);
+  const ema9 = indicators.ema9 != null ? Number(indicators.ema9) : null;
+  const aboveEMA9 = ema9 != null ? currentClose > ema9 : false;
+  const aboveGammaFlip = tgGex?.gammaFlipLevel ? currentClose > tgGex.gammaFlipLevel : null;
+  const nearestExpiryGammaStatus = tgGex?.zeroDteGammaStatus || tgGex?.gammaStatus || null;
+
+  let bullScore = 0;
+  if ((dayChangePct ?? 0) >= 0.45) bullScore++;
+  if ((fromOpenPct ?? 0) >= 0.25) bullScore++;
+  if (aboveVWAP) bullScore++;
+  if (aboveEMA9) bullScore++;
+  if ((rangePositionPct ?? 50) >= 70) bullScore++;
+  if (priorBoxHigh != null && currentClose >= priorBoxHigh - 1) bullScore++;
+  if (aboveGammaFlip !== false) bullScore++;
+
+  let bearScore = 0;
+  if ((dayChangePct ?? 0) <= -0.45) bearScore++;
+  if ((fromOpenPct ?? 0) <= -0.25) bearScore++;
+  if (!aboveVWAP) bearScore++;
+  if (!aboveEMA9) bearScore++;
+  if ((rangePositionPct ?? 50) <= 30) bearScore++;
+  if (priorBoxLow != null && currentClose <= priorBoxLow + 1) bearScore++;
+  if (aboveGammaFlip !== true) bearScore++;
+
+  const isBullTrend = bullScore >= 5 && aboveVWAP && aboveEMA9 && (((dayChangePct ?? 0) >= 0.45) || ((fromOpenPct ?? 0) >= 0.35));
+  const isBearTrend = bearScore >= 5 && !aboveVWAP && !aboveEMA9 && (((dayChangePct ?? 0) <= -0.45) || ((fromOpenPct ?? 0) <= -0.35));
+  const confidence = Math.round((Math.max(bullScore, bearScore) / 7) * 100);
+  const fmt = (n: number | null) => n == null || !Number.isFinite(n) ? "N/A" : n.toFixed(2);
+
+  if (isBullTrend) {
+    const rationale = `Bull trend day: day ${fmt(dayChangePct)}%, open ${fmt(fromOpenPct)}%, above VWAP/EMA9, top ${Math.round(rangePositionPct)}% of range.`;
+    return {
+      regime: "BULL_TREND_DAY",
+      directionalBias: "CALL",
+      confidence,
+      recommendedAction: "OPEN_CALL",
+      icAllowed: false,
+      icBlockReason: "Bull trend day invalidates neutral 0DTE Iron Condor deployment.",
+      previousClose,
+      dayOpen,
+      dayChangePct,
+      fromOpenPct,
+      rangePositionPct,
+      priorBoxHigh,
+      priorBoxLow,
+      aboveVWAP,
+      aboveEMA9,
+      aboveGammaFlip,
+      nearestExpiryGammaStatus,
+      rationale
+    };
+  }
+
+  if (isBearTrend) {
+    const rationale = `Bear trend day: day ${fmt(dayChangePct)}%, open ${fmt(fromOpenPct)}%, below VWAP/EMA9, bottom ${Math.round(rangePositionPct)}% of range.`;
+    return {
+      regime: "BEAR_TREND_DAY",
+      directionalBias: "PUT",
+      confidence,
+      recommendedAction: "OPEN_PUT",
+      icAllowed: false,
+      icBlockReason: "Bear trend day invalidates neutral 0DTE Iron Condor deployment.",
+      previousClose,
+      dayOpen,
+      dayChangePct,
+      fromOpenPct,
+      rangePositionPct,
+      priorBoxHigh,
+      priorBoxLow,
+      aboveVWAP,
+      aboveEMA9,
+      aboveGammaFlip,
+      nearestExpiryGammaStatus,
+      rationale
+    };
+  }
+
+  return {
+    regime: "RANGE_OR_MIXED",
+    directionalBias: "NONE",
+    confidence,
+    recommendedAction: "HOLD",
+    icAllowed: true,
+    icBlockReason: null,
+    previousClose,
+    dayOpen,
+    dayChangePct,
+    fromOpenPct,
+    rangePositionPct,
+    priorBoxHigh,
+    priorBoxLow,
+    aboveVWAP,
+    aboveEMA9,
+    aboveGammaFlip,
+    nearestExpiryGammaStatus,
+    rationale: `Range/mixed tape: bullScore=${bullScore}/7, bearScore=${bearScore}/7.`
+  };
+}
+
+function isBeforeEtCutoff(etDate: Date, hour: number, minute: number) {
+  const minutes = etDate.getHours() * 60 + etDate.getMinutes();
+  return minutes < (hour * 60 + minute);
+}
+
+function planReason(plan: any) {
+  return plan?.logic || plan?.action_reasoning || plan?.buy_zone || plan?.risk_warning || "策略未提供具體理由";
 }
 
 async function getFundFlow(quotes: any[], etfQuotes: Record<string, any[]> = {}) {
@@ -579,11 +754,16 @@ async function runTradingAgents(env: Env) {
       source: `CBOE Delayed 15-min Options Chain (${tgGex.generatedAt})`,
       gammaFlipLevel: tgGex.gammaFlipLevel,
       gammaStatus: tgGex.gammaStatus,
+      broadGammaStatus: tgGex.broadGammaStatus,
+      zeroDteGammaStatus: tgGex.zeroDteGammaStatus,
+      totalNetGex: tgGex.totalNetGex,
+      zeroDteNetGex: tgGex.zeroDteNetGex,
       mostLongGammaStrike: `${tgGex.mostLongStrike} (${tgGex.mostLongGex})`,
       mostShortGammaStrike: `${tgGex.mostShortStrike} (${tgGex.mostShortGex})`,
       longGammaWalls: tgGex.longWalls?.map((w: any) => `${w.strike}(${w.gex})`).join(' > '),
       shortGammaPockets: tgGex.shortPockets?.map((p: any) => `${p.strike}(${p.gex})`).join(' > '),
     } : null;
+    const trendDayContext = computeTrendDayContext(m5QuotesValid, spxInd, tgGex);
 
     const rawWisdom = await env.SPX_MEMORY.get('SPX_WISDOM_BOOK');
     const learnedRules = rawWisdom ? JSON.parse(rawWisdom) : [];
@@ -604,6 +784,7 @@ async function runTradingAgents(env: Env) {
         label: sentimentData.label,
         reason: sentimentData.reason
       },
+      trendDayContext,
       skavinskiGEX: tgGexContext,
       priceActionContext: calculatePriceActionContext(spxQuotesD1, spxQuotesH1),
       TODAYS_MEMORY: {
@@ -623,6 +804,7 @@ async function runTradingAgents(env: Env) {
       ivPercentile,
       pcrValue: context.pcrValue,
       skavinskiGEX: tgGexContext,
+      trendDayContext,
       icPositionStatus: dailyMemory.icPosition,
       newsSentiment: sentimentData,
     };
@@ -674,6 +856,40 @@ async function runTradingAgents(env: Env) {
       console.error('[ERR] Orchestrator error', e);
     }
 
+    if (
+      dailyMemory.currentPosition === 'NONE' &&
+      isBeforeEtCutoff(etNow, 15, 30) &&
+      trendDayContext.regime === 'BULL_TREND_DAY' &&
+      (((orchestratorPlan as any).trade_action || 'HOLD') === 'HOLD' || (orchestratorPlan as any).trade_action === 'OPEN_PUT')
+    ) {
+      orchestratorPlan = {
+        ...(orchestratorPlan as any),
+        trade_action: 'OPEN_CALL',
+        action_reasoning: '順勢追蹤',
+        logic: trendDayContext.rationale,
+        buy_zone: `單邊上升日 override：現價 ${spxInd.currentClose.toFixed(2)} 附近跟隨 CALL；必須守住 VWAP ${spxInd.currentVWAP.toFixed(2)} / EMA9 ${spxInd.ema9?.toFixed(2) ?? 'N/A'}。`,
+        stop_loss: `跌回 VWAP ${spxInd.currentVWAP.toFixed(2)} 並失守 EMA9，單邊日假設失效。`,
+        take_profit: tgGex?.mostLongStrike ? `先看 SG_High / long wall ${tgGex.mostLongStrike}，突破後用 M5 higher-low trailing。` : '用 M5 higher-low trailing，失去 VWAP 即撤。',
+        risk_warning: '主要風險係尾盤追高同 VWAP 假跌破；但原本 HOLD 會錯失單邊趨勢。'
+      };
+    } else if (
+      dailyMemory.currentPosition === 'NONE' &&
+      isBeforeEtCutoff(etNow, 15, 30) &&
+      trendDayContext.regime === 'BEAR_TREND_DAY' &&
+      (((orchestratorPlan as any).trade_action || 'HOLD') === 'HOLD' || (orchestratorPlan as any).trade_action === 'OPEN_CALL')
+    ) {
+      orchestratorPlan = {
+        ...(orchestratorPlan as any),
+        trade_action: 'OPEN_PUT',
+        action_reasoning: '順勢追蹤',
+        logic: trendDayContext.rationale,
+        buy_zone: `單邊下跌日 override：現價 ${spxInd.currentClose.toFixed(2)} 附近跟隨 PUT；必須壓在 VWAP ${spxInd.currentVWAP.toFixed(2)} / EMA9 ${spxInd.ema9?.toFixed(2) ?? 'N/A'} 下方。`,
+        stop_loss: `站回 VWAP ${spxInd.currentVWAP.toFixed(2)} 並收復 EMA9，單邊日假設失效。`,
+        take_profit: tgGex?.mostShortStrike ? `先看 SG_Low / short pocket ${tgGex.mostShortStrike}，跌破後用 M5 lower-high trailing。` : '用 M5 lower-high trailing，收復 VWAP 即撤。',
+        risk_warning: '主要風險係尾盤追空同 VWAP 假收復；但原本 HOLD 會錯失單邊趨勢。'
+      };
+    }
+
     // Update Memory based on Action
     const tradeAction = (orchestratorPlan as any).trade_action || "HOLD";
     const currentPriceStr = spxInd.currentClose;
@@ -682,12 +898,12 @@ async function runTradingAgents(env: Env) {
       dailyMemory.currentPosition = 'CALL';
       dailyMemory.entryPrice = currentPriceStr;
       dailyMemory.entryTime = etTime;
-      dailyMemory.actionLog.push({ time: etTime, price: currentPriceStr, action: '買入 Call', reasoning: orchestratorPlan.logic });
+      dailyMemory.actionLog.push({ time: etTime, price: currentPriceStr, action: '買入 Call', reasoning: planReason(orchestratorPlan) });
     } else if (tradeAction === 'OPEN_PUT' && dailyMemory.currentPosition === 'NONE') {
       dailyMemory.currentPosition = 'PUT';
       dailyMemory.entryPrice = currentPriceStr;
       dailyMemory.entryTime = etTime;
-      dailyMemory.actionLog.push({ time: etTime, price: currentPriceStr, action: '買入 Put', reasoning: orchestratorPlan.logic });
+      dailyMemory.actionLog.push({ time: etTime, price: currentPriceStr, action: '買入 Put', reasoning: planReason(orchestratorPlan) });
     } else if (tradeAction === 'CLOSE' && dailyMemory.currentPosition !== 'NONE') {
       const pnlRaw = dailyMemory.currentPosition === 'CALL'
         ? (currentPriceStr - dailyMemory.entryPrice!)
@@ -696,18 +912,29 @@ async function runTradingAgents(env: Env) {
         time: etTime,
         price: currentPriceStr,
         action: `平倉 ${dailyMemory.currentPosition}`,
-        reasoning: orchestratorPlan.logic,
+        reasoning: planReason(orchestratorPlan),
         pnl: parseFloat(pnlRaw.toFixed(2))
       });
       dailyMemory.currentPosition = 'NONE';
       dailyMemory.entryPrice = null;
       dailyMemory.entryTime = null;
     } else if (tradeAction === 'HOLD' && dailyMemory.currentPosition === 'NONE') {
-      dailyMemory.actionLog.push({ time: etTime, price: currentPriceStr, action: '觀望防守', reasoning: orchestratorPlan.logic });
+      dailyMemory.actionLog.push({ time: etTime, price: currentPriceStr, action: '觀望防守', reasoning: planReason(orchestratorPlan) });
     }
 
     // Update IC Position Memory
-    const icAction = agentIC.ic_action || (orchestratorPlan as any).iron_condor_assessment || 'STAND_DOWN';
+    let icAction = agentIC.ic_action || (orchestratorPlan as any).iron_condor_assessment || 'STAND_DOWN';
+    if (!trendDayContext.icAllowed && icAction === 'DEPLOY') {
+      icAction = 'STAND_DOWN';
+      agentIC.ic_action = 'STAND_DOWN';
+      agentIC.gex_check = 'FAIL';
+      agentIC.ic_reasoning = `${trendDayContext.icBlockReason} ${trendDayContext.rationale}`;
+    } else if (!trendDayContext.icAllowed && dailyMemory.icPosition !== 'NONE' && !['CLOSE_WING', 'CLOSE_50PCT', 'EMERGENCY_CLOSE'].includes(icAction)) {
+      icAction = 'EMERGENCY_CLOSE';
+      agentIC.ic_action = 'EMERGENCY_CLOSE';
+      agentIC.gex_check = 'FAIL';
+      agentIC.ic_reasoning = `${trendDayContext.icBlockReason} ${trendDayContext.rationale}`;
+    }
     if (icAction === 'DEPLOY' && dailyMemory.icPosition === 'NONE') {
       dailyMemory.icPosition = 'DEPLOYED';
       dailyMemory.icDeployTime = etTime;
@@ -752,6 +979,11 @@ OB：${paCtx.nearestOB} | FVG：${paCtx.nearestFVG}
 🎯 黃金口袋：<code>${paCtx.fibGoldenPocket}</code>`
       : '⚠️ 多週期數據不足';
 
+    const trendDayDisplay = `🎚️ <b>[Tape Regime · 單邊日雷達]</b>
+Regime：<code>${trendDayContext.regime}</code> | Bias：<code>${trendDayContext.directionalBias}</code> | Confidence：<code>${trendDayContext.confidence}%</code>
+建議：<code>${trendDayContext.recommendedAction}</code> | IC：<code>${trendDayContext.icAllowed ? 'ALLOWED' : 'BLOCKED'}</code>
+理由：${tgEscape(trendDayContext.rationale)}${trendDayContext.icBlockReason ? `\nIC Block：${tgEscape(trendDayContext.icBlockReason)}` : ''}`;
+
     // IC summary for display
     const icDisplay = agentIC.ic_action === 'STAND_DOWN'
       ? `🦅 鐵鷹：條件不滿足，按兵不動`
@@ -772,6 +1004,8 @@ M5 級別：2H Box <code>[${m5Analysis.boxLow.toFixed(2)} - ${m5Analysis.boxHigh
 📦 通道狀態：${context.isSqueeze ? '⚠️ 處於劇烈擠壓，能量正在蓄積' : '通道正常擴張，趨勢慣性延續'}
 
 🏛️ <b>[價格行為 · 機構足跡]</b> (Price Action)
+${trendDayDisplay}
+
 ${paContextDisplay}
 
 💸 <b>[主力資金 · 潮汐觀察]</b> (Fund Flow)
