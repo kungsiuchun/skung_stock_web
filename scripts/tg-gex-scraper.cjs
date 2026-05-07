@@ -93,9 +93,17 @@ function parseGexMessage(text) {
   if (lowerMatch) result.netFlowLower = { strike: parseInt(lowerMatch[1]), gex: lowerMatch[2] };
   if (floorMatch) result.netFlowFloor = { strike: parseInt(floorMatch[1]), gex: floorMatch[2] };
 
-  // Â±EM Pricing Skew
-  const skewMatch = t.match(/Puts are ([0-9.]+)%\s*higher IV/i);
-  if (skewMatch) result.putCallIvSkew = parseFloat(skewMatch[1]);
+  // ±EM Pricing Skew
+  const skewMatch = t.match(/(Puts|Calls) are[^\d]*([0-9.]+)%\s*higher/i);
+  if (skewMatch) {
+    let val = parseFloat(skewMatch[2]);
+    if (skewMatch[1].toLowerCase() === 'calls') {
+      val = -val;
+    }
+    result.putCallIvSkew = val;
+  } else if (t.match(/Puts and calls have similar IV/i)) {
+    result.putCallIvSkew = 0;
+  }
 
   // Generated time
   const genMatch = t.match(/Generated:\s*([0-9:]+\s*ET)/i);
