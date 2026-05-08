@@ -1282,23 +1282,10 @@ Final Advisory：<code>${zeroDteRuleEngine.allowNewSignal ? 'ALLOW_NEW_SIGNAL' :
     const message = `SPX: ${context.currentPrice} 操作：${displayAction}
 ⏱️ <b>美東時間：${etTime} ET</b> | <b>標的：SPX</b>
 
-⚡ <b>[市場雷達 · 實時全景]</b>
-今日 SPX 現報 <code>${context.currentPrice}</code> | VIX <code>${context.currentVix}</code> (IV%: <code>${ivPercentile}%</code>)
-期限結構：<code>${vixTermStructure}</code> (9D: <code>${currentVix9d?.toFixed(2)}</code> | 3M: <code>${currentVix3m?.toFixed(2)}</code>)
-M5 級別：2H Box <code>[${m5Analysis.boxLow.toFixed(2)} - ${m5Analysis.boxHigh.toFixed(2)}]</code> | 量能 <code>${m5Analysis.volumeSurge.toFixed(2)}x</code>
-新聞情緒：<code>${sentimentData.score}</code> (${sentimentData.label}) - ${tgEscape(sentimentData.reason)}
-技術面：RSI <code>${context.rsi14}</code> | MACD <code>${(spxInd.macd as any)?.histogram?.toFixed(2) || 'N/A'}</code> | Bollinger <code>${context.bollingerBandwidth}</code>
-均線：EMA9 <code>${context.ema9}</code> (${context.ema9Trend}) | VWAP 乖離 <code>${context.vwapDeviation}</code>
-📦 通道狀態：${context.isSqueeze ? '⚠️ 處於劇烈擠壓，能量正在蓄積' : '通道正常擴張，趨勢慣性延續'}
-
 🏛️ <b>[價格行為 · 機構足跡]</b> (Price Action)
 ${trendDayDisplay}
 
 ${paContextDisplay}
-
-💸 <b>[主力資金 · 潮汐觀察]</b> (Fund Flow)
-6H 累計淨流入：<code>$${((fundFlow?.mainNetInflow || 0) / 1000000).toFixed(2)}M</code>
-解讀：${tgEscape(fundFlow?.interpretation || '數據缺失')}
 
 📊 <b>[期權籌碼 · PCR 指標]</b>
 Put/Call Ratio：<code>${context.pcrValue}</code> — ${tgEscape(context.pcrStatus)}
