@@ -84,8 +84,6 @@ interface ZeroDteRuleEngineResult {
   signalScore: number;
   hardBlocks: string[];
   activeRisks: string[];
-  missingData: string[];
-  ruleNotes: string[];
   allowNewSignal: boolean;
   hardRuleTriggered: boolean;
   thetaDecayRiskHigh: boolean;
@@ -626,14 +624,6 @@ function analyzeZeroDteRules(args: {
 
   const hardBlocks: string[] = [];
   const activeRisks: string[] = [];
-  const missingData = [
-    "realtime_option_bid_ask_spread",
-    "contract_level_greeks",
-    "actual_0dte_premium_decay",
-    "real_fill_slippage",
-    "verified_macro_calendar"
-  ];
-  const ruleNotes: string[] = [];
   let score = 45;
 
   const currentPrice = Number(spxInd.currentClose);
@@ -687,7 +677,6 @@ function analyzeZeroDteRules(args: {
   else {
     score -= 12;
     activeRisks.push("gex_missing");
-    missingData.push("yahoo_options_gex_snapshot");
   }
   if (currentVix && currentVix9d && currentVix3m) score += 6;
   else {
@@ -745,11 +734,6 @@ function analyzeZeroDteRules(args: {
     }
   }
 
-  if (missingData.length > 0) {
-    score -= 6;
-    ruleNotes.push("Execution-grade data is incomplete; advisory is conservative only.");
-  }
-
   score = clampNumber(Math.round(score), 0, 100);
 
   let marketRegime: ZeroDteRuleEngineResult["marketRegime"] = "UNKNOWN";
@@ -770,8 +754,6 @@ function analyzeZeroDteRules(args: {
     signalScore: score,
     hardBlocks,
     activeRisks,
-    missingData: Array.from(new Set(missingData)),
-    ruleNotes,
     allowNewSignal: verdict === "TRADE_ALLOWED",
     hardRuleTriggered: hardBlocks.length > 0,
     thetaDecayRiskHigh,
@@ -1085,6 +1067,11 @@ async function runTradingAgents(env: Env) {
     const d2 = normalizeDecision(agent2.decision);
     const d3 = normalizeDecision(agent3.decision);
     const d4 = normalizeDecision(agent4.decision);
+    const formatAgentDecision = (decision: string) => {
+      if (['BUY', 'LONG', 'CALL', 'OPEN_CALL'].includes(decision)) return '🟢 [做多]';
+      if (['SELL', 'SHORT', 'PUT', 'OPEN_PUT'].includes(decision)) return '🔴 [做空]';
+      return '⚪ [觀望]';
+    };
 
     const buyVotes = [d1, d2, d3, d4].filter(d => d === 'BUY' || d === 'LONG').length;
     const sellVotes = [d1, d2, d3, d4].filter(d => d === 'SELL' || d === 'SHORT' || d === 'PUT').length;
@@ -1290,7 +1277,6 @@ GEX檢查：${agentIC.gex_check} | VIX檢查：${agentIC.vix_check} | 事件檢�
 Verdict：<code>${zeroDteRuleEngine.verdict}</code> | Bias：<code>${zeroDteRuleEngine.directionalBias}</code> | Regime：<code>${zeroDteRuleEngine.marketRegime}</code> | Score：<code>${zeroDteRuleEngine.signalScore}/100</code>
 Hard Blocks：<code>${tgEscape(zeroDteList(zeroDteRuleEngine.hardBlocks))}</code>
 Active Risks：<code>${tgEscape(zeroDteList(zeroDteRuleEngine.activeRisks))}</code>
-Missing Data：<code>${tgEscape(zeroDteList(zeroDteRuleEngine.missingData))}</code>
 Final Advisory：<code>${zeroDteRuleEngine.allowNewSignal ? 'ALLOW_NEW_SIGNAL' : 'CONSERVATIVE_BLOCK_OR_WAIT'}</code>`;
 
     const message = `SPX: ${context.currentPrice} 操作：${displayAction}
@@ -1331,16 +1317,16 @@ ${zeroDteDisplay}
 🟢 <code>${buyVotes}</code> | 🔴 <code>${sellVotes}</code> | ⚪ <code>${holdVotes}</code> [🔥 核心共識: <b>${consensusVote}</b>]
 🗣️ <b>專家深度腦爆</b> (Expert Rapid-Fire)
 
-🦁 <b>QM (Momentum)</b>:
+🦁 <b>QM: ${formatAgentDecision(d1)} (Momentum)</b>:
 ${tgEscape(agent1.reasoning)}
 
-🌊 <b>CM (GEX Decision)</b>:
+🌊 <b>CM: ${formatAgentDecision(d2)} (GEX Decision)</b>:
 ${tgEscape(agent2.reasoning)}
 
-🦢 <b>NT (Sentiment)</b>:
+🦢 <b>NT: ${formatAgentDecision(d3)} (Sentiment)</b>:
 ${tgEscape(agent3.reasoning)}
 
-🏛️ <b>PA (Price Action)</b>:
+🏛️ <b>PA: ${formatAgentDecision(d4)} (Price Action)</b>:
 ${tgEscape(agent4.reasoning)}
 
 ${icDisplay}
@@ -1440,8 +1426,8 @@ async function runEndOfDayAudit(env: Env) {
 export default {
   async scheduled(event: any, env: Env, ctx: any) {
     // audit cron 必須與 wrangler.spx.toml 的 crons 陣列完全一致
-    // 15 20 * * 1-5 -> UTC 20:15 (EDT 16:15，即美東時間下午 4:15 收盤後 15 分鐘)
-    if (event.cron === "15 20 * * 2-6") {
+    // 15 19 * * 2-6 -> UTC 19:15 (EDT 15:15)
+    if (event.cron === "15 19 * * 2-6") {
       ctx.waitUntil(runEndOfDayAudit(env));
     } else {
       ctx.waitUntil(runTradingAgents(env));

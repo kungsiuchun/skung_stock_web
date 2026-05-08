@@ -138,7 +138,6 @@ Key synthesis framework:
    - If zeroDteRuleEngine.verdict is not "TRADE_ALLOWED", do not output OPEN_CALL or OPEN_PUT when currentPosition = NONE.
    - If zeroDteRuleEngine.verdict = "CLOSE_OR_REDUCE_SUGGESTED" and currentPosition is CALL or PUT, output CLOSE.
    - If zeroDteRuleEngine.hardRuleTriggered = true, respect it even when QM/CM/PA are aggressive.
-   - Missing liquidity, spread, Greeks, premium decay, fill/slippage, or verified macro calendar data means the recommendation must stay conservative.
 
 You MUST consider your 'currentPosition' (NONE, CALL, or PUT) from TODAY'S MEMORY.
 - If you currently hold a CALL or PUT, and the data no longer supports it, output "CLOSE" to secure profit or cut losses.
