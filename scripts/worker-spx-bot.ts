@@ -49,7 +49,7 @@ interface TrendDayContext {
   nearestExpiryGammaStatus: string | null;
   rationale: string;
 }
-interface TgGexData {
+interface GexData {
   spot?: number;
   gammaFlipLevel?: number;
   gammaStatus?: string;
@@ -68,6 +68,29 @@ interface TgGexData {
   putCallIvSkew?: number;
   generatedAt?: string;
   parsedAt?: string;
+}
+
+type ZeroDteAdvisoryVerdict =
+  | "TRADE_ALLOWED"
+  | "WAIT_AND_OBSERVE"
+  | "NO_TRADE"
+  | "CLOSE_OR_REDUCE_SUGGESTED"
+  | "FREEZE_NEW_SIGNALS";
+
+interface ZeroDteRuleEngineResult {
+  verdict: ZeroDteAdvisoryVerdict;
+  directionalBias: "CALL" | "PUT" | "NONE";
+  marketRegime: "TREND" | "CHOP" | "GAMMA_PIN" | "UNKNOWN";
+  signalScore: number;
+  hardBlocks: string[];
+  activeRisks: string[];
+  missingData: string[];
+  ruleNotes: string[];
+  allowNewSignal: boolean;
+  hardRuleTriggered: boolean;
+  thetaDecayRiskHigh: boolean;
+  gammaPinningDetected: boolean;
+  liquidityRisk: "UNKNOWN";
 }
 
 // --- Helper: Fetch with Timeout ---
@@ -209,6 +232,7 @@ async function calculateIndicators(quotes: any[]) {
   const sma20 = SMA.calculate({ values: closes, period: 20 });
   const sma50 = SMA.calculate({ values: closes, period: 50 });
   const ema9 = EMA.calculate({ values: closes, period: 9 });
+  const ema20 = EMA.calculate({ values: closes, period: 20 });
 
   // Calculate Intraday VWAP (using quotes from the latest trading day)
   const latestDateStr = quotes[quotes.length - 1].date.toDateString();
@@ -237,12 +261,13 @@ async function calculateIndicators(quotes: any[]) {
     sma50: sma50.length > 0 ? sma50[sma50.length - 1] : null,
     macd: currentMACD,
     ema9: ema9.length > 0 ? ema9[ema9.length - 1] : null,
+    ema20: ema20.length > 0 ? ema20[ema20.length - 1] : null,
     currentVWAP,
     vwapDeviation
   };
 }
 
-function computeTrendDayContext(m5Quotes: any[], indicators: any, tgGex: TgGexData | null): TrendDayContext {
+function computeTrendDayContext(m5Quotes: any[], indicators: any, gexData: GexData | null): TrendDayContext {
   const fallback: TrendDayContext = {
     regime: "RANGE_OR_MIXED",
     directionalBias: "NONE",
@@ -260,7 +285,7 @@ function computeTrendDayContext(m5Quotes: any[], indicators: any, tgGex: TgGexDa
     aboveVWAP: false,
     aboveEMA9: false,
     aboveGammaFlip: null,
-    nearestExpiryGammaStatus: tgGex?.zeroDteGammaStatus || tgGex?.gammaStatus || null,
+    nearestExpiryGammaStatus: gexData?.zeroDteGammaStatus || gexData?.gammaStatus || null,
     rationale: "M5 data insufficient; treat tape as range/mixed."
   };
 
@@ -288,8 +313,8 @@ function computeTrendDayContext(m5Quotes: any[], indicators: any, tgGex: TgGexDa
   const aboveVWAP = currentClose > Number(indicators.currentVWAP ?? currentClose);
   const ema9 = indicators.ema9 != null ? Number(indicators.ema9) : null;
   const aboveEMA9 = ema9 != null ? currentClose > ema9 : false;
-  const aboveGammaFlip = tgGex?.gammaFlipLevel ? currentClose > tgGex.gammaFlipLevel : null;
-  const nearestExpiryGammaStatus = tgGex?.zeroDteGammaStatus || tgGex?.gammaStatus || null;
+  const aboveGammaFlip = gexData?.gammaFlipLevel ? currentClose > gexData.gammaFlipLevel : null;
+  const nearestExpiryGammaStatus = gexData?.zeroDteGammaStatus || gexData?.gammaStatus || null;
 
   let bullScore = 0;
   if ((dayChangePct ?? 0) >= 0.45) bullScore++;
@@ -534,6 +559,227 @@ function calculateIVPercentile(vixQuotes: any[]): number {
   return Math.round((belowCount / closes.length) * 100);
 }
 
+function clampNumber(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function getEtMinutes(date: Date) {
+  return date.getHours() * 60 + date.getMinutes();
+}
+
+function parseEtTimestamp(input: string | null): Date | null {
+  if (!input) return null;
+  const nums = input.match(/\d+/g)?.map(Number);
+  if (!nums || nums.length < 5) return null;
+  const [year, month, day, hour, minute, second = 0] = nums;
+  return new Date(year, month - 1, day, hour, minute, second);
+}
+
+function getConsecutiveLosses(actionLog: ActionLogItem[]) {
+  let losses = 0;
+  for (let i = actionLog.length - 1; i >= 0; i--) {
+    const pnl = actionLog[i].pnl;
+    if (pnl == null) continue;
+    if (pnl < 0) losses++;
+    else break;
+  }
+  return losses;
+}
+
+function getDailyPnlPoints(actionLog: ActionLogItem[]) {
+  return actionLog.reduce((sum, item) => sum + (item.pnl || 0), 0);
+}
+
+function hasUnverifiedMacroEventRisk(sentimentData: any) {
+  const text = `${sentimentData?.label || ""} ${sentimentData?.reason || ""}`.toLowerCase();
+  return /\b(cpi|fomc|fed|powell|nfp|jobs report|payroll|inflation|rate decision)\b/.test(text);
+}
+
+function analyzeZeroDteRules(args: {
+  etNow: Date;
+  spxInd: any;
+  m5Analysis: { volumeSurge: number };
+  currentVix: number | null | undefined;
+  currentVix9d: number | null | undefined;
+  currentVix3m: number | null | undefined;
+  pcrValue: number | null;
+  calculatedGex: GexData | null;
+  trendDayContext: TrendDayContext;
+  dailyMemory: DailyMemory;
+  sentimentData: any;
+  priceActionContext: any;
+}): ZeroDteRuleEngineResult {
+  const {
+    etNow,
+    spxInd,
+    m5Analysis,
+    currentVix,
+    currentVix9d,
+    currentVix3m,
+    pcrValue,
+    calculatedGex,
+    trendDayContext,
+    dailyMemory,
+    sentimentData,
+    priceActionContext
+  } = args;
+
+  const hardBlocks: string[] = [];
+  const activeRisks: string[] = [];
+  const missingData = [
+    "realtime_option_bid_ask_spread",
+    "contract_level_greeks",
+    "actual_0dte_premium_decay",
+    "real_fill_slippage",
+    "verified_macro_calendar"
+  ];
+  const ruleNotes: string[] = [];
+  let score = 45;
+
+  const currentPrice = Number(spxInd.currentClose);
+  const ema9 = spxInd.ema9 != null ? Number(spxInd.ema9) : null;
+  const ema20 = spxInd.ema20 != null ? Number(spxInd.ema20) : null;
+  const vwap = spxInd.currentVWAP != null ? Number(spxInd.currentVWAP) : null;
+  const macdHistogram = spxInd.macd?.histogram != null ? Number(spxInd.macd.histogram) : null;
+  const volumeSurge = Number(m5Analysis.volumeSurge || 1);
+  const gammaFlip = calculatedGex?.gammaFlipLevel ? Number(calculatedGex.gammaFlipLevel) : null;
+
+  const aboveVwap = vwap != null && currentPrice > vwap;
+  const belowVwap = vwap != null && currentPrice < vwap;
+  const emaBull = ema9 != null && ema20 != null && ema9 > ema20 && currentPrice > ema9;
+  const emaBear = ema9 != null && ema20 != null && ema9 < ema20 && currentPrice < ema9;
+  const macdBull = macdHistogram != null && macdHistogram > 0;
+  const macdBear = macdHistogram != null && macdHistogram < 0;
+  const aboveGammaFlip = gammaFlip != null ? currentPrice > gammaFlip : null;
+  const nearGammaFlip = gammaFlip != null && Math.abs(currentPrice - gammaFlip) <= 8;
+  const gammaPinningDetected = Boolean(
+    calculatedGex?.zeroDteGammaStatus === "positive_gamma" &&
+    (nearGammaFlip ||
+      calculatedGex.longWalls?.some((w) => Math.abs(currentPrice - Number(w.strike)) <= 8))
+  );
+  const thetaDecayRiskHigh = dailyMemory.currentPosition !== "NONE" && getEtMinutes(etNow) >= 14 * 60 + 30;
+
+  let callScore = 0;
+  let putScore = 0;
+  if (aboveVwap) callScore += 2;
+  if (belowVwap) putScore += 2;
+  if (emaBull) callScore += 2;
+  if (emaBear) putScore += 2;
+  if (macdBull) callScore += 1;
+  if (macdBear) putScore += 1;
+  if (aboveGammaFlip === true) callScore += 1;
+  if (aboveGammaFlip === false) putScore += 1;
+  if (trendDayContext.directionalBias === "CALL") callScore += 3;
+  if (trendDayContext.directionalBias === "PUT") putScore += 3;
+  if (priceActionContext?.macroTrend?.includes("UPTREND")) callScore += 1;
+  if (priceActionContext?.macroTrend?.includes("DOWNTREND")) putScore += 1;
+
+  const directionalBias: "CALL" | "PUT" | "NONE" =
+    callScore >= putScore + 2 ? "CALL" : putScore >= callScore + 2 ? "PUT" : "NONE";
+
+  if (directionalBias !== "NONE") score += 14;
+  if (volumeSurge >= 1.25) score += 8;
+  else {
+    score -= 8;
+    activeRisks.push("volume_follow_through_weak");
+  }
+  if (calculatedGex) score += 8;
+  else {
+    score -= 12;
+    activeRisks.push("gex_missing");
+    missingData.push("yahoo_options_gex_snapshot");
+  }
+  if (currentVix && currentVix9d && currentVix3m) score += 6;
+  else {
+    score -= 10;
+    activeRisks.push("vix_term_structure_missing");
+  }
+  if (pcrValue != null) score += 4;
+  else {
+    score -= 5;
+    activeRisks.push("pcr_missing");
+  }
+  if (gammaPinningDetected) {
+    score -= 12;
+    activeRisks.push("gamma_pinning_detected");
+  }
+  if (thetaDecayRiskHigh) {
+    score -= 10;
+    activeRisks.push("theta_decay_risk_high");
+  }
+  if (hasUnverifiedMacroEventRisk(sentimentData)) {
+    score -= 12;
+    activeRisks.push("macro_event_risk_unverified");
+  }
+  if (directionalBias === "NONE") {
+    score -= 12;
+    activeRisks.push("signal_conflict");
+  }
+
+  const minutesNow = getEtMinutes(etNow);
+  const marketOpen = 9 * 60 + 30;
+  if (minutesNow >= marketOpen && minutesNow < marketOpen + 5) {
+    hardBlocks.push("first_5_minutes_no_chasing");
+  }
+  if (hasUnverifiedMacroEventRisk(sentimentData)) {
+    hardBlocks.push("macro_event_risk_needs_verified_calendar");
+  }
+
+  const consecutiveLosses = getConsecutiveLosses(dailyMemory.actionLog);
+  const dailyPnlPoints = getDailyPnlPoints(dailyMemory.actionLog);
+  if (consecutiveLosses >= 3 || dailyPnlPoints <= -30) {
+    hardBlocks.push("daily_circuit_breaker");
+  }
+
+  let positionTimedOut = false;
+  if (dailyMemory.currentPosition !== "NONE" && dailyMemory.entryPrice != null) {
+    const entryDate = parseEtTimestamp(dailyMemory.entryTime);
+    const elapsedMinutes = entryDate ? (etNow.getTime() - entryDate.getTime()) / 60000 : null;
+    const expectedMove =
+      dailyMemory.currentPosition === "CALL"
+        ? currentPrice - dailyMemory.entryPrice
+        : dailyMemory.entryPrice - currentPrice;
+    if (elapsedMinutes != null && elapsedMinutes >= 15 && expectedMove <= 0) {
+      positionTimedOut = true;
+      hardBlocks.push("position_no_follow_through_after_15m");
+    }
+  }
+
+  if (missingData.length > 0) {
+    score -= 6;
+    ruleNotes.push("Execution-grade data is incomplete; advisory is conservative only.");
+  }
+
+  score = clampNumber(Math.round(score), 0, 100);
+
+  let marketRegime: ZeroDteRuleEngineResult["marketRegime"] = "UNKNOWN";
+  if (gammaPinningDetected) marketRegime = "GAMMA_PIN";
+  else if (trendDayContext.regime === "BULL_TREND_DAY" || trendDayContext.regime === "BEAR_TREND_DAY") marketRegime = "TREND";
+  else if (trendDayContext.regime === "RANGE_OR_MIXED") marketRegime = "CHOP";
+
+  let verdict: ZeroDteAdvisoryVerdict = "WAIT_AND_OBSERVE";
+  if (positionTimedOut) verdict = "CLOSE_OR_REDUCE_SUGGESTED";
+  else if (hardBlocks.includes("daily_circuit_breaker")) verdict = "FREEZE_NEW_SIGNALS";
+  else if (hardBlocks.length > 0 || score < 45) verdict = "NO_TRADE";
+  else if (score >= 70 && directionalBias !== "NONE") verdict = "TRADE_ALLOWED";
+
+  return {
+    verdict,
+    directionalBias,
+    marketRegime,
+    signalScore: score,
+    hardBlocks,
+    activeRisks,
+    missingData: Array.from(new Set(missingData)),
+    ruleNotes,
+    allowNewSignal: verdict === "TRADE_ALLOWED",
+    hardRuleTriggered: hardBlocks.length > 0,
+    thetaDecayRiskHigh,
+    gammaPinningDetected,
+    liquidityRisk: "UNKNOWN"
+  };
+}
+
 // --- IC-specific Agent Analyzer ---
 async function analyzeWithICAgent(personaPrompt: string, contextData: any, env: Env) {
   const systemPrompt = `You are an institutional options strategist. Your persona is: ${personaPrompt}. \n${SYSTEM_PROMPT_IC}`;
@@ -669,7 +915,7 @@ async function runTradingAgents(env: Env) {
     if (!dailyMemory.icPosition) { dailyMemory.icPosition = 'NONE'; dailyMemory.icDeployTime = null; dailyMemory.icAction = null; }
 
     console.log('[DEBUG] Step 1: Fetching Yahoo Quotes, Options, News, GEX & Multi-TF data...');
-    const [spxQuotes, spxQuotesM5, spxQuotesD1, spxQuotesH1, vixQuotes, vixQuotes3mo, vixQuotes9d, spyQuotes, iwmQuotes, xlkQuotes, xlvQuotes, pcrValue, sentimentData, tgGex] = await Promise.all([
+    const [spxQuotes, spxQuotesM5, spxQuotesD1, spxQuotesH1, vixQuotes, vixQuotes3mo, vixQuotes9d, spyQuotes, iwmQuotes, xlkQuotes, xlvQuotes, pcrValue, sentimentData, calculatedGex] = await Promise.all([
       fetchYahooChart('^GSPC', '15m', '7d'),
       fetchYahooChart('^GSPC', '5m', '2d'),
       fetchYahooChart('^GSPC', '1d', '3mo'),   // PA: D1 macro structure
@@ -685,8 +931,6 @@ async function runTradingAgents(env: Env) {
       fetchNewsAndSentiment(env),
       fetchAndCalculateGEX()
     ]);
-
-    const tgGexAge = 0; // Live calculated
 
     console.log('[DEBUG] Step 2: Calculating Indicators...');
     const spxInd = await calculateIndicators(spxQuotes);
@@ -725,6 +969,7 @@ async function runTradingAgents(env: Env) {
       recentHigh: spxInd.recentHigh,
       recentLow: spxInd.recentLow,
       ema9: spxInd.ema9?.toFixed(2),
+      ema20: spxInd.ema20?.toFixed(2),
       ema9Trend: spxInd.currentClose > (spxInd.ema9 || 0) ? 'Bullish (Above EMA9)' : 'Bearish (Below EMA9)',
       currentVWAP: spxInd.currentVWAP.toFixed(2),
       vwapDeviation: spxInd.vwapDeviation.toFixed(2) + '%',
@@ -750,20 +995,35 @@ async function runTradingAgents(env: Env) {
     const fundFlow = await getFundFlow(spxQuotes, etfQuotes);
 
     // GEX 整合到 AI context
-    const tgGexContext = tgGex ? {
-      source: `CBOE Delayed 15-min Options Chain (${tgGex.generatedAt})`,
-      gammaFlipLevel: tgGex.gammaFlipLevel,
-      gammaStatus: tgGex.gammaStatus,
-      broadGammaStatus: tgGex.broadGammaStatus,
-      zeroDteGammaStatus: tgGex.zeroDteGammaStatus,
-      totalNetGex: tgGex.totalNetGex,
-      zeroDteNetGex: tgGex.zeroDteNetGex,
-      mostLongGammaStrike: `${tgGex.mostLongStrike} (${tgGex.mostLongGex})`,
-      mostShortGammaStrike: `${tgGex.mostShortStrike} (${tgGex.mostShortGex})`,
-      longGammaWalls: tgGex.longWalls?.map((w: any) => `${w.strike}(${w.gex})`).join(' > '),
-      shortGammaPockets: tgGex.shortPockets?.map((p: any) => `${p.strike}(${p.gex})`).join(' > '),
+    const calculatedGexContext = calculatedGex ? {
+      source: `Internal Yahoo Options GEX Calculator (${calculatedGex.generatedAt})`,
+      gammaFlipLevel: calculatedGex.gammaFlipLevel,
+      gammaStatus: calculatedGex.gammaStatus,
+      broadGammaStatus: calculatedGex.broadGammaStatus,
+      zeroDteGammaStatus: calculatedGex.zeroDteGammaStatus,
+      totalNetGex: calculatedGex.totalNetGex,
+      zeroDteNetGex: calculatedGex.zeroDteNetGex,
+      mostLongGammaStrike: `${calculatedGex.mostLongStrike} (${calculatedGex.mostLongGex})`,
+      mostShortGammaStrike: `${calculatedGex.mostShortStrike} (${calculatedGex.mostShortGex})`,
+      longGammaWalls: calculatedGex.longWalls?.map((w: any) => `${w.strike}(${w.gex})`).join(' > '),
+      shortGammaPockets: calculatedGex.shortPockets?.map((p: any) => `${p.strike}(${p.gex})`).join(' > '),
     } : null;
-    const trendDayContext = computeTrendDayContext(m5QuotesValid, spxInd, tgGex);
+    const trendDayContext = computeTrendDayContext(m5QuotesValid, spxInd, calculatedGex);
+    const priceActionContext = calculatePriceActionContext(spxQuotesD1, spxQuotesH1);
+    const zeroDteRuleEngine = analyzeZeroDteRules({
+      etNow,
+      spxInd,
+      m5Analysis,
+      currentVix,
+      currentVix9d,
+      currentVix3m,
+      pcrValue,
+      calculatedGex,
+      trendDayContext,
+      dailyMemory,
+      sentimentData,
+      priceActionContext
+    });
 
     const rawWisdom = await env.SPX_MEMORY.get('SPX_WISDOM_BOOK');
     const learnedRules = rawWisdom ? JSON.parse(rawWisdom) : [];
@@ -785,8 +1045,9 @@ async function runTradingAgents(env: Env) {
         reason: sentimentData.reason
       },
       trendDayContext,
-      skavinskiGEX: tgGexContext,
-      priceActionContext: calculatePriceActionContext(spxQuotesD1, spxQuotesH1),
+      zeroDteRuleEngine,
+      calculatedGEX: calculatedGexContext,
+      priceActionContext,
       TODAYS_MEMORY: {
         currentPosition: dailyMemory.currentPosition,
         entryPrice: dailyMemory.entryPrice,
@@ -803,8 +1064,9 @@ async function runTradingAgents(env: Env) {
       currentVix: context.currentVix,
       ivPercentile,
       pcrValue: context.pcrValue,
-      skavinskiGEX: tgGexContext,
+      calculatedGEX: calculatedGexContext,
       trendDayContext,
+      zeroDteRuleEngine,
       icPositionStatus: dailyMemory.icPosition,
       newsSentiment: sentimentData,
     };
@@ -869,7 +1131,7 @@ async function runTradingAgents(env: Env) {
         logic: trendDayContext.rationale,
         buy_zone: `單邊上升日 override：現價 ${spxInd.currentClose.toFixed(2)} 附近跟隨 CALL；必須守住 VWAP ${spxInd.currentVWAP.toFixed(2)} / EMA9 ${spxInd.ema9?.toFixed(2) ?? 'N/A'}。`,
         stop_loss: `跌回 VWAP ${spxInd.currentVWAP.toFixed(2)} 並失守 EMA9，單邊日假設失效。`,
-        take_profit: tgGex?.mostLongStrike ? `先看 SG_High / long wall ${tgGex.mostLongStrike}，突破後用 M5 higher-low trailing。` : '用 M5 higher-low trailing，失去 VWAP 即撤。',
+        take_profit: calculatedGex?.mostLongStrike ? `先看 SG_High / long wall ${calculatedGex.mostLongStrike}，突破後用 M5 higher-low trailing。` : '用 M5 higher-low trailing，失去 VWAP 即撤。',
         risk_warning: '主要風險係尾盤追高同 VWAP 假跌破；但原本 HOLD 會錯失單邊趨勢。'
       };
     } else if (
@@ -885,8 +1147,35 @@ async function runTradingAgents(env: Env) {
         logic: trendDayContext.rationale,
         buy_zone: `單邊下跌日 override：現價 ${spxInd.currentClose.toFixed(2)} 附近跟隨 PUT；必須壓在 VWAP ${spxInd.currentVWAP.toFixed(2)} / EMA9 ${spxInd.ema9?.toFixed(2) ?? 'N/A'} 下方。`,
         stop_loss: `站回 VWAP ${spxInd.currentVWAP.toFixed(2)} 並收復 EMA9，單邊日假設失效。`,
-        take_profit: tgGex?.mostShortStrike ? `先看 SG_Low / short pocket ${tgGex.mostShortStrike}，跌破後用 M5 lower-high trailing。` : '用 M5 lower-high trailing，收復 VWAP 即撤。',
+        take_profit: calculatedGex?.mostShortStrike ? `先看 SG_Low / short pocket ${calculatedGex.mostShortStrike}，跌破後用 M5 lower-high trailing。` : '用 M5 lower-high trailing，收復 VWAP 即撤。',
         risk_warning: '主要風險係尾盤追空同 VWAP 假收復；但原本 HOLD 會錯失單邊趨勢。'
+      };
+    }
+
+    const plannedTradeAction = ((orchestratorPlan as any).trade_action || 'HOLD').toString().toUpperCase();
+    if (zeroDteRuleEngine.verdict === 'CLOSE_OR_REDUCE_SUGGESTED' && dailyMemory.currentPosition !== 'NONE') {
+      orchestratorPlan = {
+        ...(orchestratorPlan as any),
+        trade_action: 'CLOSE',
+        action_reasoning: '0DTE風控',
+        buy_zone: 'N/A',
+        stop_loss: '0DTE rule engine: 15分鐘內無順向跟進，Theta decay 風險升高。',
+        take_profit: '先退出或減倉，等待下一個高分 setup。',
+        risk_warning: `Hard rule triggered: ${zeroDteRuleEngine.hardBlocks.join(', ') || 'position_timeout'}`
+      };
+    } else if (
+      dailyMemory.currentPosition === 'NONE' &&
+      ['OPEN_CALL', 'OPEN_PUT'].includes(plannedTradeAction) &&
+      zeroDteRuleEngine.verdict !== 'TRADE_ALLOWED'
+    ) {
+      orchestratorPlan = {
+        ...(orchestratorPlan as any),
+        trade_action: 'HOLD',
+        action_reasoning: '0DTE禁開',
+        buy_zone: 'N/A',
+        stop_loss: 'N/A',
+        take_profit: 'N/A',
+        risk_warning: `0DTE rule engine blocked new signal: ${zeroDteRuleEngine.verdict}. ${zeroDteRuleEngine.hardBlocks.join(', ') || zeroDteRuleEngine.activeRisks.join(', ') || 'score_not_enough'}`
       };
     }
 
@@ -924,7 +1213,12 @@ async function runTradingAgents(env: Env) {
 
     // Update IC Position Memory
     let icAction = agentIC.ic_action || (orchestratorPlan as any).iron_condor_assessment || 'STAND_DOWN';
-    if (!trendDayContext.icAllowed && icAction === 'DEPLOY') {
+    if (zeroDteRuleEngine.verdict !== 'TRADE_ALLOWED' && icAction === 'DEPLOY') {
+      icAction = 'STAND_DOWN';
+      agentIC.ic_action = 'STAND_DOWN';
+      agentIC.event_check = zeroDteRuleEngine.hardBlocks.length > 0 ? 'FAIL' : agentIC.event_check;
+      agentIC.ic_reasoning = `0DTE rule engine blocked IC deployment: ${zeroDteRuleEngine.verdict}. ${zeroDteRuleEngine.hardBlocks.join(', ') || zeroDteRuleEngine.activeRisks.join(', ') || 'score_not_enough'}`;
+    } else if (!trendDayContext.icAllowed && icAction === 'DEPLOY') {
       icAction = 'STAND_DOWN';
       agentIC.ic_action = 'STAND_DOWN';
       agentIC.gex_check = 'FAIL';
@@ -991,6 +1285,14 @@ Regime：<code>${trendDayContext.regime}</code> | Bias：<code>${trendDayContext
 GEX檢查：${agentIC.gex_check} | VIX檢查：${agentIC.vix_check} | 事件檢查：${agentIC.event_check}
 📝 ${tgEscape(agentIC.ic_reasoning || 'N/A')}`;
 
+    const zeroDteList = (items: string[]) => items.length > 0 ? items.slice(0, 5).join(', ') : 'None';
+    const zeroDteDisplay = `🧠 <b>[0DTE Rule Engine · Advisory Only]</b>
+Verdict：<code>${zeroDteRuleEngine.verdict}</code> | Bias：<code>${zeroDteRuleEngine.directionalBias}</code> | Regime：<code>${zeroDteRuleEngine.marketRegime}</code> | Score：<code>${zeroDteRuleEngine.signalScore}/100</code>
+Hard Blocks：<code>${tgEscape(zeroDteList(zeroDteRuleEngine.hardBlocks))}</code>
+Active Risks：<code>${tgEscape(zeroDteList(zeroDteRuleEngine.activeRisks))}</code>
+Missing Data：<code>${tgEscape(zeroDteList(zeroDteRuleEngine.missingData))}</code>
+Final Advisory：<code>${zeroDteRuleEngine.allowNewSignal ? 'ALLOW_NEW_SIGNAL' : 'CONSERVATIVE_BLOCK_OR_WAIT'}</code>`;
+
     const message = `SPX: ${context.currentPrice} 操作：${displayAction}
 ⏱️ <b>美東時間：${etTime} ET</b> | <b>標的：SPX</b>
 
@@ -1015,12 +1317,15 @@ ${paContextDisplay}
 📊 <b>[期權籌碼 · PCR 指標]</b>
 Put/Call Ratio：<code>${context.pcrValue}</code> — ${tgEscape(context.pcrStatus)}
 
-📡 <b>[期權 GEX 訊號]</b>${tgGex ? ` (${tgGex.generatedAt})` : ' 數據缺失'}
-${tgGex ? `系統態勢：<b>${tgGex.gammaStatus === 'positive_gamma' ? '✅ Positive Gamma — 橡皮筋模式（做市商吸收波動）' : '⚠️ Negative Gamma — 滑滑梯模式（波動放大）'}</b>
-🔄 Gamma Flip (ZG)：<code>${tgGex.gammaFlipLevel}</code> (${(spxInd.currentClose > (tgGex.gammaFlipLevel || 0)) ? '在 Flip 之上↑ 多方有利' : '在 Flip 之下↓ 空方佔優'})
-🟢 最強多方 (SG_High)：<code>${tgGex.mostLongStrike}</code> (${tgGex.mostLongGex}) | 🔴 最強空方 (SG_Low)：<code>${tgGex.mostShortStrike}</code> (${tgGex.mostShortGex})
-📊 Long Walls：${tgGex.longWalls?.slice(0, 3).map((w: any) => `${w.strike}(${w.gex})`).join(' ► ') || 'N/A'}
-📉 Short Pockets：${tgGex.shortPockets?.slice(0, 3).map((p: any) => `${p.strike}(${p.gex})`).join(' ► ') || 'N/A'}` : '⚠️ 數據抓取失敗'}  
+📡 <b>[期權 GEX 訊號]</b>${calculatedGex ? ` (${calculatedGex.generatedAt})` : ' 數據缺失'}
+${calculatedGex ? `來源：<code>Internal Yahoo Options GEX Calculator</code>
+系統態勢：<b>${calculatedGex.gammaStatus === 'positive_gamma' ? '✅ Positive Gamma — 橡皮筋模式（做市商吸收波動）' : '⚠️ Negative Gamma — 滑滑梯模式（波動放大）'}</b>
+🔄 Gamma Flip (ZG)：<code>${calculatedGex.gammaFlipLevel}</code> (${(spxInd.currentClose > (calculatedGex.gammaFlipLevel || 0)) ? '在 Flip 之上↑ 多方有利' : '在 Flip 之下↓ 空方佔優'})
+🟢 最強多方 (SG_High)：<code>${calculatedGex.mostLongStrike}</code> (${calculatedGex.mostLongGex}) | 🔴 最強空方 (SG_Low)：<code>${calculatedGex.mostShortStrike}</code> (${calculatedGex.mostShortGex})
+📊 Long Walls：${calculatedGex.longWalls?.slice(0, 3).map((w: any) => `${w.strike}(${w.gex})`).join(' ► ') || 'N/A'}
+📉 Short Pockets：${calculatedGex.shortPockets?.slice(0, 3).map((p: any) => `${p.strike}(${p.gex})`).join(' ► ') || 'N/A'}` : '⚠️ 數據抓取失敗'}
+
+${zeroDteDisplay}
 
 ⚖️ <b>[理事會決議 · 專家辯論]</b> (4方向性 + 1鐵鷹)
 🟢 <code>${buyVotes}</code> | 🔴 <code>${sellVotes}</code> | ⚪ <code>${holdVotes}</code> [🔥 核心共識: <b>${consensusVote}</b>]

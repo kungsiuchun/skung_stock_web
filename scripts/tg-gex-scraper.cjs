@@ -13,6 +13,13 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 
+// LEGACY: the SPX worker now uses scripts/gex-calculator.ts to calculate GEX internally.
+// Keep this disabled by default so scheduled Windows jobs cannot refresh old Skavinski KV data by accident.
+if (process.env.ALLOW_LEGACY_SKAVINSKI_SCRAPER !== '1') {
+  console.warn('Legacy Skavinski scraper is disabled. Set ALLOW_LEGACY_SKAVINSKI_SCRAPER=1 to run it intentionally.');
+  process.exit(0);
+}
+
 // â”€â”€ è®€å– .dev.vars â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const VARS_PATH = path.resolve(__dirname, '../.dev.vars');
 
