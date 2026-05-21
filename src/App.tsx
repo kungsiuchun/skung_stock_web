@@ -7,11 +7,12 @@ import { FinanceDashboard } from './components/finance-dashboard'
 import { FinRobotDashboard } from './components/dashboard/finrobot-dashboard'
 import { TradingAgentDashboard } from './components/dashboard/trading-agent-dashboard'
 import { AIFeaturesPage } from './components/ai-features-page'
+import { SPXRecapPage } from './components/spx-recap-page'
 import { portfolioConfig } from '@/config/portfolio'
 import { Home, LineChart } from 'lucide-react'
 
 
-export type ViewState = 'home' | 'ai-features' | 'finance-dashboard' | 'finrobot-dashboard' | 'trading-agent-dashboard';
+export type ViewState = 'home' | 'ai-features' | 'finance-dashboard' | 'finrobot-dashboard' | 'trading-agent-dashboard' | 'spx-recap';
 
 function App() {
   const [isAIOpen, setIsAIOpen] = useState(false);
@@ -51,12 +52,15 @@ function App() {
             <FinRobotDashboard />
           ) : currentView === 'trading-agent-dashboard' ? (
             <TradingAgentDashboard />
+          ) : currentView === 'spx-recap' ? (
+            <SPXRecapPage />
           ) : (
             <AIFeaturesPage 
               onOpenCaptionTool={() => setIsAIOpen(true)} 
               onOpenFinanceTool={() => setCurrentView('finance-dashboard')}
               onOpenFinRobotTool={() => setCurrentView('finrobot-dashboard')}
               onOpenTradingAgentTool={() => setCurrentView('trading-agent-dashboard')}
+              onOpenSPXRecap={() => setCurrentView('spx-recap')}
             />
           )}
         </div>
@@ -65,7 +69,7 @@ function App() {
       <AICaptionTool isOpen={isAIOpen} onClose={() => setIsAIOpen(false)} />
       <FinanceChatTool isOpen={isFinanceChatOpen} onClose={() => setIsFinanceChatOpen(false)} />
 
-      {(currentView !== 'finance-dashboard' && currentView !== 'finrobot-dashboard' && currentView !== 'trading-agent-dashboard') && (
+      {(currentView !== 'finance-dashboard' && currentView !== 'finrobot-dashboard' && currentView !== 'trading-agent-dashboard' && currentView !== 'spx-recap') && (
         <div className="fixed bottom-12 left-28 z-50 pointer-events-none">
         <h1 className="text-6xl font-black text-white/95 tracking-tighter leading-none mix-blend-difference">
           {portfolioConfig.ownerName.toUpperCase()}'S<br/>

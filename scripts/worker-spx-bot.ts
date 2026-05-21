@@ -1,6 +1,7 @@
 import { RSI, BollingerBands, SMA, MACD, EMA } from 'technicalindicators';
 import { PERSONAS, ORCHESTRATOR_PROMPT, SYSTEM_PROMPT_PREFIX, SYSTEM_PROMPT_IC, AUDIT_AGENT_PROMPT, ALPHA_EAR_SENTIMENT_PROMPT } from './prompts';
 import { fetchAndCalculateGEX } from './gex-calculator';
+import { upsertRecapDay, type D1DatabaseLike } from '../src/lib/spx-recap-d1';
 
 // Cloudflare Worker Environment Types
 interface Env {
@@ -10,6 +11,7 @@ interface Env {
   OPENROUTER_MODEL?: string;
   WEBHOOK_SECRET?: string; // 🔒 防護互聯網隨機觸發的安全金鑰
   SPX_MEMORY: any;
+  SPX_RECAP_DB?: D1DatabaseLike;
 }
 
 interface ActionLogItem {
@@ -18,6 +20,12 @@ interface ActionLogItem {
   action: string;
   reasoning: string;
   pnl?: number;
+  buyZone?: string;
+  stopLoss?: string;
+  takeProfit?: string;
+  riskWarning?: string;
+  ruleEngineVerdict?: string;
+  signalScore?: number;
 }
 interface DailyMemory {
   currentPosition: "NONE" | "CALL" | "PUT";
@@ -68,6 +76,21 @@ interface GexData {
   putCallIvSkew?: number;
   generatedAt?: string;
   parsedAt?: string;
+}
+
+interface IntradayKeyLevel {
+  level: number;
+  touches: number;
+  kind: "support" | "resistance";
+  distance: number;
+}
+
+interface IntradayStructureContext {
+  nearestSupport: IntradayKeyLevel | null;
+  nearestResistance: IntradayKeyLevel | null;
+  repeatedSupport: IntradayKeyLevel | null;
+  repeatedResistance: IntradayKeyLevel | null;
+  targetDisciplineNote: string;
 }
 
 type ZeroDteAdvisoryVerdict =
@@ -284,7 +307,7 @@ function computeTrendDayContext(m5Quotes: any[], indicators: any, gexData: GexDa
     aboveEMA9: false,
     aboveGammaFlip: null,
     nearestExpiryGammaStatus: gexData?.zeroDteGammaStatus || gexData?.gammaStatus || null,
-    rationale: "M5 data insufficient; treat tape as range/mixed."
+    rationale: "5分鐘資料不足，暫時當震盪市處理，唔好硬追方向。"
   };
 
   const validQuotes = m5Quotes.filter((q: any) => q?.close != null && q?.date instanceof Date);
@@ -338,14 +361,14 @@ function computeTrendDayContext(m5Quotes: any[], indicators: any, gexData: GexDa
   const fmt = (n: number | null) => n == null || !Number.isFinite(n) ? "N/A" : n.toFixed(2);
 
   if (isBullTrend) {
-    const rationale = `Bull trend day: day ${fmt(dayChangePct)}%, open ${fmt(fromOpenPct)}%, above VWAP/EMA9, top ${Math.round(rangePositionPct)}% of range.`;
+    const rationale = `單邊上升日：較昨日升 ${fmt(dayChangePct)}%，較開市升 ${fmt(fromOpenPct)}%，價格企在 VWAP/EMA9 之上，位於今日波幅頂部 ${Math.round(rangePositionPct)}%。`;
     return {
       regime: "BULL_TREND_DAY",
       directionalBias: "CALL",
       confidence,
       recommendedAction: "OPEN_CALL",
       icAllowed: false,
-      icBlockReason: "Bull trend day invalidates neutral 0DTE Iron Condor deployment.",
+      icBlockReason: "單邊上升日唔適合開中性 0DTE 鐵鷹，容易被 CALL 邊打穿。",
       previousClose,
       dayOpen,
       dayChangePct,
@@ -362,14 +385,14 @@ function computeTrendDayContext(m5Quotes: any[], indicators: any, gexData: GexDa
   }
 
   if (isBearTrend) {
-    const rationale = `Bear trend day: day ${fmt(dayChangePct)}%, open ${fmt(fromOpenPct)}%, below VWAP/EMA9, bottom ${Math.round(rangePositionPct)}% of range.`;
+    const rationale = `單邊下跌日：較昨日跌 ${fmt(dayChangePct)}%，較開市跌 ${fmt(fromOpenPct)}%，價格壓在 VWAP/EMA9 之下，位於今日波幅底部 ${Math.round(rangePositionPct)}%。`;
     return {
       regime: "BEAR_TREND_DAY",
       directionalBias: "PUT",
       confidence,
       recommendedAction: "OPEN_PUT",
       icAllowed: false,
-      icBlockReason: "Bear trend day invalidates neutral 0DTE Iron Condor deployment.",
+      icBlockReason: "單邊下跌日唔適合開中性 0DTE 鐵鷹，容易被 PUT 邊打穿。",
       previousClose,
       dayOpen,
       dayChangePct,
@@ -403,7 +426,7 @@ function computeTrendDayContext(m5Quotes: any[], indicators: any, gexData: GexDa
     aboveEMA9,
     aboveGammaFlip,
     nearestExpiryGammaStatus,
-    rationale: `Range/mixed tape: bullScore=${bullScore}/7, bearScore=${bearScore}/7.`
+    rationale: `震盪或方向未清：多方分 ${bullScore}/7，空方分 ${bearScore}/7，未夠資格當單邊日。`
   };
 }
 
@@ -593,16 +616,98 @@ function hasUnverifiedMacroEventRisk(sentimentData: any) {
   return /\b(cpi|fomc|fed|powell|nfp|jobs report|payroll|inflation|rate decision)\b/.test(text);
 }
 
+function bucketLevel(price: number, bucketSize = 5) {
+  return Math.round(price / bucketSize) * bucketSize;
+}
+
+function buildKeyLevels(prices: number[], currentPrice: number, kind: "support" | "resistance"): IntradayKeyLevel[] {
+  const counts = new Map<number, number>();
+  for (const price of prices) {
+    if (!Number.isFinite(price)) continue;
+    const level = bucketLevel(price);
+    counts.set(level, (counts.get(level) || 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .map(([level, touches]) => ({
+      level,
+      touches,
+      kind,
+      distance: Math.abs(currentPrice - level)
+    }))
+    .filter((item) => item.touches >= 2)
+    .sort((a, b) => b.touches - a.touches || a.distance - b.distance);
+}
+
+function getNearestLevel(levels: IntradayKeyLevel[], currentPrice: number, direction: "below" | "above") {
+  const filtered = levels
+    .filter((level) => direction === "below" ? level.level <= currentPrice : level.level >= currentPrice)
+    .sort((a, b) => a.distance - b.distance || b.touches - a.touches);
+  return filtered[0] || null;
+}
+
+function computeIntradayStructureContext(m5Quotes: any[], currentPrice: number): IntradayStructureContext {
+  const validQuotes = m5Quotes
+    .filter((q: any) => q?.high != null && q?.low != null && q?.close != null)
+    .slice(-72);
+
+  if (validQuotes.length < 18 || !Number.isFinite(currentPrice)) {
+    return {
+      nearestSupport: null,
+      nearestResistance: null,
+      repeatedSupport: null,
+      repeatedResistance: null,
+      targetDisciplineNote: "5分鐘資料不足，止盈止損先跟 VWAP/EMA9 同 GEX 關鍵位。"
+    };
+  }
+
+  const supports = buildKeyLevels(validQuotes.map((q: any) => Number(q.low)), currentPrice, "support");
+  const resistances = buildKeyLevels(validQuotes.map((q: any) => Number(q.high)), currentPrice, "resistance");
+  const nearestSupport = getNearestLevel(supports, currentPrice, "below");
+  const nearestResistance = getNearestLevel(resistances, currentPrice, "above");
+  const repeatedSupport = supports.find((level) => level.level <= currentPrice && level.touches >= 3) || null;
+  const repeatedResistance = resistances.find((level) => level.level >= currentPrice && level.touches >= 3) || null;
+
+  const notes: string[] = [];
+  if (repeatedSupport) {
+    notes.push(`${repeatedSupport.level} 附近係重複支撐，已經守住 ${repeatedSupport.touches} 次；做 PUT 要先喺支撐前收割，除非價格明確跌穿並企穩下面。`);
+  }
+  if (repeatedResistance) {
+    notes.push(`${repeatedResistance.level} 附近係重複阻力，已經壓住 ${repeatedResistance.touches} 次；做 CALL 要先喺阻力前收割，除非價格明確升穿並企穩上面。`);
+  }
+
+  return {
+    nearestSupport,
+    nearestResistance,
+    repeatedSupport,
+    repeatedResistance,
+    targetDisciplineNote: notes.join(" ") || "暫時未見重複日內牆位，止盈用 GEX 牆位加 M5 trailing。"
+  };
+}
+
+function appendPlanSnapshot(logItem: ActionLogItem, plan: any, ruleEngine: ZeroDteRuleEngineResult): ActionLogItem {
+  return {
+    ...logItem,
+    buyZone: plan?.buy_zone,
+    stopLoss: plan?.stop_loss,
+    takeProfit: plan?.take_profit,
+    riskWarning: plan?.risk_warning,
+    ruleEngineVerdict: ruleEngine.verdict,
+    signalScore: ruleEngine.signalScore
+  };
+}
+
 function analyzeZeroDteRules(args: {
   etNow: Date;
   spxInd: any;
-  m5Analysis: { volumeSurge: number };
+  m5Analysis: { volumeSurge: number; currentM5Vol?: number; avgM5Vol?: number };
   currentVix: number | null | undefined;
   currentVix9d: number | null | undefined;
   currentVix3m: number | null | undefined;
   pcrValue: number | null;
   calculatedGex: GexData | null;
   trendDayContext: TrendDayContext;
+  intradayStructure: IntradayStructureContext;
   dailyMemory: DailyMemory;
   sentimentData: any;
   priceActionContext: any;
@@ -617,6 +722,7 @@ function analyzeZeroDteRules(args: {
     pcrValue,
     calculatedGex,
     trendDayContext,
+    intradayStructure,
     dailyMemory,
     sentimentData,
     priceActionContext
@@ -642,8 +748,13 @@ function analyzeZeroDteRules(args: {
   const macdBear = macdHistogram != null && macdHistogram < 0;
   const aboveGammaFlip = gammaFlip != null ? currentPrice > gammaFlip : null;
   const nearGammaFlip = gammaFlip != null && Math.abs(currentPrice - gammaFlip) <= 8;
+  const isTrendDay = trendDayContext.regime === "BULL_TREND_DAY" || trendDayContext.regime === "BEAR_TREND_DAY";
+  const isNegativeGamma = calculatedGex?.zeroDteGammaStatus === "negative_gamma" || calculatedGex?.gammaStatus === "negative_gamma";
+  const macroEventRisk = hasUnverifiedMacroEventRisk(sentimentData);
+  const volumeReliable = Number(m5Analysis.avgM5Vol || 0) > 0 && Number(m5Analysis.currentM5Vol || 0) > 0;
   const gammaPinningDetected = Boolean(
     calculatedGex?.zeroDteGammaStatus === "positive_gamma" &&
+    !isTrendDay &&
     (nearGammaFlip ||
       calculatedGex.longWalls?.some((w) => Math.abs(currentPrice - Number(w.strike)) <= 8))
   );
@@ -668,7 +779,13 @@ function analyzeZeroDteRules(args: {
     callScore >= putScore + 2 ? "CALL" : putScore >= callScore + 2 ? "PUT" : "NONE";
 
   if (directionalBias !== "NONE") score += 14;
-  if (volumeSurge >= 1.25) score += 8;
+  if (isTrendDay) score += 12;
+  if (isNegativeGamma && directionalBias !== "NONE") score += 8;
+  if (volumeReliable && volumeSurge >= 1.25) score += 8;
+  else if (!volumeReliable && isTrendDay) {
+    score += 4;
+    activeRisks.push("index_volume_unavailable_using_price_trend");
+  }
   else {
     score -= 8;
     activeRisks.push("volume_follow_through_weak");
@@ -696,8 +813,11 @@ function analyzeZeroDteRules(args: {
     score -= 10;
     activeRisks.push("theta_decay_risk_high");
   }
-  if (hasUnverifiedMacroEventRisk(sentimentData)) {
-    score -= 12;
+  if (macroEventRisk && isTrendDay && directionalBias !== "NONE") {
+    score += 6;
+    activeRisks.push("macro_event_is_catalyst_verify_calendar");
+  } else if (macroEventRisk) {
+    score -= 10;
     activeRisks.push("macro_event_risk_unverified");
   }
   if (directionalBias === "NONE") {
@@ -705,15 +825,20 @@ function analyzeZeroDteRules(args: {
     activeRisks.push("signal_conflict");
   }
 
+  if (directionalBias === "PUT" && intradayStructure.repeatedSupport && intradayStructure.repeatedSupport.distance <= 12) {
+    score -= 6;
+    activeRisks.push(`put_target_near_repeated_support_${intradayStructure.repeatedSupport.level}`);
+  }
+  if (directionalBias === "CALL" && intradayStructure.repeatedResistance && intradayStructure.repeatedResistance.distance <= 12) {
+    score -= 6;
+    activeRisks.push(`call_target_near_repeated_resistance_${intradayStructure.repeatedResistance.level}`);
+  }
+
   const minutesNow = getEtMinutes(etNow);
   const marketOpen = 9 * 60 + 30;
   if (minutesNow >= marketOpen && minutesNow < marketOpen + 5) {
     hardBlocks.push("first_5_minutes_no_chasing");
   }
-  if (hasUnverifiedMacroEventRisk(sentimentData)) {
-    hardBlocks.push("macro_event_risk_needs_verified_calendar");
-  }
-
   const consecutiveLosses = getConsecutiveLosses(dailyMemory.actionLog);
   const dailyPnlPoints = getDailyPnlPoints(dailyMemory.actionLog);
   if (consecutiveLosses >= 3 || dailyPnlPoints <= -30) {
@@ -745,7 +870,10 @@ function analyzeZeroDteRules(args: {
   if (positionTimedOut) verdict = "CLOSE_OR_REDUCE_SUGGESTED";
   else if (hardBlocks.includes("daily_circuit_breaker")) verdict = "FREEZE_NEW_SIGNALS";
   else if (hardBlocks.length > 0 || score < 45) verdict = "NO_TRADE";
-  else if (score >= 70 && directionalBias !== "NONE") verdict = "TRADE_ALLOWED";
+  else if (
+    directionalBias !== "NONE" &&
+    (score >= 70 || (isTrendDay && score >= 62) || (isNegativeGamma && score >= 62))
+  ) verdict = "TRADE_ALLOWED";
 
   return {
     verdict,
@@ -870,6 +998,27 @@ function tgEscape(str: string): string {
 
 // --- 主要執行邏輯 ---
 
+async function persistRecapDayToD1(env: Env, date: string, memory: DailyMemory, audit?: {
+  report: string;
+  learnedRules: string[];
+  generatedAt?: string | null;
+}) {
+  if (!env.SPX_RECAP_DB) return;
+
+  try {
+    await upsertRecapDay(env.SPX_RECAP_DB, date, memory, audit ? {
+      date,
+      generatedAt: audit.generatedAt || new Date().toISOString(),
+      report: audit.report,
+      learnedRules: audit.learnedRules,
+      actionLogSize: memory.actionLog.length
+    } : null);
+    console.log('[D1] SPX recap persisted', date);
+  } catch (err: any) {
+    console.error('[D1] SPX recap persist failed', err?.message || err);
+  }
+}
+
 async function runTradingAgents(env: Env) {
   try {
     // 0. 密鑰效驗 (PUA 診斷)
@@ -992,6 +1141,7 @@ async function runTradingAgents(env: Env) {
     } : null;
     const trendDayContext = computeTrendDayContext(m5QuotesValid, spxInd, calculatedGex);
     const priceActionContext = calculatePriceActionContext(spxQuotesD1, spxQuotesH1);
+    const intradayStructure = computeIntradayStructureContext(m5QuotesValid, spxInd.currentClose);
     const zeroDteRuleEngine = analyzeZeroDteRules({
       etNow,
       spxInd,
@@ -1002,6 +1152,7 @@ async function runTradingAgents(env: Env) {
       pcrValue,
       calculatedGex,
       trendDayContext,
+      intradayStructure,
       dailyMemory,
       sentimentData,
       priceActionContext
@@ -1027,6 +1178,7 @@ async function runTradingAgents(env: Env) {
         reason: sentimentData.reason
       },
       trendDayContext,
+      intradayStructure,
       zeroDteRuleEngine,
       calculatedGEX: calculatedGexContext,
       priceActionContext,
@@ -1105,6 +1257,13 @@ async function runTradingAgents(env: Env) {
       console.error('[ERR] Orchestrator error', e);
     }
 
+    const callTargetGuide = intradayStructure.repeatedResistance
+      ? `先在重複阻力 ${intradayStructure.repeatedResistance.level} 前分段止盈；有效接受其上方後才看下一道 GEX wall。`
+      : (calculatedGex?.mostLongStrike ? `先看 SG_High / long wall ${calculatedGex.mostLongStrike}，突破後用 M5 higher-low trailing。` : '用 M5 higher-low trailing，失去 VWAP 即撤。');
+    const putTargetGuide = intradayStructure.repeatedSupport
+      ? `先在重複支撐 ${intradayStructure.repeatedSupport.level} 前分段止盈；有效接受其下方後才看下一道 GEX pocket。`
+      : (calculatedGex?.mostShortStrike ? `先看 SG_Low / short pocket ${calculatedGex.mostShortStrike}，跌破後用 M5 lower-high trailing。` : '用 M5 lower-high trailing，收復 VWAP 即撤。');
+
     if (
       dailyMemory.currentPosition === 'NONE' &&
       isBeforeEtCutoff(etNow, 15, 30) &&
@@ -1118,7 +1277,7 @@ async function runTradingAgents(env: Env) {
         logic: trendDayContext.rationale,
         buy_zone: `單邊上升日 override：現價 ${spxInd.currentClose.toFixed(2)} 附近跟隨 CALL；必須守住 VWAP ${spxInd.currentVWAP.toFixed(2)} / EMA9 ${spxInd.ema9?.toFixed(2) ?? 'N/A'}。`,
         stop_loss: `跌回 VWAP ${spxInd.currentVWAP.toFixed(2)} 並失守 EMA9，單邊日假設失效。`,
-        take_profit: calculatedGex?.mostLongStrike ? `先看 SG_High / long wall ${calculatedGex.mostLongStrike}，突破後用 M5 higher-low trailing。` : '用 M5 higher-low trailing，失去 VWAP 即撤。',
+        take_profit: callTargetGuide,
         risk_warning: '主要風險係尾盤追高同 VWAP 假跌破；但原本 HOLD 會錯失單邊趨勢。'
       };
     } else if (
@@ -1134,12 +1293,18 @@ async function runTradingAgents(env: Env) {
         logic: trendDayContext.rationale,
         buy_zone: `單邊下跌日 override：現價 ${spxInd.currentClose.toFixed(2)} 附近跟隨 PUT；必須壓在 VWAP ${spxInd.currentVWAP.toFixed(2)} / EMA9 ${spxInd.ema9?.toFixed(2) ?? 'N/A'} 下方。`,
         stop_loss: `站回 VWAP ${spxInd.currentVWAP.toFixed(2)} 並收復 EMA9，單邊日假設失效。`,
-        take_profit: calculatedGex?.mostShortStrike ? `先看 SG_Low / short pocket ${calculatedGex.mostShortStrike}，跌破後用 M5 lower-high trailing。` : '用 M5 lower-high trailing，收復 VWAP 即撤。',
+        take_profit: putTargetGuide,
         risk_warning: '主要風險係尾盤追空同 VWAP 假收復；但原本 HOLD 會錯失單邊趨勢。'
       };
     }
 
     const plannedTradeAction = ((orchestratorPlan as any).trade_action || 'HOLD').toString().toUpperCase();
+    const mustBlockNewDirectionalSignal =
+      zeroDteRuleEngine.hardRuleTriggered ||
+      zeroDteRuleEngine.verdict === 'FREEZE_NEW_SIGNALS' ||
+      (zeroDteRuleEngine.verdict === 'NO_TRADE' && zeroDteRuleEngine.signalScore < 45) ||
+      (zeroDteRuleEngine.gammaPinningDetected && trendDayContext.regime === 'RANGE_OR_MIXED') ||
+      zeroDteRuleEngine.directionalBias === 'NONE';
     if (zeroDteRuleEngine.verdict === 'CLOSE_OR_REDUCE_SUGGESTED' && dailyMemory.currentPosition !== 'NONE') {
       orchestratorPlan = {
         ...(orchestratorPlan as any),
@@ -1153,7 +1318,8 @@ async function runTradingAgents(env: Env) {
     } else if (
       dailyMemory.currentPosition === 'NONE' &&
       ['OPEN_CALL', 'OPEN_PUT'].includes(plannedTradeAction) &&
-      zeroDteRuleEngine.verdict !== 'TRADE_ALLOWED'
+      zeroDteRuleEngine.verdict !== 'TRADE_ALLOWED' &&
+      mustBlockNewDirectionalSignal
     ) {
       orchestratorPlan = {
         ...(orchestratorPlan as any),
@@ -1162,7 +1328,22 @@ async function runTradingAgents(env: Env) {
         buy_zone: 'N/A',
         stop_loss: 'N/A',
         take_profit: 'N/A',
-        risk_warning: `0DTE rule engine blocked new signal: ${zeroDteRuleEngine.verdict}. ${zeroDteRuleEngine.hardBlocks.join(', ') || zeroDteRuleEngine.activeRisks.join(', ') || 'score_not_enough'}`
+        risk_warning: `0DTE rule engine hard-blocked new signal: ${zeroDteRuleEngine.verdict}. ${zeroDteRuleEngine.hardBlocks.join(', ') || zeroDteRuleEngine.activeRisks.join(', ') || 'score_not_enough'}`
+      };
+    }
+
+    const finalPlannedAction = ((orchestratorPlan as any).trade_action || 'HOLD').toString().toUpperCase();
+    if (finalPlannedAction === 'OPEN_PUT' && intradayStructure.repeatedSupport) {
+      orchestratorPlan = {
+        ...(orchestratorPlan as any),
+        take_profit: `${(orchestratorPlan as any).take_profit || 'N/A'} | Adaptive guard: ${intradayStructure.repeatedSupport.level} 是 M5 重複支撐，未接受下破前先收割，禁止死等更遠目標。`,
+        risk_warning: `${(orchestratorPlan as any).risk_warning || ''} 重複支撐會製造反抽，PUT 要用 trailing stop。`.trim()
+      };
+    } else if (finalPlannedAction === 'OPEN_CALL' && intradayStructure.repeatedResistance) {
+      orchestratorPlan = {
+        ...(orchestratorPlan as any),
+        take_profit: `${(orchestratorPlan as any).take_profit || 'N/A'} | Adaptive guard: ${intradayStructure.repeatedResistance.level} 是 M5 重複阻力，未接受上破前先收割，禁止死等更遠目標。`,
+        risk_warning: `${(orchestratorPlan as any).risk_warning || ''} 重複阻力會製造回吐，CALL 要用 trailing stop。`.trim()
       };
     }
 
@@ -1174,28 +1355,28 @@ async function runTradingAgents(env: Env) {
       dailyMemory.currentPosition = 'CALL';
       dailyMemory.entryPrice = currentPriceStr;
       dailyMemory.entryTime = etTime;
-      dailyMemory.actionLog.push({ time: etTime, price: currentPriceStr, action: '買入 Call', reasoning: planReason(orchestratorPlan) });
+      dailyMemory.actionLog.push(appendPlanSnapshot({ time: etTime, price: currentPriceStr, action: '買入 Call', reasoning: planReason(orchestratorPlan) }, orchestratorPlan, zeroDteRuleEngine));
     } else if (tradeAction === 'OPEN_PUT' && dailyMemory.currentPosition === 'NONE') {
       dailyMemory.currentPosition = 'PUT';
       dailyMemory.entryPrice = currentPriceStr;
       dailyMemory.entryTime = etTime;
-      dailyMemory.actionLog.push({ time: etTime, price: currentPriceStr, action: '買入 Put', reasoning: planReason(orchestratorPlan) });
+      dailyMemory.actionLog.push(appendPlanSnapshot({ time: etTime, price: currentPriceStr, action: '買入 Put', reasoning: planReason(orchestratorPlan) }, orchestratorPlan, zeroDteRuleEngine));
     } else if (tradeAction === 'CLOSE' && dailyMemory.currentPosition !== 'NONE') {
       const pnlRaw = dailyMemory.currentPosition === 'CALL'
         ? (currentPriceStr - dailyMemory.entryPrice!)
         : (dailyMemory.entryPrice! - currentPriceStr);
-      dailyMemory.actionLog.push({
+      dailyMemory.actionLog.push(appendPlanSnapshot({
         time: etTime,
         price: currentPriceStr,
         action: `平倉 ${dailyMemory.currentPosition}`,
         reasoning: planReason(orchestratorPlan),
         pnl: parseFloat(pnlRaw.toFixed(2))
-      });
+      }, orchestratorPlan, zeroDteRuleEngine));
       dailyMemory.currentPosition = 'NONE';
       dailyMemory.entryPrice = null;
       dailyMemory.entryTime = null;
     } else if (tradeAction === 'HOLD' && dailyMemory.currentPosition === 'NONE') {
-      dailyMemory.actionLog.push({ time: etTime, price: currentPriceStr, action: '觀望防守', reasoning: planReason(orchestratorPlan) });
+      dailyMemory.actionLog.push(appendPlanSnapshot({ time: etTime, price: currentPriceStr, action: '觀望防守', reasoning: planReason(orchestratorPlan) }, orchestratorPlan, zeroDteRuleEngine));
     }
 
     // Update IC Position Memory
@@ -1241,6 +1422,7 @@ async function runTradingAgents(env: Env) {
     const etNowDateStr = etTime.split(' ')[0].replace(/\//g, '-');
     const dbKey = `spx_memory_${etNowDateStr}`;
     await env.SPX_MEMORY.put(dbKey, JSON.stringify(dailyMemory));
+    await persistRecapDayToD1(env, etNowDateStr, dailyMemory);
 
     const toM = (val: number) => (val / 1000000).toFixed(1) + 'M';
     let displayAction = tradeAction;
@@ -1254,16 +1436,56 @@ async function runTradingAgents(env: Env) {
 
     // PA Context summary for display
     const paCtx = extendedContext.priceActionContext;
+    const currentPriceNum = Number(context.currentPrice);
+    const parsePriceZone = (text: string | undefined) => {
+      if (!text || text === 'None detected') return null;
+      const match = text.match(/\[(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\]/);
+      if (!match) return null;
+      return { low: Number(match[1]), high: Number(match[2]) };
+    };
+    const zoneStatus = (label: string, text: string | undefined) => {
+      const zone = parsePriceZone(text);
+      if (!zone) return `${label}：未偵測`;
+      if (currentPriceNum >= zone.low && currentPriceNum <= zone.high) return `${label}：<code>${zone.low.toFixed(2)}-${zone.high.toFixed(2)}</code>（現價正在區內）`;
+      const distance = currentPriceNum < zone.low ? zone.low - currentPriceNum : currentPriceNum - zone.high;
+      const direction = currentPriceNum < zone.low ? '區間在現價上方' : '區間在現價下方';
+      return `${label}：<code>${zone.low.toFixed(2)}-${zone.high.toFixed(2)}</code>（距現價 ${distance.toFixed(2)} 點，${direction}）`;
+    };
+    const paBias = paCtx?.macroTrend?.includes('UPTREND')
+      ? '偏多，日線仍是 HH/HL 升勢'
+      : paCtx?.macroTrend?.includes('DOWNTREND')
+        ? '偏空，日線仍是 LH/LL 跌勢'
+        : '震盪，日線未有清晰方向';
+    const paStructure = paCtx?.recentCHoCH
+      ? '⚠️ 出現 CHoCH（性質變化），原趨勢有反轉警號'
+      : paCtx?.recentBOS
+        ? '✅ 出現 BOS（結構突破），原趨勢仍在延續'
+        : '— 未見新突破，等價格靠近關鍵區';
+    const paConclusion = paCtx
+      ? (paCtx.recentCHoCH
+        ? '結論：先降槓桿，等反轉確認或重新站回結構。'
+        : paCtx.recentBOS
+          ? '結論：PA 支持順勢背景；入場仍要等 0DTE / GEX / 動能共振。'
+          : '結論：只係背景參考，未提供即時入場觸發。')
+      : '';
     const paContextDisplay = paCtx
-      ? `📐 D1趨勢：${paCtx.macroTrend} | BOS:${paCtx.recentBOS ? '✅' : '—'} CHoCH:${paCtx.recentCHoCH ? '⚠️' : '—'}
-OB：${paCtx.nearestOB} | FVG：${paCtx.nearestFVG}
-🎯 黃金口袋：<code>${paCtx.fibGoldenPocket}</code>`
-      : '⚠️ 多週期數據不足';
+      ? `日線：${paBias}
+結構：${paStructure}
+關鍵區：${zoneStatus('OB 回踩區', paCtx.nearestOB)} | ${zoneStatus('FVG 缺口', paCtx.nearestFVG)}
+黃金口袋：<code>${paCtx.fibGoldenPocket}</code>
+${paConclusion}`
+      : '⚠️ 多週期數據不足，PA 暫時唔提供入場參考。';
 
     const trendDayDisplay = `🎚️ <b>[Tape Regime · 單邊日雷達]</b>
 Regime：<code>${trendDayContext.regime}</code> | Bias：<code>${trendDayContext.directionalBias}</code> | Confidence：<code>${trendDayContext.confidence}%</code>
 建議：<code>${trendDayContext.recommendedAction}</code> | IC：<code>${trendDayContext.icAllowed ? 'ALLOWED' : 'BLOCKED'}</code>
 理由：${tgEscape(trendDayContext.rationale)}${trendDayContext.icBlockReason ? `\nIC Block：${tgEscape(trendDayContext.icBlockReason)}` : ''}`;
+
+    const fmtLevel = (level: IntradayKeyLevel | null) =>
+      level ? `<code>${level.level.toFixed(0)}</code> (${level.touches} touches, ${level.distance.toFixed(1)} pts away)` : '<code>N/A</code>';
+    const intradayStructureDisplay = `📐 <b>[日內結構 · 目標紀律]</b>
+Support：${fmtLevel(intradayStructure.nearestSupport)} | Resistance：${fmtLevel(intradayStructure.nearestResistance)}
+紀律：${tgEscape(intradayStructure.targetDisciplineNote)}`;
 
     // IC summary for display
     const icDisplay = agentIC.ic_action === 'STAND_DOWN'
@@ -1286,6 +1508,8 @@ Final Advisory：<code>${zeroDteRuleEngine.allowNewSignal ? 'ALLOW_NEW_SIGNAL' :
 ${trendDayDisplay}
 
 ${paContextDisplay}
+
+${intradayStructureDisplay}
 
 📊 <b>[期權籌碼 · PCR 指標]</b>
 Put/Call Ratio：<code>${context.pcrValue}</code> — ${tgEscape(context.pcrStatus)}
@@ -1399,6 +1623,20 @@ async function runEndOfDayAudit(env: Env) {
       console.log('[AUDIT] Saved new rules to SPX_WISDOM_BOOK', extractedRules);
     }
 
+    await env.SPX_MEMORY.put(`spx_audit_${etDateStr}`, JSON.stringify({
+      date: etDateStr,
+      generatedAt: new Date().toISOString(),
+      report,
+      learnedRules: extractedRules,
+      actionLogSize: memory.actionLog.length
+    }));
+    console.log('[AUDIT] Saved daily recap report to SPX_MEMORY', `spx_audit_${etDateStr}`);
+    await persistRecapDayToD1(env, etDateStr, memory, {
+      report,
+      learnedRules: extractedRules,
+      generatedAt: new Date().toISOString()
+    });
+
     const finalMsg = `📅 <b>【每日審計清單】 (${etDateStr})</b>\n\n<pre>${tgEscape(report)}</pre>`;
 
     await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, finalMsg);
@@ -1413,8 +1651,8 @@ async function runEndOfDayAudit(env: Env) {
 export default {
   async scheduled(event: any, env: Env, ctx: any) {
     // audit cron 必須與 wrangler.spx.toml 的 crons 陣列完全一致
-    // 15 19 * * 2-6 -> UTC 19:15 (EDT 15:15)
-    if (event.cron === "15 19 * * 2-6") {
+    // 15 20 * * 2-6 -> UTC 20:15
+    if (event.cron === "15 20 * * 2-6") {
       ctx.waitUntil(runEndOfDayAudit(env));
     } else {
       ctx.waitUntil(runTradingAgents(env));

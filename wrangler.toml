@@ -1,0 +1,12 @@
+name = "siuchun-portfolio-demo"
+pages_build_output_dir = "./dist"
+compatibility_date = "2024-04-01"
+
+[[kv_namespaces]]
+binding = "SPX_MEMORY"
+id = "d885526d2249419eaf921dcb7dd27488"
+
+[[d1_databases]]
+binding = "SPX_RECAP_DB"
+database_name = "spx-recap-db"
+database_id = "00a4729d-1792-42d1-bd86-ed58dfe1f95f"

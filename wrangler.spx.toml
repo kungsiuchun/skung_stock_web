@@ -5,12 +5,17 @@ compatibility_flags = [ "nodejs_compat" ]
 
 [triggers]
 # 美東時間 10:00 - 15:45 (UTC 14-19) 每 15 分鐘執行一次，週一至週五
-# 盤後審計：美東時間 15:15 (UTC 19:15) 執行，週一至週五
-crons = [ "*/15 14-19 * * 2-6", "15 19 * * 2-6" ]
+# 盤後審計：UTC 20:15 執行，週一至週五
+crons = [ "*/15 14-19 * * 2-6", "15 20 * * 2-6" ]
 
 [[kv_namespaces]]
 binding = "SPX_MEMORY"
 id = "d885526d2249419eaf921dcb7dd27488"
+
+[[d1_databases]]
+binding = "SPX_RECAP_DB"
+database_name = "spx-recap-db"
+database_id = "00a4729d-1792-42d1-bd86-ed58dfe1f95f"
 
 [vars]
 # 這裡放置非敏感的默認變量

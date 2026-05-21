@@ -1,6 +1,6 @@
 "use client";
 
-import { ImageIcon, MessageSquare, Wand2, Bot, Users } from "lucide-react";
+import { BarChart3, Bot, ImageIcon, MessageSquare, Users, Wand2 } from "lucide-react";
 import { GlowingEffect } from "@/components/ui/glowing-effect";
 import { cn } from "@/lib/utils";
 
@@ -9,9 +9,16 @@ interface AIFeaturesPageProps {
   onOpenFinanceTool: () => void;
   onOpenFinRobotTool: () => void;
   onOpenTradingAgentTool: () => void;
+  onOpenSPXRecap: () => void;
 }
 
-export function AIFeaturesPage({ onOpenCaptionTool, onOpenFinanceTool, onOpenFinRobotTool, onOpenTradingAgentTool }: AIFeaturesPageProps) {
+export function AIFeaturesPage({
+  onOpenCaptionTool,
+  onOpenFinanceTool,
+  onOpenFinRobotTool,
+  onOpenTradingAgentTool,
+  onOpenSPXRecap,
+}: AIFeaturesPageProps) {
   return (
     <div className="w-full h-full flex flex-col items-center justify-center p-6 sm:p-12 z-10 pointer-events-auto overflow-y-auto pt-32">
       <div className="max-w-5xl w-full">
@@ -24,9 +31,8 @@ export function AIFeaturesPage({ onOpenCaptionTool, onOpenFinanceTool, onOpenFin
           </p>
         </div>
 
-        <ul className="grid grid-cols-1 grid-rows-none gap-4 md:grid-cols-12 md:grid-rows-3 lg:gap-4 xl:max-h-[34rem] xl:grid-rows-2">
+        <ul className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           <GridItem
-            area="md:[grid-area:1/1/2/7] xl:[grid-area:1/1/2/5]"
             icon={<ImageIcon className="h-4 w-4" />}
             title="Image to Caption"
             description="Use Cloudflare Workers AI to automatically generate rich descriptions from any uploaded image."
@@ -34,7 +40,6 @@ export function AIFeaturesPage({ onOpenCaptionTool, onOpenFinanceTool, onOpenFin
             className="cursor-pointer hover:scale-[1.02] transition-transform"
           />
           <GridItem
-            area="md:[grid-area:1/7/2/13] xl:[grid-area:2/1/3/5]"
             icon={<MessageSquare className="h-4 w-4" />}
             title="Finance Analyzer"
             description="Engage with an intelligent agent powered by StepFun 3.5 Flash to analyze stock trends over 20 days."
@@ -42,7 +47,6 @@ export function AIFeaturesPage({ onOpenCaptionTool, onOpenFinanceTool, onOpenFin
             className="cursor-pointer hover:scale-[1.02] transition-transform"
           />
           <GridItem
-            area="md:[grid-area:2/1/3/7] xl:[grid-area:1/5/3/8]"
             icon={<Bot className="h-4 w-4" />}
             title="FinRobot Analyst"
             description="Automated intelligent agent for real-time equity research powered by FinRobot multi-agent logic."
@@ -50,7 +54,6 @@ export function AIFeaturesPage({ onOpenCaptionTool, onOpenFinanceTool, onOpenFin
             className="cursor-pointer hover:scale-[1.02] transition-transform"
           />
           <GridItem
-            area="md:[grid-area:2/7/3/13] xl:[grid-area:1/8/2/13]"
             icon={<Users className="h-4 w-4" />}
             title="Trading Agent (Multi-Role)"
             description="A multi-agent committee utilizing Alpha Vantage and Technical Analysis for comprehensive trading strategies."
@@ -58,7 +61,13 @@ export function AIFeaturesPage({ onOpenCaptionTool, onOpenFinanceTool, onOpenFin
             className="cursor-pointer hover:scale-[1.02] transition-transform"
           />
           <GridItem
-            area="md:[grid-area:3/1/4/13] xl:[grid-area:2/8/3/13]"
+            icon={<BarChart3 className="h-4 w-4" />}
+            title="SPX Recap"
+            description="Review SPX Telegram bot callouts, win rate, PnL, defensive holds, and daily audit notes."
+            onClick={onOpenSPXRecap}
+            className="cursor-pointer hover:scale-[1.02] transition-transform"
+          />
+          <GridItem
             icon={<Wand2 className="h-4 w-4" />}
             title="Coming Soon: Image Gen"
             description="Text-to-image generation powered by state-of-the-art diffusion models. Stay tuned!"
@@ -70,7 +79,6 @@ export function AIFeaturesPage({ onOpenCaptionTool, onOpenFinanceTool, onOpenFin
 }
 
 interface GridItemProps {
-  area: string;
   icon: React.ReactNode;
   title: string;
   description: React.ReactNode;
@@ -78,9 +86,9 @@ interface GridItemProps {
   className?: string;
 }
 
-const GridItem = ({ area, icon, title, description, onClick, className }: GridItemProps) => {
+const GridItem = ({ icon, title, description, onClick, className }: GridItemProps) => {
   return (
-    <li className={cn("min-h-[14rem] list-none", area, className)} onClick={onClick}>
+    <li className={cn("min-h-[14rem] list-none", className)} onClick={onClick}>
       <div className="relative h-full rounded-[1.25rem] border-[0.75px] border-white/10 p-2 md:rounded-[1.5rem] md:p-3 bg-black/20">
         <GlowingEffect
           spread={40}
