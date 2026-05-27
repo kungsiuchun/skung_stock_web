@@ -1,5 +1,5 @@
 {
-  "name": "siuchun-portfolio-demo",
+  "name": "sius-ai-workshop",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -12,7 +12,7 @@
     "spx:backfill:dry": "tsx scripts/backfill-spx-recap.ts --dry-run",
     "spx:backfill": "tsx scripts/backfill-spx-recap.ts --apply",
     "deploy": "npm run deploy:site && npm run deploy:spx",
-    "deploy:site": "node scripts/sync-secrets.js && wrangler pages deploy dist --project-name siuchun-portfolio-demo",
+    "deploy:site": "node scripts/sync-secrets.js && wrangler pages deploy dist --project-name sius-ai-workshop",
     "deploy:spx": "wrangler deploy --config wrangler.spx.toml",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"

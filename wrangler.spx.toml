@@ -4,9 +4,10 @@ compatibility_date = "2024-12-30"
 compatibility_flags = [ "nodejs_compat" ]
 
 [triggers]
-# 美東時間 10:00 - 15:45 (UTC 14-19) 每 15 分鐘執行一次，週一至週五
-# 盤後審計：UTC 20:15 執行，週一至週五
-crons = [ "*/15 14-19 * * 2-6", "15 20 * * 2-6" ]
+# Cloudflare cron uses UTC. The Worker gates the real NYSE calendar and ET windows.
+# Trading: 10:00-15:45 ET every 15 minutes, 10:00-12:45 ET on early closes.
+# Audit: 16:15 ET, or 13:15 ET on early closes.
+crons = [ "*/15 14-20 * * MON-FRI", "15 17-21 * * MON-FRI" ]
 
 [[kv_namespaces]]
 binding = "SPX_MEMORY"
@@ -18,8 +19,8 @@ database_name = "spx-recap-db"
 database_id = "00a4729d-1792-42d1-bd86-ed58dfe1f95f"
 
 [vars]
-# 這裡放置非敏感的默認變量
+# Non-sensitive default variables.
 OPENROUTER_MODEL = "google/gemma-4-26b-a4b-it"
 
-# 敏感變量 (TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, OPENROUTER_API_KEY) 
-# 應使用 `wrangler secret put` 設置，不要寫在文件中。
+# Sensitive values (TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, OPENROUTER_API_KEY)
+# should be set with `wrangler secret put`, not committed here.

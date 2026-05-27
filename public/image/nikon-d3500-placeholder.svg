@@ -1,0 +1,54 @@
+<svg width="1200" height="820" viewBox="0 0 1200 820" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="820" fill="transparent"/>
+  <g filter="url(#shadow)">
+    <path d="M235 282C235 242.235 267.235 210 307 210H445L477 168H662L698 210H874C913.765 210 946 242.235 946 282V578C946 617.765 913.765 650 874 650H307C267.235 650 235 617.765 235 578V282Z" fill="#111318"/>
+    <path d="M257 293C257 260.415 283.415 234 316 234H454L487 192H652L690 234H865C897.585 234 924 260.415 924 293V566C924 598.585 897.585 625 865 625H316C283.415 625 257 598.585 257 566V293Z" fill="url(#body)"/>
+    <path d="M309 259H457L490 218H641L681 259H864C881.673 259 896 273.327 896 291V339H309V259Z" fill="#20242D"/>
+    <rect x="306" y="372" width="200" height="104" rx="18" fill="#0C0D10"/>
+    <rect x="327" y="393" width="72" height="24" rx="8" fill="#2A2F3B"/>
+    <rect x="759" y="285" width="130" height="36" rx="12" fill="#07080A"/>
+    <rect x="320" y="279" width="96" height="36" rx="10" fill="#D0A534"/>
+    <text x="344" y="304" fill="#111318" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700">Nikon</text>
+    <text x="326" y="527" fill="#E8EAED" font-family="Arial, Helvetica, sans-serif" font-size="34" font-weight="800" letter-spacing="2">D3500</text>
+    <circle cx="616" cy="432" r="192" fill="#08090C"/>
+    <circle cx="616" cy="432" r="166" fill="url(#lensOuter)"/>
+    <circle cx="616" cy="432" r="126" fill="#050609"/>
+    <circle cx="616" cy="432" r="91" fill="url(#glass)"/>
+    <circle cx="585" cy="393" r="34" fill="rgba(157, 206, 255, 0.32)"/>
+    <circle cx="649" cy="466" r="22" fill="rgba(92, 255, 214, 0.18)"/>
+    <path d="M476 212H654L625 161H505L476 212Z" fill="#171A20"/>
+    <path d="M514 170H616L645 211H484L514 170Z" fill="#222732"/>
+    <rect x="718" y="187" width="104" height="35" rx="12" fill="#242936"/>
+    <rect x="837" y="254" width="51" height="30" rx="10" fill="#353B48"/>
+    <path d="M276 359H357C376.33 359 392 374.67 392 394V534C392 553.33 376.33 569 357 569H276V359Z" fill="rgba(255,255,255,0.04)"/>
+    <path d="M845 360H924V568H845C825.67 568 810 552.33 810 533V395C810 375.67 825.67 360 845 360Z" fill="rgba(255,255,255,0.04)"/>
+  </g>
+  <defs>
+    <filter id="shadow" x="145" y="78" width="1041" height="690" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+      <feOffset dx="35" dy="38"/>
+      <feGaussianBlur stdDeviation="45"/>
+      <feComposite in2="hardAlpha" operator="out"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.65 0"/>
+      <feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_1_1"/>
+      <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_1_1" result="shape"/>
+    </filter>
+    <linearGradient id="body" x1="280" y1="224" x2="873" y2="663" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#303642"/>
+      <stop offset="0.35" stop-color="#171A20"/>
+      <stop offset="1" stop-color="#050609"/>
+    </linearGradient>
+    <linearGradient id="lensOuter" x1="482" y1="295" x2="749" y2="585" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2D3442"/>
+      <stop offset="0.45" stop-color="#10131A"/>
+      <stop offset="1" stop-color="#030406"/>
+    </linearGradient>
+    <radialGradient id="glass" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(584 388) rotate(53.9077) scale(177.417)">
+      <stop stop-color="#BDE4FF"/>
+      <stop offset="0.28" stop-color="#2E637B"/>
+      <stop offset="0.65" stop-color="#10243A"/>
+      <stop offset="1" stop-color="#020308"/>
+    </radialGradient>
+  </defs>
+</svg>

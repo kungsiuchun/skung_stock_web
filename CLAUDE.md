@@ -36,3 +36,11 @@ Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 2. Use `detect_changes` for code review.
 3. Use `get_affected_flows` to understand impact.
 4. Use `query_graph` pattern="tests_for" to check coverage.
+
+### Local Tooling Gotchas
+
+- `list_graph_stats` can succeed even when `list_repos` and `cross_repo_search` return zero results. This means the repo-local graph database exists at `.code-review-graph/graph.db`, but the global multi-repo registry is empty.
+- Before using `cross_repo_search`, run `list_repos`. If it returns `0 registered repository(ies)`, use repo-scoped graph tools with an explicit `repo_root` instead of cross-repo search.
+- Current observed broken CLI shim: `C:\Users\kungs\.local\bin\code-review-graph.exe` returned `uv trampoline failed to canonicalize script path` when called with `--help` or `register --help`. Do not assume the CLI `register` path works until that shim is reinstalled or repaired.
+- The MCP docs helper advertised sections such as `usage`, `commands`, and `troubleshooting`, but returned `not_found` for those same names in this environment. Trust actual MCP tool schemas and direct tool output first.
+- The previously documented Python path `C:\Users\kungs\AppData\Local\Microsoft\WindowsApps\python.exe` was observed missing. Verify Python with `Get-Command python` / `Get-Command py` before relying on a hard-coded interpreter path.

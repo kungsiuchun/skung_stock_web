@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
 
-const PROJECT_NAME = 'siuchun-portfolio-demo';
+const PROJECT_NAME = process.env.CF_PAGES_PROJECT_NAME || 'sius-ai-workshop';
 const VARS_PATH = path.resolve(process.cwd(), '.dev.vars');
 
 async function syncSecrets() {

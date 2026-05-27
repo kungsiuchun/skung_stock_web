@@ -1,12 +1,19 @@
 import { portfolioConfig } from "@/config/portfolio";
-import { Sparkles } from "lucide-react";
+import type { ViewState } from "@/App";
 
 interface NavbarProps {
-  onOpenAI: () => void;
+  onWork: () => void;
   onHome?: () => void;
+  onAbout: () => void;
+  currentView: ViewState;
 }
 
-const Navbar = ({ onOpenAI, onHome }: NavbarProps) => {
+const navTextClass = (active: boolean) =>
+  `text-xs transition-colors uppercase tracking-widest font-medium ${
+    active ? 'text-white' : 'text-white/50 hover:text-white'
+  }`;
+
+const Navbar = ({ onWork, onHome, onAbout, currentView }: NavbarProps) => {
   const callApi = async () => {
     try {
       const response = await fetch('/api/hello');
@@ -17,6 +24,15 @@ const Navbar = ({ onOpenAI, onHome }: NavbarProps) => {
       alert('Backend call failed. Note: Functions only work when deployed to Cloudflare via Git or Wrangler.');
     }
   };
+
+  const isWorkActive = [
+    'work-gallery',
+    'settle-up',
+    'finance-dashboard',
+    'finrobot-dashboard',
+    'trading-agent-dashboard',
+    'spx-recap',
+  ].includes(currentView);
 
   return (
     <nav className="fixed top-0 left-0 right-0 z-[100] px-6 py-4 flex items-center justify-between pointer-events-auto">
@@ -29,15 +45,8 @@ const Navbar = ({ onOpenAI, onHome }: NavbarProps) => {
         </button>
         <div className="h-4 w-[1px] bg-white/20 mx-2" />
         <div className="flex items-center gap-6">
-          <a href="#" className="text-xs text-white/50 hover:text-white transition-colors uppercase tracking-widest font-medium">Work</a>
-          <a href="#" className="text-xs text-white/50 hover:text-white transition-colors uppercase tracking-widest font-medium">About</a>
-          <button 
-            onClick={onOpenAI}
-            className="flex items-center gap-2 text-xs text-purple-400 hover:text-purple-300 transition-colors uppercase tracking-widest font-bold group"
-          >
-            <Sparkles className="w-3 h-3 group-hover:animate-pulse" />
-            AI Vision
-          </button>
+          <button onClick={onWork} className={navTextClass(isWorkActive)}>Work</button>
+          <button onClick={onAbout} className={navTextClass(currentView === 'about')}>About</button>
         </div>
       </div>
       

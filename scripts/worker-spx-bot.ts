@@ -596,6 +596,137 @@ function parseEtTimestamp(input: string | null): Date | null {
   return new Date(year, month - 1, day, hour, minute, second);
 }
 
+const MARKET_TIME_ZONE = 'America/New_York';
+const TRADING_CRON = '*/15 14-20 * * MON-FRI';
+const AUDIT_CRON = '15 17-21 * * MON-FRI';
+
+interface ScheduledRunOptions {
+  force?: boolean;
+}
+
+function toDateKey(year: number, month: number, day: number) {
+  return `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+}
+
+function toEasternDate(date: Date) {
+  return new Date(date.toLocaleString('en-US', { timeZone: MARKET_TIME_ZONE }));
+}
+
+function observedHolidayKey(year: number, monthIndex: number, day: number) {
+  const date = new Date(year, monthIndex, day);
+  const weekday = date.getDay();
+  if (weekday === 6) date.setDate(date.getDate() - 1);
+  if (weekday === 0) date.setDate(date.getDate() + 1);
+  return toDateKey(date.getFullYear(), date.getMonth() + 1, date.getDate());
+}
+
+function nthWeekdayOfMonth(year: number, monthIndex: number, weekday: number, nth: number) {
+  const date = new Date(year, monthIndex, 1);
+  const offset = (weekday - date.getDay() + 7) % 7;
+  date.setDate(1 + offset + (nth - 1) * 7);
+  return date;
+}
+
+function lastWeekdayOfMonth(year: number, monthIndex: number, weekday: number) {
+  const date = new Date(year, monthIndex + 1, 0);
+  const offset = (date.getDay() - weekday + 7) % 7;
+  date.setDate(date.getDate() - offset);
+  return date;
+}
+
+function getEasterSunday(year: number) {
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, month - 1, day);
+}
+
+function getFullMarketHolidayKeys(year: number) {
+  const holidays = new Set<string>();
+  const addDate = (date: Date) => holidays.add(toDateKey(date.getFullYear(), date.getMonth() + 1, date.getDate()));
+
+  holidays.add(observedHolidayKey(year, 0, 1));
+  holidays.add(observedHolidayKey(year + 1, 0, 1));
+  addDate(nthWeekdayOfMonth(year, 0, 1, 3));
+  addDate(nthWeekdayOfMonth(year, 1, 1, 3));
+
+  const goodFriday = getEasterSunday(year);
+  goodFriday.setDate(goodFriday.getDate() - 2);
+  addDate(goodFriday);
+
+  addDate(lastWeekdayOfMonth(year, 4, 1));
+
+  if (year >= 2022) {
+    holidays.add(observedHolidayKey(year, 5, 19));
+  }
+
+  holidays.add(observedHolidayKey(year, 6, 4));
+  addDate(nthWeekdayOfMonth(year, 8, 1, 1));
+  addDate(nthWeekdayOfMonth(year, 10, 4, 4));
+  holidays.add(observedHolidayKey(year, 11, 25));
+
+  return holidays;
+}
+
+function getEarlyCloseMarketHolidayKeys(year: number, fullHolidayKeys = getFullMarketHolidayKeys(year)) {
+  const earlyCloses = new Set<string>();
+  const addIfTradingDay = (date: Date) => {
+    const key = toDateKey(date.getFullYear(), date.getMonth() + 1, date.getDate());
+    const weekday = date.getDay();
+    if (weekday !== 0 && weekday !== 6 && !fullHolidayKeys.has(key)) {
+      earlyCloses.add(key);
+    }
+  };
+
+  const julyThird = new Date(year, 6, 3);
+  addIfTradingDay(julyThird);
+
+  const dayAfterThanksgiving = nthWeekdayOfMonth(year, 10, 4, 4);
+  dayAfterThanksgiving.setDate(dayAfterThanksgiving.getDate() + 1);
+  addIfTradingDay(dayAfterThanksgiving);
+
+  const christmasEve = new Date(year, 11, 24);
+  addIfTradingDay(christmasEve);
+
+  return earlyCloses;
+}
+
+export function getMarketScheduleStatus(now: Date = new Date()) {
+  const etNow = toEasternDate(now);
+  const etDateKey = toDateKey(etNow.getFullYear(), etNow.getMonth() + 1, etNow.getDate());
+  const weekday = etNow.getDay();
+  const minutes = getEtMinutes(etNow);
+  const isWeekend = weekday === 0 || weekday === 6;
+  const fullHolidayKeys = getFullMarketHolidayKeys(etNow.getFullYear());
+  const isFullHoliday = fullHolidayKeys.has(etDateKey);
+  const isMarketOpenDay = !isWeekend && !isFullHoliday;
+  const isEarlyClose = isMarketOpenDay && getEarlyCloseMarketHolidayKeys(etNow.getFullYear(), fullHolidayKeys).has(etDateKey);
+  const tradingEndMinutes = isEarlyClose ? 12 * 60 + 45 : 15 * 60 + 45;
+  const auditMinutes = isEarlyClose ? 13 * 60 + 15 : 16 * 60 + 15;
+
+  return {
+    etNow,
+    etDateKey,
+    minutes,
+    isMarketOpenDay,
+    isEarlyClose,
+    isTradingWindow: isMarketOpenDay && minutes >= 10 * 60 && minutes <= tradingEndMinutes,
+    isAuditWindow: isMarketOpenDay && minutes === auditMinutes,
+    skipReason: isWeekend ? 'weekend' : isFullHoliday ? 'us_market_holiday' : null
+  };
+}
+
 function getConsecutiveLosses(actionLog: ActionLogItem[]) {
   let losses = 0;
   for (let i = actionLog.length - 1; i >= 0; i--) {
@@ -1019,8 +1150,14 @@ async function persistRecapDayToD1(env: Env, date: string, memory: DailyMemory, 
   }
 }
 
-async function runTradingAgents(env: Env) {
+async function runTradingAgents(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}) {
   try {
+    const marketStatus = getMarketScheduleStatus(now);
+    if (!options.force && !marketStatus.isTradingWindow) {
+      console.log(`[SCHEDULE] Skip trading run: ${marketStatus.skipReason || 'outside_trading_window'} ${marketStatus.etDateKey} ${marketStatus.minutes}`);
+      return;
+    }
+
     // 0. 密鑰效驗 (PUA 診斷)
     if (!env.TELEGRAM_TOKEN || !env.TELEGRAM_CHAT_ID) {
       throw new Error(`環境變量缺失: TOKEN=${!!env.TELEGRAM_TOKEN}, CHAT=${!!env.TELEGRAM_CHAT_ID}`);
@@ -1030,14 +1167,14 @@ async function runTradingAgents(env: Env) {
     await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, "💓 <b>系統心跳：診斷任務已啟動...</b>\n正在獲取市場數據中...");
 
     // Memory Fetch
-    const etNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+    const etNow = marketStatus.etNow;
     const etDateStr = etNow.getFullYear() + "-" + (etNow.getMonth() + 1).toString().padStart(2, '0') + "-" + etNow.getDate().toString().padStart(2, '0');
     const memoryKey = `spx_memory_${etDateStr}`;
 
     const etTime = new Intl.DateTimeFormat('zh-TW', {
       timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
-    }).format(new Date());
+    }).format(now);
 
     // 並行讀取日內記憶
     const rawMemory = await env.SPX_MEMORY.get(memoryKey);
@@ -1565,8 +1702,14 @@ ${icDisplay}
   }
 }
 
-async function runEndOfDayAudit(env: Env) {
-  const etNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+async function runEndOfDayAudit(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}) {
+  const marketStatus = getMarketScheduleStatus(now);
+  if (!options.force && !marketStatus.isMarketOpenDay) {
+    console.log(`[SCHEDULE] Skip audit run: ${marketStatus.skipReason || 'market_closed'} ${marketStatus.etDateKey}`);
+    return;
+  }
+
+  const etNow = marketStatus.etNow;
   const etDateStr = etNow.getFullYear() + "-" + (etNow.getMonth() + 1).toString().padStart(2, '0') + "-" + etNow.getDate().toString().padStart(2, '0');
   const memoryKey = `spx_memory_${etDateStr}`;
   const rawMemory = await env.SPX_MEMORY.get(memoryKey);
@@ -1650,13 +1793,25 @@ async function runEndOfDayAudit(env: Env) {
 
 export default {
   async scheduled(event: any, env: Env, ctx: any) {
-    // audit cron 必須與 wrangler.spx.toml 的 crons 陣列完全一致
-    // 15 20 * * 2-6 -> UTC 20:15
-    if (event.cron === "15 20 * * 2-6") {
-      ctx.waitUntil(runEndOfDayAudit(env));
-    } else {
-      ctx.waitUntil(runTradingAgents(env));
+    const scheduledAt = new Date(typeof event.scheduledTime === 'number' ? event.scheduledTime : Date.now());
+    const marketStatus = getMarketScheduleStatus(scheduledAt);
+    const cron = String(event.cron || '');
+    if (!marketStatus.isMarketOpenDay) {
+      console.log(`[SCHEDULE] No-op: ${marketStatus.skipReason || 'market_closed'} ${marketStatus.etDateKey}`);
+      return;
     }
+
+    if (cron === AUDIT_CRON && marketStatus.isAuditWindow) {
+      ctx.waitUntil(runEndOfDayAudit(env, scheduledAt));
+      return;
+    }
+
+    if (cron === TRADING_CRON && marketStatus.isTradingWindow) {
+      ctx.waitUntil(runTradingAgents(env, scheduledAt));
+      return;
+    }
+
+    console.log(`[SCHEDULE] No-op: outside configured ET windows cron=${cron} date=${marketStatus.etDateKey} minutes=${marketStatus.minutes}`);
   },
   async fetch(request: Request, env: Env, ctx: any) {
     const url = new URL(request.url);
@@ -1671,9 +1826,11 @@ export default {
       return new Response('Unauthorized: Please provide a valid ?token parameter to protect your AI credits!', { status: 401 });
     }
 
+    const forceManualRun = url.searchParams.has('force');
+
     // ?audit — 手動觸發盤後審計報告
     if (url.searchParams.has('audit')) {
-      ctx.waitUntil(runEndOfDayAudit(env));
+      ctx.waitUntil(runEndOfDayAudit(env, new Date(), { force: forceManualRun }));
       return new Response('Audit triggered — check Telegram in ~30s.');
     }
 
@@ -1685,7 +1842,7 @@ export default {
       console.error = (...args) => logs.push(`[ERR] ${args.join(' ')}`);
 
       try {
-        await runTradingAgents(env);
+        await runTradingAgents(env, new Date(), { force: forceManualRun });
         return new Response(`DEBUG COMPLETE.\n\nLOGS:\n${logs.join('\n')}`);
       } catch (e: any) {
         return new Response(`DEBUG ERROR: ${e.message}\n${e.stack}\n\nLOGS:\n${logs.join('\n')}`, { status: 500 });
@@ -1694,7 +1851,7 @@ export default {
         console.error = originalError;
       }
     }
-    ctx.waitUntil(runTradingAgents(env));
+    ctx.waitUntil(runTradingAgents(env, new Date(), { force: forceManualRun }));
     return new Response('Analysis triggered.');
   }
 };

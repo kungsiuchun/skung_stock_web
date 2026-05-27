@@ -83,44 +83,14 @@ export const portfolioConfig = {
     //   src: "https://images.unsplash.com/photo-1505069446780-4ef442b5207f?q=80&w=1974&auto=format&fit=crop",
     // },
     {
-      id: 16,
-      alt: "Women wearing kimono beside wooden house",
-      src: "https://images.unsplash.com/photo-1505069446780-4ef442b5207f?q=80&w=1974&auto=format&fit=crop",
+      id: 37,
+      alt: "Garden portrait with straw hat",
+      src: "/image/DSC_0990.JPG",
     },
     {
-      id: 17,
-      alt: "People passing under hanging red lanterns at dusk",
-      src: "https://images.unsplash.com/photo-1596713109885-c94bdfd7f19d?q=80&w=1974&auto=format&fit=crop",
-    },
-    {
-      id: 18,
-      alt: "Stepping stone path winding through lush forest",
-      src: "https://plus.unsplash.com/premium_photo-1673285285994-6bfff235db97?q=80&w=1936&auto=format&fit=crop",
-    },
-    {
-      id: 19,
-      alt: "Uploaded photo 0132",
-      src: "/image/DSC_0132.JPG",
-    },
-    {
-      id: 20,
-      alt: "Uploaded photo 0154",
-      src: "/image/DSC_0154.JPG",
-    },
-    {
-      id: 21,
-      alt: "Uploaded photo 0171",
-      src: "/image/DSC_0171.JPG",
-    },
-    {
-      id: 22,
-      alt: "Uploaded photo 0276",
-      src: "/image/DSC_0276.JPG",
-    },
-    {
-      id: 23,
-      alt: "Uploaded photo 0280",
-      src: "/image/DSC_0280.JPG",
+      id: 31,
+      alt: "Wrigley Building clock tower at dusk",
+      src: "/image/DSC_0372.JPG?v=2",
     },
     {
       id: 24,
@@ -128,9 +98,84 @@ export const portfolioConfig = {
       src: "/image/DSC_0053.JPG",
     },
     {
+      id: 34,
+      alt: "Colorful portrait wall at Navy Pier",
+      src: "/image/DSC_0297.JPG?v=2",
+    },
+    {
+      id: 20,
+      alt: "Uploaded photo 0154",
+      src: "/image/DSC_0154.JPG",
+    },
+    {
+      id: 29,
+      alt: "Navy Pier ferris wheel against blue sky",
+      src: "/image/DSC_0346.JPG?v=2",
+    },
+    {
+      id: 39,
+      alt: "Temple elephant statue portrait",
+      src: "/image/DSC_0849.JPG",
+    },
+    {
+      id: 32,
+      alt: "Chicago skyline reflected on the river at dusk",
+      src: "/image/DSC_0395.JPG?v=2",
+    },
+    {
       id: 25,
       alt: "Uploaded photo 0060",
       src: "/image/DSC_0060.JPG",
+    },
+    {
+      id: 28,
+      alt: "Chicago Cloud Gate plaza portrait",
+      src: "/image/DSC_0455.JPG?v=2",
+    },
+    {
+      id: 38,
+      alt: "Hong Kong skyline selfie at golden hour",
+      src: "/image/DSC_0777.JPG",
+    },
+    {
+      id: 22,
+      alt: "Uploaded photo 0276",
+      src: "/image/DSC_0276.JPG",
+    },
+    {
+      id: 36,
+      alt: "Chicago skyline portrait with umbrella removed",
+      src: "/image/DSC_0335.JPG",
+    },
+    {
+      id: 27,
+      alt: "Uploaded photo 0146",
+      src: "/image/DSC_0146.JPG",
+    },
+    {
+      id: 30,
+      alt: "Chicago skyline reflected at Cloud Gate",
+      src: "/image/DSC_0458.JPG?v=2",
+    },
+    {
+      id: 23,
+      alt: "Uploaded photo 0280",
+      src: "/image/DSC_0280.JPG",
+    },
+    {
+      id: 40,
+      alt: "Garden portrait through circular frame",
+      src: "/image/DSC_0956.JPG",
+    },
+    {
+      id: 21,
+      alt: "Uploaded photo 0171",
+      src: "/image/DSC_0171.JPG",
+    },
+    {
+      id: 33,
+      alt: "Chicago river skyline at night",
+      src: "/image/DSC_0407.JPG?v=2",
     },
     {
       id: 26,
@@ -138,9 +183,14 @@ export const portfolioConfig = {
       src: "/image/DSC_0103.JPG",
     },
     {
-      id: 27,
-      alt: "Uploaded photo 0146",
-      src: "/image/DSC_0146.JPG",
+      id: 35,
+      alt: "Route 66 Navy Pier sign with ferris wheel",
+      src: "/image/DSC_0294.JPG?v=2",
+    },
+    {
+      id: 19,
+      alt: "Uploaded photo 0132",
+      src: "/image/DSC_0132.JPG",
     },
   ]
 }

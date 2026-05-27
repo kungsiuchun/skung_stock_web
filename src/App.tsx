@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import DemoOne from './components/demo-one'
 import Navbar from './components/navbar'
 import AICaptionTool from './components/ai-caption-tool'
@@ -6,24 +6,83 @@ import FinanceChatTool from './components/finance-chat-tool'
 import { FinanceDashboard } from './components/finance-dashboard'
 import { FinRobotDashboard } from './components/dashboard/finrobot-dashboard'
 import { TradingAgentDashboard } from './components/dashboard/trading-agent-dashboard'
-import { AIFeaturesPage } from './components/ai-features-page'
 import { SPXRecapPage } from './components/spx-recap-page'
+import { AboutPage } from './components/about-page'
+import { WorkGallery } from './components/work-gallery'
+import { SettleUpPage } from './components/settle-up-page'
 import { portfolioConfig } from '@/config/portfolio'
 import { Home, LineChart } from 'lucide-react'
 
 
-export type ViewState = 'home' | 'ai-features' | 'finance-dashboard' | 'finrobot-dashboard' | 'trading-agent-dashboard' | 'spx-recap';
+export type ViewState = 'home' | 'about' | 'work-gallery' | 'settle-up' | 'finance-dashboard' | 'finrobot-dashboard' | 'trading-agent-dashboard' | 'spx-recap';
+
+const getViewFromHash = (): ViewState | null => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  const hash = window.location.hash;
+
+  if (hash.startsWith('#/work/settle-up')) {
+    return 'settle-up';
+  }
+
+  if (hash.startsWith('#/work')) {
+    return 'work-gallery';
+  }
+
+  return null;
+};
 
 function App() {
   const [isAIOpen, setIsAIOpen] = useState(false);
   const [isFinanceChatOpen, setIsFinanceChatOpen] = useState(false);
   const [currentView, setCurrentView] = useState<ViewState>('home');
 
+  useEffect(() => {
+    const syncViewFromHash = () => {
+      const hashView = getViewFromHash();
+
+      if (hashView) {
+        setCurrentView(hashView);
+      }
+    };
+
+    syncViewFromHash();
+    window.addEventListener('hashchange', syncViewFromHash);
+
+    return () => window.removeEventListener('hashchange', syncViewFromHash);
+  }, []);
+
+  const navigateToView = (view: ViewState) => {
+    setCurrentView(view);
+
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    if (view === 'work-gallery') {
+      window.location.hash = '#/work';
+      return;
+    }
+
+    if (view === 'settle-up') {
+      window.location.hash = '#/work/settle-up';
+      return;
+    }
+
+    if (window.location.hash.startsWith('#/work')) {
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+    }
+  };
+
   return (
     <main className="w-full h-screen relative bg-[#141414] overflow-hidden">
       <Navbar 
-        onOpenAI={() => setCurrentView('ai-features')} 
-        onHome={() => setCurrentView('home')}
+        onWork={() => navigateToView('work-gallery')}
+        onHome={() => navigateToView('home')}
+        onAbout={() => navigateToView('about')}
+        currentView={currentView}
       />
       
       <div className="w-full h-full flex pt-20">
@@ -46,6 +105,19 @@ function App() {
         <div className="flex-1 h-full overflow-hidden">
           {currentView === 'home' ? (
             <DemoOne />
+          ) : currentView === 'about' ? (
+            <AboutPage />
+          ) : currentView === 'work-gallery' ? (
+            <WorkGallery
+              onOpenSettleUp={() => navigateToView('settle-up')}
+              onOpenCaptionTool={() => setIsAIOpen(true)}
+              onOpenFinanceTool={() => navigateToView('finance-dashboard')}
+              onOpenFinRobotTool={() => navigateToView('finrobot-dashboard')}
+              onOpenTradingAgentTool={() => navigateToView('trading-agent-dashboard')}
+              onOpenSPXRecap={() => navigateToView('spx-recap')}
+            />
+          ) : currentView === 'settle-up' ? (
+            <SettleUpPage onBackToWork={() => navigateToView('work-gallery')} />
           ) : currentView === 'finance-dashboard' ? (
             <FinanceDashboard />
           ) : currentView === 'finrobot-dashboard' ? (
@@ -55,13 +127,7 @@ function App() {
           ) : currentView === 'spx-recap' ? (
             <SPXRecapPage />
           ) : (
-            <AIFeaturesPage 
-              onOpenCaptionTool={() => setIsAIOpen(true)} 
-              onOpenFinanceTool={() => setCurrentView('finance-dashboard')}
-              onOpenFinRobotTool={() => setCurrentView('finrobot-dashboard')}
-              onOpenTradingAgentTool={() => setCurrentView('trading-agent-dashboard')}
-              onOpenSPXRecap={() => setCurrentView('spx-recap')}
-            />
+            <DemoOne />
           )}
         </div>
       </div>
@@ -69,7 +135,7 @@ function App() {
       <AICaptionTool isOpen={isAIOpen} onClose={() => setIsAIOpen(false)} />
       <FinanceChatTool isOpen={isFinanceChatOpen} onClose={() => setIsFinanceChatOpen(false)} />
 
-      {(currentView !== 'finance-dashboard' && currentView !== 'finrobot-dashboard' && currentView !== 'trading-agent-dashboard' && currentView !== 'spx-recap') && (
+      {currentView === 'home' && (
         <div className="fixed bottom-12 left-28 z-50 pointer-events-none">
         <h1 className="text-6xl font-black text-white/95 tracking-tighter leading-none mix-blend-difference">
           {portfolioConfig.ownerName.toUpperCase()}'S<br/>

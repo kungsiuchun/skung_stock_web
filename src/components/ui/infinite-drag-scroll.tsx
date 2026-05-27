@@ -10,7 +10,6 @@ import {
   useContext,
   useLayoutEffect,
   useRef,
-  useState,
   createContext,
 } from "react";
 import { cva } from "class-variance-authority";
@@ -24,14 +23,13 @@ const GridVariantContext = createContext<variants | undefined>(undefined);
 
 //Motion Variants
 const rowVariants = {
-  initial: { opacity: 0, scale: 0.3 },
+  initial: { opacity: 0, scale: 0.96 },
   animate: () => ({
     opacity: 1,
     scale: 1,
     transition: {
-      delay: Math.random() + 1.5,
-      duration: 1.4,
-      ease: cubicBezier(0.18, 0.71, 0.11, 1),
+      duration: 0.45,
+      ease: cubicBezier(0.22, 1, 0.36, 1),
     },
   }),
 };
@@ -46,13 +44,20 @@ export const DraggableContainer = ({
   variant?: variants;
 }) => {
   const ref = useRef<HTMLDivElement | null>(null);
+  const wrapBoundsRef = useRef({ x: -1, y: -1 });
+  const isDraggingRef = useRef(false);
+  const wheelAnimationRef = useRef<ReturnType<typeof animate> | null>(null);
 
   const x = useMotionValue(0);
   const y = useMotionValue(0);
 
-  const [isDragging, setIsDragging] = useState(false);
-  const handleIsDragging = () => setIsDragging(true);
-  const handleIsNotDragging = () => setIsDragging(false);
+  const handleIsDragging = () => {
+    isDraggingRef.current = true;
+    wheelAnimationRef.current?.stop();
+  };
+  const handleIsNotDragging = () => {
+    isDraggingRef.current = false;
+  };
 
   useLayoutEffect(() => {
     if (!ref.current) return;
@@ -60,47 +65,50 @@ export const DraggableContainer = ({
     const updateDimensions = () => {
       if (!ref.current) return;
       const { width, height } = ref.current.getBoundingClientRect();
-      const wrapX = -(width / 2);
-      const wrapY = -(height / 2);
-
-      const xDrag = x.on("change", (latest) => {
-        const wrappedX = wrap(wrapX, 0, latest);
-        if (latest !== wrappedX) x.set(wrappedX);
-      });
-
-      const yDrag = y.on("change", (latest) => {
-        const wrappedY = wrap(wrapY, 0, latest);
-        if (latest !== wrappedY) y.set(wrappedY);
-      });
-
-      return () => {
-        xDrag();
-        yDrag();
+      wrapBoundsRef.current = {
+        x: -(width / 2),
+        y: -(height / 2),
       };
     };
+
+    updateDimensions();
+
+    const xDrag = x.on("change", (latest) => {
+      const wrappedX = wrap(wrapBoundsRef.current.x, 0, latest);
+      if (latest !== wrappedX) x.set(wrappedX);
+    });
+
+    const yDrag = y.on("change", (latest) => {
+      const wrappedY = wrap(wrapBoundsRef.current.y, 0, latest);
+      if (latest !== wrappedY) y.set(wrappedY);
+    });
 
     const resizeObserver = new ResizeObserver(updateDimensions);
     resizeObserver.observe(ref.current);
 
-    const initialCleanup = updateDimensions();
-
     const handleWheelScroll = (event: WheelEvent) => {
-      if (!isDragging) {
-        animate(y, y.get() - event.deltaY * 2, {
+      if (!isDraggingRef.current) {
+        event.preventDefault();
+        const cappedDelta = Math.max(-90, Math.min(90, event.deltaY));
+
+        wheelAnimationRef.current?.stop();
+        wheelAnimationRef.current = animate(y, y.get() - cappedDelta * 0.62, {
           type: "tween",
-          duration: 0.8,
-          ease: cubicBezier(0.18, 0.71, 0.11, 1),
+          duration: 0.42,
+          ease: cubicBezier(0.22, 1, 0.36, 1),
         });
       }
     };
 
     window.addEventListener("wheel", handleWheelScroll, { passive: false });
     return () => {
+      wheelAnimationRef.current?.stop();
+      xDrag();
+      yDrag();
       resizeObserver.disconnect();
-      if (initialCleanup) initialCleanup();
       window.removeEventListener("wheel", handleWheelScroll);
     };
-  }, [x, y, isDragging]);
+  }, [x, y]);
 
   return (
     <GridVariantContext.Provider value={variant}>
@@ -116,7 +124,7 @@ export const DraggableContainer = ({
             drag
             dragConstraints={{ left: -10000, right: 10000, top: -10000, bottom: 10000 }} // Arbitrary large constraints to prevent drag inhibition
             dragElastic={0}
-            dragMomentum={true}
+            dragMomentum={false}
             onDragStart={handleIsDragging}
             onDragEnd={handleIsNotDragging}
             style={{ x, y }}
