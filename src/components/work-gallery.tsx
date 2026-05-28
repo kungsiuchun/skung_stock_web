@@ -1,4 +1,4 @@
-import { ArrowRight, BarChart3, Bot, Camera, CircleDollarSign, ImageIcon, MessageSquare, ReceiptText, Users } from "lucide-react";
+import { ArrowRight, BarChart3, Bot, Camera, CircleDollarSign, ImageIcon, MessageSquare, ReceiptText, Users, Waves } from "lucide-react";
 import { GlowingEffect } from "@/components/ui/glowing-effect";
 import { cn } from "@/lib/utils";
 
@@ -9,6 +9,7 @@ interface WorkGalleryProps {
   onOpenFinRobotTool: () => void;
   onOpenTradingAgentTool: () => void;
   onOpenSPXRecap: () => void;
+  onOpenSPXGexHeatmap: () => void;
 }
 
 type WorkItem = {
@@ -29,6 +30,7 @@ export function WorkGallery({
   onOpenFinRobotTool,
   onOpenTradingAgentTool,
   onOpenSPXRecap,
+  onOpenSPXGexHeatmap,
 }: WorkGalleryProps) {
   const workItems: WorkItem[] = [
     {
@@ -76,6 +78,15 @@ export function WorkGallery({
       action: "Open recap",
       icon: <BarChart3 className="h-5 w-5" />,
       onClick: onOpenSPXRecap,
+    },
+    {
+      title: "SPX GEX Heatmap",
+      category: "Options Map",
+      description: "A retained seven-trading-day view of premarket SPX NetGEX by strike and expiry.",
+      buildNote: "Automates the Stocks Intelligence workflow into a date-selectable gamma map without storing raw HTML.",
+      action: "Open heatmap",
+      icon: <Waves className="h-5 w-5" />,
+      onClick: onOpenSPXGexHeatmap,
     },
     {
       title: "Image Caption",

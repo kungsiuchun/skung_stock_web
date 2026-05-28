@@ -7,7 +7,8 @@ compatibility_flags = [ "nodejs_compat" ]
 # Cloudflare cron uses UTC. The Worker gates the real NYSE calendar and ET windows.
 # Trading: 10:00-15:45 ET every 15 minutes, 10:00-12:45 ET on early closes.
 # Audit: 16:15 ET, or 13:15 ET on early closes.
-crons = [ "*/15 14-20 * * MON-FRI", "15 17-21 * * MON-FRI" ]
+# SPX GEX heatmap: 09:15/09:20/09:25 ET retry window. The Worker gates ET/DST/NYSE days.
+crons = [ "*/15 14-20 * * MON-FRI", "15 17-21 * * MON-FRI", "15,20,25 13-14 * * MON-FRI" ]
 
 [[kv_namespaces]]
 binding = "SPX_MEMORY"
@@ -22,5 +23,5 @@ database_id = "00a4729d-1792-42d1-bd86-ed58dfe1f95f"
 # Non-sensitive default variables.
 OPENROUTER_MODEL = "google/gemma-4-26b-a4b-it"
 
-# Sensitive values (TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, OPENROUTER_API_KEY)
+# Sensitive values (TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, OPENROUTER_API_KEY, MCP_BEARER_TOKEN)
 # should be set with `wrangler secret put`, not committed here.

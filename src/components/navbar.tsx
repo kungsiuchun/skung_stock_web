@@ -32,6 +32,7 @@ const Navbar = ({ onWork, onHome, onAbout, currentView }: NavbarProps) => {
     'finrobot-dashboard',
     'trading-agent-dashboard',
     'spx-recap',
+    'spx-gex-heatmap',
   ].includes(currentView);
 
   return (

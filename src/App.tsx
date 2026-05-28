@@ -7,6 +7,7 @@ import { FinanceDashboard } from './components/finance-dashboard'
 import { FinRobotDashboard } from './components/dashboard/finrobot-dashboard'
 import { TradingAgentDashboard } from './components/dashboard/trading-agent-dashboard'
 import { SPXRecapPage } from './components/spx-recap-page'
+import { SPXGexHeatmapPage } from './components/spx-gex-heatmap-page'
 import { AboutPage } from './components/about-page'
 import { WorkGallery } from './components/work-gallery'
 import { SettleUpPage } from './components/settle-up-page'
@@ -14,7 +15,7 @@ import { portfolioConfig } from '@/config/portfolio'
 import { Home, LineChart } from 'lucide-react'
 
 
-export type ViewState = 'home' | 'about' | 'work-gallery' | 'settle-up' | 'finance-dashboard' | 'finrobot-dashboard' | 'trading-agent-dashboard' | 'spx-recap';
+export type ViewState = 'home' | 'about' | 'work-gallery' | 'settle-up' | 'finance-dashboard' | 'finrobot-dashboard' | 'trading-agent-dashboard' | 'spx-recap' | 'spx-gex-heatmap';
 
 const getViewFromHash = (): ViewState | null => {
   if (typeof window === 'undefined') {
@@ -25,6 +26,10 @@ const getViewFromHash = (): ViewState | null => {
 
   if (hash.startsWith('#/work/settle-up')) {
     return 'settle-up';
+  }
+
+  if (hash.startsWith('#/work/spx-gex-heatmap')) {
+    return 'spx-gex-heatmap';
   }
 
   if (hash.startsWith('#/work')) {
@@ -68,6 +73,11 @@ function App() {
 
     if (view === 'settle-up') {
       window.location.hash = '#/work/settle-up';
+      return;
+    }
+
+    if (view === 'spx-gex-heatmap') {
+      window.location.hash = '#/work/spx-gex-heatmap';
       return;
     }
 
@@ -115,6 +125,7 @@ function App() {
               onOpenFinRobotTool={() => navigateToView('finrobot-dashboard')}
               onOpenTradingAgentTool={() => navigateToView('trading-agent-dashboard')}
               onOpenSPXRecap={() => navigateToView('spx-recap')}
+              onOpenSPXGexHeatmap={() => navigateToView('spx-gex-heatmap')}
             />
           ) : currentView === 'settle-up' ? (
             <SettleUpPage onBackToWork={() => navigateToView('work-gallery')} />
@@ -126,6 +137,8 @@ function App() {
             <TradingAgentDashboard />
           ) : currentView === 'spx-recap' ? (
             <SPXRecapPage />
+          ) : currentView === 'spx-gex-heatmap' ? (
+            <SPXGexHeatmapPage onBackToWork={() => navigateToView('work-gallery')} />
           ) : (
             <DemoOne />
           )}

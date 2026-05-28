@@ -11,6 +11,7 @@
     "d1:migrate:remote": "wrangler d1 migrations apply spx-recap-db --remote",
     "spx:backfill:dry": "tsx scripts/backfill-spx-recap.ts --dry-run",
     "spx:backfill": "tsx scripts/backfill-spx-recap.ts --apply",
+    "test:spx-gex": "node --import tsx --test tests/spx-gex-heatmap.test.ts",
     "deploy": "npm run deploy:site && npm run deploy:spx",
     "deploy:site": "node scripts/sync-secrets.js && wrangler pages deploy dist --project-name sius-ai-workshop",
     "deploy:spx": "wrangler deploy --config wrangler.spx.toml",

@@ -2,6 +2,8 @@ import { RSI, BollingerBands, SMA, MACD, EMA } from 'technicalindicators';
 import { PERSONAS, ORCHESTRATOR_PROMPT, SYSTEM_PROMPT_PREFIX, SYSTEM_PROMPT_IC, AUDIT_AGENT_PROMPT, ALPHA_EAR_SENTIMENT_PROMPT } from './prompts';
 import { fetchAndCalculateGEX } from './gex-calculator';
 import { upsertRecapDay, type D1DatabaseLike } from '../src/lib/spx-recap-d1';
+import { generateAndStoreSpxGexHeatmap } from '../src/lib/spx-gex-heatmap';
+import { StocksMcpSseClient } from '../src/lib/stocks-mcp-sse-client';
 
 // Cloudflare Worker Environment Types
 interface Env {
@@ -10,6 +12,8 @@ interface Env {
   OPENROUTER_API_KEY: string;
   OPENROUTER_MODEL?: string;
   WEBHOOK_SECRET?: string; // 🔒 防護互聯網隨機觸發的安全金鑰
+  MCP_BEARER_TOKEN?: string;
+  STOCK_MCP_BASE?: string;
   SPX_MEMORY: any;
   SPX_RECAP_DB?: D1DatabaseLike;
 }
@@ -599,6 +603,7 @@ function parseEtTimestamp(input: string | null): Date | null {
 const MARKET_TIME_ZONE = 'America/New_York';
 const TRADING_CRON = '*/15 14-20 * * MON-FRI';
 const AUDIT_CRON = '15 17-21 * * MON-FRI';
+const SPX_GEX_HEATMAP_CRON = '15,20,25 13-14 * * MON-FRI';
 
 interface ScheduledRunOptions {
   force?: boolean;
@@ -1789,6 +1794,30 @@ async function runEndOfDayAudit(env: Env, now: Date = new Date(), options: Sched
   }
 }
 
+async function runSpxGexHeatmapGeneration(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}) {
+  if (!env.SPX_RECAP_DB) {
+    console.log('[SPX_GEX_HEATMAP] Skip: SPX_RECAP_DB binding is missing.');
+    return;
+  }
+
+  if (!env.MCP_BEARER_TOKEN) {
+    console.log('[SPX_GEX_HEATMAP] Skip: MCP_BEARER_TOKEN secret is missing.');
+    return;
+  }
+
+  try {
+    const result = await generateAndStoreSpxGexHeatmap({
+      db: env.SPX_RECAP_DB,
+      mcpClient: new StocksMcpSseClient(env.MCP_BEARER_TOKEN, env.STOCK_MCP_BASE),
+      now,
+      force: options.force
+    });
+    console.log(`[SPX_GEX_HEATMAP] ${result.status} ${result.date}${'reason' in result ? ` ${result.reason}` : ''}`);
+  } catch (error) {
+    console.error('[SPX_GEX_HEATMAP] Generation failed', error instanceof Error ? error.message : String(error));
+  }
+}
+
 // --- Worker Entry Point ---
 
 export default {
@@ -1803,6 +1832,11 @@ export default {
 
     if (cron === AUDIT_CRON && marketStatus.isAuditWindow) {
       ctx.waitUntil(runEndOfDayAudit(env, scheduledAt));
+      return;
+    }
+
+    if (cron === SPX_GEX_HEATMAP_CRON) {
+      ctx.waitUntil(runSpxGexHeatmapGeneration(env, scheduledAt));
       return;
     }
 
@@ -1832,6 +1866,11 @@ export default {
     if (url.searchParams.has('audit')) {
       ctx.waitUntil(runEndOfDayAudit(env, new Date(), { force: forceManualRun }));
       return new Response('Audit triggered — check Telegram in ~30s.');
+    }
+
+    if (url.searchParams.has('gex')) {
+      ctx.waitUntil(runSpxGexHeatmapGeneration(env, new Date(), { force: forceManualRun }));
+      return new Response('SPX GEX heatmap generation triggered.');
     }
 
     if (url.searchParams.has('debug')) {

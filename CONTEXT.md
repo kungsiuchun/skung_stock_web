@@ -49,3 +49,11 @@ Settle Up is a Work Item that turns a real group-expense spreadsheet workflow in
 Settle Up should preserve the core expense concepts: payer, amount, participants, net balance, and settlement transfers.
 
 Settle Up should not look like a spreadsheet clone; the spreadsheet is a workflow reference, not a visual design.
+
+## SPX GEX Heatmap
+
+SPX GEX Heatmap is a Work Item that turns a premarket SPX options gamma workflow into a date-selectable visual map.
+
+SPX GEX Heatmap should show retained JSON snapshots as a live product surface, not stored raw HTML.
+
+SPX GEX Heatmap should treat seven trading days as the retention window, so weekends and NYSE full holidays do not consume retention slots.
