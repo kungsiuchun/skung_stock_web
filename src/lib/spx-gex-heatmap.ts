@@ -75,6 +75,13 @@ export type SpxGexGenerationResult =
   | { status: "skipped_existing"; date: string }
   | { status: "skipped"; date: string; reason: string };
 
+export const isStocksMcpAuthError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  const hasAuthSignal = /\b(401|403)\b|unauthori[sz]ed|forbidden|bearer/i.test(message);
+  const hasStocksMcpSignal = /stocks mcp|mcp_bearer_token|mcp bearer|mcp sse/i.test(message);
+  return hasAuthSignal && hasStocksMcpSignal;
+};
+
 interface D1SpxGexHeatmapRow {
   date: string;
   generated_at: string;

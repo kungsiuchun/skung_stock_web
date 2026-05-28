@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   buildSpxGexHeatmapFromMcpText,
   getSpxGexGenerationStatus,
+  isStocksMcpAuthError,
   listSpxGexHeatmapDates,
   readSpxGexHeatmap,
   generateAndStoreSpxGexHeatmap,
@@ -30,6 +31,15 @@ describe("SPX GEX heatmap generation gate", () => {
     assert.equal(status.isMarketOpenDay, false);
     assert.equal(status.isGenerationWindow, false);
     assert.equal(status.skipReason, "us_market_holiday");
+  });
+});
+
+describe("SPX GEX heatmap MCP auth errors", () => {
+  it("detects Stocks MCP token expiry errors without matching unrelated failures", () => {
+    assert.equal(isStocksMcpAuthError(new Error("Stocks MCP SSE connect failed: 401")), true);
+    assert.equal(isStocksMcpAuthError(new Error("Stocks MCP tools/call post failed: HTTP 403")), true);
+    assert.equal(isStocksMcpAuthError(new Error("Stocks MCP request timed out")), false);
+    assert.equal(isStocksMcpAuthError(new Error("Upstream API failed: HTTP 401")), false);
   });
 });
 

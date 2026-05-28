@@ -2,7 +2,7 @@ import { RSI, BollingerBands, SMA, MACD, EMA } from 'technicalindicators';
 import { PERSONAS, ORCHESTRATOR_PROMPT, SYSTEM_PROMPT_PREFIX, SYSTEM_PROMPT_IC, AUDIT_AGENT_PROMPT, ALPHA_EAR_SENTIMENT_PROMPT } from './prompts';
 import { fetchAndCalculateGEX } from './gex-calculator';
 import { upsertRecapDay, type D1DatabaseLike } from '../src/lib/spx-recap-d1';
-import { generateAndStoreSpxGexHeatmap } from '../src/lib/spx-gex-heatmap';
+import { generateAndStoreSpxGexHeatmap, isStocksMcpAuthError } from '../src/lib/spx-gex-heatmap';
 import { StocksMcpSseClient } from '../src/lib/stocks-mcp-sse-client';
 
 // Cloudflare Worker Environment Types
@@ -1814,7 +1814,20 @@ async function runSpxGexHeatmapGeneration(env: Env, now: Date = new Date(), opti
     });
     console.log(`[SPX_GEX_HEATMAP] ${result.status} ${result.date}${'reason' in result ? ` ${result.reason}` : ''}`);
   } catch (error) {
-    console.error('[SPX_GEX_HEATMAP] Generation failed', error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[SPX_GEX_HEATMAP] Generation failed', message);
+    if (isStocksMcpAuthError(error)) {
+      await sendTelegramMessage(
+        env.TELEGRAM_TOKEN,
+        env.TELEGRAM_CHAT_ID,
+        [
+          '<b>[SPX GEX Heatmap token expired]</b>',
+          'Stocks Intelligence MCP rejected the Worker token.',
+          'Action: sign in via the VS Code extension, then run <code>npm run spx:gex:rotate-token</code>.',
+          'Do not paste the token into chat, logs, or memory.'
+        ].join('\n')
+      );
+    }
   }
 }
 
