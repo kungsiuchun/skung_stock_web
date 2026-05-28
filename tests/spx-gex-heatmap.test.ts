@@ -69,18 +69,27 @@ Flip level: $5,950 (-0.8%)
 
 const createFakeMcpClient = () => {
   const calls: string[] = [];
+  let activeCalls = 0;
+  let maxActiveCalls = 0;
+  const track = async <T>(value: T) => {
+    activeCalls += 1;
+    maxActiveCalls = Math.max(maxActiveCalls, activeCalls);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    activeCalls -= 1;
+    return value;
+  };
   const client: SpxGexMcpClient = {
     async getQuotes() {
       calls.push("get_quotes");
-      return "| Ticker | Last | Change | Change % |\n| SPX | $6,000.00 | +12.50 | +0.21% |";
+      return track("| Ticker | Last | Change | Change % |\n| SPX | $6,000.00 | +12.50 | +0.21% |");
     },
     async getOptions() {
       calls.push("get_options");
-      return "**Available expiries:** 2026-05-26, 2026-05-27, 2026-05-28, 2026-05-29, 2026-06-01, 2026-06-02";
+      return track("**Available expiries:** 2026-05-26, 2026-05-27, 2026-05-28, 2026-05-29, 2026-06-01, 2026-06-02");
     },
     async getOptions0Dte() {
       calls.push("get_options_0dte");
-      return `
+      return track(`
 **Snapshot:** 2026-05-27T09:14:55 **Session phase:** \`pre_market\` **Now (ET):** 2026-05-27 09:14
 **Expiry:** 2026-05-27
 **Pin level:** $6,000 (0.0%)
@@ -91,15 +100,15 @@ Flip level: $5,950 (-0.8%)
 | Top call wall | $6,050 |
 | Top put wall | $5,900 |
 | Charm regime | \`supportive\` |
-      `.trim();
+      `.trim());
     },
     async getOptionsGex(expiry: string) {
       calls.push(`get_options_gex:${expiry}`);
-      return gexText(expiry, "| $6,050 | 1 | 2 | **2.00B** |\n| $6,000 | 1 | 2 | **-1.00B** |");
+      return track(gexText(expiry, "| $6,050 | 1 | 2 | **2.00B** |\n| $6,000 | 1 | 2 | **-1.00B** |"));
     },
   };
 
-  return { client, calls };
+  return { client, calls, getMaxActiveCalls: () => maxActiveCalls };
 };
 
 class MemoryD1Statement {
@@ -257,7 +266,7 @@ describe("SPX GEX heatmap API", () => {
 describe("SPX GEX heatmap automation runner", () => {
   it("generates once during the premarket window and skips retries when the date already exists", async () => {
     const db = new MemoryD1();
-    const { client, calls } = createFakeMcpClient();
+    const { client, calls, getMaxActiveCalls } = createFakeMcpClient();
 
     const firstRun = await generateAndStoreSpxGexHeatmap({
       db,
@@ -275,6 +284,7 @@ describe("SPX GEX heatmap automation runner", () => {
     assert.equal((await readSpxGexHeatmap(db, "2026-05-27"))?.cells.length, 10);
     assert.equal(calls.filter((call) => call === "get_quotes").length, 1);
     assert.equal(calls.filter((call) => call.startsWith("get_options_gex")).length, 5);
+    assert.equal(getMaxActiveCalls(), 1);
   });
 
   it("does not call the MCP client when the market is closed", async () => {

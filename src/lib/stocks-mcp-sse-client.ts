@@ -14,6 +14,7 @@ interface JsonRpcResponse {
 class SseLineReader {
   private buffer = "";
   private readonly decoder = new TextDecoder();
+  private pendingRead: Promise<ReadableStreamReadResult<Uint8Array>> | null = null;
 
   constructor(private readonly reader: ReadableStreamDefaultReader<Uint8Array>) {}
 
@@ -36,13 +37,16 @@ class SseLineReader {
 
   private async readLine(timeoutMs: number): Promise<string | null> {
     while (!this.buffer.includes("\n")) {
-      const read = this.reader.read();
       const result = await Promise.race([
-        read,
-        new Promise<ReadableStreamReadResult<Uint8Array>>((resolve) =>
-          setTimeout(() => resolve({ done: true, value: undefined }), timeoutMs),
+        this.getPendingRead(),
+        new Promise<"timeout">((resolve) =>
+          setTimeout(() => resolve("timeout"), timeoutMs),
         ),
       ]);
+
+      if (result === "timeout") return null;
+
+      this.pendingRead = null;
 
       if (result.done) {
         if (this.buffer.length === 0) return null;
@@ -58,6 +62,11 @@ class SseLineReader {
     const line = this.buffer.slice(0, newlineIndex).replace(/\r$/, "");
     this.buffer = this.buffer.slice(newlineIndex + 1);
     return line;
+  }
+
+  private getPendingRead() {
+    this.pendingRead ||= this.reader.read();
+    return this.pendingRead;
   }
 }
 

@@ -463,11 +463,9 @@ export const generateAndStoreSpxGexHeatmap = async (options: {
     return { status: "skipped_existing", date };
   }
 
-  const [quoteText, optionsText, zeroDteText] = await Promise.all([
-    options.mcpClient.getQuotes(),
-    options.mcpClient.getOptions(),
-    options.mcpClient.getOptions0Dte(),
-  ]);
+  const quoteText = await options.mcpClient.getQuotes();
+  const optionsText = await options.mcpClient.getOptions();
+  const zeroDteText = await options.mcpClient.getOptions0Dte();
   const selectedExpiries = selectSpxGexActiveExpiriesFromMcpText(optionsText, zeroDteText, 5);
   const gexByExpiryText: Record<string, string> = {};
 
