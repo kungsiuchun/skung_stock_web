@@ -1,4 +1,4 @@
-import { ArrowRight, BarChart3, Bot, Camera, CircleDollarSign, ImageIcon, MessageSquare, ReceiptText, Users, Waves } from "lucide-react";
+import { Activity, ArrowRight, BarChart3, Bot, Camera, CircleDollarSign, ImageIcon, MessageSquare, ReceiptText, Users, Waves } from "lucide-react";
 import { GlowingEffect } from "@/components/ui/glowing-effect";
 import { cn } from "@/lib/utils";
 
@@ -10,6 +10,7 @@ interface WorkGalleryProps {
   onOpenTradingAgentTool: () => void;
   onOpenSPXRecap: () => void;
   onOpenSPXGexHeatmap: () => void;
+  onOpenStocksWatcher: () => void;
 }
 
 type WorkItem = {
@@ -31,6 +32,7 @@ export function WorkGallery({
   onOpenTradingAgentTool,
   onOpenSPXRecap,
   onOpenSPXGexHeatmap,
+  onOpenStocksWatcher,
 }: WorkGalleryProps) {
   const workItems: WorkItem[] = [
     {
@@ -87,6 +89,16 @@ export function WorkGallery({
       action: "Open heatmap",
       icon: <Waves className="h-5 w-5" />,
       onClick: onOpenSPXGexHeatmap,
+    },
+    {
+      title: "Stocks Intelligence Watcher",
+      category: "Ticker Terminal",
+      description: "A dense ticker watcher for quotes, favorites, options flow, OI, volume, and GEX by strike.",
+      buildNote: "Replicates the Stocks Intelligence workflow as a live portfolio product backed by the MCP server.",
+      action: "Open watcher",
+      icon: <Activity className="h-5 w-5" />,
+      featured: true,
+      onClick: onOpenStocksWatcher,
     },
     {
       title: "Image Caption",

@@ -5,9 +5,19 @@ interface JsonRpcResponse {
   result?: {
     content?: { text?: string }[];
     isError?: boolean;
+    tools?: StocksMcpToolSummary[];
   };
   error?: {
     message?: string;
+  };
+}
+
+export interface StocksMcpToolSummary {
+  name: string;
+  description?: string;
+  inputSchema?: {
+    properties?: Record<string, unknown>;
+    required?: string[];
   };
 }
 
@@ -17,6 +27,14 @@ class SseLineReader {
   private pendingRead: Promise<ReadableStreamReadResult<Uint8Array>> | null = null;
 
   constructor(private readonly reader: ReadableStreamDefaultReader<Uint8Array>) {}
+
+  async close() {
+    await Promise.race([
+      this.reader.cancel().catch(() => undefined),
+      new Promise<void>((resolve) => setTimeout(resolve, 1_000)),
+    ]);
+    this.pendingRead = null;
+  }
 
   async readEvent(timeoutMs: number) {
     const deadline = Date.now() + timeoutMs;
@@ -73,6 +91,25 @@ class SseLineReader {
 const jsonContent = (body: unknown) =>
   JSON.stringify(body);
 
+const fetchWithTimeout = async (url: string, init: RequestInit, timeoutMs: number) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`Stocks MCP request timed out after ${timeoutMs}ms.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
 export class StocksMcpSseClient implements SpxGexMcpClient {
   private messageUrl: string | null = null;
   private sseReader: SseLineReader | null = null;
@@ -81,6 +118,7 @@ export class StocksMcpSseClient implements SpxGexMcpClient {
   constructor(
     private readonly bearerToken: string,
     private readonly serverBase = "https://stock-mcp-sse.azurewebsites.net",
+    private readonly toolTimeoutMs = 25_000,
   ) {}
 
   async getQuotes() {
@@ -96,18 +134,41 @@ export class StocksMcpSseClient implements SpxGexMcpClient {
   }
 
   async getOptionsGex(expiry: string) {
-    return this.callTool("get_options_gex", { ticker: "SPX", expiry, topRows: 20 });
+    return this.callToolText("get_options_gex", { ticker: "SPX", expiry, topRows: 20 });
+  }
+
+  async listTools() {
+    await this.connect();
+    const id = this.nextId++;
+    await this.post(id, "tools/list", {});
+    const payload = await this.readJsonRpcById(id, 30_000);
+
+    if (payload.error?.message) {
+      throw new Error(`Stocks MCP tools/list failed: ${payload.error.message}`);
+    }
+
+    return payload.result?.tools || [];
+  }
+
+  async callToolText(name: string, args: Record<string, unknown>) {
+    return this.callTool(name, args);
+  }
+
+  async close() {
+    await this.sseReader?.close();
+    this.sseReader = null;
+    this.messageUrl = null;
   }
 
   private async connect() {
     if (this.messageUrl && this.sseReader) return;
 
-    const response = await fetch(`${this.serverBase}/sse`, {
+    const response = await fetchWithTimeout(`${this.serverBase}/sse`, {
       headers: {
         Accept: "text/event-stream",
         Authorization: `Bearer ${this.bearerToken}`,
       },
-    });
+    }, 15_000);
 
     if (!response.ok || !response.body) {
       throw new Error(`Stocks MCP SSE connect failed: ${response.status}`);
@@ -123,7 +184,7 @@ export class StocksMcpSseClient implements SpxGexMcpClient {
     await this.post(initId, "initialize", {
       protocolVersion: "2024-11-05",
       capabilities: {},
-      clientInfo: { name: "sius-spx-gex-heatmap-worker", version: "1.0.0" },
+      clientInfo: { name: "sius-stock-work-gallery", version: "1.0.0" },
     });
     await this.readJsonRpcById(initId, 10_000);
     await this.post(this.nextId++, "notifications/initialized", {});
@@ -132,14 +193,14 @@ export class StocksMcpSseClient implements SpxGexMcpClient {
   private async post(id: number, method: string, params: unknown) {
     if (!this.messageUrl) throw new Error("Stocks MCP message URL is not ready.");
 
-    const response = await fetch(this.messageUrl, {
+    const response = await fetchWithTimeout(this.messageUrl, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.bearerToken}`,
         "Content-Type": "application/json",
       },
       body: jsonContent({ jsonrpc: "2.0", id, method, params }),
-    });
+    }, 15_000);
 
     if (response.status !== 202 && !response.ok) {
       throw new Error(`Stocks MCP ${method} post failed: HTTP ${response.status}`);
@@ -166,7 +227,7 @@ export class StocksMcpSseClient implements SpxGexMcpClient {
     await this.connect();
     const id = this.nextId++;
     await this.post(id, "tools/call", { name, arguments: args });
-    const payload = await this.readJsonRpcById(id, 120_000);
+    const payload = await this.readJsonRpcById(id, this.toolTimeoutMs);
 
     if (payload.error?.message) {
       throw new Error(`Stocks MCP tool ${name} failed: ${payload.error.message}`);

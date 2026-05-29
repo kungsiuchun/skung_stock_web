@@ -8,6 +8,7 @@ import { FinRobotDashboard } from './components/dashboard/finrobot-dashboard'
 import { TradingAgentDashboard } from './components/dashboard/trading-agent-dashboard'
 import { SPXRecapPage } from './components/spx-recap-page'
 import { SPXGexHeatmapPage } from './components/spx-gex-heatmap-page'
+import { StocksIntelligenceWatcherPage } from './components/stocks-intelligence-watcher-page'
 import { AboutPage } from './components/about-page'
 import { WorkGallery } from './components/work-gallery'
 import { SettleUpPage } from './components/settle-up-page'
@@ -15,7 +16,7 @@ import { portfolioConfig } from '@/config/portfolio'
 import { Home, LineChart } from 'lucide-react'
 
 
-export type ViewState = 'home' | 'about' | 'work-gallery' | 'settle-up' | 'finance-dashboard' | 'finrobot-dashboard' | 'trading-agent-dashboard' | 'spx-recap' | 'spx-gex-heatmap';
+export type ViewState = 'home' | 'about' | 'work-gallery' | 'settle-up' | 'finance-dashboard' | 'finrobot-dashboard' | 'trading-agent-dashboard' | 'spx-recap' | 'spx-gex-heatmap' | 'stocks-intelligence-watcher';
 
 const getViewFromHash = (): ViewState | null => {
   if (typeof window === 'undefined') {
@@ -30,6 +31,10 @@ const getViewFromHash = (): ViewState | null => {
 
   if (hash.startsWith('#/work/spx-gex-heatmap')) {
     return 'spx-gex-heatmap';
+  }
+
+  if (hash.startsWith('#/work/stocks-intelligence-watcher')) {
+    return 'stocks-intelligence-watcher';
   }
 
   if (hash.startsWith('#/work')) {
@@ -81,6 +86,11 @@ function App() {
       return;
     }
 
+    if (view === 'stocks-intelligence-watcher') {
+      window.location.hash = '#/work/stocks-intelligence-watcher';
+      return;
+    }
+
     if (window.location.hash.startsWith('#/work')) {
       window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
     }
@@ -126,6 +136,7 @@ function App() {
               onOpenTradingAgentTool={() => navigateToView('trading-agent-dashboard')}
               onOpenSPXRecap={() => navigateToView('spx-recap')}
               onOpenSPXGexHeatmap={() => navigateToView('spx-gex-heatmap')}
+              onOpenStocksWatcher={() => navigateToView('stocks-intelligence-watcher')}
             />
           ) : currentView === 'settle-up' ? (
             <SettleUpPage onBackToWork={() => navigateToView('work-gallery')} />
@@ -139,6 +150,8 @@ function App() {
             <SPXRecapPage />
           ) : currentView === 'spx-gex-heatmap' ? (
             <SPXGexHeatmapPage onBackToWork={() => navigateToView('work-gallery')} />
+          ) : currentView === 'stocks-intelligence-watcher' ? (
+            <StocksIntelligenceWatcherPage onBackToWork={() => navigateToView('work-gallery')} />
           ) : (
             <DemoOne />
           )}

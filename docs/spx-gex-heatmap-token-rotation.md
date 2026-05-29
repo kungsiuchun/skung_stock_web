@@ -1,6 +1,6 @@
-# SPX GEX Heatmap Token Rotation
+# Stocks Intelligence Token Rotation
 
-The SPX GEX heatmap Worker uses the Cloudflare secret `MCP_BEARER_TOKEN` to call the Stocks Intelligence MCP SSE server. The token value comes from the local Stocks Intelligence session file and can expire after roughly 7 days.
+The SPX GEX heatmap Worker and the Stocks Intelligence Watcher Pages Function use the Cloudflare secret `MCP_BEARER_TOKEN` to call the Stocks Intelligence MCP SSE server. The token value comes from the local Stocks Intelligence session file and can expire after roughly 7 days.
 
 ## Alert
 
@@ -12,7 +12,7 @@ Stocks Intelligence MCP rejected the Worker token.
 Action: sign in via the VS Code extension, then run npm run spx:gex:rotate-token.
 ```
 
-That alert means the Cloudflare secret is stale. It does not mean D1, retention, or the Work Gallery card is broken.
+That alert means the Cloudflare secret is stale. It does not mean D1, retention, the heatmap card, or the Stocks Intelligence Watcher UI is broken.
 
 ## Rotate
 
@@ -23,7 +23,10 @@ That alert means the Cloudflare secret is stale. It does not mean D1, retention,
 npm run spx:gex:rotate-token
 ```
 
-The script reads `~\.stock-intelligence\session.json`, validates the token against the MCP SSE endpoint, then updates Cloudflare secret `MCP_BEARER_TOKEN` using `wrangler.spx.toml`.
+The script reads `~\.stock-intelligence\session.json`, validates the token against the MCP SSE endpoint, then updates Cloudflare secret `MCP_BEARER_TOKEN` in two places:
+
+- the SPX Worker, using `wrangler.spx.toml`
+- the Pages project `sius-ai-workshop`, for `/api/stocks-intelligence-watcher`
 
 The script must not print the token. Do not paste the token into chat, logs, docs, or memory.
 

@@ -57,3 +57,11 @@ SPX GEX Heatmap is a Work Item that turns a premarket SPX options gamma workflow
 SPX GEX Heatmap should show retained JSON snapshots as a live product surface, not stored raw HTML.
 
 SPX GEX Heatmap should treat seven trading days as the retention window, so weekends and NYSE full holidays do not consume retention slots.
+
+## Stocks Intelligence Watcher
+
+Stocks Intelligence Watcher is a Work Item that turns the Stocks Intelligence MCP ticker workflow into a dense live ticker terminal.
+
+Stocks Intelligence Watcher should lead with a usable watchlist, search, favorites, options expiry table, and OI/volume/GEX strike views rather than a static explanation.
+
+Stocks Intelligence Watcher keeps the MCP token server-side; the browser receives only normalized JSON from the Pages Function.

@@ -1,6 +1,7 @@
 param(
   [string]$SessionPath = (Join-Path $env:USERPROFILE ".stock-intelligence\session.json"),
-  [string]$ServerBase = "https://stock-mcp-sse.azurewebsites.net"
+  [string]$ServerBase = "https://stock-mcp-sse.azurewebsites.net",
+  [string]$PagesProjectName = "sius-ai-workshop"
 )
 
 $ErrorActionPreference = "Stop"
@@ -44,7 +45,10 @@ finally {
   $client.Dispose()
 }
 
-Write-Host "Local Stocks Intelligence token validated. Uploading to Cloudflare secret MCP_BEARER_TOKEN..."
+Write-Host "Local Stocks Intelligence token validated. Uploading to Cloudflare Worker secret MCP_BEARER_TOKEN..."
 $token | npx wrangler secret put MCP_BEARER_TOKEN --config wrangler.spx.toml
 
-Write-Host "Cloudflare secret update command completed. Token value was not printed."
+Write-Host "Uploading to Cloudflare Pages secret MCP_BEARER_TOKEN for $PagesProjectName..."
+$token | npx wrangler pages secret put MCP_BEARER_TOKEN --project-name $PagesProjectName
+
+Write-Host "Cloudflare secret update commands completed. Token value was not printed."
