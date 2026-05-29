@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import {
   ArrowLeft,
   BarChart3,
@@ -11,8 +12,15 @@ import {
 } from "lucide-react";
 import type {
   StocksWatcherChartMode,
+  StocksWatcherSnapshotCacheEntry,
   StocksWatcherSnapshot,
   StocksWatcherStrikeRow,
+} from "@/lib/stocks-intelligence-watcher";
+import {
+  applyStocksWatcherSymbolRemoval,
+  getFreshStocksWatcherCacheEntry,
+  getNearestSpotStrike,
+  getStocksWatcherVisibleSymbols,
 } from "@/lib/stocks-intelligence-watcher";
 
 interface StocksIntelligenceWatcherPageProps {
@@ -20,6 +28,8 @@ interface StocksIntelligenceWatcherPageProps {
 }
 
 const DEFAULT_WATCHLIST = ["TSLA", "MU", "IREN"];
+const FAVORITES_STORAGE_KEY = "stocks-intelligence-favorites";
+const HIDDEN_SYMBOLS_STORAGE_KEY = "stocks-intelligence-hidden-symbols";
 
 const formatNumber = (value: number) => {
   const abs = Math.abs(value);
@@ -65,40 +75,112 @@ const getPutValue = (row: StocksWatcherStrikeRow, mode: StocksWatcherChartMode) 
   return row.putGex;
 };
 
+interface ChartTooltipState {
+  strike: number;
+  callValue: number;
+  putValue: number;
+  netGex: number;
+  x: number;
+  y: number;
+}
+
+const normalizeSymbol = (symbol: string) => symbol.trim().toUpperCase();
+
+const readStoredSymbols = (key: string, fallback: string[]) => {
+  if (typeof window === "undefined") return fallback;
+
+  try {
+    const saved = window.localStorage.getItem(key);
+    return saved ? JSON.parse(saved) as string[] : fallback;
+  } catch {
+    return fallback;
+  }
+};
+
 export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligenceWatcherPageProps) {
   const [selectedSymbol, setSelectedSymbol] = useState("TSLA");
   const [query, setQuery] = useState("TSLA");
   const [mode, setMode] = useState<StocksWatcherChartMode>("volume");
   const [snapshot, setSnapshot] = useState<StocksWatcherSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadingSymbol, setLoadingSymbol] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const snapshotCacheRef = useRef<Map<string, StocksWatcherSnapshotCacheEntry>>(new Map());
+  const chartViewportRef = useRef<HTMLDivElement | null>(null);
+  const [chartTooltip, setChartTooltip] = useState<ChartTooltipState | null>(null);
   const [favorites, setFavorites] = useState<string[]>(() => {
-    if (typeof window === "undefined") return DEFAULT_WATCHLIST;
-    const saved = window.localStorage.getItem("stocks-intelligence-favorites");
-    return saved ? JSON.parse(saved) as string[] : DEFAULT_WATCHLIST;
+    return readStoredSymbols(FAVORITES_STORAGE_KEY, DEFAULT_WATCHLIST);
+  });
+  const [hiddenSymbols, setHiddenSymbols] = useState<string[]>(() => {
+    return readStoredSymbols(HIDDEN_SYMBOLS_STORAGE_KEY, []);
   });
 
   useEffect(() => {
     if (typeof window !== "undefined") {
-      window.localStorage.setItem("stocks-intelligence-favorites", JSON.stringify(favorites));
+      window.localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(favorites));
     }
   }, [favorites]);
 
-  const loadSnapshot = async (symbol: string) => {
-    setLoading(true);
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(HIDDEN_SYMBOLS_STORAGE_KEY, JSON.stringify(hiddenSymbols));
+    }
+  }, [hiddenSymbols]);
+
+  const fetchSnapshot = async (symbol: string, options: { background?: boolean } = {}) => {
+    const nextSymbol = normalizeSymbol(symbol);
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    if (!options.background) {
+      setLoading(true);
+    }
+    setLoadingSymbol(nextSymbol);
     setError(null);
 
     try {
-      const response = await fetch(`/api/stocks-intelligence-watcher?symbol=${encodeURIComponent(symbol)}`);
+      const response = await fetch(`/api/stocks-intelligence-watcher?symbol=${encodeURIComponent(nextSymbol)}`, {
+        signal: controller.signal,
+      });
       const body = await response.json() as StocksWatcherSnapshot;
+      snapshotCacheRef.current.set(body.symbol, { snapshot: body, fetchedAt: Date.now() });
       setSnapshot(body);
       setSelectedSymbol(body.symbol);
       setQuery(body.symbol);
     } catch (requestError) {
+      if (requestError instanceof DOMException && requestError.name === "AbortError") {
+        return;
+      }
       setError(requestError instanceof Error ? requestError.message : String(requestError));
     } finally {
-      setLoading(false);
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+        setLoading(false);
+        setLoadingSymbol(null);
+      }
     }
+  };
+
+  const loadSnapshot = async (symbol: string, options: { force?: boolean } = {}) => {
+    const nextSymbol = normalizeSymbol(symbol);
+    if (!nextSymbol) return;
+    if (loadingSymbol === nextSymbol && selectedSymbol === nextSymbol) return;
+
+    const cached = options.force ? null : getFreshStocksWatcherCacheEntry(snapshotCacheRef.current, nextSymbol);
+    if (cached) {
+      const isAlreadySelected = cached.snapshot.symbol === selectedSymbol;
+      setSnapshot(cached.snapshot);
+      setSelectedSymbol(cached.snapshot.symbol);
+      setQuery(cached.snapshot.symbol);
+      if (!isAlreadySelected) {
+        void fetchSnapshot(nextSymbol, { background: true });
+      }
+      return;
+    }
+
+    await fetchSnapshot(nextSymbol);
   };
 
   useEffect(() => {
@@ -106,9 +188,17 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   }, []);
 
   const watchlist = useMemo(() => {
-    const merged = Array.from(new Set([...favorites, selectedSymbol, ...DEFAULT_WATCHLIST])).filter(Boolean);
-    return merged.slice(0, 8);
-  }, [favorites, selectedSymbol]);
+    return getStocksWatcherVisibleSymbols({
+      favorites,
+      hiddenSymbols,
+      selectedSymbol,
+      defaultSymbols: DEFAULT_WATCHLIST,
+    });
+  }, [favorites, hiddenSymbols, selectedSymbol]);
+  const favoriteCount = useMemo(() => {
+    const hidden = new Set(hiddenSymbols.map(normalizeSymbol));
+    return Array.from(new Set(favorites.map(normalizeSymbol))).filter((symbol) => symbol && !hidden.has(symbol)).length;
+  }, [favorites, hiddenSymbols]);
 
   const submitSearch = () => {
     const nextSymbol = query.trim().toUpperCase();
@@ -123,10 +213,53 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     );
   };
 
+  const removeSymbol = (symbol: string) => {
+    const result = applyStocksWatcherSymbolRemoval(
+      {
+        favorites,
+        hiddenSymbols,
+        selectedSymbol,
+        defaultSymbols: DEFAULT_WATCHLIST,
+      },
+      symbol,
+    );
+
+    setFavorites(result.favorites);
+    setHiddenSymbols(result.hiddenSymbols);
+
+    if (result.nextSelectedSymbol !== selectedSymbol) {
+      void loadSnapshot(result.nextSelectedSymbol);
+    }
+  };
+
+  const setChartTooltipForPoint = (row: StocksWatcherStrikeRow, x: number, y: number) => {
+    setChartTooltip({
+      strike: row.strike,
+      callValue: Math.abs(getCallValue(row, mode)),
+      putValue: Math.abs(getPutValue(row, mode)),
+      netGex: row.netGex,
+      x,
+      y,
+    });
+  };
+
+  const showChartTooltip = (
+    row: StocksWatcherStrikeRow,
+    event: ReactMouseEvent<HTMLDivElement>,
+  ) => {
+    const bounds = chartViewportRef.current?.getBoundingClientRect();
+    setChartTooltipForPoint(
+      row,
+      bounds ? event.clientX - bounds.left + 14 : 20,
+      bounds ? event.clientY - bounds.top - 18 : 20,
+    );
+  };
+
   const isPositive = (snapshot?.quote.change || 0) >= 0;
   const rows = snapshot?.strikes || [];
   const maxValue = getMaxForMode(rows, mode);
   const focusedRows = rows.slice(Math.max(0, Math.floor(rows.length / 2) - 14), Math.min(rows.length, Math.floor(rows.length / 2) + 15));
+  const spotStrike = snapshot ? getNearestSpotStrike(focusedRows, snapshot.spot) : null;
 
   return (
     <section className="h-full w-full overflow-hidden bg-[#080d14] text-slate-100">
@@ -143,7 +276,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             </button>
             <button
               type="button"
-              onClick={() => snapshot && void loadSnapshot(snapshot.symbol)}
+              onClick={() => snapshot && void loadSnapshot(snapshot.symbol, { force: true })}
               className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-700 bg-slate-900 text-slate-300 transition-colors hover:border-blue-400 hover:text-blue-300"
               title="Refresh"
             >
@@ -189,7 +322,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           <div className="mt-3 flex items-center gap-2 border-b border-slate-800 pb-3">
             <button className="rounded-full border border-slate-700 px-4 py-1.5 text-sm text-slate-200">All Stocks</button>
             <button className="rounded-full border border-blue-400/60 bg-blue-500/20 px-4 py-1.5 text-sm font-semibold text-blue-100">
-              FAV ({favorites.length})
+              FAV ({favoriteCount})
             </button>
             <button
               type="button"
@@ -201,12 +334,13 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             </button>
           </div>
 
-          <div className="mt-3 grid grid-cols-[2rem_1fr_5rem_5rem_5rem] items-center border-b border-slate-800 pb-2 text-xs font-bold text-slate-400">
+          <div className="mt-3 grid grid-cols-[2rem_1fr_5rem_5rem_5rem_2rem] items-center border-b border-slate-800 pb-2 text-xs font-bold text-slate-400">
             <span />
             <span>Ticker</span>
             <span>Price</span>
             <span>Chg</span>
             <span>Chg%</span>
+            <span />
           </div>
 
           <div className="max-h-[calc(100vh-22rem)] overflow-y-auto">
@@ -215,22 +349,49 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
               const rowQuote = selected ? snapshot?.quote : null;
               const change = rowQuote?.change ?? (symbol === "TSLA" ? 1.74 : symbol === "MU" ? -4.89 : -3.79);
               const rowPositive = change >= 0;
+              const isRowLoading = loadingSymbol === symbol;
 
               return (
-                <button
+                <div
                   key={symbol}
-                  type="button"
+                  role="button"
+                  tabIndex={0}
                   onClick={() => void loadSnapshot(symbol)}
-                  className={`grid w-full grid-cols-[2rem_1fr_5rem_5rem_5rem] items-center border-b border-slate-800 py-3 text-left text-sm transition-colors hover:bg-slate-900 ${selected ? "border-b-blue-400 bg-blue-500/5" : ""}`}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      void loadSnapshot(symbol);
+                    }
+                  }}
+                  className={`grid w-full grid-cols-[2rem_1fr_5rem_5rem_5rem_2rem] items-center border-b border-slate-800 py-3 text-left text-sm transition-colors hover:bg-slate-900 ${selected ? "border-b-blue-400 bg-blue-500/5" : ""}`}
                 >
                   <span className="flex h-4 w-4 items-center justify-center rounded-sm border border-slate-500 bg-slate-950" />
-                  <span className="font-black text-white">{symbol}</span>
+                  <span className="font-black text-white">{symbol}{isRowLoading ? " ..." : ""}</span>
                   <span>{rowQuote ? currency(rowQuote.price) : symbol === "MU" ? "$123.52" : symbol === "IREN" ? "$64.05" : "$442.10"}</span>
                   <span className={rowPositive ? "text-emerald-400" : "text-red-400"}>{rowPositive ? "+" : ""}{change.toFixed(2)}</span>
                   <span className={rowPositive ? "text-emerald-400" : "text-red-400"}>
                     {rowPositive ? "+" : ""}{(rowQuote?.changePercent ?? (rowPositive ? 0.4 : -0.53)).toFixed(2)}%
                   </span>
-                </button>
+                  <button
+                    type="button"
+                    title="Remove ticker"
+                    aria-label={`Remove ${symbol}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      removeSymbol(symbol);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        removeSymbol(symbol);
+                      }
+                    }}
+                    className="flex h-7 w-7 items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-slate-800 hover:text-red-300"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               );
             })}
           </div>
@@ -361,22 +522,59 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                   </p>
                 ))}
 
-                <div className="relative h-[28rem] overflow-x-auto overflow-y-hidden border-b border-l border-slate-800">
+                <div
+                  ref={chartViewportRef}
+                  className="relative h-[28rem] overflow-x-auto overflow-y-hidden border-b border-l border-slate-800"
+                  onMouseLeave={() => setChartTooltip(null)}
+                >
                   <div className="absolute inset-x-0 top-1/2 border-t border-slate-700/70" />
+                  {chartTooltip && (
+                    <div
+                      className="pointer-events-none absolute z-20 rounded-md border border-slate-600 bg-slate-950/95 px-3 py-2 text-xs text-slate-100 shadow-xl"
+                      style={{
+                        left: chartTooltip.x,
+                        top: Math.max(8, chartTooltip.y),
+                      }}
+                    >
+                      <p className="font-black text-blue-100">Strike {chartTooltip.strike}</p>
+                      <p className="mt-1 text-emerald-300">Call {formatNumber(chartTooltip.callValue)}</p>
+                      <p className="text-red-300">Put {formatNumber(chartTooltip.putValue)}</p>
+                      <p className="text-yellow-200">
+                        {mode === "gex" ? "Net GEX" : "P/C context"} {formatNumber(mode === "gex" ? chartTooltip.netGex : snapshot?.putCallVolume || 0)}
+                      </p>
+                    </div>
+                  )}
                   <div className="flex h-full min-w-[72rem] items-end gap-2 px-8 pb-10 pt-8">
                     {focusedRows.map((row) => {
                       const callValue = Math.abs(getCallValue(row, mode));
                       const putValue = Math.abs(getPutValue(row, mode));
                       const callHeight = Math.max(2, (callValue / maxValue) * 42);
                       const putHeight = Math.max(2, (putValue / maxValue) * 42);
-                      const isSpotStrike = Math.abs(row.strike - (snapshot?.spot || row.strike)) < ((snapshot?.spot || 1) * 0.01);
+                      const isSpotStrike = row.strike === spotStrike?.strike;
 
                       return (
-                        <div key={row.strike} className="relative flex h-full min-w-8 flex-col items-center justify-end">
+                        <div
+                          key={row.strike}
+                          data-chart-bar
+                          className="relative flex h-full min-w-8 flex-col items-center justify-end"
+                          onMouseEnter={(event) => showChartTooltip(row, event)}
+                          onMouseMove={(event) => showChartTooltip(row, event)}
+                          onFocus={(event) => {
+                            const bounds = chartViewportRef.current?.getBoundingClientRect();
+                            const target = event.currentTarget.getBoundingClientRect();
+                            setChartTooltipForPoint(
+                              row,
+                              bounds ? target.left - bounds.left + target.width / 2 + 14 : 20,
+                              bounds ? target.top - bounds.top - 18 : 20,
+                            );
+                          }}
+                          onBlur={() => setChartTooltip(null)}
+                          tabIndex={0}
+                        >
                           {isSpotStrike && (
                             <div className="absolute bottom-10 top-2 border-l-2 border-dashed border-yellow-300/80">
                               <span className="absolute -top-5 -translate-x-1/2 whitespace-nowrap text-xs font-black text-yellow-300">
-                                Spot {snapshot?.spot.toFixed(2)}
+                                Spot {snapshot ? currency(snapshot.spot) : "--"}
                               </span>
                             </div>
                           )}

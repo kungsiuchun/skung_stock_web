@@ -71,10 +71,85 @@ export interface StocksWatcherMcpClient {
 }
 
 const DEFAULT_WATCHLIST = ["TSLA", "MU", "IREN", "NVDA", "AAPL"];
+export const STOCKS_WATCHER_CACHE_TTL_MS = 60_000;
+
+export interface StocksWatcherSnapshotCacheEntry {
+  snapshot: StocksWatcherSnapshot;
+  fetchedAt: number;
+}
+
+export interface StocksWatcherRemovalState {
+  favorites: string[];
+  hiddenSymbols: string[];
+  selectedSymbol: string;
+  defaultSymbols: string[];
+}
 
 const round = (value: number, digits = 2) => {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
+};
+
+export const getNearestSpotStrike = (rows: StocksWatcherStrikeRow[], spot: number) => {
+  if (rows.length === 0 || !Number.isFinite(spot)) return null;
+
+  return rows.reduce((nearest, row) => {
+    const currentDistance = Math.abs(row.strike - spot);
+    const nearestDistance = Math.abs(nearest.strike - spot);
+    if (currentDistance < nearestDistance) return row;
+    if (currentDistance === nearestDistance && row.strike > nearest.strike) return row;
+    return nearest;
+  });
+};
+
+const normalizeSymbol = (symbol: string) => symbol.trim().toUpperCase();
+
+const uniqueSymbols = (symbols: string[]) =>
+  Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
+
+export const getStocksWatcherVisibleSymbols = (options: {
+  favorites: string[];
+  hiddenSymbols: string[];
+  selectedSymbol: string;
+  defaultSymbols: string[];
+  limit?: number;
+}) => {
+  const hidden = new Set(options.hiddenSymbols.map(normalizeSymbol));
+  const merged = uniqueSymbols([...options.favorites, options.selectedSymbol, ...options.defaultSymbols]);
+  return merged.filter((symbol) => !hidden.has(symbol)).slice(0, options.limit ?? 8);
+};
+
+export const applyStocksWatcherSymbolRemoval = (
+  state: StocksWatcherRemovalState,
+  symbolToRemove: string,
+) => {
+  const removed = normalizeSymbol(symbolToRemove);
+  const defaultSet = new Set(state.defaultSymbols.map(normalizeSymbol));
+  const favorites = uniqueSymbols(state.favorites).filter((symbol) => symbol !== removed);
+  const hiddenSymbols = uniqueSymbols(defaultSet.has(removed) ? [...state.hiddenSymbols, removed] : state.hiddenSymbols);
+  const visible = getStocksWatcherVisibleSymbols({
+    favorites,
+    hiddenSymbols,
+    selectedSymbol: state.selectedSymbol === removed ? "" : state.selectedSymbol,
+    defaultSymbols: state.defaultSymbols,
+  });
+
+  return {
+    favorites,
+    hiddenSymbols,
+    nextSelectedSymbol: normalizeSymbol(state.selectedSymbol) === removed ? visible[0] || "TSLA" : normalizeSymbol(state.selectedSymbol),
+  };
+};
+
+export const getFreshStocksWatcherCacheEntry = (
+  cache: Map<string, StocksWatcherSnapshotCacheEntry>,
+  symbol: string,
+  now = Date.now(),
+  ttlMs = STOCKS_WATCHER_CACHE_TTL_MS,
+) => {
+  const entry = cache.get(normalizeSymbol(symbol));
+  if (!entry) return null;
+  return now - entry.fetchedAt <= ttlMs ? entry : null;
 };
 
 const parseTableCells = (line: string) =>

@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  STOCKS_WATCHER_CACHE_TTL_MS,
+  applyStocksWatcherSymbolRemoval,
   buildDemoStocksWatcherSnapshot,
   buildStocksWatcherSnapshotFromMcp,
+  getFreshStocksWatcherCacheEntry,
+  getNearestSpotStrike,
   type StocksWatcherMcpClient,
 } from "../src/lib/stocks-intelligence-watcher";
 
@@ -81,6 +85,47 @@ test("demo snapshot is deterministic enough for the watcher shell", () => {
   assert.ok(snapshot.expiries.length >= 20);
   assert.ok(snapshot.strikes.length >= 20);
   assert.ok(snapshot.warnings.includes("fallback"));
+});
+
+test("nearest spot strike chooses one strike when several are close to spot", () => {
+  const snapshot = buildDemoStocksWatcherSnapshot("TSLA", "fallback");
+  const nearest = getNearestSpotStrike(
+    [
+      { ...snapshot.strikes[0], strike: 440 },
+      { ...snapshot.strikes[1], strike: 442.5 },
+      { ...snapshot.strikes[2], strike: 445 },
+    ],
+    442.1,
+  );
+
+  assert.equal(nearest?.strike, 442.5);
+});
+
+test("watchlist removal removes favorites, hides defaults, and chooses the next visible ticker", () => {
+  const result = applyStocksWatcherSymbolRemoval(
+    {
+      favorites: ["TSLA", "MU", "IREN"],
+      hiddenSymbols: [],
+      selectedSymbol: "MU",
+      defaultSymbols: ["TSLA", "MU", "IREN"],
+    },
+    "MU",
+  );
+
+  assert.deepEqual(result.favorites, ["TSLA", "IREN"]);
+  assert.deepEqual(result.hiddenSymbols, ["MU"]);
+  assert.equal(result.nextSelectedSymbol, "TSLA");
+});
+
+test("snapshot cache returns only fresh entries", () => {
+  const snapshot = buildDemoStocksWatcherSnapshot("TSLA", "fallback");
+  const cache = new Map([
+    ["TSLA", { snapshot, fetchedAt: 1_000 }],
+    ["MU", { snapshot: buildDemoStocksWatcherSnapshot("MU", "fallback"), fetchedAt: 1_000 }],
+  ]);
+
+  assert.equal(getFreshStocksWatcherCacheEntry(cache, "tsla", 1_000 + STOCKS_WATCHER_CACHE_TTL_MS - 1)?.snapshot.symbol, "TSLA");
+  assert.equal(getFreshStocksWatcherCacheEntry(cache, "mu", 1_000 + STOCKS_WATCHER_CACHE_TTL_MS + 1), null);
 });
 
 test("MCP snapshot parses quotes, options, GEX, and tools/list metadata", async () => {
