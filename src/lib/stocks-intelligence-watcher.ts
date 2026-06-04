@@ -1,4 +1,7 @@
-import type { StocksMcpToolSummary } from "./stocks-mcp-sse-client";
+import { STOCKS_WATCHER_SYMBOLS, normalizeStocksWatcherSymbol } from "./stocks-native-yahoo";
+import type { StocksNativeToolResult, StocksNativeToolSummary } from "./stocks-native-yahoo";
+import { STOCKS_WATCHER_UNIVERSE } from "./stocks-watcher-universe";
+import type { StocksWatcherUniverseStock } from "./stocks-watcher-universe";
 
 export type StocksWatcherChartMode = "oi" | "volume" | "gex";
 
@@ -14,8 +17,10 @@ export interface StocksWatcherQuote {
 export interface StocksWatcherExpiryRow {
   expiry: string;
   openInterest: number;
+  primaryStrike: number;
   strike: number;
   volume: number;
+  dominantType: "C" | "P";
   type: "C" | "P";
 }
 
@@ -52,6 +57,9 @@ export interface StocksWatcherSnapshot {
   putCallOpenInterest: number;
   putCallVolume: number;
   sweeps: number;
+  availableExpiries: string[];
+  selectedExpiry: string | null;
+  expiryRows: StocksWatcherExpiryRow[];
   expiries: StocksWatcherExpiryRow[];
   strikes: StocksWatcherStrikeRow[];
   history: StocksWatcherHistoryPoint[];
@@ -62,15 +70,16 @@ export interface StocksWatcherSnapshot {
   availableTools: { name: string; description: string; inputKeys: string[] }[];
   toolRuns: StocksWatcherToolRun[];
   warnings: string[];
-  source: "stocks_intelligence_mcp" | "demo_fallback";
+  source: "native_yahoo" | "demo_fallback";
 }
 
-export interface StocksWatcherMcpClient {
-  listTools: () => Promise<StocksMcpToolSummary[]>;
+export interface StocksWatcherToolClient {
+  listTools: () => Promise<StocksNativeToolSummary[]>;
   callToolText: (name: string, args: Record<string, unknown>) => Promise<string>;
+  callTool?: (name: string, args: Record<string, unknown>) => Promise<StocksNativeToolResult>;
 }
 
-const DEFAULT_WATCHLIST = ["TSLA", "MU", "IREN", "NVDA", "AAPL"];
+const DEFAULT_WATCHLIST = [...STOCKS_WATCHER_SYMBOLS];
 export const STOCKS_WATCHER_CACHE_TTL_MS = 60_000;
 
 export interface StocksWatcherSnapshotCacheEntry {
@@ -83,6 +92,21 @@ export interface StocksWatcherRemovalState {
   hiddenSymbols: string[];
   selectedSymbol: string;
   defaultSymbols: string[];
+}
+
+export interface StocksWatcherVisibleSymbolsOptions {
+  favorites: string[];
+  hiddenSymbols: string[];
+  selectedSymbol: string;
+  defaultSymbols: string[];
+  limit?: number;
+  query?: string;
+  sector?: string;
+  type?: string;
+  universe?: readonly StocksWatcherUniverseStock[];
+  includeSelected?: boolean;
+  includeDefaultSymbols?: boolean;
+  restrictToDefaultSymbols?: boolean;
 }
 
 const round = (value: number, digits = 2) => {
@@ -107,16 +131,31 @@ const normalizeSymbol = (symbol: string) => symbol.trim().toUpperCase();
 const uniqueSymbols = (symbols: string[]) =>
   Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
 
-export const getStocksWatcherVisibleSymbols = (options: {
-  favorites: string[];
-  hiddenSymbols: string[];
-  selectedSymbol: string;
-  defaultSymbols: string[];
-  limit?: number;
-}) => {
+export const getStocksWatcherVisibleSymbols = (options: StocksWatcherVisibleSymbolsOptions) => {
   const hidden = new Set(options.hiddenSymbols.map(normalizeSymbol));
-  const merged = uniqueSymbols([...options.favorites, options.selectedSymbol, ...options.defaultSymbols]);
-  return merged.filter((symbol) => !hidden.has(symbol)).slice(0, options.limit ?? 8);
+  const universe = options.universe || STOCKS_WATCHER_UNIVERSE;
+  const bySymbol = new Map(universe.map((stock) => [normalizeSymbol(stock.symbol), stock]));
+  const allowed = new Set(options.defaultSymbols.map(normalizeSymbol));
+  const restrictToDefaultSymbols = options.restrictToDefaultSymbols ?? true;
+  const defaultSymbols = options.includeDefaultSymbols === false ? [] : options.defaultSymbols;
+  const baseSymbols = options.includeSelected === false
+    ? uniqueSymbols([...options.favorites, ...defaultSymbols])
+    : uniqueSymbols([...options.favorites, options.selectedSymbol, ...defaultSymbols]);
+  const query = (options.query || "").trim().toLowerCase();
+  const sector = options.sector || "All Sectors";
+  const type = options.type || "All Types";
+
+  return baseSymbols
+    .filter((symbol) => (!restrictToDefaultSymbols || allowed.has(symbol)) && !hidden.has(symbol))
+    .filter((symbol) => {
+      const stock = bySymbol.get(symbol);
+      if (!stock) return !query && sector === "All Sectors" && type === "All Types";
+      const matchesQuery = !query || stock.symbol.toLowerCase().includes(query) || stock.companyName.toLowerCase().includes(query);
+      const matchesSector = sector === "All Sectors" || stock.sector === sector;
+      const matchesType = type === "All Types" || stock.type === type;
+      return matchesQuery && matchesSector && matchesType;
+    })
+    .slice(0, options.limit ?? 50);
 };
 
 export const applyStocksWatcherSymbolRemoval = (
@@ -137,7 +176,7 @@ export const applyStocksWatcherSymbolRemoval = (
   return {
     favorites,
     hiddenSymbols,
-    nextSelectedSymbol: normalizeSymbol(state.selectedSymbol) === removed ? visible[0] || "TSLA" : normalizeSymbol(state.selectedSymbol),
+    nextSelectedSymbol: normalizeSymbol(state.selectedSymbol) === removed ? visible[0] || DEFAULT_WATCHLIST[0] : normalizeSymbol(state.selectedSymbol),
   };
 };
 
@@ -185,13 +224,16 @@ const parseQuoteText = (symbol: string, text: string): Partial<StocksWatcherQuot
 
   const cells = parseTableCells(row);
   const numbers = cells.map(parseNumber).filter((value): value is number => value !== null);
+  const priceCellIndex = cells.findIndex((cell) => cell.includes("$"));
+  const price = priceCellIndex >= 0 ? parseNumber(cells[priceCellIndex]) ?? undefined : numbers[0];
+  const change = priceCellIndex >= 0 ? parseNumber(cells[priceCellIndex + 1] || "") ?? undefined : numbers[1];
   const percentCell = cells.find((cell) => cell.includes("%"));
 
   return {
     symbol,
-    companyName: cells.find((cell) => /inc|corp|ltd|tesla|nvidia|apple|micro/i.test(cell)) || symbol,
-    price: numbers[0],
-    change: numbers[1],
+    companyName: cells[1] && !cells[1].includes("$") ? cells[1] : cells.find((cell) => /inc|corp|ltd|nvidia|unitedhealth|neos|rex|wisdomtree/i.test(cell)) || symbol,
+    price,
+    change,
     changePercent: percentCell ? parseNumber(percentCell) ?? undefined : numbers[2],
   };
 };
@@ -223,8 +265,10 @@ const parseOptionRows = (text: string, spot: number): StocksWatcherExpiryRow[] =
     rows.push({
       expiry,
       openInterest: Math.max(...largeNumbers),
+      primaryStrike: strike,
       strike,
       volume: largeNumbers[largeNumbers.length - 1],
+      dominantType: type,
       type,
     });
   }
@@ -242,7 +286,7 @@ const parseGexRows = (text: string, spot: number): Partial<StocksWatcherStrikeRo
     const strike = numbers.find((value) => value > spot * 0.55 && value < spot * 1.45);
     if (!strike || numbers.length < 2) continue;
 
-    const gexNumbers = numbers.filter((value) => Math.abs(value) > 1_000 || Math.abs(value) < 200);
+    const gexNumbers = numbers.filter((value) => value !== strike).filter((value) => Math.abs(value) > 1_000 || Math.abs(value) < 200);
     const callGex = Math.abs(gexNumbers.find((value) => value > 0) || 0);
     const putGex = -Math.abs([...gexNumbers].reverse().find((value) => value < 0) || 0);
 
@@ -315,13 +359,63 @@ const buildSyntheticExpiries = (symbol: string, strikes: StocksWatcherStrikeRow[
     const type = index % 3 === 1 ? "P" : "C";
 
     return {
-      expiry: date.toISOString().slice(2, 10),
+      expiry: date.toISOString().slice(0, 10),
       openInterest: type === "C" ? strikeRow.callOpenInterest * (index + 2) : strikeRow.putOpenInterest * (index + 2),
+      primaryStrike: strikeRow.strike,
       strike: strikeRow.strike,
       volume: type === "C" ? strikeRow.callVolume : strikeRow.putVolume,
+      dominantType: type,
       type,
     };
   });
+};
+
+const buildExpirySummaryRows = (
+  availableExpiries: string[],
+  optionRows: StocksWatcherExpiryRow[],
+  fallbackRows: StocksWatcherExpiryRow[],
+): StocksWatcherExpiryRow[] => {
+  const byExpiry = new Map<string, StocksWatcherExpiryRow[]>();
+  for (const row of optionRows) {
+    const normalized = parseDateLike(row.expiry) || row.expiry;
+    byExpiry.set(normalized, [...(byExpiry.get(normalized) || []), { ...row, expiry: normalized }]);
+  }
+
+  const fallbackByExpiry = new Map(fallbackRows.map((row) => [parseDateLike(row.expiry) || row.expiry, row]));
+  const sourceExpiries = availableExpiries.length > 0 ? availableExpiries : Array.from(byExpiry.keys());
+  const summaries = sourceExpiries.map((expiry) => {
+    const normalized = parseDateLike(expiry) || expiry;
+    const rows = byExpiry.get(normalized) || [];
+    const fallback = fallbackByExpiry.get(normalized) || fallbackRows[0];
+    if (rows.length === 0) {
+      const fallbackType: "C" | "P" = fallback?.dominantType ?? fallback?.type ?? "C";
+      return {
+        ...fallback,
+        expiry: normalized,
+        primaryStrike: fallback?.primaryStrike ?? fallback?.strike ?? 0,
+        strike: fallback?.primaryStrike ?? fallback?.strike ?? 0,
+        dominantType: fallbackType,
+        type: fallbackType,
+      };
+    }
+
+    const callInterest = rows.filter((row) => row.type === "C").reduce((sum, row) => sum + row.openInterest, 0);
+    const putInterest = rows.filter((row) => row.type === "P").reduce((sum, row) => sum + row.openInterest, 0);
+    const dominant: "C" | "P" = callInterest >= putInterest ? "C" : "P";
+    const primary = rows.reduce((best, row) => (row.openInterest + row.volume) > (best.openInterest + best.volume) ? row : best);
+
+    return {
+      expiry: normalized,
+      openInterest: rows.reduce((sum, row) => sum + row.openInterest, 0),
+      primaryStrike: primary.primaryStrike || primary.strike,
+      strike: primary.primaryStrike || primary.strike,
+      volume: rows.reduce((sum, row) => sum + row.volume, 0),
+      dominantType: dominant,
+      type: dominant,
+    };
+  });
+
+  return summaries.slice(0, 32);
 };
 
 const buildSyntheticHistory = (symbol: string, spot: number): StocksWatcherHistoryPoint[] => {
@@ -365,24 +459,47 @@ const summariseTool = (name: string, text: string) => {
 };
 
 export const buildDemoStocksWatcherSnapshot = (symbol: string, warning: string): StocksWatcherSnapshot => {
-  const upperSymbol = symbol.trim().toUpperCase() || "TSLA";
-  const base = upperSymbol === "TSLA" ? 442.1 : upperSymbol === "MU" ? 123.52 : upperSymbol === "IREN" ? 64.05 : 180 + seeded(upperSymbol) % 260;
-  const change = upperSymbol === "TSLA" ? 1.74 : upperSymbol === "MU" ? -4.89 : upperSymbol === "IREN" ? -3.79 : round(((seeded(upperSymbol) % 31) - 15) / 10, 2);
+  const upperSymbol = normalizeStocksWatcherSymbol(symbol);
+  const universeStock = STOCKS_WATCHER_UNIVERSE.find((stock) => stock.symbol === upperSymbol);
+  const demoPrices: Record<string, number> = {
+    NVDA: 181.8,
+    IREN: 64.05,
+    QQQI: 50.42,
+    FEPI: 55.18,
+    NTSX: 45.76,
+    UNH: 297.34,
+  };
+  const demoChanges: Record<string, number> = {
+    NVDA: 2.14,
+    IREN: -3.79,
+    QQQI: 0.18,
+    FEPI: -0.22,
+    NTSX: 0.11,
+    UNH: 1.37,
+  };
+  const base = universeStock?.fallbackPrice ?? demoPrices[upperSymbol] ?? 180 + seeded(upperSymbol) % 260;
+  const change = universeStock?.fallbackChange ?? demoChanges[upperSymbol] ?? round(((seeded(upperSymbol) % 31) - 15) / 10, 2);
   const strikes = buildSyntheticStrikes(upperSymbol, base);
   const callOi = strikes.reduce((sum, row) => sum + row.callOpenInterest, 0);
   const putOi = strikes.reduce((sum, row) => sum + row.putOpenInterest, 0);
   const callVol = strikes.reduce((sum, row) => sum + row.callVolume, 0);
   const putVol = strikes.reduce((sum, row) => sum + row.putVolume, 0);
+  const syntheticExpiries = buildSyntheticExpiries(upperSymbol, strikes);
+  const syntheticExpiryRows = buildExpirySummaryRows(
+    Array.from(new Set(syntheticExpiries.map((row) => row.expiry))).slice(0, 12),
+    syntheticExpiries,
+    syntheticExpiries,
+  );
 
   return {
     generatedAt: new Date().toISOString(),
     symbol: upperSymbol,
     quote: {
       symbol: upperSymbol,
-      companyName: upperSymbol === "TSLA" ? "Tesla, Inc." : `${upperSymbol} demo equity`,
+      companyName: universeStock?.companyName || `${upperSymbol} demo asset`,
       price: base,
       change,
-      changePercent: round((change / base) * 100, 2),
+      changePercent: universeStock?.fallbackChangePercent ?? round((change / base) * 100, 2),
       asOf: "05/28, 04:00 PM",
     },
     spot: base,
@@ -392,11 +509,14 @@ export const buildDemoStocksWatcherSnapshot = (symbol: string, warning: string):
     putCallOpenInterest: round(putOi / Math.max(1, callOi), 2),
     putCallVolume: round(putVol / Math.max(1, callVol), 2),
     sweeps: seeded(upperSymbol) % 4,
-    expiries: buildSyntheticExpiries(upperSymbol, strikes),
+    availableExpiries: syntheticExpiryRows.map((row) => row.expiry),
+    selectedExpiry: syntheticExpiryRows[0]?.expiry || null,
+    expiryRows: syntheticExpiryRows,
+    expiries: syntheticExpiryRows,
     strikes,
     history: buildSyntheticHistory(upperSymbol, base),
     marketContext: {
-      breadth: "Demo breadth context. Live mode uses market_breadth when the MCP token is available.",
+      breadth: "Demo breadth context. Live mode uses native Yahoo data.",
       relativeStrength: `Demo relative strength for ${upperSymbol} versus ${DEFAULT_WATCHLIST.filter((item) => item !== upperSymbol).join(", ")}.`,
     },
     availableTools: [],
@@ -407,7 +527,7 @@ export const buildDemoStocksWatcherSnapshot = (symbol: string, warning: string):
 };
 
 const callToolWithVariants = async (
-  client: StocksWatcherMcpClient,
+  client: StocksWatcherToolClient,
   name: string,
   variants: Record<string, unknown>[],
   toolRuns: StocksWatcherToolRun[],
@@ -428,11 +548,73 @@ const callToolWithVariants = async (
   return "";
 };
 
-export const buildStocksWatcherSnapshotFromMcp = async (
+const callToolStructuredWithVariants = async (
+  client: StocksWatcherToolClient,
+  name: string,
+  variants: Record<string, unknown>[],
+  toolRuns: StocksWatcherToolRun[],
+) => {
+  if (!client.callTool) {
+    const text = await callToolWithVariants(client, name, variants, toolRuns);
+    return { text, raw: null };
+  }
+
+  let lastError = "";
+  for (const args of variants) {
+    try {
+      const result = await client.callTool(name, args);
+      toolRuns.push({ name, status: "ok", detail: Object.keys(args).join(", ") || "no args" });
+      return result;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  toolRuns.push({ name, status: "failed", detail: lastError || "No argument variant succeeded." });
+  return { text: "", raw: null };
+};
+
+const recordFromUnknown = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+
+const rowsFromRawOptionChain = (raw: unknown): {
+  expiries: string[];
+  selectedExpiry: string | null;
+  rows: StocksWatcherExpiryRow[];
+} => {
+  const rawRecord = recordFromUnknown(raw);
+  const chain = recordFromUnknown(rawRecord?.chain);
+  if (!chain) return { expiries: [], selectedExpiry: null, rows: [] };
+
+  const selectedExpiry = typeof chain.selectedExpiry === "string" ? parseDateLike(chain.selectedExpiry) || chain.selectedExpiry : null;
+  const expiries = Array.isArray(chain.expiries)
+    ? chain.expiries.map((item) => typeof item === "string" ? parseDateLike(item) || item : "").filter(Boolean)
+    : [];
+  const normalizeLeg = (leg: unknown, type: "C" | "P") => {
+    const record = recordFromUnknown(leg);
+    if (!record || !selectedExpiry) return null;
+    const strike = typeof record.strike === "number" ? record.strike : 0;
+    return {
+      expiry: selectedExpiry,
+      openInterest: typeof record.openInterest === "number" ? record.openInterest : 0,
+      primaryStrike: strike,
+      strike,
+      volume: typeof record.volume === "number" ? record.volume : 0,
+      dominantType: type,
+      type,
+    };
+  };
+  const calls = Array.isArray(chain.calls) ? chain.calls.map((leg) => normalizeLeg(leg, "C")).filter((row): row is StocksWatcherExpiryRow => Boolean(row)) : [];
+  const puts = Array.isArray(chain.puts) ? chain.puts.map((leg) => normalizeLeg(leg, "P")).filter((row): row is StocksWatcherExpiryRow => Boolean(row)) : [];
+
+  return { expiries, selectedExpiry, rows: [...calls, ...puts] };
+};
+
+export const buildStocksWatcherSnapshotFromNative = async (
   symbol: string,
-  client: StocksWatcherMcpClient,
+  client: StocksWatcherToolClient,
 ): Promise<StocksWatcherSnapshot> => {
-  const upperSymbol = symbol.trim().toUpperCase() || "TSLA";
+  const upperSymbol = normalizeStocksWatcherSymbol(symbol);
   const warnings: string[] = [];
   const toolRuns: StocksWatcherToolRun[] = [];
   let availableTools: StocksWatcherSnapshot["availableTools"] = [];
@@ -458,10 +640,12 @@ export const buildStocksWatcherSnapshotFromMcp = async (
   const demoBase = buildDemoStocksWatcherSnapshot(upperSymbol, "Live quote parser fallback.");
   const price = partialQuote.price || demoBase.quote.price;
 
-  const optionsText = await callToolWithVariants(client, "get_options", [
+  const optionsResult = await callToolStructuredWithVariants(client, "get_options", [
     { ticker: upperSymbol, strikesAroundAtm: 25 },
   ], toolRuns);
-  const expiries = extractAvailableExpiries(optionsText);
+  const rawOptions = rowsFromRawOptionChain(optionsResult.raw);
+  const optionsText = optionsResult.text;
+  const expiries = rawOptions.expiries.length > 0 ? rawOptions.expiries : extractAvailableExpiries(optionsText);
   const frontExpiry = expiries[0];
   const gexText = frontExpiry ? await callToolWithVariants(client, "get_options_gex", [
     { ticker: upperSymbol, expiry: frontExpiry, topRows: 20 },
@@ -484,6 +668,7 @@ export const buildStocksWatcherSnapshotFromMcp = async (
   ], toolRuns);
 
   const parsedExpiries = parseOptionRows(optionsText, price);
+  const expiryRows = buildExpirySummaryRows(expiries, [...rawOptions.rows, ...parsedExpiries], demoBase.expiryRows);
   const strikes = completeRows(upperSymbol, price, parseGexRows(`${gexText}\n${zeroDteText}`, price));
   const history = parseHistory(intradayText).length > 3 ? parseHistory(intradayText) : parseHistory(historyText);
   const callOi = strikes.reduce((sum, row) => sum + row.callOpenInterest, 0);
@@ -510,7 +695,10 @@ export const buildStocksWatcherSnapshotFromMcp = async (
     putCallOpenInterest: round(putOi / Math.max(1, callOi), 2),
     putCallVolume: round(putVol / Math.max(1, callVol), 2),
     sweeps: zeroDteText.match(/\bsweep/i) ? 1 : 0,
-    expiries: parsedExpiries.length > 0 ? parsedExpiries : demoBase.expiries,
+    availableExpiries: expiryRows.map((row) => row.expiry),
+    selectedExpiry: rawOptions.selectedExpiry || expiryRows[0]?.expiry || frontExpiry || null,
+    expiryRows,
+    expiries: expiryRows,
     strikes,
     history: history.length > 3 ? history : demoBase.history,
     marketContext: {
@@ -520,6 +708,6 @@ export const buildStocksWatcherSnapshotFromMcp = async (
     availableTools,
     toolRuns,
     warnings,
-    source: "stocks_intelligence_mcp",
+    source: "native_yahoo",
   };
 };

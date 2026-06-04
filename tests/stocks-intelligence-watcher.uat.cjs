@@ -41,16 +41,117 @@ const waitForServer = async () => {
   throw new Error(`Vite did not start on ${baseUrl}`);
 };
 
+const expiries = ["2026-05-29", "2026-06-01", "2026-06-03", "2026-06-05"];
+const uatSymbols = [
+  "NVDA", "GOOG", "GOOGL", "AAPL", "MSFT", "AMZN", "AVGO", "TSM", "TSLA", "META",
+  "MU", "BRK-B", "LLY", "WMT", "AMD", "JPM", "V", "XOM", "INTC", "JNJ",
+  "ORCL", "CSCO", "COST", "MA", "CAT", "LRCX", "QCOM", "ASML", "NFLX", "CRM",
+  "ADBE", "NOW", "SHOP", "PLTR", "UBER", "PFE", "MRK", "TMO", "HD", "MCD",
+  "KO", "PEP", "BAC", "GS", "CVX", "SLB", "QQQI", "FEPI", "NTSX", "IREN",
+];
+
+const buildOptionToolResponse = (tool, params = {}) => {
+  if (tool === "get_watchlist") {
+    return {
+      ok: true,
+      tool,
+      params,
+      text: JSON.stringify({
+        symbols: uatSymbols,
+        stocks: uatSymbols.map((symbol) => ({ symbol })),
+      }),
+      raw: {
+        source: "native_yahoo",
+        symbols: uatSymbols,
+        stocks: uatSymbols.map((symbol) => ({ symbol })),
+      },
+      calledAt: "2026-05-28T21:00:01.000Z",
+    };
+  }
+
+  if (!/options|greeks|dex|iv|pcr|sweeps|mispricing/i.test(tool)) {
+    return {
+      ok: true,
+      tool,
+      params,
+      text: `Native ${tool} dashboard data`,
+      raw: { source: "native_yahoo", ok: true },
+      calledAt: "2026-05-28T21:00:01.000Z",
+    };
+  }
+
+  const expiry = params.expiry || expiries[0];
+  const expiryIndex = Math.max(0, expiries.indexOf(expiry));
+  const spot = 181.8;
+  const strikes = Array.from({ length: 26 }, (_, index) => 150 + index * 2.5);
+  const calls = strikes.map((strike, index) => ({
+    contractSymbol: `NVDA${expiry.replaceAll("-", "").slice(2)}C${strike}`,
+    strike,
+    bid: Math.max(0.05, spot - strike + 1).toFixed ? Number(Math.max(0.05, spot - strike + 1).toFixed(2)) : 0,
+    ask: Number(Math.max(0.1, spot - strike + 1.35).toFixed(2)),
+    volume: 400 + expiryIndex * 120 + index * 18,
+    openInterest: 0,
+    impliedVolatility: 44 + index * 0.2,
+  }));
+  const puts = strikes.map((strike, index) => ({
+    contractSymbol: `NVDA${expiry.replaceAll("-", "").slice(2)}P${strike}`,
+    strike,
+    bid: Number(Math.max(0.05, strike - spot + 1).toFixed(2)),
+    ask: Number(Math.max(0.1, strike - spot + 1.35).toFixed(2)),
+    volume: 360 + expiryIndex * 90 + index * 14,
+    openInterest: 0,
+    impliedVolatility: 46 + index * 0.18,
+  }));
+  const chain = { symbol: "NVDA", spot, expiries, selectedExpiry: expiry, calls, puts };
+  const exposures = strikes.slice(2, 22).map((strike, index) => ({
+    strike,
+    call: calls[index + 2],
+    put: puts[index + 2],
+    callOpenInterest: 0,
+    putOpenInterest: 0,
+    callVolume: calls[index + 2].volume,
+    putVolume: puts[index + 2].volume,
+    callEffectiveOpenInterest: calls[index + 2].volume,
+    putEffectiveOpenInterest: puts[index + 2].volume,
+    openInterestSource: "volume_proxy",
+    callIv: calls[index + 2].impliedVolatility,
+    putIv: puts[index + 2].impliedVolatility,
+    callGex: 1_000_000 + expiryIndex * 350_000 + index * 110_000,
+    putGex: -780_000 - expiryIndex * 220_000 - index * 70_000,
+    netGex: 220_000 + expiryIndex * 130_000 + index * 40_000,
+    callDex: 30_000 + index * 2_000,
+    putDex: -22_000 - index * 1_500,
+    netDex: 8_000 + index * 500,
+    avgIv: 45 + index * 0.2,
+  }));
+
+  const raw = tool === "get_options_pcr"
+    ? { source: "native_yahoo", ticker: "NVDA", expiry, putCallOpenInterest: 0.87, putCallVolume: 0.76, callOi: 10000, putOi: 8700, callVol: 4000, putVol: 3040 }
+    : { source: "native_yahoo", chain, exposures, rows: exposures };
+
+  return {
+    ok: true,
+    tool,
+    params,
+    text: `Native ${tool} dashboard data for ${expiry}`,
+    raw,
+    calledAt: "2026-05-28T21:00:01.000Z",
+  };
+};
+
 const buildSnapshot = (symbol) => {
   const quoteBySymbol = {
-    TSLA: { price: 442.1, change: 1.74, changePercent: 0.4, companyName: "Tesla Inc." },
+    NVDA: { price: 181.8, change: 2.14, changePercent: 1.19, companyName: "NVIDIA Corporation" },
     IREN: { price: 64.05, change: -3.79, changePercent: -0.53, companyName: "Iris Energy" },
-    MU: { price: 123.52, change: -4.89, changePercent: -0.53, companyName: "Micron Technology" },
+    QQQI: { price: 50.42, change: 0.18, changePercent: 0.36, companyName: "NEOS Nasdaq-100 High Income ETF" },
+    FEPI: { price: 55.18, change: -0.22, changePercent: -0.4, companyName: "REX FANG & Innovation Equity Premium Income ETF" },
+    NTSX: { price: 45.76, change: 0.11, changePercent: 0.24, companyName: "WisdomTree U.S. Efficient Core Fund" },
+    UNH: { price: 297.34, change: 1.37, changePercent: 0.46, companyName: "UnitedHealth Group" },
   };
-  const quote = quoteBySymbol[symbol] || quoteBySymbol.TSLA;
+  const quote = quoteBySymbol[symbol] || quoteBySymbol.NVDA;
   const strikes = Array.from({ length: 29 }, (_, index) => {
-    const strike = 407.5 + index * 2.5;
-    const distance = Math.abs(strike - 442.5);
+    const strike = quote.price - 35 + index * 2.5;
+    const distance = Math.abs(strike - quote.price);
     const callVolume = Math.max(20, Math.round(1800 - distance * 22));
     const putVolume = Math.max(18, Math.round(1200 - distance * 16));
     return {
@@ -76,18 +177,33 @@ const buildSnapshot = (symbol) => {
       changePercent: quote.changePercent,
       asOf: "05/28, 04:00 PM",
     },
-    spot: 442.1,
-    atm: 442.1,
+    spot: quote.price,
+    atm: quote.price,
     selectedTimeLabel: "live",
     gexRegime: "Pinning",
     putCallOpenInterest: 0.67,
     putCallVolume: 0.72,
     sweeps: 0,
-    expiries: [
-      { expiry: "2026-05-29", openInterest: 6600, strike: 432.5, volume: 726, type: "C" },
-      { expiry: "2026-05-31", openInterest: 7300, strike: 440, volume: 636, type: "P" },
-      { expiry: "2026-06-02", openInterest: 17_800, strike: 447.5, volume: 1700, type: "C" },
-    ],
+    availableExpiries: expiries,
+    selectedExpiry: expiries[0],
+    expiryRows: expiries.map((expiry, index) => ({
+      expiry,
+      openInterest: [426_000, 56_000, 19_000, 154_000][index],
+      primaryStrike: [180, 177.5, 182.5, 185][index],
+      strike: [180, 177.5, 182.5, 185][index],
+      volume: [98_400, 17_500, 2_800, 12_000][index],
+      dominantType: index === 2 ? "P" : "C",
+      type: index === 2 ? "P" : "C",
+    })),
+    expiries: expiries.map((expiry, index) => ({
+      expiry,
+      openInterest: [426_000, 56_000, 19_000, 154_000][index],
+      primaryStrike: [180, 177.5, 182.5, 185][index],
+      strike: [180, 177.5, 182.5, 185][index],
+      volume: [98_400, 17_500, 2_800, 12_000][index],
+      dominantType: index === 2 ? "P" : "C",
+      type: index === 2 ? "P" : "C",
+    })),
     strikes,
     history: [
       { label: "9AM", price: 438.1 },
@@ -108,7 +224,7 @@ const buildSnapshot = (symbol) => {
       { name: "get_options", status: "ok", detail: "ok" },
     ],
     warnings: [],
-    source: "stocks_intelligence_mcp",
+    source: "native_yahoo",
   };
 };
 
@@ -116,6 +232,7 @@ const buildSnapshot = (symbol) => {
   let server;
   let browser;
   const requestCounts = {};
+  const toolCalls = [];
 
   try {
     const serverCommand = process.platform === "win32" ? "cmd.exe" : "npx";
@@ -134,9 +251,21 @@ const buildSnapshot = (symbol) => {
     await context.addInitScript(() => window.localStorage.clear());
     const page = await context.newPage();
 
-    await page.route("**/api/stocks-intelligence-watcher?**", async (route) => {
+    await page.route("**/api/stocks-intelligence-watcher**", async (route) => {
+      if (route.request().method() === "POST") {
+        const body = route.request().postDataJSON();
+        toolCalls.push(body);
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(buildOptionToolResponse(body.tool, body.params)),
+        });
+        return;
+      }
+
       const url = new URL(route.request().url());
-      const symbol = (url.searchParams.get("symbol") || "TSLA").toUpperCase();
+      const requested = (url.searchParams.get("symbol") || "NVDA").toUpperCase();
+      const symbol = /^[A-Z0-9.^-]{1,12}$/.test(requested) ? requested : "NVDA";
       requestCounts[symbol] = (requestCounts[symbol] || 0) + 1;
       await route.fulfill({
         status: 200,
@@ -146,15 +275,75 @@ const buildSnapshot = (symbol) => {
     });
 
     await page.goto(`${baseUrl}/#/work/stocks-intelligence-watcher`, { waitUntil: "domcontentloaded" });
-    await expect(page.getByRole("heading", { name: "TSLA" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "NVDA" })).toBeVisible();
+    await expect(page.locator("[data-watchlist-row]")).toHaveCount(50);
+    await expect(page.locator('[data-watchlist-row="GOOG"]')).toBeVisible();
 
-    await expect(page.locator('text="Spot $442.10"')).toHaveCount(1);
+    await page.getByRole("checkbox", { name: "Favorite GOOG", exact: true }).check();
+    await expect(page.getByRole("heading", { name: "NVDA" })).toBeVisible();
+    await wait(150);
+    assert.ok(toolCalls.some((call) => call.tool === "save_memory" && String(call.params?.value || "").includes("GOOG")), "favorite checkbox must persist GOOG through save_memory");
 
-    const muRequestsBeforeRemove = requestCounts.MU || 0;
-    await page.getByLabel("Remove MU").click();
-    await expect(page.getByLabel("Remove MU")).toHaveCount(0);
+    await page.getByRole("button", { name: /FAV/ }).click();
+    await expect(page.locator("[data-watchlist-row]")).toHaveCount(1);
+    await expect(page.locator('[data-watchlist-row="GOOG"]')).toBeVisible();
+
+    await page.getByRole("button", { name: "All Stocks" }).click();
+    await page.locator('input[placeholder*="ticker"]').fill("Apple");
+    await page.getByLabel("Sector filter").selectOption("Technology");
+    await page.getByLabel("Type filter").selectOption("Stock");
+    await expect(page.locator("[data-watchlist-row]")).toHaveCount(1);
+    await expect(page.locator('[data-watchlist-row="AAPL"]')).toBeVisible();
+
+    await page.locator('input[placeholder*="ticker"]').fill("");
+    await page.getByLabel("Sector filter").selectOption("All Sectors");
+    await page.getByLabel("Type filter").selectOption("All Types");
+    await expect(page.locator("[data-watchlist-row]")).toHaveCount(50);
+
+    await page.locator('input[placeholder*="ticker"]').fill("SOFI");
+    await page.getByRole("button", { name: "Load" }).click();
+    await expect(page.getByRole("heading", { name: "SOFI" })).toBeVisible();
+    await expect(page.locator('[data-watchlist-row="SOFI"]')).toBeVisible();
+    assert.equal(requestCounts.SOFI || 0, 1, "loading a typed custom ticker should fetch and append it to the visible list");
+
+    await expect(page.locator('text="Spot $181.80"')).toHaveCount(1);
+    await page.locator('input[placeholder*="ticker"]').fill("");
+    await expect(page.locator('[data-expiry-chip]')).toHaveCount(0);
+    await expect(page.locator('[data-expiry-row="2026-05-29"]')).toContainText("26-05-29");
+    await expect(page.getByText(/May 29, 2026/)).toBeVisible();
+    const may29Class = await page.locator('[data-expiry-row="2026-05-29"]').getAttribute("class");
+    assert.match(may29Class || "", /bg-blue-500/);
+
+    await page.locator('[data-expiry-row="2026-06-01"]').click();
+    await expect(page.getByText(/Jun 1, 2026/)).toBeVisible();
+    const jun1Class = await page.locator('[data-expiry-row="2026-06-01"]').getAttribute("class");
+    assert.match(jun1Class || "", /bg-blue-500/);
+    assert.ok(toolCalls.some((call) => call.tool === "get_options" && call.params?.expiry === "2026-06-01"), "expiry row click must request get_options for clicked expiry");
+    assert.ok(toolCalls.some((call) => call.tool === "get_options_gex" && call.params?.expiry === "2026-06-01"), "expiry row click must request get_options_gex for clicked expiry");
+    assert.ok(toolCalls.some((call) => call.tool === "get_options_pcr" && call.params?.expiry === "2026-06-01"), "expiry row click must request get_options_pcr for clicked expiry");
+
+    await page.getByRole("button", { name: "OI", exact: true }).click();
+    await expect(page.getByText(/Jun 1, 2026/)).toBeVisible();
+    await page.locator("[data-chart-bar]").nth(4).hover();
+    await expect(page.getByText(/^Call (?!0$)/)).toBeVisible();
+    await page.getByLabel("Strike zoom").fill("9");
+    await expect(page.locator("[data-chart-bar]")).toHaveCount(9);
+    await page.getByRole("button", { name: "Vol", exact: true }).click();
+    await expect(page.getByText(/Jun 1, 2026/)).toBeVisible();
+    await page.getByRole("button", { name: "GEX", exact: true }).click();
+    await expect(page.getByText(/Jun 1, 2026/)).toBeVisible();
+    await expect(page.getByText("26-06-01").first()).toBeVisible();
+    await page.getByRole("button", { name: "IV", exact: true }).click();
+    await expect(page.getByText("Call OI/Vol").first()).toBeVisible();
+    await expect(page.getByText(/45\.\d%/).first()).toBeVisible();
+    await page.getByRole("button", { name: "GEX", exact: true }).click();
+    assert.equal(await page.locator("pre").filter({ hasText: '"source"' }).count(), 0, "options dashboard must not expose raw JSON");
+
+    const fepiRequestsBeforeRemove = requestCounts.FEPI || 0;
+    await page.getByLabel("Remove FEPI").click();
+    await expect(page.getByLabel("Remove FEPI")).toHaveCount(0);
     await wait(250);
-    assert.equal(requestCounts.MU || 0, muRequestsBeforeRemove, "removing MU must not load MU");
+    assert.equal(requestCounts.FEPI || 0, fepiRequestsBeforeRemove, "removing FEPI must not load FEPI");
 
     const irenRow = page.locator('div[role="button"]').filter({ hasText: "IREN" }).first();
     await irenRow.click();
@@ -164,10 +353,29 @@ const buildSnapshot = (symbol) => {
     await wait(350);
     assert.equal(requestCounts.IREN || 0, 1, "second cached IREN click should not refetch");
 
-    await page.locator("[data-chart-bar]").nth(10).hover();
-    await expect(page.getByText(/^Strike /)).toBeVisible();
+    await page.locator('input[placeholder*="ticker"]').fill("TSLA");
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("heading", { name: "TSLA" })).toBeVisible();
+    assert.equal(requestCounts.TSLA || 0, 1, "searching a curated ticker should load that ticker once");
+
+    await page.locator("[data-chart-bar]").nth(4).hover();
+    await expect(page.getByText(/^Strike \d/)).toBeVisible();
     await expect(page.getByText(/^Call /)).toBeVisible();
     await expect(page.getByText(/^Put /)).toBeVisible();
+
+    await page.setViewportSize({ width: 414, height: 896 });
+    await page.evaluate(() => window.localStorage.clear());
+    await page.goto(`${baseUrl}/?mobile-uat=1#/work/stocks-intelligence-watcher`, { waitUntil: "domcontentloaded" });
+    await expect(page.locator("[data-watchlist-row]")).toHaveCount(50);
+    await page.locator('[data-watchlist-row="MCD"]').click();
+    await expect(page.getByRole("heading", { name: "MCD" })).toBeVisible();
+    await wait(150);
+    const headingBox = await page.getByRole("heading", { name: "MCD" }).boundingBox();
+    assert.ok(headingBox && headingBox.y >= 0 && headingBox.y < 260, "mobile stock click must bring the detail panel into view");
+    const chartBox = await page.locator("[data-options-chart-viewport]").boundingBox();
+    const bottomBox = await page.locator("[data-bottom-panels]").boundingBox();
+    assert.ok(chartBox && bottomBox, "mobile chart and bottom panels must both render");
+    assert.ok(chartBox.y + chartBox.height <= bottomBox.y, "mobile options chart must not overlap bottom cards");
 
     fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
     await page.screenshot({ path: screenshotPath, fullPage: true });

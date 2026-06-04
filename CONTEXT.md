@@ -64,4 +64,8 @@ Stocks Intelligence Watcher is a Work Item that turns the Stocks Intelligence MC
 
 Stocks Intelligence Watcher should lead with a usable watchlist, search, favorites, options expiry table, and OI/volume/GEX strike views rather than a static explanation.
 
-Stocks Intelligence Watcher keeps the MCP token server-side; the browser receives only normalized JSON from the Pages Function.
+Stocks Intelligence Watcher uses a repo-native Yahoo backend; the browser receives only normalized JSON from the Pages Function.
+
+In Stocks Intelligence Watcher, an expiry row is a selectable expiration summary row. Clicking it changes the right-side Options panel to that expiration's OI, volume, GEX, DEX, Greeks, P/C, or chain data.
+
+Contract rows belong in the Chain tab or strike drilldown. They are not the left-side expiry selector.

@@ -63,7 +63,7 @@ export interface BuildSpxGexHeatmapInput {
   gexByExpiryText: Record<string, string>;
 }
 
-export interface SpxGexMcpClient {
+export interface SpxGexDataClient {
   getQuotes: () => Promise<string>;
   getOptions: () => Promise<string>;
   getOptions0Dte: () => Promise<string>;
@@ -74,13 +74,6 @@ export type SpxGexGenerationResult =
   | { status: "generated"; date: string }
   | { status: "skipped_existing"; date: string }
   | { status: "skipped"; date: string; reason: string };
-
-export const isStocksMcpAuthError = (error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  const hasAuthSignal = /\b(401|403)\b|unauthori[sz]ed|forbidden|bearer/i.test(message);
-  const hasStocksMcpSignal = /stocks mcp|mcp_bearer_token|mcp bearer|mcp sse/i.test(message);
-  return hasAuthSignal && hasStocksMcpSignal;
-};
 
 interface D1SpxGexHeatmapRow {
   date: string;
@@ -212,7 +205,12 @@ const parseQuote = (text: string): SpxGexQuote => {
   const row = text.split("\n").find((line) => /^\|\s*SPX\s*\|/.test(line));
   if (!row) throw new Error("Could not parse SPX quote row.");
 
-  const [ticker, last, change, changePercent] = parseTableCells(row);
+  const cells = parseTableCells(row);
+  const ticker = cells[0];
+  const lastIndex = cells.findIndex((cell) => cell.includes("$"));
+  const last = lastIndex >= 0 ? cells[lastIndex] : cells[1];
+  const change = lastIndex >= 0 ? cells[lastIndex + 1] || "" : cells[2];
+  const changePercent = lastIndex >= 0 ? cells[lastIndex + 2] || "" : cells[3];
   const lastValue = parseDollarNumber(last);
   if (lastValue === null) throw new Error("Could not parse SPX quote last price.");
 
@@ -268,7 +266,7 @@ const parseZeroDte = (text: string): SpxGexZeroDte => {
 const selectActiveExpiries = (availableExpiries: string[], frontExpiry: string, count: number) =>
   availableExpiries.filter((expiry) => expiry >= frontExpiry).slice(0, count);
 
-export const selectSpxGexActiveExpiriesFromMcpText = (optionsText: string, zeroDteText: string, count = 5) => {
+export const selectSpxGexActiveExpiriesFromToolText = (optionsText: string, zeroDteText: string, count = 5) => {
   const zeroDte = parseZeroDte(zeroDteText);
   return selectActiveExpiries(parseAvailableExpiries(optionsText), zeroDte.expiry, count);
 };
@@ -292,7 +290,7 @@ const parseGexRows = (expiry: string, text: string) => {
   };
 };
 
-export const buildSpxGexHeatmapFromMcpText = (input: BuildSpxGexHeatmapInput): SpxGexHeatmapModel => {
+export const buildSpxGexHeatmapFromToolText = (input: BuildSpxGexHeatmapInput): SpxGexHeatmapModel => {
   const quote = parseQuote(input.quoteText);
   const availableExpiries = parseAvailableExpiries(input.optionsText);
   const zeroDte = parseZeroDte(input.zeroDteText);
@@ -351,7 +349,7 @@ export const buildSpxGexHeatmapFromMcpText = (input: BuildSpxGexHeatmapInput): S
       gexTool: "get_options_gex",
       zeroDteTool: "get_options_0dte",
       gexTopRows: 20,
-      note: "Server schema caps rendered per-strike GEX rows at topRows <= 20; all rendered strikes are filtered to spot +/- 10%.",
+      note: "Native Yahoo options data is transformed into per-strike exposure rows; all rendered strikes are filtered to spot +/- 10%.",
     },
   };
 };
@@ -449,7 +447,7 @@ export const upsertSpxGexHeatmap = async (
 
 export const generateAndStoreSpxGexHeatmap = async (options: {
   db: D1DatabaseLike;
-  mcpClient: SpxGexMcpClient;
+  dataClient: SpxGexDataClient;
   now?: Date;
   force?: boolean;
 }): Promise<SpxGexGenerationResult> => {
@@ -470,17 +468,17 @@ export const generateAndStoreSpxGexHeatmap = async (options: {
     return { status: "skipped_existing", date };
   }
 
-  const quoteText = await options.mcpClient.getQuotes();
-  const optionsText = await options.mcpClient.getOptions();
-  const zeroDteText = await options.mcpClient.getOptions0Dte();
-  const selectedExpiries = selectSpxGexActiveExpiriesFromMcpText(optionsText, zeroDteText, 5);
+  const quoteText = await options.dataClient.getQuotes();
+  const optionsText = await options.dataClient.getOptions();
+  const zeroDteText = await options.dataClient.getOptions0Dte();
+  const selectedExpiries = selectSpxGexActiveExpiriesFromToolText(optionsText, zeroDteText, 5);
   const gexByExpiryText: Record<string, string> = {};
 
   for (const expiry of selectedExpiries) {
-    gexByExpiryText[expiry] = await options.mcpClient.getOptionsGex(expiry);
+    gexByExpiryText[expiry] = await options.dataClient.getOptionsGex(expiry);
   }
 
-  const heatmap = buildSpxGexHeatmapFromMcpText({
+  const heatmap = buildSpxGexHeatmapFromToolText({
     generatedAt: now.toISOString(),
     quoteText,
     optionsText,

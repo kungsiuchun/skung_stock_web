@@ -1,13 +1,8 @@
 import {
   buildDemoStocksWatcherSnapshot,
-  buildStocksWatcherSnapshotFromMcp,
+  buildStocksWatcherSnapshotFromNative,
 } from "../../src/lib/stocks-intelligence-watcher";
-import { StocksMcpSseClient } from "../../src/lib/stocks-mcp-sse-client";
-
-interface Env {
-  MCP_BEARER_TOKEN?: string;
-  STOCKS_MCP_SERVER_BASE?: string;
-}
+import { NativeStocksYahooClient, normalizeStocksWatcherSymbol } from "../../src/lib/stocks-native-yahoo";
 
 const json = (body: unknown, init: ResponseInit = {}) =>
   new Response(JSON.stringify(body), {
@@ -20,33 +15,61 @@ const json = (body: unknown, init: ResponseInit = {}) =>
   });
 
 const normalizeSymbol = (value: string | null) => {
-  const symbol = (value || "TSLA").trim().toUpperCase().replace(/[^A-Z0-9.^-]/g, "");
-  return symbol.slice(0, 12) || "TSLA";
+  return normalizeStocksWatcherSymbol(value);
 };
 
-export async function onRequest(context: { request: Request; env: Env }) {
+const normalizeToolName = (value: unknown) => {
+  const tool = String(value || "").trim();
+  if (!/^[A-Za-z0-9_./-]{1,80}$/.test(tool)) {
+    throw new Error("Invalid native tool name.");
+  }
+  return tool;
+};
+
+const normalizeParams = (value: unknown) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+};
+
+const callNativeTool = async (tool: string, params: Record<string, unknown>) => {
+  const client = new NativeStocksYahooClient();
+  const result = await client.callTool(tool, params);
+  return json({
+    ok: true,
+    tool,
+    params,
+    text: result.text,
+    raw: result.raw,
+    calledAt: new Date().toISOString(),
+  });
+};
+
+export async function onRequest(context: { request: Request }) {
   const url = new URL(context.request.url);
   const symbol = normalizeSymbol(url.searchParams.get("symbol"));
 
-  if (!context.env.MCP_BEARER_TOKEN) {
-    return json(buildDemoStocksWatcherSnapshot(symbol, "MCP_BEARER_TOKEN is not configured for Pages Functions."));
+  if (context.request.method === "POST") {
+    try {
+      const body = await context.request.json() as { tool?: unknown; params?: unknown };
+      return await callNativeTool(normalizeToolName(body.tool), normalizeParams(body.params));
+    } catch (error) {
+      return json(
+        {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        { status: 400 },
+      );
+    }
   }
 
   try {
-    const client = new StocksMcpSseClient(
-      context.env.MCP_BEARER_TOKEN,
-      context.env.STOCKS_MCP_SERVER_BASE || undefined,
-    );
-    try {
-      const snapshot = await buildStocksWatcherSnapshotFromMcp(symbol, client);
-      return json(snapshot);
-    } finally {
-      await client.close();
-    }
+    const snapshot = await buildStocksWatcherSnapshotFromNative(symbol, new NativeStocksYahooClient());
+    return json(snapshot);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return json(
-      buildDemoStocksWatcherSnapshot(symbol, `Stocks Intelligence MCP failed, using demo fallback: ${message}`),
+      buildDemoStocksWatcherSnapshot(symbol, `Native Yahoo data failed, using demo fallback: ${message}`),
       { status: 206 },
     );
   }

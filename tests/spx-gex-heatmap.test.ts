@@ -2,15 +2,14 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
-  buildSpxGexHeatmapFromMcpText,
+  buildSpxGexHeatmapFromToolText,
   getSpxGexGenerationStatus,
-  isStocksMcpAuthError,
   listSpxGexHeatmapDates,
   readSpxGexHeatmap,
   generateAndStoreSpxGexHeatmap,
   upsertSpxGexHeatmap,
   type SpxGexHeatmapModel,
-  type SpxGexMcpClient,
+  type SpxGexDataClient,
 } from "../src/lib/spx-gex-heatmap";
 import { onRequest as getSpxGexHeatmapApi } from "../functions/api/spx-gex-heatmap";
 
@@ -34,15 +33,6 @@ describe("SPX GEX heatmap generation gate", () => {
   });
 });
 
-describe("SPX GEX heatmap MCP auth errors", () => {
-  it("detects Stocks MCP token expiry errors without matching unrelated failures", () => {
-    assert.equal(isStocksMcpAuthError(new Error("Stocks MCP SSE connect failed: 401")), true);
-    assert.equal(isStocksMcpAuthError(new Error("Stocks MCP tools/call post failed: HTTP 403")), true);
-    assert.equal(isStocksMcpAuthError(new Error("Stocks MCP request timed out")), false);
-    assert.equal(isStocksMcpAuthError(new Error("Upstream API failed: HTTP 401")), false);
-  });
-});
-
 const gexText = (_expiry: string, rows: string) => `
 **Snapshot:** 2026-05-27T09:14:55 **Spot:** $6,000.00
 | Metric | Value |
@@ -52,7 +42,7 @@ ${rows}
 `.trim();
 
 const buildSampleHeatmap = (generatedAt = "2026-05-27T13:15:30.000Z") =>
-  buildSpxGexHeatmapFromMcpText({
+  buildSpxGexHeatmapFromToolText({
     generatedAt,
     quoteText: "| Ticker | Last | Change | Change % |\n| SPX | $6,000.00 | +12.50 | +0.21% |",
     optionsText: "**Available expiries:** 2026-05-26, 2026-05-27, 2026-05-28, 2026-05-29, 2026-06-01, 2026-06-02",
@@ -77,7 +67,7 @@ Flip level: $5,950 (-0.8%)
     },
   });
 
-const createFakeMcpClient = () => {
+const createFakeDataClient = () => {
   const calls: string[] = [];
   let activeCalls = 0;
   let maxActiveCalls = 0;
@@ -88,7 +78,7 @@ const createFakeMcpClient = () => {
     activeCalls -= 1;
     return value;
   };
-  const client: SpxGexMcpClient = {
+  const client: SpxGexDataClient = {
     async getQuotes() {
       calls.push("get_quotes");
       return track("| Ticker | Last | Change | Change % |\n| SPX | $6,000.00 | +12.50 | +0.21% |");
@@ -198,7 +188,7 @@ class MemoryD1 {
 }
 
 describe("SPX GEX heatmap model", () => {
-  it("builds normalized JSON from MCP text and starts active expiries from the 0DTE front expiry", () => {
+  it("builds normalized JSON from tool text and starts active expiries from the 0DTE front expiry", () => {
     const heatmap = buildSampleHeatmap();
 
     assert.deepEqual(heatmap.selectedExpiries, ["2026-05-27", "2026-05-28", "2026-05-29", "2026-06-01", "2026-06-02"]);
@@ -276,16 +266,16 @@ describe("SPX GEX heatmap API", () => {
 describe("SPX GEX heatmap automation runner", () => {
   it("generates once during the premarket window and skips retries when the date already exists", async () => {
     const db = new MemoryD1();
-    const { client, calls, getMaxActiveCalls } = createFakeMcpClient();
+    const { client, calls, getMaxActiveCalls } = createFakeDataClient();
 
     const firstRun = await generateAndStoreSpxGexHeatmap({
       db,
-      mcpClient: client,
+      dataClient: client,
       now: new Date("2026-05-27T13:15:00Z"),
     });
     const retryRun = await generateAndStoreSpxGexHeatmap({
       db,
-      mcpClient: client,
+      dataClient: client,
       now: new Date("2026-05-27T13:20:00Z"),
     });
 
@@ -297,13 +287,13 @@ describe("SPX GEX heatmap automation runner", () => {
     assert.equal(getMaxActiveCalls(), 1);
   });
 
-  it("does not call the MCP client when the market is closed", async () => {
+  it("does not call the data client when the market is closed", async () => {
     const db = new MemoryD1();
-    const { client, calls } = createFakeMcpClient();
+    const { client, calls } = createFakeDataClient();
 
     const result = await generateAndStoreSpxGexHeatmap({
       db,
-      mcpClient: client,
+      dataClient: client,
       now: new Date("2026-05-25T13:15:00Z"),
     });
 

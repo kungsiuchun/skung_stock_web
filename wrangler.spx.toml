@@ -23,5 +23,5 @@ database_id = "00a4729d-1792-42d1-bd86-ed58dfe1f95f"
 # Non-sensitive default variables.
 OPENROUTER_MODEL = "google/gemma-4-26b-a4b-it"
 
-# Sensitive values (TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, OPENROUTER_API_KEY, MCP_BEARER_TOKEN)
+# Sensitive values (TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, OPENROUTER_API_KEY)
 # should be set with `wrangler secret put`, not committed here.

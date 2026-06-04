@@ -14,7 +14,6 @@
     "test:spx-gex": "node --import tsx --test tests/spx-gex-heatmap.test.ts",
     "test:stocks-watcher": "node --import tsx --test tests/stocks-intelligence-watcher.test.ts",
     "test:stocks-watcher:uat": "node tests/stocks-intelligence-watcher.uat.cjs",
-    "spx:gex:rotate-token": "powershell -ExecutionPolicy Bypass -File scripts/rotate-stocks-mcp-secret.ps1",
     "deploy": "npm run deploy:site && npm run deploy:spx",
     "deploy:site": "node scripts/sync-secrets.js && wrangler pages deploy dist --project-name sius-ai-workshop",
     "deploy:spx": "wrangler deploy --config wrangler.spx.toml",
@@ -40,8 +39,7 @@
     "remark-gfm": "^4.0.1",
     "tailwind-merge": "^2.3.0",
     "technicalindicators": "^3.1.0",
-    "telegram": "^2.26.22",
-    "yahoo-finance2": "^3.14.0"
+    "telegram": "^2.26.22"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
