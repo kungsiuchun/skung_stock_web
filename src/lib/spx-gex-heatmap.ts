@@ -31,6 +31,36 @@ export interface SpxGexHeatmapCell {
   netGex: number | null;
 }
 
+export type SpxGexPremarketRegime = "bullish_above_flip" | "bearish_below_flip" | "pinning_range" | "mixed";
+
+export interface SpxGexMarketContext {
+  macroRegime: string | null;
+  breadth: {
+    advancers: number;
+    universeCount: number;
+    avgChange: number | null;
+  } | null;
+  flow: {
+    topTicker: string;
+    proxyFlow: number;
+    changePercent: number;
+  } | null;
+  latestHeadline: string | null;
+  warnings: string[];
+}
+
+export interface SpxGexPremarketInterpretation {
+  paragraph: string;
+  levels: {
+    dividingLine: string;
+    upside: string;
+    downside: string;
+  };
+  regime: SpxGexPremarketRegime;
+  context: string | null;
+  warnings: string[];
+}
+
 export interface SpxGexHeatmapModel {
   generatedAt: string;
   ticker: "SPX";
@@ -45,6 +75,7 @@ export interface SpxGexHeatmapModel {
   cells: SpxGexHeatmapCell[];
   totals: { expdate: string; netGex: number }[];
   zeroDte: SpxGexZeroDte;
+  premarketInterpretation: SpxGexPremarketInterpretation;
   source: {
     quoteTool: "get_quotes";
     optionExpiryTool: "get_options";
@@ -61,6 +92,7 @@ export interface BuildSpxGexHeatmapInput {
   optionsText: string;
   zeroDteText: string;
   gexByExpiryText: Record<string, string>;
+  marketContext?: SpxGexMarketContext | null;
 }
 
 export interface SpxGexDataClient {
@@ -68,6 +100,7 @@ export interface SpxGexDataClient {
   getOptions: () => Promise<string>;
   getOptions0Dte: () => Promise<string>;
   getOptionsGex: (expiry: string) => Promise<string>;
+  getMarketContext?: () => Promise<SpxGexMarketContext>;
 }
 
 export type SpxGexGenerationResult =
@@ -87,6 +120,7 @@ interface D1SpxGexHeatmapRow {
   cells_json: string;
   totals_json: string;
   zero_dte_json: string;
+  interpretation_json?: string | null;
   source_json: string;
 }
 
@@ -290,6 +324,111 @@ const parseGexRows = (expiry: string, text: string) => {
   };
 };
 
+const formatSpxLevel = (value: number | null | undefined) => value ? value.toFixed(0) : "n/a";
+
+const formatSignedPercent = (value: number | null | undefined) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+};
+
+const compactExposure = (value: number | null | undefined) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000_000) return `${value >= 0 ? "+" : ""}${(value / 1_000_000_000).toFixed(2)}B`;
+  if (abs >= 1_000_000) return `${value >= 0 ? "+" : ""}${(value / 1_000_000).toFixed(2)}M`;
+  if (abs >= 1_000) return `${value >= 0 ? "+" : ""}${(value / 1_000).toFixed(0)}K`;
+  return `${value >= 0 ? "+" : ""}${value.toFixed(0)}`;
+};
+
+const buildMarketContextSentence = (context: SpxGexMarketContext | null | undefined) => {
+  if (!context) return null;
+  const parts: string[] = [];
+
+  if (context.macroRegime) {
+    parts.push(`regime 為 ${context.macroRegime}`);
+  }
+
+  if (context.breadth) {
+    parts.push(
+      `approved universe breadth 為 ${context.breadth.advancers}/${context.breadth.universeCount} positive，平均變動 ${formatSignedPercent(context.breadth.avgChange)}`,
+    );
+  }
+
+  if (context.flow) {
+    parts.push(
+      `flow proxy 最大為 ${context.flow.topTicker} ${compactExposure(context.flow.proxyFlow)}，變動 ${formatSignedPercent(context.flow.changePercent)}`,
+    );
+  }
+
+  if (context.latestHeadline) {
+    parts.push(`最新 Yahoo headline：${context.latestHeadline}`);
+  }
+
+  return parts.length > 0 ? `市場背景方面，${parts.join("；")}。` : null;
+};
+
+export const buildSpxGexPremarketInterpretation = (
+  heatmap: Omit<SpxGexHeatmapModel, "premarketInterpretation">,
+  marketContext?: SpxGexMarketContext | null,
+): SpxGexPremarketInterpretation => {
+  const spot = heatmap.quote.last;
+  const flip = heatmap.zeroDte.gammaFlip;
+  const pin = heatmap.zeroDte.pinLevel;
+  const callWall = heatmap.zeroDte.topCallWallLevel;
+  const putWall = heatmap.zeroDte.topPutWallLevel;
+  const netGex = heatmap.zeroDte.netGex;
+  const isNearPin = Boolean(pin && Math.abs(spot - pin) / Math.max(1, spot) <= 0.003);
+  const regime: SpxGexPremarketRegime = isNearPin
+    ? "pinning_range"
+    : flip
+      ? spot >= flip
+        ? "bullish_above_flip"
+        : "bearish_below_flip"
+      : "mixed";
+  const negativeClusters = heatmap.cells
+    .filter((cell) => cell.netGex !== null && cell.netGex < 0)
+    .sort((a, b) => Number(a.netGex) - Number(b.netGex))
+    .map((cell) => cell.strike)
+    .filter((strike, index, strikes) => strikes.indexOf(strike) === index)
+    .filter((strike) => strike !== putWall)
+    .slice(0, 2);
+  const downsideLevels = [putWall, ...negativeClusters].filter((value): value is number => typeof value === "number");
+  const dividingLine = flip ? `SPX ${formatSpxLevel(flip)} 為多空分水嶺` : "Gamma flip 暫時缺失，多空分水嶺不完整";
+  const upside = callWall ? `上方關鍵位 ${formatSpxLevel(callWall)} call wall` : "上方 call wall 暫時缺失";
+  const downside = downsideLevels.length > 0
+    ? `下方關鍵位 ${downsideLevels.map(formatSpxLevel).join("、")}`
+    : "下方 put wall / 負 GEX cluster 暫時缺失";
+  const sidePhrase = regime === "pinning_range"
+    ? `現價 ${formatSpxLevel(spot)} 貼近 pin ${formatSpxLevel(pin)}，短線以 pinning / 震盪消化為主`
+    : regime === "bullish_above_flip"
+      ? `站上 ${formatSpxLevel(flip)} 屬多頭領域`
+      : regime === "bearish_below_flip"
+        ? `跌在 ${formatSpxLevel(flip)} 下方屬空頭領域`
+        : "分水嶺資料不完整，方向判斷要降級處理";
+  const gexPhrase = typeof netGex === "number"
+    ? netGex >= 0
+      ? `0DTE NetGEX ${compactExposure(netGex)} 偏正，盤面較容易走震盪、拉回後被承接或反彈後被壓住`
+      : `0DTE NetGEX ${compactExposure(netGex)} 偏負，離開分水嶺後波動容易放大`
+    : "0DTE NetGEX 缺失，波動狀態只能用點位降級判斷";
+  const contextSentence = buildMarketContextSentence(marketContext);
+  const paragraph = [
+    `大家好！今日盤前 Gamma 數據顯示，${dividingLine}；${sidePhrase}；${upside}；${downside}。${gexPhrase}。`,
+    contextSentence,
+  ].filter(Boolean).join("");
+
+  return {
+    paragraph,
+    levels: {
+      dividingLine,
+      upside,
+      downside,
+    },
+    regime,
+    context: contextSentence,
+    warnings: marketContext?.warnings || [],
+  };
+};
+
 export const buildSpxGexHeatmapFromToolText = (input: BuildSpxGexHeatmapInput): SpxGexHeatmapModel => {
   const quote = parseQuote(input.quoteText);
   const availableExpiries = parseAvailableExpiries(input.optionsText);
@@ -324,7 +463,7 @@ export const buildSpxGexHeatmapFromToolText = (input: BuildSpxGexHeatmapInput): 
     }
   }
 
-  return {
+  const heatmapWithoutInterpretation: Omit<SpxGexHeatmapModel, "premarketInterpretation"> = {
     generatedAt: input.generatedAt,
     ticker: "SPX",
     quote,
@@ -352,26 +491,40 @@ export const buildSpxGexHeatmapFromToolText = (input: BuildSpxGexHeatmapInput): 
       note: "Native Yahoo options data is transformed into per-strike exposure rows; all rendered strikes are filtered to spot +/- 10%.",
     },
   };
+
+  return {
+    ...heatmapWithoutInterpretation,
+    premarketInterpretation: buildSpxGexPremarketInterpretation(heatmapWithoutInterpretation, input.marketContext),
+  };
 };
 
 const parseJsonField = <T>(value: string): T => JSON.parse(value) as T;
 
-const rowToHeatmap = (row: D1SpxGexHeatmapRow): SpxGexHeatmapModel => ({
-  generatedAt: row.generated_at,
-  ticker: "SPX",
-  quote: parseJsonField<SpxGexQuote>(row.quote_json),
-  snapshot: row.snapshot_at,
-  selectedExpiries: parseJsonField<string[]>(row.expiries_json),
-  strikeRange: {
-    lower: Number(row.spot) * 0.9,
-    upper: Number(row.spot) * 1.1,
-  },
-  strikes: parseJsonField<number[]>(row.strikes_json),
-  cells: parseJsonField<SpxGexHeatmapCell[]>(row.cells_json),
-  totals: parseJsonField<{ expdate: string; netGex: number }[]>(row.totals_json),
-  zeroDte: parseJsonField<SpxGexZeroDte>(row.zero_dte_json),
-  source: parseJsonField<SpxGexHeatmapModel["source"]>(row.source_json),
-});
+const rowToHeatmap = (row: D1SpxGexHeatmapRow): SpxGexHeatmapModel => {
+  const heatmapWithoutInterpretation: Omit<SpxGexHeatmapModel, "premarketInterpretation"> = {
+    generatedAt: row.generated_at,
+    ticker: "SPX",
+    quote: parseJsonField<SpxGexQuote>(row.quote_json),
+    snapshot: row.snapshot_at,
+    selectedExpiries: parseJsonField<string[]>(row.expiries_json),
+    strikeRange: {
+      lower: Number(row.spot) * 0.9,
+      upper: Number(row.spot) * 1.1,
+    },
+    strikes: parseJsonField<number[]>(row.strikes_json),
+    cells: parseJsonField<SpxGexHeatmapCell[]>(row.cells_json),
+    totals: parseJsonField<{ expdate: string; netGex: number }[]>(row.totals_json),
+    zeroDte: parseJsonField<SpxGexZeroDte>(row.zero_dte_json),
+    source: parseJsonField<SpxGexHeatmapModel["source"]>(row.source_json),
+  };
+
+  return {
+    ...heatmapWithoutInterpretation,
+    premarketInterpretation: row.interpretation_json
+      ? parseJsonField<SpxGexPremarketInterpretation>(row.interpretation_json)
+      : buildSpxGexPremarketInterpretation(heatmapWithoutInterpretation),
+  };
+};
 
 export const listSpxGexHeatmapDates = async (db: D1DatabaseLike) => {
   const result = await db.prepare("SELECT date FROM spx_gex_heatmaps ORDER BY date DESC").all<{ date: string }>();
@@ -394,7 +547,60 @@ export const upsertSpxGexHeatmap = async (
   options: { retentionTradingDays?: number } = {},
 ) => {
   const retentionTradingDays = options.retentionTradingDays ?? 7;
+  const bindCommonUpsert = (query: string) => db.prepare(query).bind(
+    date,
+    heatmap.generatedAt,
+    heatmap.snapshot,
+    heatmap.ticker,
+    heatmap.quote.last,
+    JSON.stringify(heatmap.quote),
+    JSON.stringify(heatmap.selectedExpiries),
+    JSON.stringify(heatmap.strikes),
+    JSON.stringify(heatmap.cells),
+    JSON.stringify(heatmap.totals),
+    JSON.stringify(heatmap.zeroDte),
+    JSON.stringify(heatmap.source),
+    heatmap.generatedAt,
+    heatmap.generatedAt,
+  );
   const upsert = db.prepare(`
+    INSERT INTO spx_gex_heatmaps (
+      date, generated_at, snapshot_at, ticker, spot, quote_json, expiries_json,
+      strikes_json, cells_json, totals_json, zero_dte_json, interpretation_json, source_json, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(date) DO UPDATE SET
+      generated_at = excluded.generated_at,
+      snapshot_at = excluded.snapshot_at,
+      ticker = excluded.ticker,
+      spot = excluded.spot,
+      quote_json = excluded.quote_json,
+      expiries_json = excluded.expiries_json,
+      strikes_json = excluded.strikes_json,
+      cells_json = excluded.cells_json,
+      totals_json = excluded.totals_json,
+      zero_dte_json = excluded.zero_dte_json,
+      interpretation_json = excluded.interpretation_json,
+      source_json = excluded.source_json,
+      updated_at = excluded.updated_at
+  `).bind(
+    date,
+    heatmap.generatedAt,
+    heatmap.snapshot,
+    heatmap.ticker,
+    heatmap.quote.last,
+    JSON.stringify(heatmap.quote),
+    JSON.stringify(heatmap.selectedExpiries),
+    JSON.stringify(heatmap.strikes),
+    JSON.stringify(heatmap.cells),
+    JSON.stringify(heatmap.totals),
+    JSON.stringify(heatmap.zeroDte),
+    JSON.stringify(heatmap.premarketInterpretation),
+    JSON.stringify(heatmap.source),
+    heatmap.generatedAt,
+    heatmap.generatedAt,
+  );
+  const legacyUpsert = bindCommonUpsert(`
     INSERT INTO spx_gex_heatmaps (
       date, generated_at, snapshot_at, ticker, spot, quote_json, expiries_json,
       strikes_json, cells_json, totals_json, zero_dte_json, source_json, created_at, updated_at
@@ -413,22 +619,7 @@ export const upsertSpxGexHeatmap = async (
       zero_dte_json = excluded.zero_dte_json,
       source_json = excluded.source_json,
       updated_at = excluded.updated_at
-  `).bind(
-    date,
-    heatmap.generatedAt,
-    heatmap.snapshot,
-    heatmap.ticker,
-    heatmap.quote.last,
-    JSON.stringify(heatmap.quote),
-    JSON.stringify(heatmap.selectedExpiries),
-    JSON.stringify(heatmap.strikes),
-    JSON.stringify(heatmap.cells),
-    JSON.stringify(heatmap.totals),
-    JSON.stringify(heatmap.zeroDte),
-    JSON.stringify(heatmap.source),
-    heatmap.generatedAt,
-    heatmap.generatedAt,
-  );
+  `);
 
   const prune = db.prepare(`
     DELETE FROM spx_gex_heatmaps
@@ -437,11 +628,21 @@ export const upsertSpxGexHeatmap = async (
     )
   `).bind(retentionTradingDays);
 
-  if (db.batch) {
-    await db.batch([upsert, prune]);
-  } else {
-    await upsert.run();
-    await prune.run();
+  const runStatements = async (statement: typeof upsert) => {
+    if (db.batch) {
+      await db.batch([statement, prune]);
+    } else {
+      await statement.run();
+      await prune.run();
+    }
+  };
+
+  try {
+    await runStatements(upsert);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes("interpretation_json")) throw error;
+    await runStatements(legacyUpsert);
   }
 };
 
@@ -471,6 +672,20 @@ export const generateAndStoreSpxGexHeatmap = async (options: {
   const quoteText = await options.dataClient.getQuotes();
   const optionsText = await options.dataClient.getOptions();
   const zeroDteText = await options.dataClient.getOptions0Dte();
+  let marketContext: SpxGexMarketContext | null = null;
+  if (options.dataClient.getMarketContext) {
+    try {
+      marketContext = await options.dataClient.getMarketContext();
+    } catch (error) {
+      marketContext = {
+        macroRegime: null,
+        breadth: null,
+        flow: null,
+        latestHeadline: null,
+        warnings: [`market context failed: ${error instanceof Error ? error.message : String(error)}`],
+      };
+    }
+  }
   const selectedExpiries = selectSpxGexActiveExpiriesFromToolText(optionsText, zeroDteText, 5);
   const gexByExpiryText: Record<string, string> = {};
 
@@ -484,6 +699,7 @@ export const generateAndStoreSpxGexHeatmap = async (options: {
     optionsText,
     zeroDteText,
     gexByExpiryText,
+    marketContext,
   });
 
   await upsertSpxGexHeatmap(options.db, date, heatmap, { retentionTradingDays: 7 });

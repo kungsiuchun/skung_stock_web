@@ -126,6 +126,38 @@ export const getNearestSpotStrike = (rows: StocksWatcherStrikeRow[], spot: numbe
   });
 };
 
+export const getGammaFlipLevel = (rows: StocksWatcherStrikeRow[], spot: number) => {
+  if (rows.length < 2 || !Number.isFinite(spot)) return null;
+  const sortedRows = [...rows]
+    .filter((row) => Number.isFinite(row.strike) && Number.isFinite(row.netGex))
+    .sort((a, b) => a.strike - b.strike);
+  const candidates: number[] = [];
+
+  for (let index = 1; index < sortedRows.length; index += 1) {
+    const previous = sortedRows[index - 1];
+    const current = sortedRows[index];
+    if (!previous || !current) continue;
+    if (previous.netGex === 0) {
+      candidates.push(previous.strike);
+      continue;
+    }
+    if (current.netGex === 0) {
+      candidates.push(current.strike);
+      continue;
+    }
+    if (Math.sign(previous.netGex) === Math.sign(current.netGex)) continue;
+
+    const denominator = Math.abs(previous.netGex) + Math.abs(current.netGex);
+    const weight = denominator > 0 ? Math.abs(previous.netGex) / denominator : 0.5;
+    candidates.push(round(previous.strike + (current.strike - previous.strike) * weight));
+  }
+
+  if (candidates.length === 0) return null;
+  return candidates.reduce((nearest, candidate) =>
+    Math.abs(candidate - spot) < Math.abs(nearest - spot) ? candidate : nearest,
+  );
+};
+
 const normalizeSymbol = (symbol: string) => symbol.trim().toUpperCase();
 
 const uniqueSymbols = (symbols: string[]) =>
@@ -577,6 +609,27 @@ const callToolStructuredWithVariants = async (
 const recordFromUnknown = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 
+const numberFromUnknown = (value: unknown) =>
+  typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+const quoteFromRawResult = (symbol: string, raw: unknown): Partial<StocksWatcherQuote> => {
+  const rawRecord = recordFromUnknown(raw);
+  const quotes = Array.isArray(rawRecord?.quotes) ? rawRecord.quotes : [];
+  const quote = quotes
+    .map(recordFromUnknown)
+    .find((row) => String(row?.symbol || "").toUpperCase() === symbol.toUpperCase()) || null;
+  if (!quote) return {};
+
+  return {
+    symbol,
+    companyName: typeof quote.name === "string" ? quote.name : undefined,
+    price: numberFromUnknown(quote.price),
+    change: numberFromUnknown(quote.change),
+    changePercent: numberFromUnknown(quote.changePercent),
+    asOf: typeof quote.asOf === "string" ? quote.asOf : undefined,
+  };
+};
+
 const rowsFromRawOptionChain = (raw: unknown): {
   expiries: string[];
   selectedExpiry: string | null;
@@ -633,10 +686,13 @@ export const buildStocksWatcherSnapshotFromNative = async (
     toolRuns.push({ name: "tools/list", status: "failed", detail: message });
   }
 
-  const quoteText = await callToolWithVariants(client, "get_quotes", [
+  const quoteResult = await callToolStructuredWithVariants(client, "get_quotes", [
     { tickers: upperSymbol },
   ], toolRuns);
-  const partialQuote = parseQuoteText(upperSymbol, quoteText);
+  const partialQuote = {
+    ...parseQuoteText(upperSymbol, quoteResult.text),
+    ...quoteFromRawResult(upperSymbol, quoteResult.raw),
+  };
   const demoBase = buildDemoStocksWatcherSnapshot(upperSymbol, "Live quote parser fallback.");
   const price = partialQuote.price || demoBase.quote.price;
 

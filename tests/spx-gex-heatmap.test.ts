@@ -106,6 +106,16 @@ Flip level: $5,950 (-0.8%)
       calls.push(`get_options_gex:${expiry}`);
       return track(gexText(expiry, "| $6,050 | 1 | 2 | **2.00B** |\n| $6,000 | 1 | 2 | **-1.00B** |"));
     },
+    async getMarketContext() {
+      calls.push("get_market_context");
+      return track({
+        macroRegime: "risk_off",
+        breadth: { advancers: 2, universeCount: 5, avgChange: -0.65 },
+        flow: { topTicker: "NVDA", proxyFlow: -125_000_000, changePercent: -1.2 },
+        latestHeadline: "Futures slip before the open",
+        warnings: [],
+      });
+    },
   };
 
   return { client, calls, getMaxActiveCalls: () => maxActiveCalls };
@@ -138,7 +148,8 @@ class MemoryD1Statement {
         cells_json: this.values[8],
         totals_json: this.values[9],
         zero_dte_json: this.values[10],
-        source_json: this.values[11],
+        interpretation_json: this.values[11],
+        source_json: this.values[12],
       });
     }
 
@@ -196,6 +207,10 @@ describe("SPX GEX heatmap model", () => {
     assert.equal(heatmap.quote.last, 6000);
     assert.equal(heatmap.zeroDte.expiry, "2026-05-27");
     assert.equal(heatmap.zeroDte.gammaFlip, 5950);
+    assert.equal(heatmap.premarketInterpretation.regime, "pinning_range");
+    assert.match(heatmap.premarketInterpretation.paragraph, /大家好！今日盤前 Gamma 數據顯示/);
+    assert.match(heatmap.premarketInterpretation.levels.upside, /6050 call wall/);
+    assert.match(heatmap.premarketInterpretation.levels.downside, /5900/);
     assert.equal(heatmap.cells.find((cell) => cell.strike === 6050 && cell.expdate === "2026-05-27")?.netGex, 2_000_000_000);
     assert.equal(heatmap.cells.find((cell) => cell.strike === 6000 && cell.expdate === "2026-05-28")?.netGex, 500_000_000);
   });
@@ -235,6 +250,20 @@ describe("SPX GEX heatmap D1 storage", () => {
     assert.equal(restored?.quote.last, 6000);
     assert.equal(restored?.cells.length, 10);
     assert.equal(restored?.zeroDte.topCallWallLevel, 6050);
+    assert.match(restored?.premarketInterpretation.paragraph || "", /多空分水嶺/);
+  });
+
+  it("falls back to a gamma-only interpretation when an old D1 row has no interpretation_json", async () => {
+    const db = new MemoryD1();
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildSampleHeatmap("2026-05-27T13:15:30.000Z"));
+    const row = db.store.get("2026-05-27");
+    if (row) delete row.interpretation_json;
+
+    const restored = await readSpxGexHeatmap(db, "2026-05-27");
+
+    assert.equal(restored?.premarketInterpretation.regime, "pinning_range");
+    assert.equal(restored?.premarketInterpretation.context, null);
+    assert.match(restored?.premarketInterpretation.paragraph || "", /大家好！今日盤前 Gamma 數據顯示/);
   });
 });
 
@@ -284,7 +313,27 @@ describe("SPX GEX heatmap automation runner", () => {
     assert.equal((await readSpxGexHeatmap(db, "2026-05-27"))?.cells.length, 10);
     assert.equal(calls.filter((call) => call === "get_quotes").length, 1);
     assert.equal(calls.filter((call) => call.startsWith("get_options_gex")).length, 5);
+    assert.equal(calls.filter((call) => call === "get_market_context").length, 1);
     assert.equal(getMaxActiveCalls(), 1);
+  });
+
+  it("still generates the heatmap when market context fails", async () => {
+    const db = new MemoryD1();
+    const { client } = createFakeDataClient();
+    client.getMarketContext = async () => {
+      throw new Error("registry unavailable");
+    };
+
+    const result = await generateAndStoreSpxGexHeatmap({
+      db,
+      dataClient: client,
+      now: new Date("2026-05-27T13:15:00Z"),
+    });
+    const restored = await readSpxGexHeatmap(db, "2026-05-27");
+
+    assert.deepEqual(result, { status: "generated", date: "2026-05-27" });
+    assert.match(restored?.premarketInterpretation.warnings[0] || "", /registry unavailable/);
+    assert.equal(restored?.cells.length, 10);
   });
 
   it("does not call the data client when the market is closed", async () => {

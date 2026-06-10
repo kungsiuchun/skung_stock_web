@@ -9,6 +9,9 @@ import { ALL_RETAIL_TOOLS } from "./tools/retail-tools";
 import { ALL_FUNDAMENTALS_TOOLS } from "./tools/fundamentals-tools";
 import { macroTools } from "./tools/macro-tools";
 
+const TRADITIONAL_CHINESE_OUTPUT_RULE =
+  "Output language rule: write the entire final Markdown report in Traditional Chinese only. Do not use Simplified Chinese, except when quoting exact source text or ticker/company names.";
+
 export interface OrchestratorEnv {
   OPENROUTER_API_KEY: string;
   OPENROUTER_MODEL: string;
@@ -75,25 +78,29 @@ export class TradingAgentOrchestrator {
     // --- 1. Fundamentals Analyst ---
     const fundamentalPrompt = `你是一位基本面與宏觀經濟分析師。
 任務：使用工具取得 ${symbol} 的公司基本面、利潤表和資產負債表。如果適合，也可以使用 get_fred_series 取得最新的宏觀經濟數據 (如 GDP, UNRATE, CPIAUCSL)。
-你必須給出一份詳細的 Markdown 報告，列出公司的財務健康狀況、估值指標（本益比、EPS等）、現金流狀況，以及內部成長潛力與宏觀環境影響。請使用繁體中文。`;
+你必須給出一份詳細的 Markdown 報告，列出公司的財務健康狀況、估值指標（本益比、EPS等）、現金流狀況，以及內部成長潛力與宏觀環境影響。請使用繁體中文。
+${TRADITIONAL_CHINESE_OUTPUT_RULE}`;
     const fundamentalExecutor = this.createExecutor([...ALL_FUNDAMENTALS_TOOLS, ...macroTools], fundamentalPrompt, "Fundamentals Analyst");
 
     // --- 2. Market Analyst ---
     const marketPrompt = `你是一位市場技術分析師與量化策略師。
 任務：使用你的工具獲取 ${symbol} 的技術指標（例如 get_realtime_quote, calculate_ma, analyze_trend）。
-給出一份 Markdown 報告，評論當前技術圖表排列（多頭/空頭）、RSI強弱、以及近期價格走勢。請使用繁體中文。`;
+給出一份 Markdown 報告，評論當前技術圖表排列（多頭/空頭）、RSI強弱、以及近期價格走勢。請使用繁體中文。
+${TRADITIONAL_CHINESE_OUTPUT_RULE}`;
     const marketExecutor = this.createExecutor([...ALL_STOCK_TOOLS, ...ALL_ANALYSIS_TOOLS], marketPrompt, "Market Analyst");
 
     // --- 3. Sentiment Analyst ---
     const sentimentPrompt = `你是一位新聞與市場情緒分析師。
 任務：使用 search_stock_news (可能的話 get_retail_sentiment) 獲取 ${symbol} 的近期新聞、催化劑與散戶情緒。
-給出一份 Markdown 報告，總結推動股價背後的消息面與情緒指標。請使用繁體中文。`;
+給出一份 Markdown 報告，總結推動股價背後的消息面與情緒指標。請使用繁體中文。
+${TRADITIONAL_CHINESE_OUTPUT_RULE}`;
     const sentimentExecutor = this.createExecutor([...ALL_SEARCH_TOOLS, ...ALL_RETAIL_TOOLS], sentimentPrompt, "Sentiment Analyst");
 
     // --- 4. Quant Analyst ---
     const quantPrompt = `你是一位量化策略分析師 (Quant Analyst)。
 任務：使用 run_algorithmic_strategy 執行 ${symbol} 的「所有」策略 (將 strategy_name 設為 "all")。
-找出當中得分最高或者最強烈暗示方向的策略，給出一份 Markdown 報告。列舉最適合當前市況的策略名稱、精確的進出場點位和止損位建議。請使用繁體中文。`;
+找出當中得分最高或者最強烈暗示方向的策略，給出一份 Markdown 報告。列舉最適合當前市況的策略名稱、精確的進出場點位和止損位建議。請使用繁體中文。
+${TRADITIONAL_CHINESE_OUTPUT_RULE}`;
     const quantExecutor = this.createExecutor(ALL_ANALYSIS_TOOLS, quantPrompt, "Quant Analyst");
 
     // Execute in parallel
@@ -123,7 +130,8 @@ export class TradingAgentOrchestrator {
     const managerPrompt = `你是一位頂級投資組合經理 (Portfolio Manager)。
 下屬的基本面、技術面、情緒面以及量化分析師已經提交了他們針對 ${symbol} 的報告。
 任務：綜合這四份報告，交叉驗證他們的觀點，化解衝突，並生成一份最終且具有「強烈觀點」的交易決定（BUY / HOLD / SELL）。
-請保持直接、客觀，不要使用模糊的語言，請用具體數據佐證。請使用繁體中文。`;
+請保持直接、客觀，不要使用模糊的語言，請用具體數據佐證。請使用繁體中文。
+${TRADITIONAL_CHINESE_OUTPUT_RULE}`;
 
     const summaryInput = `
 以下是各個分析師的報告：
@@ -140,7 +148,7 @@ ${sRes.content}
 【量化策略分析報告】
 ${qRes.content}
 
-請綜合以上資訊，給出最終分析與投資決策。
+請綜合以上資訊，給出最終分析與投資決策。最終輸出必須全篇使用繁體中文，不要使用簡體中文。
 `;
 
     // Manager agent doesn't necessarily need tools here, just synthesizing.

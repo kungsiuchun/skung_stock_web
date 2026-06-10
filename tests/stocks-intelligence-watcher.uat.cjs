@@ -142,6 +142,7 @@ const buildOptionToolResponse = (tool, params = {}) => {
 const buildSnapshot = (symbol) => {
   const quoteBySymbol = {
     NVDA: { price: 181.8, change: 2.14, changePercent: 1.19, companyName: "NVIDIA Corporation" },
+    GOOG: { price: 365.76, change: -10.67, changePercent: -2.83, companyName: "Alphabet Inc." },
     IREN: { price: 64.05, change: -3.79, changePercent: -0.53, companyName: "Iris Energy" },
     QQQI: { price: 50.42, change: 0.18, changePercent: 0.36, companyName: "NEOS Nasdaq-100 High Income ETF" },
     FEPI: { price: 55.18, change: -0.22, changePercent: -0.4, companyName: "REX FANG & Innovation Equity Premium Income ETF" },
@@ -233,6 +234,7 @@ const buildSnapshot = (symbol) => {
   let browser;
   const requestCounts = {};
   const toolCalls = [];
+  const summaryCalls = [];
 
   try {
     const serverCommand = process.platform === "win32" ? "cmd.exe" : "npx";
@@ -252,6 +254,17 @@ const buildSnapshot = (symbol) => {
     const page = await context.newPage();
 
     await page.route("**/api/stocks-intelligence-watcher**", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname.includes("stocks-intelligence-watcher-summary")) {
+        summaryCalls.push(route.request().postDataJSON());
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "Summary endpoint should not be called in deterministic mode" }),
+        });
+        return;
+      }
+
       if (route.request().method() === "POST") {
         const body = route.request().postDataJSON();
         toolCalls.push(body);
@@ -263,7 +276,6 @@ const buildSnapshot = (symbol) => {
         return;
       }
 
-      const url = new URL(route.request().url());
       const requested = (url.searchParams.get("symbol") || "NVDA").toUpperCase();
       const symbol = /^[A-Z0-9.^-]{1,12}$/.test(requested) ? requested : "NVDA";
       requestCounts[symbol] = (requestCounts[symbol] || 0) + 1;
@@ -278,6 +290,15 @@ const buildSnapshot = (symbol) => {
     await expect(page.getByRole("heading", { name: "NVDA" })).toBeVisible();
     await expect(page.locator("[data-watchlist-row]")).toHaveCount(50);
     await expect(page.locator('[data-watchlist-row="GOOG"]')).toBeVisible();
+    await expect(page.locator('[data-watchlist-row="NVDA"]')).toContainText("$181.80");
+
+    await page.locator('[data-watchlist-row="GOOG"]').click();
+    await expect(page.getByRole("heading", { name: "GOOG" })).toBeVisible();
+    await expect(page.locator('[data-watchlist-row="GOOG"]')).toContainText("$365.76");
+    await expect(page.locator('[data-watchlist-row="NVDA"]')).toContainText("$181.80");
+
+    await page.locator('[data-watchlist-row="NVDA"]').click();
+    await expect(page.getByRole("heading", { name: "NVDA" })).toBeVisible();
 
     await page.getByRole("checkbox", { name: "Favorite GOOG", exact: true }).check();
     await expect(page.getByRole("heading", { name: "NVDA" })).toBeVisible();
@@ -306,7 +327,12 @@ const buildSnapshot = (symbol) => {
     await expect(page.locator('[data-watchlist-row="SOFI"]')).toBeVisible();
     assert.equal(requestCounts.SOFI || 0, 1, "loading a typed custom ticker should fetch and append it to the visible list");
 
-    await expect(page.locator('text="Spot $181.80"')).toHaveCount(1);
+    await expect(page.locator('[data-options-chart-viewport]').locator('text="Spot $181.80"')).toHaveCount(1);
+    await expect(page.locator("[data-ai-summary-panel]")).toBeVisible();
+    await expect(page.locator("[data-ai-summary-panel]")).toContainText("Deterministic rules readout");
+    await expect(page.locator("[data-ai-summary-panel]")).toContainText("SOFI options tape shows");
+    await expect(page.locator("[data-ai-summary-panel]")).toContainText("2026-05-29");
+    assert.equal(summaryCalls.length, 0, "deterministic AI summary must not call the summary endpoint");
     await page.locator('input[placeholder*="ticker"]').fill("");
     await expect(page.locator('[data-expiry-chip]')).toHaveCount(0);
     await expect(page.locator('[data-expiry-row="2026-05-29"]')).toContainText("26-05-29");
@@ -321,6 +347,8 @@ const buildSnapshot = (symbol) => {
     assert.ok(toolCalls.some((call) => call.tool === "get_options" && call.params?.expiry === "2026-06-01"), "expiry row click must request get_options for clicked expiry");
     assert.ok(toolCalls.some((call) => call.tool === "get_options_gex" && call.params?.expiry === "2026-06-01"), "expiry row click must request get_options_gex for clicked expiry");
     assert.ok(toolCalls.some((call) => call.tool === "get_options_pcr" && call.params?.expiry === "2026-06-01"), "expiry row click must request get_options_pcr for clicked expiry");
+    await expect(page.locator("[data-ai-summary-panel]")).toContainText("2026-06-01");
+    assert.equal(summaryCalls.length, 0, "expiry changes must refresh deterministic summary without network calls");
 
     await page.getByRole("button", { name: "OI", exact: true }).click();
     await expect(page.getByText(/Jun 1, 2026/)).toBeVisible();
@@ -338,6 +366,26 @@ const buildSnapshot = (symbol) => {
     await expect(page.getByText(/45\.\d%/).first()).toBeVisible();
     await page.getByRole("button", { name: "GEX", exact: true }).click();
     assert.equal(await page.locator("pre").filter({ hasText: '"source"' }).count(), 0, "options dashboard must not expose raw JSON");
+    await page.getByRole("button", { name: "OI", exact: true }).click();
+    await page.getByRole("button", { name: "GEX", exact: true }).click();
+    await wait(150);
+    assert.equal(summaryCalls.length, 0, "switching Options modes must not call an AI summary endpoint");
+    await expect(page.locator("[data-ai-summary-panel]").getByRole("button", { name: "Refresh" })).toHaveCount(0);
+    const desktopDetailGaps = await page.evaluate(() => {
+      const primary = document.querySelector('[data-primary-tab-panel="Options"]')?.getBoundingClientRect();
+      const summary = document.querySelector("[data-ai-summary-panel]")?.getBoundingClientRect();
+      const bottom = document.querySelector("[data-bottom-panels]")?.getBoundingClientRect();
+      if (!primary || !summary || !bottom) return null;
+      return {
+        top: summary.top - primary.bottom,
+        bottom: bottom.top - summary.bottom,
+      };
+    });
+    assert.ok(desktopDetailGaps, "desktop detail stack must render primary panel, AI summary, and bottom panels");
+    assert.ok(
+      Math.abs(desktopDetailGaps.top - desktopDetailGaps.bottom) <= 1.5,
+      `AI summary spacing should be balanced above and below; got top=${desktopDetailGaps.top}, bottom=${desktopDetailGaps.bottom}`,
+    );
 
     const fepiRequestsBeforeRemove = requestCounts.FEPI || 0;
     await page.getByLabel("Remove FEPI").click();
@@ -373,9 +421,11 @@ const buildSnapshot = (symbol) => {
     const headingBox = await page.getByRole("heading", { name: "MCD" }).boundingBox();
     assert.ok(headingBox && headingBox.y >= 0 && headingBox.y < 260, "mobile stock click must bring the detail panel into view");
     const chartBox = await page.locator("[data-options-chart-viewport]").boundingBox();
+    const summaryBox = await page.locator("[data-ai-summary-panel]").boundingBox();
     const bottomBox = await page.locator("[data-bottom-panels]").boundingBox();
-    assert.ok(chartBox && bottomBox, "mobile chart and bottom panels must both render");
-    assert.ok(chartBox.y + chartBox.height <= bottomBox.y, "mobile options chart must not overlap bottom cards");
+    assert.ok(chartBox && summaryBox && bottomBox, "mobile chart, AI summary, and bottom panels must all render");
+    assert.ok(chartBox.y + chartBox.height <= summaryBox.y, "mobile options chart must not overlap AI summary");
+    assert.ok(summaryBox.y + summaryBox.height <= bottomBox.y, "mobile AI summary must not overlap bottom cards");
 
     fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
     await page.screenshot({ path: screenshotPath, fullPage: true });

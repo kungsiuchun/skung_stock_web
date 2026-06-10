@@ -4,7 +4,6 @@ import Navbar from './components/navbar'
 import AICaptionTool from './components/ai-caption-tool'
 import FinanceChatTool from './components/finance-chat-tool'
 import { FinanceDashboard } from './components/finance-dashboard'
-import { FinRobotDashboard } from './components/dashboard/finrobot-dashboard'
 import { TradingAgentDashboard } from './components/dashboard/trading-agent-dashboard'
 import { SPXRecapPage } from './components/spx-recap-page'
 import { SPXGexHeatmapPage } from './components/spx-gex-heatmap-page'
@@ -16,7 +15,7 @@ import { portfolioConfig } from '@/config/portfolio'
 import { Home, LineChart } from 'lucide-react'
 
 
-export type ViewState = 'home' | 'about' | 'work-gallery' | 'settle-up' | 'finance-dashboard' | 'finrobot-dashboard' | 'trading-agent-dashboard' | 'spx-recap' | 'spx-gex-heatmap' | 'stocks-intelligence-watcher';
+export type ViewState = 'home' | 'about' | 'work-gallery' | 'settle-up' | 'finance-dashboard' | 'trading-agent-dashboard' | 'spx-recap' | 'spx-gex-heatmap' | 'stocks-intelligence-watcher';
 
 const getViewFromHash = (): ViewState | null => {
   if (typeof window === 'undefined') {
@@ -132,7 +131,6 @@ function App() {
               onOpenSettleUp={() => navigateToView('settle-up')}
               onOpenCaptionTool={() => setIsAIOpen(true)}
               onOpenFinanceTool={() => navigateToView('finance-dashboard')}
-              onOpenFinRobotTool={() => navigateToView('finrobot-dashboard')}
               onOpenTradingAgentTool={() => navigateToView('trading-agent-dashboard')}
               onOpenSPXRecap={() => navigateToView('spx-recap')}
               onOpenSPXGexHeatmap={() => navigateToView('spx-gex-heatmap')}
@@ -142,8 +140,6 @@ function App() {
             <SettleUpPage onBackToWork={() => navigateToView('work-gallery')} />
           ) : currentView === 'finance-dashboard' ? (
             <FinanceDashboard />
-          ) : currentView === 'finrobot-dashboard' ? (
-            <FinRobotDashboard />
           ) : currentView === 'trading-agent-dashboard' ? (
             <TradingAgentDashboard />
           ) : currentView === 'spx-recap' ? (

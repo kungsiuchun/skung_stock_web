@@ -1,4 +1,4 @@
-import { Activity, ArrowRight, BarChart3, Bot, Camera, CircleDollarSign, ImageIcon, MessageSquare, ReceiptText, Users, Waves } from "lucide-react";
+import { Activity, ArrowRight, BarChart3, Camera, CircleDollarSign, ImageIcon, MessageSquare, ReceiptText, Users, Waves } from "lucide-react";
 import { GlowingEffect } from "@/components/ui/glowing-effect";
 import { cn } from "@/lib/utils";
 
@@ -6,7 +6,6 @@ interface WorkGalleryProps {
   onOpenSettleUp: () => void;
   onOpenCaptionTool: () => void;
   onOpenFinanceTool: () => void;
-  onOpenFinRobotTool: () => void;
   onOpenTradingAgentTool: () => void;
   onOpenSPXRecap: () => void;
   onOpenSPXGexHeatmap: () => void;
@@ -28,7 +27,6 @@ export function WorkGallery({
   onOpenSettleUp,
   onOpenCaptionTool,
   onOpenFinanceTool,
-  onOpenFinRobotTool,
   onOpenTradingAgentTool,
   onOpenSPXRecap,
   onOpenSPXGexHeatmap,
@@ -53,15 +51,6 @@ export function WorkGallery({
       action: "Open dashboard",
       icon: <MessageSquare className="h-5 w-5" />,
       onClick: onOpenFinanceTool,
-    },
-    {
-      title: "FinRobot Analyst",
-      category: "Research Agent",
-      description: "A multi-step equity research surface for automated market and fundamentals analysis.",
-      buildNote: "Replicates an analyst workflow with agent-style information gathering and synthesis.",
-      action: "Open analyst",
-      icon: <Bot className="h-5 w-5" />,
-      onClick: onOpenFinRobotTool,
     },
     {
       title: "Trading Agent",

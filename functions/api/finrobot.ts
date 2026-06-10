@@ -23,6 +23,9 @@ interface Env {
 
 type AgentProfileId = "finrobot" | "buffett";
 
+const TRADITIONAL_CHINESE_OUTPUT_RULE =
+  "Language requirement: write the entire final Markdown report in Traditional Chinese only. Do not use Simplified Chinese, except when quoting exact source text or ticker/company names.";
+
 const FINROBOT_COT_PROMPT = `You are the Brain module of the FinRobot system, an advanced autonomous financial analyst. 
 Your task is to orchestrate a "Perception -> Brain -> Action" workflow over multiple steps.
 
@@ -45,7 +48,8 @@ The report MUST include:
 ## Key Catalysts & News
 ## Final Recommendation
 
-Always respond in Markdown. If you don't have enough data, explicitly mention what is missing.`;
+Always respond in Markdown. If you don't have enough data, explicitly mention what is missing.
+${TRADITIONAL_CHINESE_OUTPUT_RULE}`;
 
 const BUFFETT_QUALITY_PROMPT = `You are a Buffett-style long-term investment quality auditor.
 Your job is not to predict next week's stock price. Your job is to force a disciplined quality review before any long-term capital is committed.
@@ -72,6 +76,7 @@ Analysis rules:
 - Estimate owner earnings qualitatively when exact maintenance capex is unavailable; explicitly state the missing data.
 - Require a margin of safety. If intrinsic value cannot be estimated with reasonable confidence, the answer is "watch" or "pass", not "buy".
 - Use Traditional Chinese.
+- ${TRADITIONAL_CHINESE_OUTPUT_RULE}
 - Do not hallucinate missing metrics. Mark missing data plainly.
 
 The report MUST be Markdown and MUST include every section below:
@@ -136,14 +141,14 @@ const AGENT_PROFILES: Record<AgentProfileId, { label: string; prompt: string; us
     prompt: FINROBOT_COT_PROMPT,
     maxSteps: 8,
     userMessage: (ticker) =>
-      `Please execute a full FinRobot equity research analysis on "${ticker}". Gather market data, run financial CoT, and output the final markdown report.`,
+      `Please execute a full FinRobot equity research analysis on "${ticker}". Gather market data, run financial CoT, and output the final markdown report in Traditional Chinese only.`,
   },
   buffett: {
     label: "Buffett Quality Auditor",
     prompt: BUFFETT_QUALITY_PROMPT,
     maxSteps: 10,
     userMessage: (ticker) =>
-      `Run a Buffett-style long-term investment quality review on "${ticker}". Force the mandatory quality checklist, gather first-hand financial and news evidence with tools, and output the final markdown report.`,
+      `Run a Buffett-style long-term investment quality review on "${ticker}". Force the mandatory quality checklist, gather first-hand financial and news evidence with tools, and output the final markdown report in Traditional Chinese only.`,
   },
 };
 

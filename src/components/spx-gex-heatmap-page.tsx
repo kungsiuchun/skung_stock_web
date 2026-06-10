@@ -184,6 +184,27 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
               <Metric label="Snapshot" value={heatmap.snapshot || heatmap.generatedAt} />
             </div>
 
+            <section className="grid gap-4 border border-sky-300/20 bg-[#0b1119] p-4 lg:grid-cols-[minmax(0,1fr)_360px]">
+              <div>
+                <div className="mb-2 text-xs font-black uppercase tracking-[0.18em] text-sky-200">盤前 Gamma 解讀</div>
+                <p className="text-base font-bold leading-8 text-zinc-100 md:text-lg">
+                  {heatmap.premarketInterpretation.paragraph}
+                </p>
+                {heatmap.premarketInterpretation.warnings.length > 0 && (
+                  <p className="mt-3 text-xs leading-5 text-amber-200">
+                    Context warning: {heatmap.premarketInterpretation.warnings.join(" ")}
+                  </p>
+                )}
+              </div>
+
+              <div className="grid gap-2 text-sm">
+                <LevelRow label="Regime" value={heatmap.premarketInterpretation.regime} />
+                <LevelRow label="多空分水嶺" value={heatmap.premarketInterpretation.levels.dividingLine} />
+                <LevelRow label="上方關鍵位" value={heatmap.premarketInterpretation.levels.upside} />
+                <LevelRow label="下方關鍵位" value={heatmap.premarketInterpretation.levels.downside} />
+              </div>
+            </section>
+
             <div className="overflow-x-auto border border-[#2c3540] bg-[#090e15]">
               <div className="border-b border-[#2c3540] bg-[#0d131b] px-4 py-3 text-xs font-black leading-5 text-sky-100">
                 Active expiries start from 0DTE front expiry {heatmap.zeroDte.expiry} | Pin{" "}
@@ -279,5 +300,12 @@ const Metric = ({ label, value }: { label: string; value: string }) => (
   <div className="border border-white/10 bg-white/[0.04] px-4 py-3">
     <div className="text-[0.68rem] font-bold uppercase tracking-[0.18em] text-zinc-500">{label}</div>
     <div className="mt-2 break-words text-lg font-black text-white">{value}</div>
+  </div>
+);
+
+const LevelRow = ({ label, value }: { label: string; value: string }) => (
+  <div className="border border-white/10 bg-white/[0.03] px-3 py-2">
+    <div className="text-[0.68rem] font-black uppercase tracking-[0.14em] text-zinc-500">{label}</div>
+    <div className="mt-1 break-words font-black leading-5 text-white">{value}</div>
   </div>
 );

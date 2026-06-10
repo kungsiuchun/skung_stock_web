@@ -29,7 +29,6 @@ const Navbar = ({ onWork, onHome, onAbout, currentView }: NavbarProps) => {
     'work-gallery',
     'settle-up',
     'finance-dashboard',
-    'finrobot-dashboard',
     'trading-agent-dashboard',
     'spx-recap',
     'spx-gex-heatmap',

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Activity, Bot, Briefcase, Download, FileText, Landmark, Send, ShieldCheck, Users } from "lucide-react";
+import { Activity, Bot, Briefcase, Download, Eye, FileText, Landmark, Send, ShieldCheck, Users, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -13,6 +13,116 @@ type TradingReports = {
   sentiment_report?: string;
   quant_report?: string;
   manager_report?: string;
+};
+
+const escapeHtml = (value: string) =>
+  value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
+const sanitizeUrl = (value: string) => {
+  const trimmed = value.trim();
+  if (/^(https?:|mailto:|#)/i.test(trimmed)) return escapeHtml(trimmed);
+  return "#";
+};
+
+const renderInlineMarkdown = (value: string) => {
+  const escaped = escapeHtml(value);
+  return escaped
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, url) => {
+      return `<a href="${sanitizeUrl(url)}" target="_blank" rel="noreferrer">${label}</a>`;
+    });
+};
+
+const markdownToSafeHtml = (markdown: string) => {
+  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+  const html: string[] = [];
+  let inCodeBlock = false;
+  let listType: "ul" | "ol" | null = null;
+
+  const closeList = () => {
+    if (listType) {
+      html.push(`</${listType}>`);
+      listType = null;
+    }
+  };
+
+  lines.forEach((line) => {
+    const trimmed = line.trim();
+
+    if (trimmed.startsWith("```")) {
+      closeList();
+      html.push(inCodeBlock ? "</code></pre>" : "<pre><code>");
+      inCodeBlock = !inCodeBlock;
+      return;
+    }
+
+    if (inCodeBlock) {
+      html.push(`${escapeHtml(line)}\n`);
+      return;
+    }
+
+    if (!trimmed) {
+      closeList();
+      return;
+    }
+
+    if (/^---+$/.test(trimmed)) {
+      closeList();
+      html.push("<hr />");
+      return;
+    }
+
+    const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      closeList();
+      const level = heading[1].length;
+      html.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+      return;
+    }
+
+    const unordered = trimmed.match(/^[-*+]\s+(.+)$/);
+    if (unordered) {
+      if (listType !== "ul") {
+        closeList();
+        html.push("<ul>");
+        listType = "ul";
+      }
+      html.push(`<li>${renderInlineMarkdown(unordered[1])}</li>`);
+      return;
+    }
+
+    const ordered = trimmed.match(/^\d+\.\s+(.+)$/);
+    if (ordered) {
+      if (listType !== "ol") {
+        closeList();
+        html.push("<ol>");
+        listType = "ol";
+      }
+      html.push(`<li>${renderInlineMarkdown(ordered[1])}</li>`);
+      return;
+    }
+
+    const quote = trimmed.match(/^>\s?(.+)$/);
+    if (quote) {
+      closeList();
+      html.push(`<blockquote>${renderInlineMarkdown(quote[1])}</blockquote>`);
+      return;
+    }
+
+    closeList();
+    html.push(`<p>${renderInlineMarkdown(trimmed)}</p>`);
+  });
+
+  closeList();
+  if (inCodeBlock) html.push("</code></pre>");
+  return html.join("\n");
 };
 
 const AGENT_OPTIONS: Record<
@@ -134,6 +244,64 @@ ${reports.sentiment_report || "N/A"}
 ${reports.quant_report || "N/A"}
 `;
 
+const buildHtmlReport = (agentTitle: string, ticker: string, markdown: string, generatedAt: string) => {
+  const safeAgentTitle = escapeHtml(agentTitle);
+  const safeTicker = escapeHtml(ticker);
+  const safeGeneratedAt = escapeHtml(generatedAt || new Date().toLocaleString());
+  const bodyHtml = markdownToSafeHtml(markdown);
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${safeTicker} ${safeAgentTitle} Report</title>
+  <style>
+    :root { color: #111827; background: #f3f4f6; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; background: #f3f4f6; }
+    .report-shell { max-width: 920px; margin: 0 auto; padding: 48px 24px; }
+    .report { background: #ffffff; border: 1px solid #e5e7eb; box-shadow: 0 24px 80px rgba(15, 23, 42, 0.12); }
+    .masthead { border-bottom: 1px solid #e5e7eb; padding: 34px 42px 28px; }
+    .eyebrow { color: #7c3aed; font-size: 12px; font-weight: 800; letter-spacing: 0.18em; text-transform: uppercase; }
+    h1 { margin: 12px 0 10px; font-size: 36px; line-height: 1.08; letter-spacing: -0.03em; color: #0f172a; }
+    .meta { color: #64748b; font-size: 13px; display: flex; flex-wrap: wrap; gap: 14px; }
+    .content { padding: 34px 42px 44px; font-size: 15px; line-height: 1.75; }
+    .content h1 { font-size: 30px; margin: 0 0 22px; }
+    .content h2 { margin: 34px 0 12px; font-size: 21px; color: #0f172a; border-bottom: 1px solid #e5e7eb; padding-bottom: 8px; }
+    .content h3 { margin: 24px 0 8px; font-size: 17px; color: #1f2937; }
+    .content p { margin: 0 0 14px; color: #374151; }
+    .content ul, .content ol { margin: 0 0 18px 22px; padding: 0; color: #374151; }
+    .content li { margin: 6px 0; }
+    .content strong { color: #0f172a; }
+    .content a { color: #6d28d9; font-weight: 700; text-decoration: none; }
+    .content blockquote { margin: 18px 0; padding: 14px 18px; border-left: 4px solid #8b5cf6; background: #f5f3ff; color: #4c1d95; }
+    .content code { font-family: "SFMono-Regular", Consolas, monospace; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 5px; padding: 1px 5px; }
+    .content pre { overflow-x: auto; background: #0f172a; color: #e2e8f0; padding: 16px; border-radius: 8px; }
+    .content pre code { background: transparent; border: 0; color: inherit; padding: 0; }
+    .content hr { border: 0; border-top: 1px solid #e5e7eb; margin: 28px 0; }
+    @media (max-width: 700px) { .report-shell { padding: 20px 10px; } .masthead, .content { padding-left: 22px; padding-right: 22px; } h1 { font-size: 28px; } }
+  </style>
+</head>
+<body>
+  <main class="report-shell">
+    <article class="report">
+      <header class="masthead">
+        <div class="eyebrow">${safeAgentTitle}</div>
+        <h1>${safeTicker} Report</h1>
+        <div class="meta">
+          <span>Generated: ${safeGeneratedAt}</span>
+          <span>Source: ${safeAgentTitle}</span>
+        </div>
+      </header>
+      <section class="content">
+${bodyHtml}
+      </section>
+    </article>
+  </main>
+</body>
+</html>`;
+};
+
 export function TradingAgentDashboard() {
   const [ticker, setTicker] = useState("NVDA");
   const [selectedAgent, setSelectedAgent] = useState<AgentMode>("trading");
@@ -142,6 +310,8 @@ export function TradingAgentDashboard() {
   const [reportReady, setReportReady] = useState(false);
   const [reports, setReports] = useState<TradingReports | null>(null);
   const [singleReport, setSingleReport] = useState("");
+  const [reportGeneratedAt, setReportGeneratedAt] = useState("");
+  const [isHtmlPreviewOpen, setIsHtmlPreviewOpen] = useState(false);
 
   const profile = AGENT_OPTIONS[selectedAgent];
   const Icon = profile.icon;
@@ -156,6 +326,8 @@ export function TradingAgentDashboard() {
     setReportReady(false);
     setReports(null);
     setSingleReport("");
+    setReportGeneratedAt("");
+    setIsHtmlPreviewOpen(false);
     setLogs(profile.startLog(targetTicker));
 
     try {
@@ -182,6 +354,7 @@ export function TradingAgentDashboard() {
 
         if (data.results) {
           setReports(data.results);
+          setReportGeneratedAt(new Date().toLocaleString());
           setReportReady(true);
         }
         return;
@@ -209,6 +382,7 @@ export function TradingAgentDashboard() {
       }
 
       setSingleReport(data.report || "No report generated.");
+      setReportGeneratedAt(new Date().toLocaleString());
       setReportReady(true);
       setLogs((prev) => [...prev, `${data.agentLabel || profile.title} report generated.`]);
     } catch (_err: any) {
@@ -241,7 +415,24 @@ export function TradingAgentDashboard() {
     URL.revokeObjectURL(url);
   };
 
+  const downloadHtmlReport = () => {
+    const reportContent = getCurrentReport();
+    if (!reportContent) return;
+
+    const htmlReport = buildHtmlReport(profile.title, ticker, reportContent, reportGeneratedAt);
+    const blob = new Blob([htmlReport], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${ticker}_${selectedAgent}_Report.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   return (
+    <>
     <div className="w-full h-full flex flex-col items-center p-6 sm:p-12 z-10 pointer-events-auto overflow-y-auto text-white">
       <div className="max-w-6xl w-full">
         <div className="flex items-center gap-4 mb-8">
@@ -311,6 +502,8 @@ export function TradingAgentDashboard() {
                         setReportReady(false);
                         setReports(null);
                         setSingleReport("");
+                        setReportGeneratedAt("");
+                        setIsHtmlPreviewOpen(false);
                         setLogs([]);
                       }}
                       className={`h-20 rounded-lg border px-2 text-xs font-semibold transition-all flex flex-col items-center justify-center gap-1 ${
@@ -362,17 +555,37 @@ export function TradingAgentDashboard() {
             <div className={`rounded-[1.5rem] border-[0.75px] ${reportReady ? "border-green-500/30 bg-green-500/5" : "border-white/10 bg-black/40"} backdrop-blur-md p-6 shadow-xl transition-colors duration-500`}>
               <h3 className="text-lg font-medium mb-4 text-white/90">Export Report</h3>
               <p className="text-sm text-white/50 mb-6">
-                Download the selected agent's Markdown report. Buffett mode is for long-term quality review, not trade timing.
+                Export the selected agent findings as Markdown or client-facing HTML.
               </p>
 
-              <button
-                onClick={downloadReport}
-                disabled={!reportReady}
-                className="w-full bg-white/10 hover:bg-white/20 border border-white/20 text-white rounded-lg px-4 py-3 font-medium flex items-center justify-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Download className="w-4 h-4" />
-                Download Markdown
-              </button>
+              <div className="space-y-3">
+                <button
+                  onClick={downloadReport}
+                  disabled={!reportReady}
+                  className="w-full bg-white/10 hover:bg-white/20 border border-white/20 text-white rounded-lg px-4 py-3 font-medium flex items-center justify-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Download className="w-4 h-4" />
+                  Download Markdown
+                </button>
+
+                <button
+                  onClick={() => setIsHtmlPreviewOpen(true)}
+                  disabled={!reportReady}
+                  className="w-full bg-purple-500/10 hover:bg-purple-500/20 border border-purple-300/20 text-purple-50 rounded-lg px-4 py-3 font-medium flex items-center justify-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Eye className="w-4 h-4" />
+                  Preview HTML Report
+                </button>
+
+                <button
+                  onClick={downloadHtmlReport}
+                  disabled={!reportReady}
+                  className="w-full bg-white text-black hover:bg-purple-50 border border-white rounded-lg px-4 py-3 font-semibold flex items-center justify-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <FileText className="w-4 h-4" />
+                  Download HTML Report
+                </button>
+              </div>
             </div>
 
             <div className="rounded-[1.5rem] border-[0.75px] border-white/10 bg-black/40 backdrop-blur-md p-6 shadow-xl">
@@ -386,5 +599,54 @@ export function TradingAgentDashboard() {
         </div>
       </div>
     </div>
+
+    {isHtmlPreviewOpen && (
+      <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 sm:p-6 bg-black/80 backdrop-blur-xl pointer-events-auto">
+        <div className="w-full max-w-5xl h-[88vh] rounded-2xl border border-white/10 bg-[#111111] shadow-2xl flex flex-col overflow-hidden">
+          <div className="flex items-center justify-between gap-4 border-b border-white/10 px-5 py-4 shrink-0">
+            <div className="min-w-0">
+              <p className="text-xs font-bold uppercase tracking-[0.18em] text-purple-300/70">HTML Preview</p>
+              <h3 className="text-lg font-bold text-white truncate">{ticker} {profile.title} Report</h3>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={downloadHtmlReport}
+                className="hidden sm:inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/10 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-white/15"
+              >
+                <Download className="w-4 h-4" />
+                Download HTML
+              </button>
+              <button
+                onClick={() => setIsHtmlPreviewOpen(false)}
+                className="flex h-10 w-10 items-center justify-center rounded-full text-white/50 transition-colors hover:bg-white/10 hover:text-white"
+                aria-label="Close HTML preview"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto bg-slate-100 p-3 sm:p-6">
+            <article className="mx-auto max-w-4xl border border-slate-200 bg-white shadow-2xl">
+              <header className="border-b border-slate-200 px-6 py-7 sm:px-10">
+                <p className="text-xs font-black uppercase tracking-[0.18em] text-purple-700">{profile.title}</p>
+                <h1 className="mt-3 text-3xl font-black leading-tight tracking-tight text-slate-950 sm:text-4xl">
+                  {ticker} Report
+                </h1>
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs font-medium text-slate-500">
+                  <span>Generated: {reportGeneratedAt || "Pending"}</span>
+                  <span>Source: {profile.title}</span>
+                </div>
+              </header>
+
+              <div className="max-w-none px-6 py-7 text-sm leading-7 text-slate-700 sm:px-10 sm:py-9 [&_a]:font-bold [&_a]:text-purple-700 [&_blockquote]:border-l-4 [&_blockquote]:border-purple-500 [&_blockquote]:bg-purple-50 [&_blockquote]:px-4 [&_blockquote]:py-3 [&_blockquote]:text-purple-900 [&_code]:rounded [&_code]:border [&_code]:border-slate-200 [&_code]:bg-slate-100 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_h1]:mb-5 [&_h1]:text-3xl [&_h1]:font-black [&_h1]:tracking-tight [&_h1]:text-slate-950 [&_h2]:mb-3 [&_h2]:mt-8 [&_h2]:border-b [&_h2]:border-slate-200 [&_h2]:pb-2 [&_h2]:text-xl [&_h2]:font-black [&_h2]:text-slate-950 [&_h3]:mb-2 [&_h3]:mt-6 [&_h3]:text-base [&_h3]:font-black [&_h3]:text-slate-800 [&_hr]:my-7 [&_hr]:border-slate-200 [&_li]:my-1.5 [&_ol]:mb-5 [&_ol]:ml-5 [&_ol]:list-decimal [&_p]:mb-4 [&_pre]:mb-5 [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:bg-slate-950 [&_pre]:p-4 [&_pre_code]:border-0 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:text-slate-100 [&_strong]:text-slate-950 [&_ul]:mb-5 [&_ul]:ml-5 [&_ul]:list-disc">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{getCurrentReport()}</ReactMarkdown>
+              </div>
+            </article>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }

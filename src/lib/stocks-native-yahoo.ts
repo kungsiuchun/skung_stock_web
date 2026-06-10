@@ -1,4 +1,4 @@
-import type { SpxGexDataClient } from "./spx-gex-heatmap";
+import type { SpxGexDataClient, SpxGexMarketContext } from "./spx-gex-heatmap";
 import {
   STOCKS_WATCHER_QUOTE_SYMBOLS,
   STOCKS_WATCHER_SYMBOLS,
@@ -217,7 +217,11 @@ const fetchQuote = async (symbol: string): Promise<QuoteRow> => {
     currency: String(meta.currency || "USD"),
     exchange: String(meta.exchangeName || meta.fullExchangeName || "Yahoo"),
     marketState: String(meta.marketState || "UNKNOWN"),
-    asOf: typeof timestamps[lastIndex] === "number" ? new Date(timestamps[lastIndex] * 1000).toISOString() : null,
+    asOf: typeof meta.regularMarketTime === "number"
+      ? new Date(meta.regularMarketTime * 1000).toISOString()
+      : typeof timestamps[lastIndex] === "number"
+        ? new Date(timestamps[lastIndex] * 1000).toISOString()
+        : null,
   };
 };
 
@@ -453,184 +457,484 @@ const htmlChart = (ticker: string, rows: HistoryRow[]) => {
   return `<!doctype html><html><body style="margin:0;background:#020617;color:#e2e8f0;font-family:Inter,system-ui,sans-serif"><canvas id="c" width="900" height="360"></canvas><script src="https://cdn.jsdelivr.net/npm/chart.js"></script><script>const labels=${JSON.stringify(labels)};const values=${JSON.stringify(values)};new Chart(document.getElementById('c'),{type:'line',data:{labels,datasets:[{label:${JSON.stringify(ticker)},data:values,borderColor:'#60a5fa',backgroundColor:'rgba(96,165,250,.15)',fill:true,tension:.25}]},options:{responsive:true,plugins:{legend:{labels:{color:'#e2e8f0'}}},scales:{x:{ticks:{color:'#94a3b8'},grid:{color:'rgba(148,163,184,.15)'}},y:{ticks:{color:'#94a3b8'},grid:{color:'rgba(148,163,184,.15)'}}}}});</script></body></html>`;
 };
 
-export const listNativeStocksTools = (): StocksNativeToolSummary[] => [
-  { name: "get_quotes", description: "Get delayed native Yahoo quotes for the approved asset universe.", inputSchema: { properties: { tickers: { type: "string" } } } },
-  { name: "get_watchlist", description: "Return the curated top-50 stock watcher universe.", inputSchema: { properties: {} } },
-  { name: "get_stock_history", description: "Get daily OHLCV history from Yahoo chart API.", inputSchema: { properties: { ticker: { type: "string" } }, required: ["ticker"] } },
-  { name: "get_intraday", description: "Get 5-day 5-minute OHLCV data from Yahoo chart API.", inputSchema: { properties: { ticker: { type: "string" } }, required: ["ticker"] } },
-  { name: "get_stock_stats", description: "Get quote, valuation, financial, and profile stats.", inputSchema: { properties: { ticker: { type: "string" } }, required: ["ticker"] } },
-  { name: "get_beta", description: "Get beta from Yahoo quoteSummary.", inputSchema: { properties: { ticker: { type: "string" } }, required: ["ticker"] } },
-  { name: "get_options", description: "Get option chain with calls and puts around spot.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, strikesAroundAtm: { type: "integer" } }, required: ["ticker"] } },
-  { name: "get_options_0dte", description: "Get nearest-expiry option exposure summary.", inputSchema: { properties: { ticker: { type: "string" } }, required: ["ticker"] } },
-  { name: "get_options_gex", description: "Approximate per-strike gamma exposure from Yahoo option open interest.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, topRows: { type: "integer" } }, required: ["ticker"] } },
-  { name: "get_options_dex", description: "Approximate per-strike delta exposure from Yahoo option open interest.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, topRows: { type: "integer" } }, required: ["ticker"] } },
-  { name: "get_options_greeks", description: "Return IV and estimated delta/gamma exposure by strike.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, greek: { type: "string" } }, required: ["ticker"] } },
-  { name: "chart_greeks", description: "HTML chart wrapper for native Greek exposure.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
-  { name: "chart_dex", description: "HTML chart wrapper for native DEX.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
-  { name: "chart_indicator", description: "Render a native Yahoo price chart.", inputSchema: { properties: { ticker: { type: "string" }, indicator: { type: "string" } }, required: ["ticker"] } },
-  { name: "get_options_pcr", description: "Put/call ratio from Yahoo option volume and open interest.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
-  { name: "get_options_sweeps", description: "Native placeholder for unusual options rows ranked by volume.", inputSchema: { properties: { ticker: { type: "string" }, topN: { type: "integer" } }, required: ["ticker"] } },
-  { name: "get_options_iv_intraday", description: "Current option-chain IV snapshot.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
-  { name: "get_options_mispricing", description: "Simple bid/ask and IV sanity scan.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
-  { name: "get_options_flow_universe", description: "Approved-universe options flow overview.", inputSchema: { properties: { topTickers: { type: "integer" } } } },
-  { name: "earnings_vol_crush", description: "Earnings date and IV/RV vol-crush context.", inputSchema: { properties: { ticker: { type: "string" } }, required: ["ticker"] } },
-  { name: "historical_context", description: "Recent return context around the requested condition.", inputSchema: { properties: { ticker: { type: "string" }, condition: { type: "string" }, event: { type: "string" } }, required: ["ticker"] } },
-  { name: "pre_event_brief", description: "Native pre-event synthesis from quote, stats, options, and news.", inputSchema: { properties: { ticker: { type: "string" }, intent: { type: "string" } }, required: ["ticker"] } },
-  { name: "morning_briefing", description: "Native briefing for the approved asset universe.", inputSchema: { properties: { tickers: { type: "array", items: { type: "string" } }, focus: { type: "string" } } } },
-  { name: "signal_scan", description: "Native signal scan over approved tickers.", inputSchema: { properties: { tickers: { type: "array", items: { type: "string" } }, ticker: { type: "string" }, intent: { type: "string" } } } },
-  { name: "market_breadth", description: "Breadth across the approved watchlist.", inputSchema: { properties: { market: { type: "string" } } } },
-  { name: "basket_relative_strength", description: "Relative strength ranking for the approved watchlist.", inputSchema: { properties: {} } },
-  { name: "get_sector_stats", description: "Approved-universe sector/asset-class grouping.", inputSchema: { properties: { sector: { type: "string" } } } },
-  { name: "get_sector_top_holdings", description: "Top and bottom movers in the approved universe.", inputSchema: { properties: { sector: { type: "string" } } } },
-  { name: "get_macro_regime", description: "Lightweight native regime read from approved-universe breadth.", inputSchema: { properties: {} } },
-  { name: "list_memories", description: "Repo-native replacement: returns the approved symbol set; no server-side memory storage.", inputSchema: { properties: {} } },
-  { name: "save_memory", description: "Repo-native replacement: server-side memory is unsupported; UI state remains local.", inputSchema: { properties: { key: { type: "string" }, value: { type: "string" } } } },
-  { name: "share_html", description: "Repo-native replacement: public hosted sharing is unsupported in the native backend.", inputSchema: { properties: { html: { type: "string" }, title: { type: "string" } } } },
+const escapeHtml = (value: string) =>
+  value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char] || char);
+
+const htmlExposureChart = (ticker: string, rows: ReturnType<typeof optionRowsNearSpot>, metric: "dex" | "greeks") => {
+  const labels = rows.map((row) => String(row.strike));
+  const values = rows.map((row) => metric === "dex" ? row.netDex : row.avgIv);
+  const title = metric === "dex" ? `${ticker} Net DEX by strike` : `${ticker} IV / Greeks by strike`;
+  const color = metric === "dex" ? "#38bdf8" : "#a78bfa";
+  return `<!doctype html><html><body style="margin:0;background:#020617;color:#e2e8f0;font-family:Inter,system-ui,sans-serif"><div style="position:relative;height:360px;padding:14px"><h3 style="margin:0 0 10px;font-size:14px">${escapeHtml(title)}</h3><canvas id="c"></canvas></div><script src="https://cdn.jsdelivr.net/npm/chart.js"></script><script>const labels=${JSON.stringify(labels)};const values=${JSON.stringify(values)};new Chart(document.getElementById('c'),{type:'bar',data:{labels,datasets:[{label:${JSON.stringify(metric === "dex" ? "Net DEX" : "Avg IV %")},data:values,backgroundColor:${JSON.stringify(color)},borderColor:${JSON.stringify(color)},borderWidth:1}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#e2e8f0'}}},scales:{x:{ticks:{color:'#94a3b8'},grid:{color:'rgba(148,163,184,.12)'}},y:{ticks:{color:'#94a3b8'},grid:{color:'rgba(148,163,184,.14)'}}}}});</script></body></html>`;
+};
+
+const fetchUniverseQuotes = () => Promise.all(STOCKS_WATCHER_QUOTE_SYMBOLS.map((symbol) => fetchQuote(symbol)));
+
+const quoteBySymbolMap = () => new Map(STOCKS_WATCHER_UNIVERSE.map((stock) => [stock.symbol, stock]));
+
+const sectorForQuote = (quote: QuoteRow) => quoteBySymbolMap().get(quote.symbol)?.sector || "Other";
+
+interface NativeToolContext {
+  params: Record<string, unknown>;
+  ticker: string;
+  expiry?: string;
+  topRows: number;
+}
+
+interface NativeToolDefinition extends StocksNativeToolSummary {
+  handler: (context: NativeToolContext) => Promise<StocksNativeToolResult>;
+}
+
+const tool = (
+  summary: StocksNativeToolSummary,
+  handler: NativeToolDefinition["handler"],
+): NativeToolDefinition => ({ ...summary, handler });
+
+const canonicalNativeToolName = (name: string) =>
+  name === "chart_indicators"
+    ? "chart_indicator"
+    : name === "pre_event_briefing"
+      ? "pre_event_brief"
+      : name;
+
+const nativeToolContext = (params: Record<string, unknown>): NativeToolContext => ({
+  params,
+  ticker: normalizeToolTicker(params),
+  expiry: typeof params.expiry === "string" ? params.expiry : undefined,
+  topRows: typeof params.topRows === "number" ? params.topRows : 12,
+});
+
+const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
+  tool(
+    { name: "get_watchlist", description: "Return the curated top-50 stock watcher universe.", inputSchema: { properties: {} } },
+    async () => {
+      const text = JSON.stringify({ symbols: STOCKS_WATCHER_SYMBOLS, stocks: STOCKS_WATCHER_UNIVERSE }, null, 2);
+      return toolResult(text, { symbols: STOCKS_WATCHER_SYMBOLS, stocks: STOCKS_WATCHER_UNIVERSE });
+    },
+  ),
+  tool(
+    { name: "list_memories", description: "Repo-native replacement: returns the approved symbol set; no server-side memory storage.", inputSchema: { properties: {} } },
+    async () => {
+      const text = [
+        "# Native memory status",
+        "- Server-side memories: unsupported in this repo-native backend.",
+        "- Browser-local state: favorites and hidden symbols stay in React localStorage.",
+        "- Approved symbols remain available through get_watchlist, not list_memories.",
+      ].join("\n");
+      return toolResult(text, { memories: [], supported: false, storage: "browser_local_storage" });
+    },
+  ),
+  tool(
+    { name: "save_memory", description: "Repo-native replacement: server-side memory is unsupported; UI state remains local.", inputSchema: { properties: { key: { type: "string" }, value: { type: "string" } } } },
+    async ({ params }) => toolResult("Server-side memories are deprecated. The React UI keeps favorites in local browser storage.", { accepted: false, params }),
+  ),
+  tool(
+    { name: "share_html", description: "Repo-native replacement: public hosted sharing is unsupported in the native backend.", inputSchema: { properties: { html: { type: "string" }, title: { type: "string" } } } },
+    async () => toolResult("Public share links are disabled in the native backend. Export locally instead.", { accepted: false }),
+  ),
+  tool(
+    { name: "get_quotes", description: "Get delayed native Yahoo quotes for the approved asset universe.", inputSchema: { properties: { tickers: { type: "string" } } } },
+    async ({ params }) => {
+      const rawTickers = String(params.tickers || "").trim();
+      const requested = rawTickers ? rawTickers.split(",").map((item) => normalizeStocksWatcherSymbol(item)).filter(Boolean) : [];
+      const symbols = Array.from(new Set(requested.length > 0 ? requested : STOCKS_WATCHER_QUOTE_SYMBOLS));
+      const quotes = await Promise.all(symbols.map((symbol) => fetchQuote(symbol)));
+      return toolResult(markdownQuoteTable(quotes), { quotes });
+    },
+  ),
+  tool(
+    { name: "get_stock_history", description: "Get daily OHLCV history from Yahoo chart API.", inputSchema: { properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+    async ({ ticker }) => {
+      const history = await fetchHistory(ticker, "5y", "1d");
+      return toolResult(markdownHistory(history, 120), { ticker, history });
+    },
+  ),
+  tool(
+    { name: "get_intraday", description: "Get 5-day 5-minute OHLCV data from Yahoo chart API.", inputSchema: { properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+    async ({ ticker }) => {
+      const history = await fetchHistory(ticker, "5d", "5m");
+      return toolResult(markdownHistory(history, 120), { ticker, history });
+    },
+  ),
+  tool(
+    { name: "get_stock_stats", description: "Get quote, valuation, financial, and profile stats.", inputSchema: { properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+    async ({ ticker }) => {
+      const result = await latestQuoteSummaryText(ticker);
+      return toolResult(result.text, result.raw);
+    },
+  ),
+  tool(
+    { name: "get_beta", description: "Get beta from Yahoo quoteSummary.", inputSchema: { properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+    async ({ ticker }) => {
+      const result = await latestQuoteSummaryText(ticker);
+      const quote = (result.raw as { quote?: QuoteRow }).quote;
+      const summary = (result.raw as { summary?: Record<string, any> }).summary;
+      const beta = toNumber(summary?.defaultKeyStatistics?.beta?.raw, 0);
+      const text = [
+        `# ${ticker} beta`,
+        `- Beta: ${beta || "n/a"}`,
+        `- Last price: ${quote ? fmtMoney(quote.price) : "n/a"}`,
+        "- Source: Yahoo quoteSummary.defaultKeyStatistics.beta",
+      ].join("\n");
+      return toolResult(text, { ticker, beta: beta || null, quote });
+    },
+  ),
+  tool(
+    { name: "get_options", description: "Get option chain with calls and puts around spot.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, strikesAroundAtm: { type: "integer" } }, required: ["ticker"] } },
+    async ({ ticker, expiry, params }) => {
+      const chain = await fetchOptions(ticker, expiry);
+      return toolResult(markdownOptionChain(chain, toNumber(params.strikesAroundAtm, 12)), { chain });
+    },
+  ),
+  tool(
+    { name: "get_options_gex", description: "Approximate per-strike gamma exposure from Yahoo option open interest.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, topRows: { type: "integer" } }, required: ["ticker"] } },
+    async ({ ticker, expiry, topRows }) => {
+      const chain = await fetchOptions(ticker, expiry);
+      return toolResult(markdownExposure(chain, "gex", topRows), { chain, exposures: optionRowsNearSpot(chain, topRows) });
+    },
+  ),
+  tool(
+    { name: "chart_gex", description: "Markdown gamma exposure chart data for compatibility aliases.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, topRows: { type: "integer" } }, required: ["ticker"] } },
+    async (context) => NATIVE_TOOL_BY_NAME.get("get_options_gex")!.handler(context),
+  ),
+  tool(
+    { name: "get_options_dex", description: "Approximate per-strike delta exposure from Yahoo option open interest.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, topRows: { type: "integer" } }, required: ["ticker"] } },
+    async ({ ticker, expiry, topRows }) => {
+      const chain = await fetchOptions(ticker, expiry);
+      return toolResult(markdownExposure(chain, "dex", topRows), { chain, exposures: optionRowsNearSpot(chain, topRows) });
+    },
+  ),
+  tool(
+    { name: "chart_dex", description: "HTML chart wrapper for native DEX.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
+    async ({ ticker, expiry, topRows }) => {
+      const chain = await fetchOptions(ticker, expiry);
+      const rows = optionRowsNearSpot(chain, topRows);
+      return toolResult(htmlExposureChart(ticker, rows, "dex"), { chain, exposures: rows, chart: "net_dex_by_strike" });
+    },
+  ),
+  tool(
+    { name: "get_options_0dte", description: "Get nearest-expiry option exposure summary.", inputSchema: { properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+    async ({ ticker, expiry }) => {
+      const chain = await fetchOptions(ticker, expiry);
+      const rows = optionRowsNearSpot(chain, 8);
+      const netGex = rows.reduce((sum, row) => sum + row.netGex, 0);
+      const netDex = rows.reduce((sum, row) => sum + row.netDex, 0);
+      const pin = rows.reduce((best, row) => Math.abs(row.netGex) > Math.abs(best.netGex) ? row : best, rows[0] || { strike: chain.spot, netGex: 0, netDex: 0 });
+      const text = [
+        `**Snapshot:** ${new Date().toISOString()} **Session phase:** \`native_yahoo\` **Now (ET):** ${new Date().toLocaleString("en-US", { timeZone: "America/New_York" })}`,
+        `**Expiry:** ${chain.selectedExpiry || "none"}`,
+        `**Pin level:** ${fmtMoney(pin.strike)} (${chain.spot ? fmtPct(((pin.strike - chain.spot) / chain.spot) * 100) : "0.00%"})`,
+        `Flip level: ${fmtMoney(pin.strike)}`,
+        "| Metric | Value |",
+        "| --- | ---: |",
+        `| Net GEX | **${compact(netGex)}** |`,
+        `| Net DEX | **${compact(netDex)}** |`,
+        `| Top call wall | ${fmtMoney(pin.strike)} |`,
+        `| Top put wall | ${fmtMoney(pin.strike)} |`,
+        "| Charm regime | `native_yahoo_approx` |",
+        markdownExposure(chain, "gex", 8),
+      ].join("\n");
+      return toolResult(text, { chain, rows, netGex, netDex, pin });
+    },
+  ),
+  tool(
+    { name: "get_options_greeks", description: "Return IV and estimated delta/gamma exposure by strike.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, greek: { type: "string" } }, required: ["ticker"] } },
+    async ({ ticker, expiry, topRows }) => {
+      const chain = await fetchOptions(ticker, expiry);
+      const rows = optionRowsNearSpot(chain, topRows);
+      const text = [
+        "| Strike | Avg IV | Call OI | Put OI | Net GEX | Net DEX |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: |",
+        ...rows.map((row) => `| ${row.strike} | ${row.avgIv}% | ${row.callEffectiveOpenInterest} | ${row.putEffectiveOpenInterest} | ${compact(row.netGex)} | ${compact(row.netDex)} |`),
+      ].join("\n");
+      return toolResult(text, { chain, rows });
+    },
+  ),
+  tool(
+    { name: "chart_greeks", description: "HTML chart wrapper for native Greek exposure.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
+    async ({ ticker, expiry, topRows }) => {
+      const chain = await fetchOptions(ticker, expiry);
+      const rows = optionRowsNearSpot(chain, topRows);
+      return toolResult(htmlExposureChart(ticker, rows, "greeks"), { chain, rows, chart: "avg_iv_by_strike" });
+    },
+  ),
+  tool(
+    { name: "get_options_iv_intraday", description: "Current option-chain IV snapshot.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
+    async ({ ticker, expiry, topRows }) => {
+      const chain = await fetchOptions(ticker, expiry);
+      const rows = optionRowsNearSpot(chain, topRows);
+      const text = [
+        `# ${ticker} current option-chain IV snapshot`,
+        `- Expiry: ${chain.selectedExpiry || "none"}`,
+        `- Spot: ${fmtMoney(chain.spot)}`,
+        "| Strike | Call IV | Put IV | Avg IV | IV source |",
+        "| ---: | ---: | ---: | ---: | --- |",
+        ...rows.map((row) => `| ${row.strike} | ${row.callIv}% | ${row.putIv}% | ${row.avgIv}% | Yahoo option chain |`),
+      ].join("\n");
+      return toolResult(text, { chain, rows, metric: "current_iv" });
+    },
+  ),
+  tool(
+    { name: "get_options_pcr", description: "Put/call ratio from Yahoo option volume and open interest.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
+    async ({ ticker, expiry }) => {
+      const chain = await fetchOptions(ticker, expiry);
+      const callOi = chain.calls.reduce((sum, leg) => sum + leg.openInterest, 0);
+      const putOi = chain.puts.reduce((sum, leg) => sum + leg.openInterest, 0);
+      const callVol = chain.calls.reduce((sum, leg) => sum + leg.volume, 0);
+      const putVol = chain.puts.reduce((sum, leg) => sum + leg.volume, 0);
+      const raw = { ticker, expiry: chain.selectedExpiry, putCallOpenInterest: round(putOi / Math.max(1, callOi), 2), putCallVolume: round(putVol / Math.max(1, callVol), 2), callOi, putOi, callVol, putVol };
+      return toolResult(`| Metric | Value |\n| --- | ---: |\n| P/C open interest | ${raw.putCallOpenInterest} |\n| P/C volume | ${raw.putCallVolume} |`, raw);
+    },
+  ),
+  tool(
+    { name: "get_options_sweeps", description: "Native placeholder for unusual options rows ranked by volume.", inputSchema: { properties: { ticker: { type: "string" }, topN: { type: "integer" } }, required: ["ticker"] } },
+    async ({ ticker, expiry }) => {
+      const chain = await fetchOptions(ticker, expiry);
+      const legs = [...chain.calls.map((leg) => ({ ...leg, type: "C" })), ...chain.puts.map((leg) => ({ ...leg, type: "P" }))].sort((a, b) => b.volume - a.volume).slice(0, 12);
+      const text = `# ${ticker} unusual options volume proxy\n| Type | Strike | Volume | OI | Vol/OI | Bid | Ask | IV |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${legs.map((leg) => `| ${leg.type} | ${leg.strike} | ${leg.volume} | ${leg.openInterest} | ${round(leg.volume / Math.max(1, leg.openInterest), 2)} | ${leg.bid} | ${leg.ask} | ${leg.impliedVolatility}% |`).join("\n")}`;
+      return toolResult(text, { chain, legs });
+    },
+  ),
+  tool(
+    { name: "get_options_mispricing", description: "Simple bid/ask and IV sanity scan.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
+    async ({ ticker, expiry }) => {
+      const chain = await fetchOptions(ticker, expiry);
+      const legs = [...chain.calls.map((leg) => ({ ...leg, type: "C" })), ...chain.puts.map((leg) => ({ ...leg, type: "P" }))]
+        .map((leg) => ({ ...leg, spread: round(leg.ask - leg.bid), spreadPct: round(((leg.ask - leg.bid) / Math.max(0.01, leg.lastPrice || leg.ask)) * 100, 2) }))
+        .sort((a, b) => b.spreadPct - a.spreadPct)
+        .slice(0, 12);
+      const text = `# ${ticker} option bid/ask and IV sanity scan\n| Type | Strike | Last | Bid | Ask | Spread | Spread % | IV |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${legs.map((leg) => `| ${leg.type} | ${leg.strike} | ${leg.lastPrice} | ${leg.bid} | ${leg.ask} | ${leg.spread} | ${leg.spreadPct}% | ${leg.impliedVolatility}% |`).join("\n")}`;
+      return toolResult(text, { chain, legs, metric: "spread_pct" });
+    },
+  ),
+  tool(
+    { name: "get_options_flow_universe", description: "Approved-universe options flow overview.", inputSchema: { properties: { topTickers: { type: "integer" } } } },
+    async () => {
+      const quotes = await fetchUniverseQuotes();
+      const flowRows = [...quotes]
+        .map((quote) => ({
+          symbol: quote.symbol,
+          dollarVolume: quote.price * quote.volume,
+          changePercent: quote.changePercent,
+          proxyFlow: quote.price * quote.volume * (quote.changePercent / 100),
+        }))
+        .sort((a, b) => Math.abs(b.proxyFlow) - Math.abs(a.proxyFlow));
+      const text = [
+        "# Approved-universe options flow proxy",
+        "Yahoo native mode has no tape-level options flow; this ranks price-volume pressure as a proxy.",
+        "| Ticker | Dollar volume | Change % | Proxy flow |",
+        "| --- | ---: | ---: | ---: |",
+        ...flowRows.map((row) => `| ${row.symbol} | ${compact(row.dollarVolume)} | ${fmtPct(row.changePercent)} | ${compact(row.proxyFlow)} |`),
+      ].join("\n");
+      return toolResult(text, { flowRows, universe: STOCKS_WATCHER_SYMBOLS });
+    },
+  ),
+  tool(
+    { name: "market_breadth", description: "Breadth across the approved watchlist.", inputSchema: { properties: { market: { type: "string" } } } },
+    async () => {
+      const quotes = await fetchUniverseQuotes();
+      const sorted = [...quotes].sort((a, b) => b.changePercent - a.changePercent);
+      const advancers = quotes.filter((quote) => quote.changePercent >= 0).length;
+      const text = [
+        "# Market breadth",
+        `- Advancers: ${advancers}/${quotes.length}`,
+        `- Decliners: ${quotes.length - advancers}/${quotes.length}`,
+        markdownQuoteTable(sorted),
+        `Leadership: ${sorted[0]?.symbol || "n/a"}; laggard: ${sorted[sorted.length - 1]?.symbol || "n/a"}.`,
+      ].join("\n\n");
+      return toolResult(text, { quotes: sorted, advancers, universe: STOCKS_WATCHER_SYMBOLS });
+    },
+  ),
+  tool(
+    { name: "basket_relative_strength", description: "Relative strength ranking for the approved watchlist.", inputSchema: { properties: {} } },
+    async () => {
+      const quotes = await fetchUniverseQuotes();
+      const ranked = [...quotes].sort((a, b) => b.changePercent - a.changePercent);
+      const text = [
+        "# Basket relative strength",
+        "| Rank | Ticker | Last | Change % | Volume |",
+        "| ---: | --- | ---: | ---: | ---: |",
+        ...ranked.map((quote, index) => `| ${index + 1} | ${quote.symbol} | ${fmtMoney(quote.price)} | ${fmtPct(quote.changePercent)} | ${compact(quote.volume)} |`),
+      ].join("\n");
+      return toolResult(text, { ranked, benchmark: ranked[0]?.symbol || null });
+    },
+  ),
+  tool(
+    { name: "signal_scan", description: "Native signal scan over approved tickers.", inputSchema: { properties: { tickers: { type: "array", items: { type: "string" } }, ticker: { type: "string" }, intent: { type: "string" } } } },
+    async ({ params, ticker }) => {
+      const requested = Array.isArray(params.tickers) ? params.tickers.map((item) => normalizeStocksWatcherSymbol(String(item))).filter(Boolean) : [ticker];
+      const quotes = await Promise.all(Array.from(new Set(requested)).map((symbol) => fetchQuote(symbol)));
+      const signals = quotes.map((quote) => ({
+        symbol: quote.symbol,
+        signal: quote.changePercent > 1 ? "positive_momentum" : quote.changePercent < -1 ? "negative_momentum" : "neutral",
+        changePercent: quote.changePercent,
+        volume: quote.volume,
+      }));
+      const text = [
+        "# Native signal scan",
+        "| Ticker | Signal | Change % | Volume |",
+        "| --- | --- | ---: | ---: |",
+        ...signals.map((row) => `| ${row.symbol} | ${row.signal} | ${fmtPct(row.changePercent)} | ${compact(row.volume)} |`),
+      ].join("\n");
+      return toolResult(text, { signals });
+    },
+  ),
+  tool(
+    { name: "morning_briefing", description: "Native briefing for the approved asset universe.", inputSchema: { properties: { tickers: { type: "array", items: { type: "string" } }, focus: { type: "string" } } } },
+    async ({ params }) => {
+      const requested = Array.isArray(params.tickers) && params.tickers.length > 0
+        ? params.tickers.map((item) => normalizeStocksWatcherSymbol(String(item))).filter(Boolean)
+        : STOCKS_WATCHER_QUOTE_SYMBOLS;
+      const quotes = await Promise.all(Array.from(new Set(requested)).map((symbol) => fetchQuote(symbol)));
+      const sorted = [...quotes].sort((a, b) => b.changePercent - a.changePercent);
+      const text = [
+        "# Native morning briefing",
+        `- Focus: ${String(params.focus || "market watch")}`,
+        `- Best: ${sorted[0]?.symbol || "n/a"} ${sorted[0] ? fmtPct(sorted[0].changePercent) : ""}`,
+        `- Worst: ${sorted[sorted.length - 1]?.symbol || "n/a"} ${sorted[sorted.length - 1] ? fmtPct(sorted[sorted.length - 1].changePercent) : ""}`,
+        markdownQuoteTable(sorted),
+      ].join("\n\n");
+      return toolResult(text, { briefingQuotes: sorted, focus: params.focus || "market watch" });
+    },
+  ),
+  tool(
+    { name: "get_sector_stats", description: "Approved-universe sector/asset-class grouping.", inputSchema: { properties: { sector: { type: "string" } } } },
+    async () => {
+      const quotes = await fetchUniverseQuotes();
+      const sectorStats = new Map<string, { sector: string; count: number; avgChangePercent: number; dollarVolume: number }>();
+      for (const quote of quotes) {
+        const sector = sectorForQuote(quote);
+        const current = sectorStats.get(sector) || { sector, count: 0, avgChangePercent: 0, dollarVolume: 0 };
+        current.count += 1;
+        current.avgChangePercent += quote.changePercent;
+        current.dollarVolume += quote.price * quote.volume;
+        sectorStats.set(sector, current);
+      }
+      const rows = Array.from(sectorStats.values()).map((row) => ({ ...row, avgChangePercent: round(row.avgChangePercent / Math.max(1, row.count), 2) })).sort((a, b) => b.avgChangePercent - a.avgChangePercent);
+      const text = [
+        "# Sector stats",
+        "| Sector | Count | Avg change % | Dollar volume |",
+        "| --- | ---: | ---: | ---: |",
+        ...rows.map((row) => `| ${row.sector} | ${row.count} | ${fmtPct(row.avgChangePercent)} | ${compact(row.dollarVolume)} |`),
+      ].join("\n");
+      return toolResult(text, { sectorStats: rows });
+    },
+  ),
+  tool(
+    { name: "get_sector_top_holdings", description: "Top and bottom movers in the approved universe.", inputSchema: { properties: { sector: { type: "string" } } } },
+    async ({ params }) => {
+      const requestedSector = String(params.sector || "").trim();
+      const quotes = await fetchUniverseQuotes();
+      const rows = quotes
+        .map((quote) => ({ ...quote, sector: sectorForQuote(quote) }))
+        .filter((quote) => !requestedSector || quote.sector.toLowerCase().includes(requestedSector.toLowerCase()))
+        .sort((a, b) => b.changePercent - a.changePercent);
+      const text = [
+        `# Sector top holdings${requestedSector ? `: ${requestedSector}` : ""}`,
+        "| Ticker | Sector | Last | Change % | Volume |",
+        "| --- | --- | ---: | ---: | ---: |",
+        ...rows.map((quote) => `| ${quote.symbol} | ${quote.sector} | ${fmtMoney(quote.price)} | ${fmtPct(quote.changePercent)} | ${compact(quote.volume)} |`),
+      ].join("\n");
+      return toolResult(text, { holdings: rows, sector: requestedSector || "all" });
+    },
+  ),
+  tool(
+    { name: "get_macro_regime", description: "Lightweight native regime read from approved-universe breadth.", inputSchema: { properties: {} } },
+    async () => {
+      const quotes = await fetchUniverseQuotes();
+      const advancers = quotes.filter((quote) => quote.changePercent >= 0).length;
+      const avgChange = round(quotes.reduce((sum, quote) => sum + quote.changePercent, 0) / Math.max(1, quotes.length), 2);
+      const regime = advancers / Math.max(1, quotes.length) >= 0.6 ? "risk_on" : advancers / Math.max(1, quotes.length) <= 0.4 ? "risk_off" : "mixed";
+      const text = [
+        "# Macro regime",
+        `- Regime: ${regime}`,
+        `- Breadth: ${advancers}/${quotes.length} positive`,
+        `- Average approved-universe change: ${fmtPct(avgChange)}`,
+      ].join("\n");
+      return toolResult(text, { regime, advancers, avgChange, universeCount: quotes.length });
+    },
+  ),
+  tool(
+    { name: "earnings_vol_crush", description: "Earnings date and IV/RV vol-crush context.", inputSchema: { properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+    async ({ ticker }) => buildEventContextToolResult("earnings_vol_crush", ticker, {}),
+  ),
+  tool(
+    { name: "historical_context", description: "Recent return context around the requested condition.", inputSchema: { properties: { ticker: { type: "string" }, condition: { type: "string" }, event: { type: "string" } }, required: ["ticker"] } },
+    async ({ ticker, params }) => buildEventContextToolResult("historical_context", ticker, params),
+  ),
+  tool(
+    { name: "pre_event_brief", description: "Native pre-event synthesis from quote, stats, options, and news.", inputSchema: { properties: { ticker: { type: "string" }, intent: { type: "string" } }, required: ["ticker"] } },
+    async ({ ticker, params }) => buildEventContextToolResult("pre_event_brief", ticker, params),
+  ),
+  tool(
+    { name: "chart_indicator", description: "Render a native Yahoo price chart.", inputSchema: { properties: { ticker: { type: "string" }, indicator: { type: "string" } }, required: ["ticker"] } },
+    async ({ ticker }) => {
+      const history = await fetchHistory(ticker, "1y", "1d");
+      return toolResult(htmlChart(ticker, history), { ticker, history: history.slice(-90) });
+    },
+  ),
 ];
 
-export const callNativeStocksTool = async (name: string, params: Record<string, unknown> = {}): Promise<StocksNativeToolResult> => {
-  const canonicalName = name === "chart_indicators" ? "chart_indicator" : name === "pre_event_briefing" ? "pre_event_brief" : name;
-  const ticker = normalizeToolTicker(params);
-  const expiry = typeof params.expiry === "string" ? params.expiry : undefined;
-  const topRows = typeof params.topRows === "number" ? params.topRows : 12;
+const NATIVE_TOOL_BY_NAME = new Map(NATIVE_TOOL_REGISTRY.map((definition) => [definition.name, definition]));
 
-  if (canonicalName === "get_watchlist" || canonicalName === "list_memories") {
-    const text = JSON.stringify({ symbols: STOCKS_WATCHER_SYMBOLS, stocks: STOCKS_WATCHER_UNIVERSE }, null, 2);
-    return toolResult(text, { symbols: STOCKS_WATCHER_SYMBOLS, stocks: STOCKS_WATCHER_UNIVERSE });
-  }
+const buildEventContextToolResult = async (
+  canonicalName: "earnings_vol_crush" | "historical_context" | "pre_event_brief",
+  ticker: string,
+  params: Record<string, unknown>,
+) => {
+  const [stats, history, news] = await Promise.all([
+    latestQuoteSummaryText(ticker),
+    fetchHistory(ticker, "1y", "1d"),
+    fetchNews(ticker).catch(() => []),
+  ]);
+  const latest = history[history.length - 1];
+  const prior = history[Math.max(0, history.length - 21)];
+  const oneMonthReturn = prior?.close ? ((latest.close - prior.close) / prior.close) * 100 : 0;
 
-  if (canonicalName === "save_memory") {
-    return toolResult("Server-side memories are deprecated. The React UI keeps favorites in local browser storage.", { accepted: false, params });
-  }
-
-  if (canonicalName === "share_html") {
-    return toolResult("Public share links are disabled in the native backend. Export locally instead.", { accepted: false });
-  }
-
-  if (canonicalName === "get_quotes") {
-    const rawTickers = String(params.tickers || "").trim();
-    const requested = rawTickers ? rawTickers.split(",").map((item) => normalizeStocksWatcherSymbol(item)).filter(Boolean) : [];
-    const symbols = Array.from(new Set(requested.length > 0 ? requested : STOCKS_WATCHER_QUOTE_SYMBOLS));
-    const quotes = await Promise.all(symbols.map((symbol) => fetchQuote(symbol)));
-    return toolResult(markdownQuoteTable(quotes), { quotes });
-  }
-
-  if (canonicalName === "get_stock_history") {
-    const history = await fetchHistory(ticker, "5y", "1d");
-    return toolResult(markdownHistory(history, 120), { ticker, history });
-  }
-
-  if (canonicalName === "get_intraday") {
-    const history = await fetchHistory(ticker, "5d", "5m");
-    return toolResult(markdownHistory(history, 120), { ticker, history });
-  }
-
-  if (canonicalName === "get_stock_stats" || canonicalName === "get_beta") {
-    const result = await latestQuoteSummaryText(ticker);
-    return toolResult(result.text, result.raw);
-  }
-
-  if (canonicalName === "get_options") {
-    const chain = await fetchOptions(ticker, expiry);
-    return toolResult(markdownOptionChain(chain, toNumber(params.strikesAroundAtm, 12)), { chain });
-  }
-
-  if (canonicalName === "get_options_gex" || canonicalName === "chart_gex") {
-    const chain = await fetchOptions(ticker, expiry);
-    return toolResult(markdownExposure(chain, "gex", topRows), { chain, exposures: optionRowsNearSpot(chain, topRows) });
-  }
-
-  if (canonicalName === "get_options_dex" || canonicalName === "chart_dex") {
-    const chain = await fetchOptions(ticker, expiry);
-    return toolResult(markdownExposure(chain, "dex", topRows), { chain, exposures: optionRowsNearSpot(chain, topRows) });
-  }
-
-  if (canonicalName === "get_options_0dte") {
-    const chain = await fetchOptions(ticker, expiry);
-    const rows = optionRowsNearSpot(chain, 8);
-    const netGex = rows.reduce((sum, row) => sum + row.netGex, 0);
-    const netDex = rows.reduce((sum, row) => sum + row.netDex, 0);
-    const pin = rows.reduce((best, row) => Math.abs(row.netGex) > Math.abs(best.netGex) ? row : best, rows[0] || { strike: chain.spot, netGex: 0, netDex: 0 });
+  if (canonicalName === "earnings_vol_crush") {
+    const calendar = (stats.raw as { summary?: Record<string, any> }).summary?.calendarEvents || {};
+    const earningsDate = calendar.earnings?.earningsDate?.[0]?.fmt || "n/a";
     const text = [
-      `**Snapshot:** ${new Date().toISOString()} **Session phase:** \`native_yahoo\` **Now (ET):** ${new Date().toLocaleString("en-US", { timeZone: "America/New_York" })}`,
-      `**Expiry:** ${chain.selectedExpiry || "none"}`,
-      `**Pin level:** ${fmtMoney(pin.strike)} (${chain.spot ? fmtPct(((pin.strike - chain.spot) / chain.spot) * 100) : "0.00%"})`,
-      `Flip level: ${fmtMoney(pin.strike)}`,
-      "| Metric | Value |",
-      "| --- | ---: |",
-      `| Net GEX | **${compact(netGex)}** |`,
-      `| Net DEX | **${compact(netDex)}** |`,
-      `| Top call wall | ${fmtMoney(pin.strike)} |`,
-      `| Top put wall | ${fmtMoney(pin.strike)} |`,
-      "| Charm regime | `native_yahoo_approx` |",
-      markdownExposure(chain, "gex", 8),
-    ].join("\n");
-    return toolResult(text, { chain, rows, netGex, netDex, pin });
-  }
-
-  if (canonicalName === "get_options_greeks" || canonicalName === "get_options_iv_intraday") {
-    const chain = await fetchOptions(ticker, expiry);
-    const rows = optionRowsNearSpot(chain, topRows);
-    const text = [
-      "| Strike | Avg IV | Call OI | Put OI | Net GEX | Net DEX |",
-      "| ---: | ---: | ---: | ---: | ---: | ---: |",
-      ...rows.map((row) => `| ${row.strike} | ${row.avgIv}% | ${row.callEffectiveOpenInterest} | ${row.putEffectiveOpenInterest} | ${compact(row.netGex)} | ${compact(row.netDex)} |`),
-    ].join("\n");
-    return toolResult(text, { chain, rows });
-  }
-
-  if (canonicalName === "get_options_pcr") {
-    const chain = await fetchOptions(ticker, expiry);
-    const callOi = chain.calls.reduce((sum, leg) => sum + leg.openInterest, 0);
-    const putOi = chain.puts.reduce((sum, leg) => sum + leg.openInterest, 0);
-    const callVol = chain.calls.reduce((sum, leg) => sum + leg.volume, 0);
-    const putVol = chain.puts.reduce((sum, leg) => sum + leg.volume, 0);
-    const raw = { ticker, expiry: chain.selectedExpiry, putCallOpenInterest: round(putOi / Math.max(1, callOi), 2), putCallVolume: round(putVol / Math.max(1, callVol), 2), callOi, putOi, callVol, putVol };
-    return toolResult(`| Metric | Value |\n| --- | ---: |\n| P/C open interest | ${raw.putCallOpenInterest} |\n| P/C volume | ${raw.putCallVolume} |`, raw);
-  }
-
-  if (canonicalName === "get_options_sweeps" || canonicalName === "get_options_mispricing") {
-    const chain = await fetchOptions(ticker, expiry);
-    const legs = [...chain.calls.map((leg) => ({ ...leg, type: "C" })), ...chain.puts.map((leg) => ({ ...leg, type: "P" }))].sort((a, b) => b.volume - a.volume).slice(0, 12);
-    const text = `| Type | Strike | Volume | OI | Bid | Ask | IV |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n${legs.map((leg) => `| ${leg.type} | ${leg.strike} | ${leg.volume} | ${leg.openInterest} | ${leg.bid} | ${leg.ask} | ${leg.impliedVolatility}% |`).join("\n")}`;
-    return toolResult(text, { chain, legs });
-  }
-
-  if (canonicalName === "get_options_flow_universe" || canonicalName === "market_breadth" || canonicalName === "basket_relative_strength" || canonicalName === "signal_scan" || canonicalName === "morning_briefing" || canonicalName === "get_macro_regime" || canonicalName === "get_sector_stats" || canonicalName === "get_sector_top_holdings") {
-    const quotes = await Promise.all(STOCKS_WATCHER_QUOTE_SYMBOLS.map((symbol) => fetchQuote(symbol)));
-    const sorted = [...quotes].sort((a, b) => b.changePercent - a.changePercent);
-    const advancers = quotes.filter((quote) => quote.changePercent >= 0).length;
-    const text = [
-      `Native Yahoo universe breadth: ${advancers}/${quotes.length} approved assets positive.`,
-      markdownQuoteTable(sorted),
-      `Leadership: ${sorted[0]?.symbol || "n/a"}; laggard: ${sorted[sorted.length - 1]?.symbol || "n/a"}.`,
-    ].join("\n\n");
-    return toolResult(text, { quotes: sorted, advancers, universe: STOCKS_WATCHER_SYMBOLS });
-  }
-
-  if (canonicalName === "earnings_vol_crush" || canonicalName === "historical_context" || canonicalName === "pre_event_brief") {
-    const [stats, history, news] = await Promise.all([
-      latestQuoteSummaryText(ticker),
-      fetchHistory(ticker, "1y", "1d"),
-      fetchNews(ticker).catch(() => []),
-    ]);
-    const latest = history[history.length - 1];
-    const prior = history[Math.max(0, history.length - 21)];
-    const oneMonthReturn = prior?.close ? ((latest.close - prior.close) / prior.close) * 100 : 0;
-    const text = [
-      stats.text,
+      `# ${ticker} earnings vol-crush context`,
+      `- Earnings date: ${earningsDate}`,
       `- 1M price context: ${fmtPct(oneMonthReturn)}`,
-      news.length > 0 ? `- Latest news: ${news[0].title} (${news[0].publisher})` : "- Latest news: unavailable from Yahoo search.",
+      "- Native Yahoo mode uses option-chain IV and price history; no realized earnings move database is stored here.",
     ].join("\n");
-    return toolResult(text, { stats: stats.raw, historyTail: history.slice(-30), news, oneMonthReturn });
+    return toolResult(text, { stats: stats.raw, historyTail: history.slice(-30), news, oneMonthReturn, earningsDate });
   }
 
-  if (canonicalName === "chart_indicator") {
-    const history = await fetchHistory(ticker, "1y", "1d");
-    return toolResult(htmlChart(ticker, history), { ticker, history: history.slice(-90) });
+  if (canonicalName === "historical_context") {
+    const high = Math.max(...history.slice(-30).map((row) => row.close));
+    const low = Math.min(...history.slice(-30).map((row) => row.close));
+    const text = [
+      `# ${ticker} historical context`,
+      `- Condition: ${String(params.condition || params.event || "recent trend")}`,
+      `- 1M return: ${fmtPct(oneMonthReturn)}`,
+      `- 30-session close range: ${fmtMoney(low)} - ${fmtMoney(high)}`,
+    ].join("\n");
+    return toolResult(text, { historyTail: history.slice(-30), oneMonthReturn, range: { high, low } });
   }
 
-  throw new Error(`Native Yahoo tool '${name}' is not implemented.`);
+  const text = [
+    `# ${ticker} pre-event brief`,
+    stats.text,
+    `- Intent: ${String(params.intent || "event prep")}`,
+    `- 1M price context: ${fmtPct(oneMonthReturn)}`,
+    news.length > 0 ? `- Latest news: ${news[0].title} (${news[0].publisher})` : "- Latest news: unavailable from Yahoo search.",
+  ].join("\n");
+  return toolResult(text, { stats: stats.raw, historyTail: history.slice(-30), news, oneMonthReturn, intent: params.intent || "event prep" });
+};
+
+export const listNativeStocksTools = (): StocksNativeToolSummary[] =>
+  NATIVE_TOOL_REGISTRY
+    .filter((definition) => definition.name !== "chart_gex")
+    .map(({ handler: _handler, ...summary }) => summary);
+
+export const callNativeStocksTool = async (name: string, params: Record<string, unknown> = {}): Promise<StocksNativeToolResult> => {
+  const canonicalName = canonicalNativeToolName(name);
+  const definition = NATIVE_TOOL_BY_NAME.get(canonicalName);
+  if (!definition) throw new Error(`Native Yahoo tool '${name}' is not implemented.`);
+  return definition.handler(nativeToolContext(params));
 };
 
 export class NativeStocksYahooClient {
@@ -648,6 +952,55 @@ export class NativeStocksYahooClient {
   }
 }
 
+const asRecord = (value: unknown): Record<string, any> =>
+  value && typeof value === "object" ? value as Record<string, any> : {};
+
+const fulfilledRaw = (
+  results: Array<{ label: string; result: PromiseSettledResult<StocksNativeToolResult> }>,
+  label: string,
+) => {
+  const match = results.find((item) => item.label === label);
+  return asRecord(match?.result.status === "fulfilled" ? match.result.value.raw : null);
+};
+
+const extractSpxGexMarketContext = (
+  results: Array<{ label: string; result: PromiseSettledResult<StocksNativeToolResult> }>,
+): SpxGexMarketContext => {
+  const warnings = results
+    .filter((item) => item.result.status === "rejected")
+    .map((item) => `${item.label} failed: ${item.result.status === "rejected" && item.result.reason instanceof Error ? item.result.reason.message : String(item.result)}`);
+  const macroRaw = fulfilledRaw(results, "get_macro_regime");
+  const breadthRaw = fulfilledRaw(results, "market_breadth");
+  const flowRaw = fulfilledRaw(results, "get_options_flow_universe");
+  const briefRaw = fulfilledRaw(results, "pre_event_brief");
+  const flowRows = Array.isArray(flowRaw.flowRows) ? flowRaw.flowRows : [];
+  const topFlow = asRecord(flowRows[0]);
+  const news = Array.isArray(briefRaw.news) ? briefRaw.news : [];
+  const latestNews = asRecord(news[0]);
+  const universeCount = Number(macroRaw.universeCount || breadthRaw.universe?.length || 0);
+  const advancers = Number(macroRaw.advancers ?? breadthRaw.advancers ?? 0);
+
+  return {
+    macroRegime: typeof macroRaw.regime === "string" ? macroRaw.regime : null,
+    breadth: universeCount > 0
+      ? {
+          advancers,
+          universeCount,
+          avgChange: typeof macroRaw.avgChange === "number" ? macroRaw.avgChange : null,
+        }
+      : null,
+    flow: typeof topFlow.symbol === "string" && typeof topFlow.proxyFlow === "number"
+      ? {
+          topTicker: topFlow.symbol,
+          proxyFlow: topFlow.proxyFlow,
+          changePercent: typeof topFlow.changePercent === "number" ? topFlow.changePercent : 0,
+        }
+      : null,
+    latestHeadline: typeof latestNews.title === "string" ? latestNews.title : null,
+    warnings,
+  };
+};
+
 export class NativeSpxGexYahooClient implements SpxGexDataClient {
   async getQuotes() {
     const quote = await fetchQuote("^SPX");
@@ -660,44 +1013,24 @@ export class NativeSpxGexYahooClient implements SpxGexDataClient {
   }
 
   async getOptions0Dte() {
-    const result = await callNativeStocksToolForMarket("get_options_0dte", "^SPX", {});
+    const result = await callNativeStocksTool("get_options_0dte", { ticker: "^SPX" });
     return result.text;
   }
 
   async getOptionsGex(expiry: string) {
-    const result = await callNativeStocksToolForMarket("get_options_gex", "^SPX", { expiry, topRows: 20 });
+    const result = await callNativeStocksTool("get_options_gex", { ticker: "^SPX", expiry, topRows: 20 });
     return result.text;
   }
-}
 
-const callNativeStocksToolForMarket = async (name: string, symbol: string, params: Record<string, unknown>) => {
-  const expiry = typeof params.expiry === "string" ? params.expiry : undefined;
-  const topRows = typeof params.topRows === "number" ? params.topRows : 12;
-  if (name === "get_options_0dte") {
-    const chain = await fetchOptions(symbol, expiry);
-    const rows = optionRowsNearSpot(chain, 8);
-    const netGex = rows.reduce((sum, row) => sum + row.netGex, 0);
-    const netDex = rows.reduce((sum, row) => sum + row.netDex, 0);
-    const pin = rows.reduce((best, row) => Math.abs(row.netGex) > Math.abs(best.netGex) ? row : best, rows[0] || { strike: chain.spot, netGex: 0, netDex: 0 });
-    const text = [
-      `**Snapshot:** ${new Date().toISOString()} **Session phase:** \`native_yahoo\` **Now (ET):** ${new Date().toLocaleString("en-US", { timeZone: "America/New_York" })}`,
-      `**Expiry:** ${chain.selectedExpiry || "none"}`,
-      `**Pin level:** ${fmtMoney(pin.strike)} (${chain.spot ? fmtPct(((pin.strike - chain.spot) / chain.spot) * 100) : "0.00%"})`,
-      `Flip level: ${fmtMoney(pin.strike)}`,
-      "| Metric | Value |",
-      "| --- | ---: |",
-      `| Net GEX | **${compact(netGex)}** |`,
-      `| Net DEX | **${compact(netDex)}** |`,
-      `| Top call wall | ${fmtMoney(pin.strike)} |`,
-      `| Top put wall | ${fmtMoney(pin.strike)} |`,
-      "| Charm regime | `native_yahoo_approx` |",
-      markdownExposure(chain, "gex", 8),
-    ].join("\n");
-    return toolResult(text, { chain, rows, netGex, netDex, pin });
+  async getMarketContext() {
+    const calls = [
+      { label: "get_macro_regime", promise: callNativeStocksTool("get_macro_regime", {}) },
+      { label: "market_breadth", promise: callNativeStocksTool("market_breadth", { market: "US" }) },
+      { label: "get_options_flow_universe", promise: callNativeStocksTool("get_options_flow_universe", { topTickers: 5 }) },
+      { label: "pre_event_brief", promise: callNativeStocksTool("pre_event_brief", { ticker: "^SPX", intent: "premarket gamma map" }) },
+    ];
+    const settled = await Promise.allSettled(calls.map((call) => call.promise));
+
+    return extractSpxGexMarketContext(calls.map((call, index) => ({ label: call.label, result: settled[index] })));
   }
-  if (name === "get_options_gex") {
-    const chain = await fetchOptions(symbol, expiry);
-    return toolResult(markdownExposure(chain, "gex", topRows), { chain, exposures: optionRowsNearSpot(chain, topRows) });
-  }
-  throw new Error(`Unsupported market tool ${name}`);
-};
+}

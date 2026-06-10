@@ -6,12 +6,30 @@ import {
   buildDemoStocksWatcherSnapshot,
   buildStocksWatcherSnapshotFromNative,
   getFreshStocksWatcherCacheEntry,
+  getGammaFlipLevel,
   getStocksWatcherVisibleSymbols,
   getNearestSpotStrike,
   type StocksWatcherToolClient,
 } from "../src/lib/stocks-intelligence-watcher";
 import { STOCKS_WATCHER_SYMBOLS, STOCKS_WATCHER_UNIVERSE } from "../src/lib/stocks-watcher-universe";
-import { normalizeStocksWatcherSymbol, resolveStocksWatcherYahooSymbol } from "../src/lib/stocks-native-yahoo";
+import { listNativeStocksTools, normalizeStocksWatcherSymbol, resolveStocksWatcherYahooSymbol } from "../src/lib/stocks-native-yahoo";
+import {
+  buildStocksWatcherAiSummaryPayload,
+  buildStocksWatcherDeterministicSummary,
+  getStocksWatcherAiSummaryCacheKey,
+} from "../src/lib/stocks-intelligence-watcher-summary";
+import {
+  getStocksWatcherExpiryOverviewToolPlan,
+  getStocksWatcherOptionsSubTabCacheKey,
+  getStocksWatcherOptionsSubTabToolPlan,
+  getStocksWatcherCustomStockFromSnapshot,
+  getStocksWatcherStrikeDetailToolPlan,
+  getStocksWatcherSnapshotExpiry,
+  getStocksWatcherSnapshotLoadDecision,
+  getStocksWatcherTopTabCacheKey,
+  getStocksWatcherTopTabToolPlan,
+  normalizeWatcherExpiryForYahoo,
+} from "../src/lib/stocks-intelligence-watcher-session";
 import { onRequest as stocksWatcherApi } from "../functions/api/stocks-intelligence-watcher";
 
 class FakeStocksNativeClient implements StocksWatcherToolClient {
@@ -108,6 +126,60 @@ test("nearest spot strike chooses one strike when several are close to spot", ()
   assert.equal(nearest?.strike, 182.5);
 });
 
+test("gamma flip uses nearest net-GEX sign crossing, not the smallest absolute bar", () => {
+  const base = buildDemoStocksWatcherSnapshot("GOOG", "fallback").strikes[0];
+  const rows = [
+    { ...base, strike: 220, netGex: 1 },
+    { ...base, strike: 360, netGex: -2_000_000 },
+    { ...base, strike: 365, netGex: -500_000 },
+    { ...base, strike: 370, netGex: 500_000 },
+    { ...base, strike: 400, netGex: 3_000_000 },
+  ];
+
+  assert.equal(getGammaFlipLevel(rows, 365.76), 367.5);
+});
+
+test("gamma flip is unavailable when visible net GEX never changes sign", () => {
+  const base = buildDemoStocksWatcherSnapshot("GOOG", "fallback").strikes[0];
+  const rows = [
+    { ...base, strike: 350, netGex: 100_000 },
+    { ...base, strike: 360, netGex: 200_000 },
+    { ...base, strike: 370, netGex: 300_000 },
+  ];
+
+  assert.equal(getGammaFlipLevel(rows, 365.76), null);
+});
+
+test("AI summary payload compacts watcher data and changes cache key by expiry", () => {
+  const snapshot = buildDemoStocksWatcherSnapshot("NVDA", "fallback");
+  const payload = buildStocksWatcherAiSummaryPayload(snapshot, {
+    selectedExpiry: snapshot.availableExpiries[0],
+    marketBreadth: "Controlled breadth context for unit tests.",
+  });
+  const nextPayload = buildStocksWatcherAiSummaryPayload(snapshot, {
+    selectedExpiry: snapshot.availableExpiries[1],
+    marketBreadth: "Controlled breadth context for unit tests.",
+  });
+
+  assert.equal(payload.symbol, "NVDA");
+  assert.equal(payload.selectedExpiry, snapshot.availableExpiries[0]);
+  assert.equal(payload.topAbsGexStrikes.length, 5);
+  assert.ok(payload.netGexTotal !== 0);
+  assert.notEqual(getStocksWatcherAiSummaryCacheKey(payload), getStocksWatcherAiSummaryCacheKey(nextPayload));
+});
+
+test("AI summary is deterministic and does not depend on model output", () => {
+  const snapshot = buildDemoStocksWatcherSnapshot("TSLA", "fallback");
+  const payload = buildStocksWatcherAiSummaryPayload(snapshot);
+  const summary = buildStocksWatcherDeterministicSummary(payload);
+
+  assert.equal(summary.model, "deterministic-rules");
+  assert.equal(summary.generatedAt, payload.quote.asOf || payload.generatedAt);
+  assert.ok(summary.headline.includes("TSLA"));
+  assert.ok(summary.whatItTellsUs.length > 0);
+  assert.ok(summary.howToAct.some((item) => item.includes("not a standalone buy or sell trigger")));
+});
+
 test("watchlist removal removes favorites, hides defaults, and chooses the next visible ticker", () => {
   const result = applyStocksWatcherSymbolRemoval(
     {
@@ -131,6 +203,88 @@ test("SPX aliases display as SPX while querying Yahoo index data internally", ()
   assert.deepEqual(resolveStocksWatcherYahooSymbol("^SPX"), { displaySymbol: "SPX", yahooSymbol: "^SPX" });
   assert.deepEqual(resolveStocksWatcherYahooSymbol("AAPL"), { displaySymbol: "AAPL", yahooSymbol: "AAPL" });
   assert.deepEqual(resolveStocksWatcherYahooSymbol("BRK-B"), { displaySymbol: "BRK-B", yahooSymbol: "BRK-B" });
+});
+
+test("native Yahoo registry exposes unique public tool names without compatibility aliases", () => {
+  const tools = listNativeStocksTools();
+  const names = tools.map((tool) => tool.name);
+
+  assert.equal(new Set(names).size, names.length);
+  assert.equal(names.includes("chart_greeks"), true);
+  assert.equal(names.includes("chart_dex"), true);
+  assert.equal(names.includes("chart_indicator"), true);
+  assert.equal(names.includes("chart_gex"), false);
+  assert.equal(names.includes("chart_indicators"), false);
+  assert.equal(names.includes("pre_event_briefing"), false);
+});
+
+test("watcher session plans native tool calls and cache keys without UI state", () => {
+  assert.equal(normalizeWatcherExpiryForYahoo("26-06-19"), "2026-06-19");
+  assert.equal(getStocksWatcherTopTabCacheKey(" nvda ", "Stats"), "NVDA:Stats");
+  assert.equal(getStocksWatcherOptionsSubTabCacheKey("nvda", "26-06-19", "Greeks"), "NVDA:2026-06-19:Greeks");
+
+  assert.deepEqual(getStocksWatcherTopTabToolPlan("Stats", "nvda"), [
+    { name: "get_stock_stats", params: { ticker: "NVDA" } },
+    { name: "get_beta", params: { ticker: "NVDA" } },
+  ]);
+  assert.deepEqual(getStocksWatcherOptionsSubTabToolPlan("Greeks", "nvda", "26-06-19"), [
+    { name: "get_options_greeks", params: { ticker: "NVDA", expiry: "2026-06-19" } },
+    { name: "chart_greeks", params: { ticker: "NVDA", expiry: "2026-06-19" } },
+  ]);
+  assert.deepEqual(getStocksWatcherExpiryOverviewToolPlan("nvda", "26-06-19"), [
+    { name: "get_options", params: { ticker: "NVDA", expiry: "2026-06-19", strikesAroundAtm: 40 } },
+    { name: "get_options_gex", params: { ticker: "NVDA", expiry: "2026-06-19", topRows: 24 } },
+    { name: "get_options_pcr", params: { ticker: "NVDA", expiry: "2026-06-19" } },
+  ]);
+  assert.deepEqual(getStocksWatcherStrikeDetailToolPlan("nvda", "26-06-19", 180), [
+    { name: "get_options_greeks", params: { ticker: "NVDA", expiry: "2026-06-19", strike: 180 } },
+    { name: "get_options_iv_intraday", params: { ticker: "NVDA", expiry: "2026-06-19", strike: 180 } },
+    { name: "get_options_mispricing", params: { ticker: "NVDA", expiry: "2026-06-19", strike: 180 } },
+  ]);
+});
+
+test("watcher session resolves snapshot cache and custom stock decisions", () => {
+  const snapshot = buildDemoStocksWatcherSnapshot("SOFI", "fallback");
+  const cached = { snapshot, fetchedAt: 12345 };
+
+  assert.equal(getStocksWatcherSnapshotExpiry(snapshot), snapshot.selectedExpiry);
+  assert.deepEqual(
+    getStocksWatcherSnapshotLoadDecision({
+      requestedSymbol: "",
+      selectedSymbol: "NVDA",
+      loadingSymbol: null,
+      cached,
+    }),
+    { symbol: "", skip: true, cached: null, backgroundRefresh: false },
+  );
+  assert.deepEqual(
+    getStocksWatcherSnapshotLoadDecision({
+      requestedSymbol: "sofi",
+      selectedSymbol: "NVDA",
+      loadingSymbol: null,
+      cached,
+    }),
+    { symbol: "SOFI", skip: false, cached, backgroundRefresh: true },
+  );
+  assert.deepEqual(
+    getStocksWatcherSnapshotLoadDecision({
+      requestedSymbol: "sofi",
+      selectedSymbol: "SOFI",
+      loadingSymbol: "SOFI",
+      cached,
+    }),
+    { symbol: "SOFI", skip: true, cached: null, backgroundRefresh: false },
+  );
+  assert.equal(getStocksWatcherCustomStockFromSnapshot(snapshot, STOCKS_WATCHER_UNIVERSE[0])?.symbol, undefined);
+  assert.deepEqual(getStocksWatcherCustomStockFromSnapshot(snapshot, null), {
+    symbol: "SOFI",
+    companyName: snapshot.quote.companyName,
+    sector: "Custom",
+    type: "Stock",
+    fallbackPrice: snapshot.quote.price,
+    fallbackChange: snapshot.quote.change,
+    fallbackChangePercent: snapshot.quote.changePercent,
+  });
 });
 
 test("all-stocks visible list supports the curated universe including SPX", () => {

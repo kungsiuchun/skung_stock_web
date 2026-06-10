@@ -1,13 +1,12 @@
 "use client";
 
-import { BarChart3, Bot, ImageIcon, MessageSquare, Users, Wand2 } from "lucide-react";
+import { BarChart3, ImageIcon, MessageSquare, Users, Wand2 } from "lucide-react";
 import { GlowingEffect } from "@/components/ui/glowing-effect";
 import { cn } from "@/lib/utils";
 
 interface AIFeaturesPageProps {
   onOpenCaptionTool: () => void;
   onOpenFinanceTool: () => void;
-  onOpenFinRobotTool: () => void;
   onOpenTradingAgentTool: () => void;
   onOpenSPXRecap: () => void;
 }
@@ -15,7 +14,6 @@ interface AIFeaturesPageProps {
 export function AIFeaturesPage({
   onOpenCaptionTool,
   onOpenFinanceTool,
-  onOpenFinRobotTool,
   onOpenTradingAgentTool,
   onOpenSPXRecap,
 }: AIFeaturesPageProps) {
@@ -44,13 +42,6 @@ export function AIFeaturesPage({
             title="Finance Analyzer"
             description="Engage with an intelligent agent powered by StepFun 3.5 Flash to analyze stock trends over 20 days."
             onClick={onOpenFinanceTool}
-            className="cursor-pointer hover:scale-[1.02] transition-transform"
-          />
-          <GridItem
-            icon={<Bot className="h-4 w-4" />}
-            title="FinRobot Analyst"
-            description="Automated intelligent agent for real-time equity research powered by FinRobot multi-agent logic."
-            onClick={onOpenFinRobotTool}
             className="cursor-pointer hover:scale-[1.02] transition-transform"
           />
           <GridItem

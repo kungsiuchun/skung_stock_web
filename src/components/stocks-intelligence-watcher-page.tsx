@@ -6,8 +6,11 @@ import {
   Building2,
   ChevronDown,
   Loader2,
+  PanelLeftClose,
+  PanelLeftOpen,
   RefreshCw,
   Search,
+  Sparkles,
   Star,
   X,
 } from "lucide-react";
@@ -22,9 +25,26 @@ import type {
 import {
   applyStocksWatcherSymbolRemoval,
   getFreshStocksWatcherCacheEntry,
+  getGammaFlipLevel,
   getNearestSpotStrike,
   getStocksWatcherVisibleSymbols,
 } from "@/lib/stocks-intelligence-watcher";
+import {
+  buildStocksWatcherAiSummaryPayload,
+  buildStocksWatcherDeterministicSummary,
+  type StocksWatcherAiSummaryResponse,
+} from "@/lib/stocks-intelligence-watcher-summary";
+import {
+  getStocksWatcherExpiryOverviewToolPlan,
+  getStocksWatcherCustomStockFromSnapshot,
+  getStocksWatcherOptionsSubTabCacheKey,
+  getStocksWatcherOptionsSubTabToolPlan,
+  getStocksWatcherSnapshotExpiry,
+  getStocksWatcherSnapshotLoadDecision,
+  getStocksWatcherStrikeDetailToolPlan,
+  getStocksWatcherTopTabCacheKey,
+  getStocksWatcherTopTabToolPlan,
+} from "@/lib/stocks-intelligence-watcher-session";
 import {
   STOCKS_WATCHER_SYMBOLS,
   STOCKS_WATCHER_UNIVERSE,
@@ -195,6 +215,19 @@ const formatNumber = (value: number) => {
 const currency = (value: number) =>
   `$${value.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}`;
 
+const formatQuoteAsOf = (asOf: string | null | undefined) => {
+  if (!asOf) return "loading";
+  const parsed = Date.parse(asOf);
+  if (!Number.isFinite(parsed)) return asOf;
+  return new Intl.DateTimeFormat("en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "America/New_York",
+  }).format(new Date(parsed));
+};
+
 const normalizeExpiryDate = (expiry: string | null | undefined) => {
   if (!expiry) return "";
   if (/^\d{2}-\d{2}-\d{2}$/.test(expiry)) return `20${expiry}`;
@@ -243,6 +276,12 @@ const getPutValue = (row: StocksWatcherStrikeRow, mode: StocksWatcherChartMode) 
   if (mode === "oi") return row.putOpenInterest;
   if (mode === "volume") return row.putVolume;
   return row.putGex;
+};
+
+const chartMetricLabel: Record<StocksWatcherChartMode, string> = {
+  oi: "Open Interest",
+  volume: "Volume",
+  gex: "Gamma Exposure",
 };
 
 interface ChartTooltipState {
@@ -778,7 +817,7 @@ const OhlcVolumeChart = ({ result }: { result: NativeToolResult }) => {
   if (points.length < 2) return <ToolTextSummary result={result} />;
 
   return (
-    <div className="overflow-hidden rounded-md border border-slate-800 bg-[#05080d]" data-chart-style={chartStyle}>
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-slate-800 bg-[#05080d]" data-chart-style={chartStyle}>
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 px-3 py-2">
         <div className="flex flex-wrap items-center gap-2">
           {(["line", "mountain", "candle", "ohlc"] as PriceChartStyle[]).map((style) => (
@@ -828,8 +867,7 @@ const OhlcVolumeChart = ({ result }: { result: NativeToolResult }) => {
         </div>
       </div>
       <div
-        className="relative px-3 pb-3 pt-2"
-        style={{ height: "clamp(28rem, calc(100vh - 25rem), 38rem)" }}
+        className="relative min-h-[28rem] flex-1 px-3 pb-3 pt-2"
         onMouseLeave={() => setTooltip(null)}
       >
         <div ref={containerRef} className="h-full w-full" data-price-chart-surface />
@@ -988,6 +1026,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<StocksWatcherChartMode>("volume");
   const [strikeWindowSize, setStrikeWindowSize] = useState(29);
+  const [watchlistCollapsed, setWatchlistCollapsed] = useState(false);
   const [snapshot, setSnapshot] = useState<StocksWatcherSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingSymbol, setLoadingSymbol] = useState<string | null>(null);
@@ -1129,24 +1168,13 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       });
       const body = await response.json() as StocksWatcherSnapshot;
       snapshotCacheRef.current.set(body.symbol, { snapshot: body, fetchedAt: Date.now() });
-      const curatedStock = getStocksWatcherUniverseStock(body.symbol);
-      if (!curatedStock) {
-        setCustomStocks((current) => uniqueStocks([
-          ...current,
-          {
-            symbol: body.symbol,
-            companyName: body.quote.companyName || `${body.symbol} custom stock`,
-            sector: "Custom",
-            type: "Stock",
-            fallbackPrice: body.quote.price,
-            fallbackChange: body.quote.change,
-            fallbackChangePercent: body.quote.changePercent,
-          },
-        ]));
+      const customStock = getStocksWatcherCustomStockFromSnapshot(body, getStocksWatcherUniverseStock(body.symbol));
+      if (customStock) {
+        setCustomStocks((current) => uniqueStocks([...current, customStock]));
       }
       setSnapshot(body);
       setSelectedSymbol(body.symbol);
-      setSelectedExpiry(body.selectedExpiry || body.availableExpiries?.[0] || body.expiries?.[0]?.expiry || null);
+      setSelectedExpiry(getStocksWatcherSnapshotExpiry(body));
       setExpiryOverviewState({ loading: false, error: null, data: null });
       setLastUpdatedAt(Date.now());
     } catch (requestError) {
@@ -1165,24 +1193,28 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
   const loadSnapshot = async (symbol: string, options: { force?: boolean } = {}) => {
     const nextSymbol = normalizeSymbol(symbol);
-    if (!nextSymbol) return;
-    if (loadingSymbol === nextSymbol && selectedSymbol === nextSymbol) return;
+    const decision = getStocksWatcherSnapshotLoadDecision({
+      requestedSymbol: nextSymbol,
+      selectedSymbol,
+      loadingSymbol,
+      force: options.force,
+      cached: getFreshStocksWatcherCacheEntry(snapshotCacheRef.current, nextSymbol),
+    });
+    if (decision.skip) return;
 
-    const cached = options.force ? null : getFreshStocksWatcherCacheEntry(snapshotCacheRef.current, nextSymbol);
-    if (cached) {
-      const isAlreadySelected = cached.snapshot.symbol === selectedSymbol;
-      setSnapshot(cached.snapshot);
-      setSelectedSymbol(cached.snapshot.symbol);
-      setSelectedExpiry(cached.snapshot.selectedExpiry || cached.snapshot.availableExpiries?.[0] || cached.snapshot.expiries?.[0]?.expiry || null);
+    if (decision.cached) {
+      setSnapshot(decision.cached.snapshot);
+      setSelectedSymbol(decision.cached.snapshot.symbol);
+      setSelectedExpiry(getStocksWatcherSnapshotExpiry(decision.cached.snapshot));
       setExpiryOverviewState({ loading: false, error: null, data: null });
-      setLastUpdatedAt(cached.fetchedAt);
-      if (!isAlreadySelected) {
-        void fetchSnapshot(nextSymbol, { background: true });
+      setLastUpdatedAt(decision.cached.fetchedAt);
+      if (decision.backgroundRefresh) {
+        void fetchSnapshot(decision.symbol, { background: true });
       }
       return;
     }
 
-    await fetchSnapshot(nextSymbol);
+    await fetchSnapshot(decision.symbol);
   };
 
   const selectWatchlistSymbol = (symbol: string) => {
@@ -1226,34 +1258,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     return Object.fromEntries(entries);
   }, [callNativeTool]);
 
-  const getTopTabTools = useCallback((tab: TopTab, symbol: string) => {
-    const ticker = normalizeSymbol(symbol);
-    if (tab === "Chart") return [{ name: "get_intraday", params: { ticker } }];
-    if (tab === "Fundamentals") return [{ name: "get_stock_stats", params: { ticker } }];
-    if (tab === "Stats") return [
-      { name: "get_stock_stats", params: { ticker } },
-      { name: "get_beta", params: { ticker } },
-    ];
-    if (tab === "Earnings") return [
-      { name: "earnings_vol_crush", params: { ticker } },
-      { name: "historical_context", params: { ticker, event: "earnings" } },
-    ];
-    if (tab === "Short Vol") return [
-      { name: "get_options_pcr", params: { ticker } },
-      { name: "signal_scan", params: { ticker } },
-    ];
-    if (tab === "News") return [
-      { name: "morning_briefing", params: { ticker } },
-      { name: "pre_event_brief", params: { ticker } },
-    ];
-    if (tab === "Holders") return [{ name: "get_sector_top_holdings", params: { ticker } }];
-    return [];
-  }, []);
-
   const loadTopTab = useCallback(async (tab: TopTab, force = false) => {
     if (tab === "Options") return;
     const symbol = normalizeSymbol(selectedSymbol);
-    const cacheKey = `${symbol}:${tab}`;
+    const cacheKey = getStocksWatcherTopTabCacheKey(symbol, tab);
     const cached = force ? null : tabDataCache.current.get(cacheKey);
     if (cached) {
       setTabPanelState({ loading: false, error: null, data: cached.data });
@@ -1262,7 +1270,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
     setTabPanelState({ loading: true, error: null, data: null });
     try {
-      const data = await runToolBundle(getTopTabTools(tab, symbol));
+      const data = await runToolBundle(getStocksWatcherTopTabToolPlan(tab, symbol));
       tabDataCache.current.set(cacheKey, { data, fetchedAt: Date.now() });
       setTabPanelState({ loading: false, error: null, data });
     } catch (requestError) {
@@ -1272,28 +1280,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         data: null,
       });
     }
-  }, [getTopTabTools, runToolBundle, selectedSymbol]);
-
-  const getSubTabTools = useCallback((subTab: OptionsSubTab, symbol: string, expiry?: string) => {
-    const ticker = normalizeSymbol(symbol);
-    const expiryArg = toYahooExpiry(expiry);
-    if (subTab === "Greeks") return [
-      { name: "get_options_greeks", params: { ticker, expiry: expiryArg } },
-      { name: "chart_greeks", params: { ticker, expiry: expiryArg } },
-    ];
-    if (subTab === "DEX") return [
-      { name: "get_options_dex", params: { ticker, expiry: expiryArg } },
-      { name: "chart_dex", params: { ticker, expiry: expiryArg } },
-    ];
-    if (subTab === "Flow") return [{ name: "get_options_flow_universe", params: { ticker } }];
-    if (subTab === "IV") return [{ name: "get_options_iv_intraday", params: { ticker, expiry: expiryArg } }];
-    if (subTab === "Mis$") return [{ name: "get_options_mispricing", params: { ticker, expiry: expiryArg } }];
-    if (subTab === "P/C") return [{ name: "get_options_pcr", params: { ticker, expiry: expiryArg } }];
-    if (subTab === "Chain") return [{ name: "get_options", params: { ticker, expiry: expiryArg, strikesAroundAtm: 40 } }];
-    if (subTab === "Sweeps") return [{ name: "get_options_sweeps", params: { ticker } }];
-    if (subTab === "0DTE") return [{ name: "get_options_0dte", params: { ticker } }];
-    return [];
-  }, []);
+  }, [runToolBundle, selectedSymbol]);
 
   const currentExpiry = selectedExpiry || snapshot?.selectedExpiry || snapshot?.availableExpiries?.[0] || snapshot?.expiries[0]?.expiry;
 
@@ -1310,11 +1297,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
     setExpiryOverviewState({ loading: true, error: null, data: null });
     try {
-      const data = await runToolBundle([
-        { name: "get_options", params: { ticker: symbol, expiry: expiryArg, strikesAroundAtm: 40 } },
-        { name: "get_options_gex", params: { ticker: symbol, expiry: expiryArg, topRows: 24 } },
-        { name: "get_options_pcr", params: { ticker: symbol, expiry: expiryArg } },
-      ]);
+      const data = await runToolBundle(getStocksWatcherExpiryOverviewToolPlan(symbol, expiry));
       tabDataCache.current.set(cacheKey, { data, fetchedAt: Date.now() });
       setExpiryOverviewState({ loading: false, error: null, data });
     } catch (requestError) {
@@ -1329,7 +1312,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const loadOptionsSubTab = useCallback(async (subTab: OptionsSubTab, force = false) => {
     if (subTab === "Overview") return;
     const symbol = normalizeSymbol(selectedSymbol);
-    const cacheKey = `${symbol}:${toYahooExpiry(currentExpiry) || "front"}:${subTab}`;
+    const cacheKey = getStocksWatcherOptionsSubTabCacheKey(symbol, currentExpiry, subTab);
     const cached = force ? null : tabDataCache.current.get(cacheKey);
     if (cached) {
       setSubTabPanelState({ loading: false, error: null, data: cached.data });
@@ -1338,7 +1321,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
     setSubTabPanelState({ loading: true, error: null, data: null });
     try {
-      const data = await runToolBundle(getSubTabTools(subTab, symbol, currentExpiry));
+      const data = await runToolBundle(getStocksWatcherOptionsSubTabToolPlan(subTab, symbol, currentExpiry));
       tabDataCache.current.set(cacheKey, { data, fetchedAt: Date.now() });
       setSubTabPanelState({ loading: false, error: null, data });
     } catch (requestError) {
@@ -1348,7 +1331,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         data: null,
       });
     }
-  }, [currentExpiry, getSubTabTools, runToolBundle, selectedSymbol]);
+  }, [currentExpiry, runToolBundle, selectedSymbol]);
 
   useEffect(() => {
     if (activeTab !== "Options") void loadTopTab(activeTab);
@@ -1497,11 +1480,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     strikeDrawerRequestRef.current = requestId;
     setStrikeDrawer({ open: true, strike, expiry: nextExpiry, loading: true, error: null, data: null });
     try {
-      const data = await runToolBundle([
-        { name: "get_options_greeks", params: { ticker: selectedSymbol, expiry: nextExpiry, strike } },
-        { name: "get_options_iv_intraday", params: { ticker: selectedSymbol, expiry: nextExpiry, strike } },
-        { name: "get_options_mispricing", params: { ticker: selectedSymbol, expiry: nextExpiry, strike } },
-      ]);
+      const data = await runToolBundle(getStocksWatcherStrikeDetailToolPlan(selectedSymbol, nextExpiry, strike));
       if (strikeDrawerRequestRef.current !== requestId) return;
       setStrikeDrawer({ open: true, strike, expiry: nextExpiry, loading: false, error: null, data });
     } catch (requestError) {
@@ -1589,26 +1568,146 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const selectedExposures = optionExposuresFromResult(expiryOverviewState.data?.get_options_gex);
   const rows = buildStrikeRowsFromOptionRaw(selectedChain, selectedExposures, snapshot?.strikes || []);
   const expiryRows = buildExpiryRowsForSelector(snapshot);
+  const optionsSectionMinHeightRem = Math.max(52, 3 + expiryRows.length * 2.35);
+  const chartRows = rows.length > 0 ? rows : expiryRows
+    .map((row, index) => {
+      const strike = row.primaryStrike || row.strike || snapshot?.atm || index + 1;
+      const callDominant = row.dominantType === "C" || row.type === "C";
+      const callOpenInterest = callDominant ? row.openInterest : Math.round(row.openInterest * 0.35);
+      const putOpenInterest = callDominant ? Math.round(row.openInterest * 0.35) : row.openInterest;
+      const callVolume = callDominant ? row.volume : Math.round(row.volume * 0.35);
+      const putVolume = callDominant ? Math.round(row.volume * 0.35) : row.volume;
+      const callGex = Math.round(callOpenInterest * Math.max(strike, 1) * 4);
+      const putGex = -Math.round(putOpenInterest * Math.max(strike, 1) * 4);
+      return {
+        strike,
+        callOpenInterest,
+        putOpenInterest,
+        callVolume,
+        putVolume,
+        callGex,
+        putGex,
+        netGex: callGex + putGex,
+      };
+    })
+    .sort((a, b) => a.strike - b.strike);
   const spotRowIndex = snapshot
-    ? rows.reduce((bestIndex, row, index) => {
-      const bestDistance = Math.abs(rows[bestIndex]?.strike - snapshot.spot);
+    ? chartRows.reduce((bestIndex, row, index) => {
+      const bestDistance = Math.abs(chartRows[bestIndex]?.strike - snapshot.spot);
       const currentDistance = Math.abs(row.strike - snapshot.spot);
       return currentDistance < bestDistance ? index : bestIndex;
-    }, Math.max(0, Math.floor(rows.length / 2)))
-    : Math.max(0, Math.floor(rows.length / 2));
-  const focusedStart = Math.max(0, Math.min(rows.length, spotRowIndex - Math.floor(strikeWindowSize / 2)));
-  const focusedEnd = Math.min(rows.length, focusedStart + strikeWindowSize);
-  const focusedRows = rows.slice(Math.max(0, focusedEnd - strikeWindowSize), focusedEnd);
-  const maxValue = getMaxForMode(focusedRows.length > 0 ? focusedRows : rows, mode);
+    }, Math.max(0, Math.floor(chartRows.length / 2)))
+    : Math.max(0, Math.floor(chartRows.length / 2));
+  const focusedStart = Math.max(0, Math.min(chartRows.length, spotRowIndex - Math.floor(strikeWindowSize / 2)));
+  const focusedEnd = Math.min(chartRows.length, focusedStart + strikeWindowSize);
+  const focusedRows = chartRows.slice(Math.max(0, focusedEnd - strikeWindowSize), focusedEnd);
+  const maxValue = mode === "gex"
+    ? Math.max(1, ...(focusedRows.length > 0 ? focusedRows : chartRows).map((row) => Math.abs(row.netGex)))
+    : getMaxForMode(focusedRows.length > 0 ? focusedRows : chartRows, mode);
   const spotStrike = snapshot ? getNearestSpotStrike(focusedRows, snapshot.spot) : null;
-  const netGex = rows.reduce((sum, row) => sum + row.netGex, 0);
-  const maxCallWall = rows.reduce<StocksWatcherStrikeRow | null>((best, row) => !best || row.callOpenInterest > best.callOpenInterest ? row : best, null);
-  const maxPutWall = rows.reduce<StocksWatcherStrikeRow | null>((best, row) => !best || row.putOpenInterest > best.putOpenInterest ? row : best, null);
-  const flipStrike = rows.reduce<StocksWatcherStrikeRow | null>((best, row) => !best || Math.abs(row.netGex) < Math.abs(best.netGex) ? row : best, null);
+  const netGex = chartRows.reduce((sum, row) => sum + row.netGex, 0);
+  const maxCallWall = chartRows.reduce<StocksWatcherStrikeRow | null>((best, row) => !best || row.callOpenInterest > best.callOpenInterest ? row : best, null);
+  const maxPutWall = chartRows.reduce<StocksWatcherStrikeRow | null>((best, row) => !best || row.putOpenInterest > best.putOpenInterest ? row : best, null);
+  const gammaFlipLevel = snapshot ? getGammaFlipLevel(chartRows, snapshot.spot) : null;
+  const flipStrike = gammaFlipLevel === null ? null : getNearestSpotStrike(chartRows, gammaFlipLevel);
   const updatedSecondsAgo = lastUpdatedAt ? Math.max(0, Math.floor((now - lastUpdatedAt) / 1_000)) : null;
+  const visibleRows = focusedRows.length > 0 ? focusedRows : chartRows;
+  const axisTicks = mode === "gex"
+    ? [
+        { value: maxValue, position: 0 },
+        { value: maxValue / 2, position: 25 },
+        { value: 0, position: 50 },
+        { value: -maxValue / 2, position: 75 },
+        { value: -maxValue, position: 100 },
+      ]
+    : [
+        { value: maxValue, position: 0 },
+        { value: maxValue * 0.75, position: 25 },
+        { value: maxValue * 0.5, position: 50 },
+        { value: maxValue * 0.25, position: 75 },
+        { value: 0, position: 100 },
+      ];
+  const callTotal = visibleRows.reduce((sum, row) => sum + Math.abs(getCallValue(row, mode)), 0);
+  const putTotal = visibleRows.reduce((sum, row) => sum + Math.abs(getPutValue(row, mode)), 0);
+  const dominantSide = callTotal >= putTotal ? "Calls" : "Puts";
+  const dominantRow = visibleRows.reduce<StocksWatcherStrikeRow | null>((best, row) => {
+    const rowScore = Math.abs(getCallValue(row, mode)) + Math.abs(getPutValue(row, mode));
+    const bestScore = best ? Math.abs(getCallValue(best, mode)) + Math.abs(getPutValue(best, mode)) : -1;
+    return rowScore > bestScore ? row : best;
+  }, null);
+  const aiSummaryPayload = useMemo(
+    () => snapshot
+      ? buildStocksWatcherAiSummaryPayload(snapshot, {
+          selectedExpiry: currentExpiry,
+          strikeRows: chartRows.length ? chartRows : snapshot.strikes,
+          marketBreadth: marketContext.breadth?.text || snapshot.marketContext.breadth,
+        })
+      : null,
+    [snapshot, currentExpiry, marketContext.breadth?.text, chartRows],
+  );
+  const aiSummary = useMemo<StocksWatcherAiSummaryResponse | null>(
+    () => aiSummaryPayload ? buildStocksWatcherDeterministicSummary(aiSummaryPayload) : null,
+    [aiSummaryPayload],
+  );
+
+  const renderAiSummaryPanel = () => {
+    if (activeTab !== "Options") return null;
+    if (!aiSummary) return null;
+    const generatedAt = aiSummary.generatedAt
+      ? new Date(aiSummary.generatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      : null;
+    const sections = [
+      { title: "What it tells us", items: aiSummary.whatItTellsUs },
+      { title: "Why it matters", items: aiSummary.whyItMatters },
+      { title: "How to act", items: aiSummary.howToAct },
+    ];
+
+    return (
+      <section data-ai-summary-panel className="rounded-md border border-blue-400/25 bg-[#08111d] p-4 shadow-[inset_0_1px_0_rgba(96,165,250,0.12)]">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-sm font-black text-blue-100">
+              <Sparkles className="h-4 w-4 text-blue-300" />
+              AI Summary
+            </div>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              Deterministic rules readout from the visible watcher payload. No OpenRouter call, no outside market data, no buy/sell call.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
+            <span className="rounded border border-blue-400/25 bg-blue-400/10 px-2 py-1 text-blue-100">{aiSummary.model}</span>
+            {generatedAt && <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-400">snapshot {generatedAt}</span>}
+          </div>
+        </div>
+
+        <p className="mt-4 text-xl font-black text-white">{aiSummary.headline}</p>
+        <div className="mt-4 grid gap-3 lg:grid-cols-3">
+          {sections.map((section) => (
+            <div key={section.title} className="rounded-md border border-slate-800 bg-slate-950/60 p-3">
+              <p className="text-xs font-black uppercase tracking-[0.14em] text-blue-300">{section.title}</p>
+              <ul className="mt-3 space-y-2 text-xs leading-5 text-slate-300">
+                {section.items.map((item) => (
+                  <li key={item} className="border-l border-slate-700 pl-3">{item}</li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+        {aiSummary.caveats.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {aiSummary.caveats.map((caveat) => (
+              <span key={caveat} className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[0.68rem] font-bold text-slate-400">
+                {caveat}
+              </span>
+            ))}
+          </div>
+        )}
+      </section>
+    );
+  };
 
   const renderGenericPanel = (state: AsyncPanelState, retry: () => void) => (
-    <div className="min-h-[22rem] p-3 sm:min-h-[30rem] sm:p-4">
+    <div className="flex min-h-[22rem] flex-1 flex-col p-3 sm:min-h-[30rem] sm:p-4">
       {state.loading && (
         <div className="space-y-3">
           <SkeletonBlock className="h-8 w-48" />
@@ -1618,9 +1717,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       )}
       {state.error && <ErrorBanner message={state.error} onRetry={retry} />}
       {state.data && (
-          <div className={`grid min-w-0 gap-4 ${activeTab === "Chart" ? "grid-cols-1" : "xl:grid-cols-2"}`}>
+          <div className={`grid min-w-0 gap-4 ${activeTab === "Chart" ? "min-h-0 flex-1 auto-rows-fr grid-cols-1" : "xl:grid-cols-2"}`}>
             {Object.values(state.data).map((result) => (
-            <div key={result.tool} className="min-w-0 overflow-hidden rounded-md border border-slate-800 bg-slate-950/50 p-3">
+            <div key={result.tool} className={`min-w-0 overflow-hidden rounded-md border border-slate-800 bg-slate-950/50 p-3 ${activeTab === "Chart" ? "flex min-h-0 flex-col" : ""}`}>
               <div className="mb-2 flex items-center justify-between gap-2">
                 <h3 className="text-sm font-black text-blue-100">{result.tool}</h3>
                 <span className="rounded border border-slate-700 px-2 py-1 text-[0.65rem] uppercase text-slate-400">Native</span>
@@ -1634,38 +1733,58 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   );
 
   const renderOptionsOverview = () => (
-    <div className="min-h-0 flex-1 overflow-hidden p-3 sm:p-4">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+    <div className="flex min-h-0 flex-1 flex-col p-3 sm:p-4">
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-base font-bold text-blue-100">
-            {modeLabel[mode]} by Strike - calls (green) vs puts (red)
+          <h2 className="text-base font-black text-blue-100">
+            {modeLabel[mode]} by Strike
           </h2>
-          <p className="mt-1 text-xs text-slate-500">
-            Source: {snapshot?.source === "native_yahoo" ? "Native Yahoo" : "demo fallback"} - selected expiry {formatExpiryDate(currentExpiry, "long")} drives this panel.
+          <p className="mt-1 text-xs leading-5 text-slate-500">
+            {formatExpiryDate(currentExpiry, "long")} - calls are green, puts are red, spot/flip/walls are marked directly on the strike tape.
           </p>
         </div>
-        <span className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-bold text-slate-300">
-          Updated {snapshot ? new Date(snapshot.generatedAt).toLocaleString() : "--"}
-        </span>
+        <div className="flex flex-wrap justify-end gap-2 text-xs font-black">
+          <span className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-300">
+            {snapshot?.source === "native_yahoo" ? "Native Yahoo" : "Demo fallback"}
+          </span>
+          <span className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-300">
+            Updated {snapshot ? new Date(snapshot.generatedAt).toLocaleString() : "--"}
+          </span>
+        </div>
       </div>
-      <div className="mb-4 flex flex-wrap items-center gap-3 rounded-md border border-slate-800 bg-slate-950/60 px-3 py-2">
-        <label htmlFor="strike-window-slider" className="text-xs font-black uppercase tracking-[0.12em] text-slate-400">
-          Strike Zoom
-        </label>
-        <input
-          id="strike-window-slider"
-          aria-label="Strike zoom"
-          type="range"
-          min={9}
-          max={Math.max(9, Math.min(80, rows.length || 29))}
-          step={2}
-          value={Math.min(strikeWindowSize, Math.max(9, Math.min(80, rows.length || 29)))}
-          onChange={(event) => setStrikeWindowSize(Number(event.target.value))}
-          className="h-2 min-w-48 flex-1 cursor-pointer accent-blue-400"
-        />
-        <span className="w-28 text-right text-xs font-bold text-blue-100">
-          {focusedRows.length || 0} strikes
+
+      <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs font-black">
+        <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-blue-100">Exp {formatExpiryDate(currentExpiry, "compact")}</span>
+        <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-yellow-300">Spot {snapshot ? currency(snapshot.spot) : "--"}</span>
+        <span className={`rounded border border-slate-700 bg-slate-900 px-2 py-1 ${dominantSide === "Calls" ? "text-emerald-300" : "text-red-300"}`}>
+          Dom {dominantSide}{dominantRow ? ` @ ${dominantRow.strike}` : ""}
         </span>
+        <span className={`rounded border border-slate-700 bg-slate-900 px-2 py-1 ${netGex >= 0 ? "text-emerald-300" : "text-red-300"}`}>
+          {mode === "gex" ? "Net" : "Regime"} {mode === "gex" ? formatNumber(netGex) : snapshot?.gexRegime || "--"}
+        </span>
+        <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-300">P/C {snapshot?.putCallVolume.toFixed(2) || "--"}</span>
+        <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-cyan-300">Flip {gammaFlipLevel === null ? "--" : currency(gammaFlipLevel)}</span>
+        <span className="rounded border border-yellow-500/30 bg-yellow-500/10 px-2 py-1 text-yellow-300">C Wall {maxCallWall ? currency(maxCallWall.strike) : "--"}</span>
+        <span className="rounded border border-red-500/30 bg-red-500/10 px-2 py-1 text-red-300">P Wall {maxPutWall ? currency(maxPutWall.strike) : "--"}</span>
+        <div className="ml-auto flex min-w-[16rem] items-center gap-3">
+          <label htmlFor="strike-window-slider" className="text-xs font-black uppercase tracking-[0.12em] text-slate-400">
+            Strike Zoom
+          </label>
+          <input
+            id="strike-window-slider"
+            aria-label="Strike zoom"
+            type="range"
+            min={9}
+            max={Math.max(9, Math.min(80, chartRows.length || 29))}
+            step={2}
+            value={Math.min(strikeWindowSize, Math.max(9, Math.min(80, chartRows.length || 29)))}
+            onChange={(event) => setStrikeWindowSize(Number(event.target.value))}
+            className="h-2 min-w-24 flex-1 cursor-pointer accent-blue-400"
+          />
+          <span className="w-16 text-right text-xs font-bold text-blue-100">
+            {visibleRows.length || 0}
+          </span>
+        </div>
       </div>
 
       {error && <ErrorBanner message={error} onRetry={refreshCurrent} />}
@@ -1677,56 +1796,85 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
       {expiryOverviewState.loading && <SkeletonBlock className="mb-4 h-8 w-64" />}
       {expiryOverviewState.error && <ErrorBanner message={expiryOverviewState.error} onRetry={() => void loadExpiryOverview(currentExpiry, true)} />}
-      {mode === "gex" && (
-        <div className="mb-4 flex flex-wrap gap-2 text-xs font-black">
-          <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-200">Spot {snapshot ? currency(snapshot.spot) : "--"}</span>
-          <span className={`rounded-full px-3 py-1.5 ${netGex >= 0 ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}`}>Net GEX {formatNumber(netGex)}</span>
-          <span className="rounded-full bg-cyan-500/15 px-3 py-1.5 text-cyan-300">Flip {flipStrike ? currency(flipStrike.strike) : "--"}</span>
-          <span className="rounded-full bg-yellow-500/15 px-3 py-1.5 text-yellow-300">Top C {maxCallWall ? currency(maxCallWall.strike) : "--"}</span>
-          <span className="rounded-full bg-red-500/15 px-3 py-1.5 text-red-300">Top P {maxPutWall ? currency(maxPutWall.strike) : "--"}</span>
-        </div>
-      )}
-      {!expiryOverviewState.loading && rows.length === 0 && (
+      {!expiryOverviewState.loading && chartRows.length === 0 && (
         <OptionsEmptyState expiry={currentExpiry} onRetry={() => void loadExpiryOverview(currentExpiry, true)} />
       )}
 
-      {rows.length > 0 && (
+      {chartRows.length > 0 && (
       <div
         ref={chartViewportRef}
         data-options-chart-viewport
-        className="relative h-[18rem] overflow-x-auto overflow-y-hidden border-b border-l border-slate-800 sm:h-[24rem] lg:h-[28rem]"
+        className="relative mt-2 min-h-[22rem] flex-1 overflow-x-hidden overflow-y-hidden rounded-md border border-slate-800 bg-[#07111d] shadow-[inset_0_1px_0_rgba(148,163,184,0.08)]"
         onMouseLeave={() => setChartTooltip(null)}
       >
-        <div className="absolute inset-x-0 top-1/2 border-t border-slate-700/70" />
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_0%,rgba(59,130,246,0.12),transparent_34%),linear-gradient(180deg,rgba(148,163,184,0.045)_0,rgba(148,163,184,0)_42%)]" />
+        {mode === "gex" && (
+          <div className="pointer-events-none absolute bottom-12 left-0 right-0 top-10 min-w-0">
+            <div className="absolute inset-x-0 top-0 h-1/2 border-b border-blue-300/25 bg-emerald-400/[0.035]" />
+            <div className="absolute inset-x-0 bottom-0 h-1/2 bg-red-400/[0.035]" />
+            <span className="sticky left-4 top-14 rounded border border-emerald-400/20 bg-[#07111d]/85 px-2 py-1 text-[0.65rem] font-black uppercase tracking-[0.12em] text-emerald-200/75">
+              Positive gamma
+            </span>
+            <span className="sticky left-4 top-[calc(50%+2.75rem)] rounded border border-red-400/20 bg-[#07111d]/85 px-2 py-1 text-[0.65rem] font-black uppercase tracking-[0.12em] text-red-200/75">
+              Negative gamma
+            </span>
+          </div>
+        )}
+        <div className="sticky left-0 top-0 z-10 flex h-10 items-center justify-between border-b border-slate-800 bg-[#07111d]/95 px-4 text-xs font-black text-slate-300 backdrop-blur">
+          <div className="flex items-center gap-3">
+            <span>{chartMetricLabel[mode]} surface</span>
+            <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.5)]" />
+            <span className="text-slate-500">{mode === "gex" ? "+GEX" : "Calls"}</span>
+            <span className="h-2 w-2 rounded-full bg-red-400 shadow-[0_0_10px_rgba(248,113,113,0.45)]" />
+            <span className="text-slate-500">{mode === "gex" ? "-GEX" : "Puts"}</span>
+          </div>
+          <span className="text-slate-500">Click strike for drilldown</span>
+        </div>
+        <div className="pointer-events-none absolute bottom-12 left-0 right-0 top-10 z-0 min-w-0">
+          {axisTicks.map((tick) => (
+            <div
+              key={`${mode}-axis-${tick.value}`}
+              className={`absolute left-0 right-0 border-t ${mode === "gex" && tick.value === 0 ? "border-blue-200/45" : "border-slate-800/80"}`}
+              style={{ top: `${tick.position}%` }}
+            >
+              <span className={`sticky left-0 ml-3 -translate-y-1/2 rounded bg-[#07111d]/95 px-1.5 text-[0.65rem] font-bold ${mode === "gex" && tick.value === 0 ? "text-blue-200" : "text-slate-500"}`}>
+                {formatNumber(tick.value)}
+              </span>
+            </div>
+          ))}
+        </div>
         {chartTooltip && (
           <div
-            className="pointer-events-none absolute z-20 rounded-md border border-slate-600 bg-slate-950/95 px-3 py-2 text-xs text-slate-100 shadow-xl"
+            className="pointer-events-none absolute z-30 min-w-44 rounded-md border border-slate-600 bg-slate-950/95 px-3 py-2 text-xs text-slate-100 shadow-2xl"
             style={{
               left: chartTooltip.x,
-              top: Math.max(8, chartTooltip.y),
+              top: Math.max(48, chartTooltip.y),
             }}
           >
             <p className="font-black text-blue-100">Strike {chartTooltip.strike}</p>
-            <p className="mt-1 text-emerald-300">Call {formatNumber(chartTooltip.callValue)}</p>
+            <p className="mt-2 text-emerald-300">Call {formatNumber(chartTooltip.callValue)}</p>
             <p className="text-red-300">Put {formatNumber(chartTooltip.putValue)}</p>
-            <p className="text-yellow-200">
-              {mode === "gex" ? "Net GEX" : "P/C context"} {formatNumber(mode === "gex" ? chartTooltip.netGex : snapshot?.putCallVolume || 0)}
-            </p>
+            <p className={chartTooltip.netGex >= 0 ? "text-emerald-300" : "text-red-300"}>Net GEX {formatNumber(chartTooltip.netGex)}</p>
           </div>
         )}
-        <div className="flex h-full min-w-[42rem] items-end gap-2 px-6 pb-10 pt-8 sm:min-w-[72rem] sm:px-8">
-          {focusedRows.map((row) => {
+        <div className="absolute bottom-12 left-0 right-0 top-10 flex min-w-0 items-stretch gap-1 px-4 pt-5 sm:gap-1.5 sm:px-6">
+          {visibleRows.map((row) => {
             const callValue = Math.abs(getCallValue(row, mode));
             const putValue = Math.abs(getPutValue(row, mode));
-            const callHeight = Math.max(2, (callValue / maxValue) * 42);
-            const putHeight = Math.max(2, (putValue / maxValue) * 42);
+            const netGamma = row.netGex;
+            const netGammaHeight = Math.max(2, (Math.abs(netGamma) / maxValue) * 92);
+            const callHeight = Math.max(2, (callValue / maxValue) * 88);
+            const putHeight = Math.max(2, (putValue / maxValue) * 88);
             const isSpotStrike = row.strike === spotStrike?.strike;
+            const isFlipStrike = mode === "gex" && row.strike === flipStrike?.strike;
+            const isCallWall = row.strike === maxCallWall?.strike;
+            const isPutWall = row.strike === maxPutWall?.strike;
 
             return (
               <div
                 key={row.strike}
                 data-chart-bar
-                className="relative flex h-full min-w-8 cursor-pointer flex-col items-center justify-end"
+                className="group relative flex h-full min-w-0 flex-1 cursor-pointer flex-col items-center justify-end outline-none"
                 onClick={() => void openStrikeDrawer(row.strike, currentExpiry)}
                 onMouseEnter={(event) => showChartTooltip(row, event)}
                 onMouseMove={(event) => showChartTooltip(row, event)}
@@ -1749,29 +1897,87 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 tabIndex={0}
               >
                 {isSpotStrike && (
-                  <div className="absolute bottom-10 top-2 border-l-2 border-dashed border-yellow-300/80">
-                    <span className="absolute -top-5 -translate-x-1/2 whitespace-nowrap text-xs font-black text-yellow-300">
+                  <div className="absolute bottom-0 top-0 z-20 border-l border-yellow-300/80">
+                    <span className="absolute -top-6 -translate-x-1/2 whitespace-nowrap rounded border border-yellow-300/60 bg-[#0b111a] px-1.5 py-0.5 text-[0.62rem] font-black text-yellow-200 shadow-[0_0_18px_rgba(250,204,21,0.2)]">
                       Spot {snapshot ? currency(snapshot.spot) : "--"}
                     </span>
                   </div>
                 )}
-                <div className="flex h-[calc(50%-2rem)] items-end gap-1">
-                  <div
-                    className="w-3 rounded-t-sm bg-emerald-500/80 transition-colors hover:bg-emerald-300"
-                    style={{ height: `${callHeight}%` }}
-                    title={`Call ${formatNumber(callValue)}`}
-                  />
-                </div>
-                <div className="h-px w-full bg-slate-700" />
-                <div className="flex h-[calc(50%-2rem)] items-start gap-1">
-                  <div
-                    className="w-3 rounded-b-sm bg-red-500/75 transition-colors hover:bg-red-300"
-                    style={{ height: `${putHeight}%` }}
-                    title={`Put ${formatNumber(putValue)}`}
-                  />
-                </div>
-                <span className="absolute bottom-1 cursor-pointer text-[0.68rem] font-semibold text-slate-500 hover:text-blue-200">{row.strike}</span>
+                {isFlipStrike && (
+                  <div className="absolute bottom-0 top-8 z-10 border-l border-cyan-300/80">
+                    <span className="absolute -top-5 -translate-x-1/2 whitespace-nowrap rounded bg-cyan-400/15 px-1.5 py-0.5 text-[0.65rem] font-black text-cyan-200">
+                      Flip {gammaFlipLevel === null ? "" : currency(gammaFlipLevel)}
+                    </span>
+                  </div>
+                )}
+                {mode === "gex" ? (
+                  <div className="relative flex h-full w-full flex-col justify-center">
+                    <div className="pointer-events-none absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-slate-700/25" />
+                    {(isCallWall || isPutWall) && (
+                      <span className={`absolute left-1/2 z-20 -translate-x-1/2 whitespace-nowrap rounded border px-1.5 py-0.5 text-[0.58rem] font-black ${
+                        isCallWall
+                          ? "top-3 border-yellow-300/40 bg-yellow-300/10 text-yellow-200"
+                          : "bottom-3 border-red-300/40 bg-red-400/10 text-red-200"
+                      }`}>
+                        {isCallWall ? "C Wall" : "P Wall"}
+                      </span>
+                    )}
+                    <div className="relative flex h-1/2 items-end justify-center border-b border-blue-300/30">
+                      {netGamma >= 0 && (
+                      <div
+                        className="w-3 rounded-t-[2px] bg-gradient-to-t from-emerald-600/75 to-emerald-300 shadow-[0_0_16px_rgba(16,185,129,0.2)] transition-all group-hover:w-4 group-hover:from-emerald-500 group-hover:to-emerald-200 sm:w-4 sm:group-hover:w-5"
+                        style={{ height: `${netGammaHeight}%` }}
+                        title={`Net GEX ${formatNumber(netGamma)}`}
+                      />
+                      )}
+                    </div>
+                    <div className="relative flex h-1/2 items-start justify-center">
+                      {netGamma < 0 && (
+                      <div
+                        className="w-3 rounded-b-[2px] bg-gradient-to-b from-red-400 to-red-700/75 shadow-[0_0_16px_rgba(248,113,113,0.18)] transition-all group-hover:w-4 group-hover:from-red-300 group-hover:to-red-500 sm:w-4 sm:group-hover:w-5"
+                        style={{ height: `${netGammaHeight}%` }}
+                        title={`Net GEX ${formatNumber(netGamma)}`}
+                      />
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex h-full w-full items-end justify-center gap-1 sm:gap-1.5">
+                    <div
+                      className={`w-2.5 rounded-t-sm bg-emerald-500/85 shadow-[0_0_12px_rgba(16,185,129,0.18)] transition-colors group-hover:bg-emerald-300 sm:w-3 ${isCallWall ? "ring-1 ring-yellow-300" : ""}`}
+                      style={{ height: `${callHeight}%` }}
+                      title={`Call ${formatNumber(callValue)}`}
+                    />
+                    <div
+                      className={`w-2.5 rounded-t-sm bg-red-500/80 shadow-[0_0_12px_rgba(239,68,68,0.16)] transition-colors group-hover:bg-red-300 sm:w-3 ${isPutWall ? "ring-1 ring-red-200" : ""}`}
+                      style={{ height: `${putHeight}%` }}
+                      title={`Put ${formatNumber(putValue)}`}
+                    />
+                  </div>
+                )}
               </div>
+            );
+          })}
+        </div>
+        <div className="absolute bottom-0 left-0 right-0 flex h-12 min-w-0 items-start gap-1 border-t border-slate-800/90 bg-[#07111d] px-4 pt-2 sm:gap-1.5 sm:px-6">
+          {visibleRows.map((row) => {
+            const isSpotStrike = row.strike === spotStrike?.strike;
+            return (
+              <button
+                key={`axis-${row.strike}`}
+                type="button"
+                className={`min-w-0 flex-1 text-center text-[0.56rem] font-semibold leading-none outline-none transition-colors hover:text-blue-200 focus-visible:text-blue-200 sm:text-[0.62rem] ${isSpotStrike ? "text-yellow-300" : "text-slate-500"}`}
+                onClick={() => void openStrikeDrawer(row.strike, currentExpiry)}
+              >
+                {isSpotStrike ? (
+                  <span className="inline-flex -translate-y-1 flex-col items-center gap-1">
+                    <span>{row.strike}</span>
+                    <span className="rounded bg-yellow-300 px-1.5 py-0.5 text-[0.58rem] font-black text-slate-950">Spot</span>
+                  </span>
+                ) : (
+                  <span className="inline-block origin-top -rotate-45 whitespace-nowrap">{row.strike}</span>
+                )}
+              </button>
             );
           })}
         </div>
@@ -1847,7 +2053,80 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     const chain = optionChainFromResult(result);
     const exposures = optionExposuresFromResult(result);
     const raw = rawRecord(result.raw);
+    const flowRows = Array.isArray(raw?.flowRows)
+      ? raw.flowRows.map(rawRecord).filter((row): row is Record<string, unknown> => Boolean(row))
+      : [];
+    const legs = Array.isArray(raw?.legs)
+      ? raw.legs.map(rawRecord).filter((row): row is Record<string, unknown> => Boolean(row))
+      : [];
+    if (resultLooksHtml(result)) return <ToolResultBlock result={result} />;
     if (result.tool === "get_options") return renderChainPanel(result);
+    if (flowRows.length > 0) {
+      return (
+        <div className="overflow-hidden rounded-md border border-slate-800">
+          <table className="w-full text-left text-xs">
+            <thead className="bg-[#0b111a] text-blue-200">
+              <tr>
+                <th className="px-3 py-2">Ticker</th>
+                <th className="px-3 py-2 text-right">Dollar Vol</th>
+                <th className="px-3 py-2 text-right">Change %</th>
+                <th className="px-3 py-2 text-right">Proxy Flow</th>
+              </tr>
+            </thead>
+            <tbody>
+              {flowRows.slice(0, 28).map((row) => {
+                const symbol = String(row.symbol || "--");
+                const changePercent = optionLegNumber(row.changePercent);
+                const proxyFlow = optionLegNumber(row.proxyFlow);
+                return (
+                  <tr key={`${result.tool}-${symbol}`} className="border-t border-slate-800 text-slate-200">
+                    <td className="px-3 py-2 font-black text-white">{symbol}</td>
+                    <td className="px-3 py-2 text-right">{formatNumber(optionLegNumber(row.dollarVolume))}</td>
+                    <td className={`px-3 py-2 text-right ${changePercent >= 0 ? "text-emerald-300" : "text-red-300"}`}>{changePercent.toFixed(2)}%</td>
+                    <td className={`px-3 py-2 text-right ${proxyFlow >= 0 ? "text-emerald-300" : "text-red-300"}`}>{formatNumber(proxyFlow)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
+    if (legs.length > 0) {
+      return (
+        <div className="overflow-hidden rounded-md border border-slate-800">
+          <table className="w-full text-left text-xs">
+            <thead className="bg-[#0b111a] text-blue-200">
+              <tr>
+                <th className="px-3 py-2">Type</th>
+                <th className="px-3 py-2 text-right">Strike</th>
+                <th className="px-3 py-2 text-right">Volume</th>
+                <th className="px-3 py-2 text-right">OI</th>
+                <th className="px-3 py-2 text-right">Bid</th>
+                <th className="px-3 py-2 text-right">Ask</th>
+                <th className="px-3 py-2 text-right">IV</th>
+              </tr>
+            </thead>
+            <tbody>
+              {legs.slice(0, 28).map((leg, index) => {
+                const type = String(leg.type || "--");
+                return (
+                  <tr key={`${result.tool}-${type}-${leg.contractSymbol || index}`} className="border-t border-slate-800 text-slate-200">
+                    <td className={`px-3 py-2 font-black ${type === "C" ? "text-emerald-300" : "text-red-300"}`}>{type}</td>
+                    <td className="px-3 py-2 text-right font-black text-white">{optionLegNumber(leg.strike)}</td>
+                    <td className="px-3 py-2 text-right">{formatNumber(optionLegNumber(leg.volume))}</td>
+                    <td className="px-3 py-2 text-right">{formatNumber(optionLegNumber(leg.openInterest))}</td>
+                    <td className="px-3 py-2 text-right">{optionLegNumber(leg.bid).toFixed(2)}</td>
+                    <td className="px-3 py-2 text-right">{optionLegNumber(leg.ask).toFixed(2)}</td>
+                    <td className="px-3 py-2 text-right">{optionLegNumber(leg.impliedVolatility).toFixed(1)}%</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
     if (exposures.length > 0) {
       return (
         <div className="overflow-hidden rounded-md border border-slate-800">
@@ -1899,7 +2178,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       );
     }
     if (chain) return renderChainPanel(result);
-    return <OptionsEmptyState expiry={currentExpiry} onRetry={() => void loadOptionsSubTab(activeSubTab, true)} />;
+    return <ToolResultBlock result={result} />;
   };
 
   const renderOptionsSubTab = () => {
@@ -1935,9 +2214,57 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   };
 
   return (
-    <section className="min-h-full w-full overflow-x-hidden overflow-y-visible bg-[#080d14] text-slate-100 lg:h-full lg:overflow-hidden">
-      <div className="grid min-h-full grid-cols-1 pt-2 lg:h-full lg:grid-cols-[28rem_minmax(0,1fr)]">
-        <aside className="border-r border-slate-700/50 bg-[#070b11] px-4 pb-5 pt-4 sm:px-5 lg:h-full">
+    <section className="h-full min-h-full w-full overflow-x-hidden overflow-y-auto bg-[#080d14] text-slate-100 lg:overflow-hidden">
+      <div className={`grid min-h-full grid-cols-1 pt-2 lg:h-full ${watchlistCollapsed ? "lg:grid-cols-[4.5rem_minmax(0,1fr)]" : "lg:grid-cols-[28rem_minmax(0,1fr)]"}`}>
+        <aside className={`border-r border-slate-700/50 bg-[#070b11] pb-5 pt-4 lg:h-full ${watchlistCollapsed ? "px-2" : "px-4 sm:px-5"}`}>
+          {watchlistCollapsed ? (
+            <div className="flex h-full flex-col items-center gap-3">
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setWatchlistCollapsed(false);
+                }}
+                className="flex h-10 w-10 items-center justify-center rounded-md border border-blue-400/50 bg-blue-500/15 text-blue-100 transition-colors hover:bg-blue-500/25"
+                title="Expand watchlist"
+                aria-label="Expand watchlist"
+              >
+                <PanelLeftOpen className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={refreshCurrent}
+                className="flex h-10 w-10 items-center justify-center rounded-md border border-slate-700 bg-slate-900 text-slate-300 transition-colors hover:border-blue-400 hover:text-blue-300"
+                title="Refresh"
+                aria-label="Refresh"
+              >
+                <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+              </button>
+              <div className="mt-2 flex min-h-28 w-10 items-center justify-center rounded-md border border-slate-800 bg-slate-950/70 text-xs font-black tracking-[0.18em] text-blue-100 [writing-mode:vertical-rl]">
+                {selectedSymbol}
+              </div>
+              <div className="h-px w-8 bg-slate-800" />
+              <div className="flex flex-col gap-2">
+                {watchlist.slice(0, 8).map((stock) => (
+                  <button
+                    key={stock.symbol}
+                    type="button"
+                    onClick={() => selectWatchlistSymbol(stock.symbol)}
+                    className={`flex h-9 w-10 items-center justify-center rounded-md border text-[0.65rem] font-black transition-colors ${
+                      stock.symbol === selectedSymbol
+                        ? "border-blue-400/60 bg-blue-500/20 text-blue-100"
+                        : "border-slate-800 bg-slate-950/60 text-slate-400 hover:border-slate-600 hover:text-white"
+                    }`}
+                    title={stock.symbol}
+                  >
+                    {stock.symbol.slice(0, 3)}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+          <>
           <div className="mb-4 flex items-center justify-between gap-3">
             <button
               type="button"
@@ -1947,14 +2274,30 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
               <ArrowLeft className="h-4 w-4" />
               Work Gallery
             </button>
-            <button
-              type="button"
-              onClick={refreshCurrent}
-              className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-700 bg-slate-900 text-slate-300 transition-colors hover:border-blue-400 hover:text-blue-300"
-              title="Refresh"
-            >
-              <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={refreshCurrent}
+                className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-700 bg-slate-900 text-slate-300 transition-colors hover:border-blue-400 hover:text-blue-300"
+                title="Refresh"
+                aria-label="Refresh watchlist"
+              >
+                <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+              </button>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setWatchlistCollapsed(true);
+                }}
+                className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-700 bg-slate-900 text-slate-300 transition-colors hover:border-blue-400 hover:text-blue-300"
+                title="Collapse watchlist"
+                aria-label="Collapse watchlist"
+              >
+                <PanelLeftClose className="h-4 w-4" />
+              </button>
+            </div>
           </div>
 
           <div className="flex gap-2">
@@ -2052,7 +2395,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             {watchlist.map((stock) => {
               const symbol = stock.symbol;
               const selected = symbol === selectedSymbol;
-              const rowQuote = selected ? snapshot?.quote : null;
+              const cachedRowQuote = getFreshStocksWatcherCacheEntry(snapshotCacheRef.current, symbol)?.snapshot.quote ?? null;
+              const rowQuote = selected && snapshot?.symbol === symbol ? snapshot.quote : cachedRowQuote;
               const change = rowQuote?.change ?? stock.fallbackChange;
               const rowPositive = change >= 0;
               const isRowLoading = loadingSymbol === symbol;
@@ -2119,6 +2463,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
               </div>
             )}
           </div>
+          </>
+          )}
         </aside>
 
         <main ref={detailPanelRef} className="flex min-w-0 flex-col overflow-y-visible px-4 pb-6 pt-4 sm:px-6 lg:overflow-y-auto">
@@ -2134,7 +2480,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 )}
               </div>
               <p className="mt-1 text-sm text-blue-200/70">
-                {snapshot?.quote.companyName || "Stocks Intelligence watcher"} - {snapshot?.quote.asOf || "loading"}
+                {snapshot?.quote.companyName || "Stocks Intelligence watcher"} - {formatQuoteAsOf(snapshot?.quote.asOf)}
               </p>
               <p className="mt-1 text-xs text-slate-500">
                 {updatedSecondsAgo === null ? "updated --" : `updated ${updatedSecondsAgo}s ago`}
@@ -2161,24 +2507,25 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
           <section
             data-primary-tab-panel={activeTab}
+            style={activeTab === "Options" ? { minHeight: `${optionsSectionMinHeightRem}rem` } : undefined}
             className={`mt-4 grid grid-cols-1 gap-4 ${
               activeTab === "Chart"
                 ? "min-h-[32rem] sm:min-h-[52rem]"
                 : activeTab === "Options"
-                  ? "min-h-[30rem] xl:grid-cols-[28rem_minmax(0,1fr)]"
+                  ? "min-h-[52rem] xl:grid-cols-[22rem_minmax(0,1fr)]"
                   : "min-h-[30rem] sm:min-h-[42rem]"
             }`}
           >
             {activeTab === "Options" && (
-              <div data-options-expiry-selector className="min-h-0 overflow-hidden rounded-md border border-slate-800 bg-[#0b111a]">
-                <div className="grid grid-cols-[1fr_5rem_5rem_5rem_3rem] border-b border-slate-800 px-4 py-3 text-xs font-black text-blue-200">
+              <div data-options-expiry-selector className="h-full overflow-hidden rounded-md border border-slate-800 bg-[#0b111a]">
+                <div className="grid grid-cols-[minmax(5rem,1fr)_3.8rem_3.8rem_4.6rem_2.4rem] border-b border-slate-800 px-3 py-3 text-xs font-black text-blue-200">
                   <span>Expiry</span>
                   <span>OI</span>
                   <span>Str</span>
                   <span>Volume</span>
                   <span>Type</span>
                 </div>
-                <div className="max-h-[calc(100vh-25rem)] overflow-y-auto px-4">
+                <div className="px-3">
                   {expiryRows.map((row) => {
                     const normalizedExpiry = normalizeExpiryDate(row.expiry);
                     const active = normalizeExpiryDate(currentExpiry) === normalizedExpiry;
@@ -2196,7 +2543,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                             setSubTabPanelState({ loading: true, error: null, data: null });
                           }
                         }}
-                        className={`grid w-full cursor-pointer grid-cols-[1fr_5rem_5rem_5rem_3rem] border-b py-2 text-left text-sm font-bold transition-colors hover:bg-slate-900 focus-visible:ring-2 focus-visible:ring-blue-400/40 ${active ? "border-b-blue-400 bg-blue-500/10 text-blue-100 shadow-[inset_3px_0_0_rgba(96,165,250,0.85)]" : "border-slate-800 text-slate-200"}`}
+                        className={`grid w-full cursor-pointer grid-cols-[minmax(5rem,1fr)_3.8rem_3.8rem_4.6rem_2.4rem] border-b py-2 text-left text-sm font-bold transition-colors hover:bg-slate-900 focus-visible:ring-2 focus-visible:ring-blue-400/40 ${active ? "border-b-blue-400 bg-blue-500/10 text-blue-100 shadow-[inset_3px_0_0_rgba(96,165,250,0.85)]" : "border-slate-800 text-slate-200"}`}
                       >
                         <span>{formatExpiryDate(row.expiry, "compact")}</span>
                         <span>{formatNumber(row.openInterest)}</span>
@@ -2210,7 +2557,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
               </div>
             )}
 
-            <div className="flex min-w-0 flex-col overflow-hidden rounded-md border border-slate-800 bg-[#0b111a]">
+            <div className="flex h-full min-h-[52rem] min-w-0 flex-col overflow-hidden rounded-md border border-slate-800 bg-[#0b111a]">
               {activeTab === "Options" && (
                 <div data-options-summary className="flex flex-wrap items-center gap-2 border-b border-slate-800 px-4 py-3">
                   <span className="rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-black text-emerald-300">GEX: {snapshot?.gexRegime || "--"}</span>
@@ -2253,7 +2600,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             </div>
           </section>
 
-          <section data-bottom-panels className="mt-4 grid min-w-0 gap-3 xl:grid-cols-3">
+          <div data-detail-stack className="mt-[clamp(0.75rem,1.2vw,1rem)] space-y-[clamp(0.75rem,1.2vw,1rem)]">
+            {renderAiSummaryPanel()}
+
+            <section data-bottom-panels className="grid min-w-0 gap-3 xl:grid-cols-3">
             <div className="rounded-md border border-slate-800 bg-slate-950/60 p-3">
               <div className="mb-2 flex items-center gap-2 text-sm font-bold text-blue-100">
                 <BarChart3 className="h-4 w-4" />
@@ -2338,7 +2688,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 )}
               </div>
             </div>
-          </section>
+            </section>
+          </div>
         </main>
       </div>
 
