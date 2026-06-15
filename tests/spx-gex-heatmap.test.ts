@@ -2,25 +2,35 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  buildSpxGexHeatmapFromOptionChains,
   buildSpxGexHeatmapFromToolText,
+  calculateBlackScholesExposures,
+  generateAndStoreSpxGexHeatmap,
   getSpxGexGenerationStatus,
   listSpxGexHeatmapDates,
+  listSpxGexHeatmapSessions,
   readSpxGexHeatmap,
-  generateAndStoreSpxGexHeatmap,
   upsertSpxGexHeatmap,
-  type SpxGexHeatmapModel,
   type SpxGexDataClient,
+  type SpxGexHeatmapModel,
+  type SpxGexOptionChain,
 } from "../src/lib/spx-gex-heatmap";
 import { onRequest as getSpxGexHeatmapApi } from "../functions/api/spx-gex-heatmap";
 
-describe("SPX GEX heatmap generation gate", () => {
-  it("allows the 09:15 ET premarket generation slot on a trading day", () => {
-    const status = getSpxGexGenerationStatus(new Date("2026-05-27T13:15:00Z"));
+describe("SPX GEX intraday generation gate", () => {
+  it("allows every 15-minute slot from 09:15 through 16:00 ET on a trading day", () => {
+    const open = getSpxGexGenerationStatus(new Date("2026-05-27T13:15:00Z"));
+    const mid = getSpxGexGenerationStatus(new Date("2026-05-27T17:30:00Z"));
+    const close = getSpxGexGenerationStatus(new Date("2026-05-27T20:00:00Z"));
+    const outside = getSpxGexGenerationStatus(new Date("2026-05-27T20:15:00Z"));
 
-    assert.equal(status.etDateKey, "2026-05-27");
-    assert.equal(status.isMarketOpenDay, true);
-    assert.equal(status.isGenerationWindow, true);
-    assert.equal(status.skipReason, null);
+    assert.equal(open.etDateKey, "2026-05-27");
+    assert.equal(open.snapshotMinuteEt, 9 * 60 + 15);
+    assert.equal(open.isGenerationWindow, true);
+    assert.equal(mid.isGenerationWindow, true);
+    assert.equal(close.snapshotTimeEt, "16:00");
+    assert.equal(close.isGenerationWindow, true);
+    assert.equal(outside.isGenerationWindow, false);
   });
 
   it("blocks generation on a full NYSE market holiday", () => {
@@ -33,6 +43,66 @@ describe("SPX GEX heatmap generation gate", () => {
   });
 });
 
+describe("SPX GEX Black-Scholes exposure model", () => {
+  it("produces finite GEX, DEX, VEX, and CEX values even at the 0DTE floor", () => {
+    const exposure = calculateBlackScholesExposures({
+      spot: 6000,
+      strike: 6000,
+      yearsToExpiry: 0,
+      callOpenInterest: 10_000,
+      putOpenInterest: 12_000,
+      callIv: 0.18,
+      putIv: 0.2,
+    });
+
+    assert.equal(Number.isFinite(exposure.netGex), true);
+    assert.equal(Number.isFinite(exposure.netDex), true);
+    assert.equal(Number.isFinite(exposure.netVex), true);
+    assert.equal(Number.isFinite(exposure.netCex), true);
+    assert.ok(exposure.callGex > 0);
+    assert.ok(exposure.putGex < 0);
+  });
+});
+
+const expiries = ["2026-05-27", "2026-05-28", "2026-05-29", "2026-06-01", "2026-06-02"];
+const strikes = [5900, 5950, 6000, 6050, 6100];
+
+const buildOptionChain = (expiry: string, spot = 6000, multiplier = 1): SpxGexOptionChain => ({
+  symbol: "SPX",
+  spot,
+  expiries,
+  selectedExpiry: expiry,
+  calls: strikes.map((strike, index) => ({
+    contractSymbol: `SPX${expiry.replaceAll("-", "")}C${strike}`,
+    strike,
+    lastPrice: Math.max(1, spot - strike + 25),
+    bid: 1,
+    ask: 2,
+    volume: Math.round((900 + index * 75) * multiplier),
+    openInterest: Math.round((index === 3 ? 22_000 : 4_000 + index * 1_500) * multiplier),
+    impliedVolatility: 18 + index,
+  })),
+  puts: strikes.map((strike, index) => ({
+    contractSymbol: `SPX${expiry.replaceAll("-", "")}P${strike}`,
+    strike,
+    lastPrice: Math.max(1, strike - spot + 25),
+    bid: 1,
+    ask: 2,
+    volume: Math.round((800 + index * 60) * multiplier),
+    openInterest: Math.round((index === 0 ? 24_000 : 5_000 + index * 1_200) * multiplier),
+    impliedVolatility: 20 + index,
+  })),
+});
+
+const buildStructuredHeatmap = (generatedAt = "2026-05-27T13:15:00.000Z", spot = 6000) =>
+  buildSpxGexHeatmapFromOptionChains({
+    generatedAt,
+    quoteText: `| Ticker | Last | Change | Change % |\n| SPX | $${spot.toFixed(2)} | +12.50 | +0.21% |`,
+    chains: expiries.map((expiry, index) => buildOptionChain(expiry, spot, 1 + index * 0.1)),
+    selectedExpiries: expiries,
+    maxStrikes: 5,
+  });
+
 const gexText = (_expiry: string, rows: string) => `
 **Snapshot:** 2026-05-27T09:14:55 **Spot:** $6,000.00
 | Metric | Value |
@@ -41,12 +111,7 @@ const gexText = (_expiry: string, rows: string) => `
 ${rows}
 `.trim();
 
-const buildSampleHeatmap = (generatedAt = "2026-05-27T13:15:30.000Z") =>
-  buildSpxGexHeatmapFromToolText({
-    generatedAt,
-    quoteText: "| Ticker | Last | Change | Change % |\n| SPX | $6,000.00 | +12.50 | +0.21% |",
-    optionsText: "**Available expiries:** 2026-05-26, 2026-05-27, 2026-05-28, 2026-05-29, 2026-06-01, 2026-06-02",
-    zeroDteText: `
+const legacyZeroDteText = `
 **Snapshot:** 2026-05-27T09:14:55 **Session phase:** \`pre_market\` **Now (ET):** 2026-05-27 09:14
 **Expiry:** 2026-05-27
 **Pin level:** $6,000 (0.0%)
@@ -57,7 +122,14 @@ Flip level: $5,950 (-0.8%)
 | Top call wall | $6,050 |
 | Top put wall | $5,900 |
 | Charm regime | \`supportive\` |
-      `.trim(),
+`.trim();
+
+const buildLegacyHeatmap = (generatedAt = "2026-05-27T13:15:00.000Z") =>
+  buildSpxGexHeatmapFromToolText({
+    generatedAt,
+    quoteText: "| Ticker | Last | Change | Change % |\n| SPX | $6,000.00 | +12.50 | +0.21% |",
+    optionsText: "**Available expiries:** 2026-05-27, 2026-05-28, 2026-05-29, 2026-06-01, 2026-06-02",
+    zeroDteText: legacyZeroDteText,
     gexByExpiryText: {
       "2026-05-27": gexText("2026-05-27", "| $6,050 | 1 | 2 | **2.00B** |\n| $6,000 | 1 | 2 | **-1.00B** |"),
       "2026-05-28": gexText("2026-05-28", "| $6,050 | 1 | 2 | **1.25B** |\n| $6,000 | 1 | 2 | **500.00M** |"),
@@ -67,65 +139,66 @@ Flip level: $5,950 (-0.8%)
     },
   });
 
-const createFakeDataClient = () => {
-  const calls: string[] = [];
-  let activeCalls = 0;
-  let maxActiveCalls = 0;
-  const track = async <T>(value: T) => {
-    activeCalls += 1;
-    maxActiveCalls = Math.max(maxActiveCalls, activeCalls);
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    activeCalls -= 1;
-    return value;
-  };
-  const client: SpxGexDataClient = {
-    async getQuotes() {
-      calls.push("get_quotes");
-      return track("| Ticker | Last | Change | Change % |\n| SPX | $6,000.00 | +12.50 | +0.21% |");
-    },
-    async getOptions() {
-      calls.push("get_options");
-      return track("**Available expiries:** 2026-05-26, 2026-05-27, 2026-05-28, 2026-05-29, 2026-06-01, 2026-06-02");
-    },
-    async getOptions0Dte() {
-      calls.push("get_options_0dte");
-      return track(`
-**Snapshot:** 2026-05-27T09:14:55 **Session phase:** \`pre_market\` **Now (ET):** 2026-05-27 09:14
-**Expiry:** 2026-05-27
-**Pin level:** $6,000 (0.0%)
-Flip level: $5,950 (-0.8%)
-| Metric | Value |
-| Net GEX | **1.50B** |
-| Net DEX | **-400.00M** |
-| Top call wall | $6,050 |
-| Top put wall | $5,900 |
-| Charm regime | \`supportive\` |
-      `.trim());
-    },
-    async getOptionsGex(expiry: string) {
-      calls.push(`get_options_gex:${expiry}`);
-      return track(gexText(expiry, "| $6,050 | 1 | 2 | **2.00B** |\n| $6,000 | 1 | 2 | **-1.00B** |"));
-    },
-    async getMarketContext() {
-      calls.push("get_market_context");
-      return track({
-        macroRegime: "risk_off",
-        breadth: { advancers: 2, universeCount: 5, avgChange: -0.65 },
-        flow: { topTicker: "NVDA", proxyFlow: -125_000_000, changePercent: -1.2 },
-        latestHeadline: "Futures slip before the open",
-        warnings: [],
-      });
-    },
-  };
+describe("SPX GEX exposure board model", () => {
+  it("builds a professional exposure board with matrix cells, structure tags, DEX, VEX, and CEX", () => {
+    const heatmap = buildStructuredHeatmap();
 
-  return { client, calls, getMaxActiveCalls: () => maxActiveCalls };
-};
+    assert.deepEqual(heatmap.selectedExpiries, expiries);
+    assert.equal(heatmap.cells.length, expiries.length * strikes.length);
+    assert.equal(heatmap.strikeProfiles.length, strikes.length);
+    assert.equal(heatmap.zeroDte.charmRegime, "black_scholes_approx");
+    assert.equal(typeof heatmap.zeroDte.netVex, "number");
+    assert.equal(typeof heatmap.zeroDte.netCex, "number");
+    assert.ok(heatmap.strikeProfiles.some((row) => row.tags.some((tag) => tag.type === "big_call_wall")));
+    assert.ok(heatmap.strikeProfiles.some((row) => row.tags.some((tag) => tag.type === "key_support")));
+    assert.ok(heatmap.strikeProfiles.some((row) => row.tags.some((tag) => tag.type === "pin")));
+    assert.ok(heatmap.strikeProfiles.some((row) => row.tags.some((tag) => tag.type === "gamma_flip")));
+    assert.ok(heatmap.source.note.includes("Black-Scholes"));
+  });
+
+  it("keeps dense SPX strike coverage near spot instead of collapsing to a sparse mock-table", () => {
+    const denseStrikes = Array.from({ length: 121 }, (_, index) => 5700 + index * 5);
+    const denseChains = expiries.map((expiry) => ({
+      ...buildOptionChain(expiry),
+      calls: denseStrikes.map((strike, index) => ({
+        contractSymbol: `SPX${expiry.replaceAll("-", "")}C${strike}`,
+        strike,
+        lastPrice: Math.max(1, 6000 - strike + 25),
+        bid: 1,
+        ask: 2,
+        volume: 200 + index,
+        openInterest: 1000 + index * 5,
+        impliedVolatility: 18 + (index % 8),
+      })),
+      puts: denseStrikes.map((strike, index) => ({
+        contractSymbol: `SPX${expiry.replaceAll("-", "")}P${strike}`,
+        strike,
+        lastPrice: Math.max(1, strike - 6000 + 25),
+        bid: 1,
+        ask: 2,
+        volume: 180 + index,
+        openInterest: 900 + index * 4,
+        impliedVolatility: 20 + (index % 8),
+      })),
+    }));
+
+    const heatmap = buildSpxGexHeatmapFromOptionChains({
+      generatedAt: "2026-05-27T13:15:00.000Z",
+      chains: denseChains,
+      selectedExpiries: expiries,
+    });
+
+    assert.equal(heatmap.strikes.length, 96);
+    assert.equal(heatmap.cells.length, 96 * expiries.length);
+    assert.ok(heatmap.strikes.includes(6000));
+  });
+});
 
 class MemoryD1Statement {
   private values: unknown[] = [];
 
   constructor(
-    private readonly store: Map<string, Record<string, unknown>>,
+    private readonly db: MemoryD1,
     private readonly query: string,
   ) {}
 
@@ -135,8 +208,31 @@ class MemoryD1Statement {
   }
 
   async run() {
+    if (this.query.includes("INSERT INTO spx_gex_intraday_snapshots")) {
+      const key = `${this.values[0]}:${this.values[1]}`;
+      this.db.intraday.set(key, {
+        trading_date: this.values[0],
+        snapshot_minute_et: this.values[1],
+        snapshot_time_et: this.values[2],
+        generated_at: this.values[3],
+        ticker: this.values[4],
+        spot: this.values[5],
+        snapshot_json: this.values[6],
+      });
+    }
+
+    if (this.query.includes("DELETE FROM spx_gex_intraday_snapshots")) {
+      const keepDates = Array.from(new Set([...this.db.intraday.values()].map((row) => String(row.trading_date))))
+        .sort()
+        .reverse()
+        .slice(0, Number(this.values[0]));
+      for (const [key, row] of [...this.db.intraday.entries()]) {
+        if (!keepDates.includes(String(row.trading_date))) this.db.intraday.delete(key);
+      }
+    }
+
     if (this.query.includes("INSERT INTO spx_gex_heatmaps")) {
-      this.store.set(String(this.values[0]), {
+      this.db.legacy.set(String(this.values[0]), {
         date: this.values[0],
         generated_at: this.values[1],
         snapshot_at: this.values[2],
@@ -148,15 +244,15 @@ class MemoryD1Statement {
         cells_json: this.values[8],
         totals_json: this.values[9],
         zero_dte_json: this.values[10],
-        interpretation_json: this.values[11],
-        source_json: this.values[12],
+        interpretation_json: this.query.includes("interpretation_json") ? this.values[11] : null,
+        source_json: this.query.includes("interpretation_json") ? this.values[12] : this.values[11],
       });
     }
 
     if (this.query.includes("DELETE FROM spx_gex_heatmaps")) {
-      const keepDates = [...this.store.keys()].sort().reverse().slice(0, Number(this.values[0]));
-      for (const date of [...this.store.keys()]) {
-        if (!keepDates.includes(date)) this.store.delete(date);
+      const keepDates = [...this.db.legacy.keys()].sort().reverse().slice(0, Number(this.values[0]));
+      for (const date of [...this.db.legacy.keys()]) {
+        if (!keepDates.includes(date)) this.db.legacy.delete(date);
       }
     }
 
@@ -164,176 +260,204 @@ class MemoryD1Statement {
   }
 
   async first<T = Record<string, unknown>>() {
-    if (this.query.includes("SELECT * FROM spx_gex_heatmaps WHERE date = ?")) {
-      return (this.store.get(String(this.values[0])) || null) as T | null;
+    if (this.query.includes("FROM spx_gex_intraday_snapshots")) {
+      const date = String(this.values[0]);
+      if (this.query.includes("snapshot_minute_et = ?")) {
+        return (this.db.intraday.get(`${date}:${this.values[1]}`) || null) as T | null;
+      }
+      const rows = [...this.db.intraday.values()]
+        .filter((row) => row.trading_date === date)
+        .sort((a, b) => Number(b.snapshot_minute_et) - Number(a.snapshot_minute_et));
+      return (rows[0] || null) as T | null;
     }
+
+    if (this.query.includes("SELECT * FROM spx_gex_heatmaps WHERE date = ?")) {
+      return (this.db.legacy.get(String(this.values[0])) || null) as T | null;
+    }
+
     return null;
   }
 
   async all<T = Record<string, unknown>>() {
-    if (this.query.includes("SELECT date FROM spx_gex_heatmaps")) {
+    if (this.query.includes("SELECT DISTINCT trading_date")) {
       return {
-        results: [...this.store.keys()]
+        results: Array.from(new Set([...this.db.intraday.values()].map((row) => String(row.trading_date))))
           .sort()
           .reverse()
-          .map((date) => ({ date })) as T[],
+          .map((trading_date) => ({ trading_date })) as T[],
       };
     }
+
+    if (this.query.includes("FROM spx_gex_intraday_snapshots") && this.query.includes("WHERE trading_date = ?")) {
+      const date = String(this.values[0]);
+      return {
+        results: [...this.db.intraday.values()]
+          .filter((row) => row.trading_date === date)
+          .sort((a, b) => Number(a.snapshot_minute_et) - Number(b.snapshot_minute_et)) as T[],
+      };
+    }
+
+    if (this.query.includes("SELECT date FROM spx_gex_heatmaps")) {
+      return {
+        results: [...this.db.legacy.keys()].sort().reverse().map((date) => ({ date })) as T[],
+      };
+    }
+
     return { results: [] as T[] };
   }
 }
 
 class MemoryD1 {
-  readonly store = new Map<string, Record<string, unknown>>();
+  readonly intraday = new Map<string, Record<string, unknown>>();
+  readonly legacy = new Map<string, Record<string, unknown>>();
 
   prepare(query: string) {
-    return new MemoryD1Statement(this.store, query);
+    return new MemoryD1Statement(this, query);
   }
 
   async batch(statements: MemoryD1Statement[]) {
-    for (const statement of statements) {
-      await statement.run();
-    }
+    for (const statement of statements) await statement.run();
     return [];
   }
 }
 
-describe("SPX GEX heatmap model", () => {
-  it("builds normalized JSON from tool text and starts active expiries from the 0DTE front expiry", () => {
-    const heatmap = buildSampleHeatmap();
-
-    assert.deepEqual(heatmap.selectedExpiries, ["2026-05-27", "2026-05-28", "2026-05-29", "2026-06-01", "2026-06-02"]);
-    assert.deepEqual(heatmap.strikes, [6050, 6000]);
-    assert.equal(heatmap.quote.last, 6000);
-    assert.equal(heatmap.zeroDte.expiry, "2026-05-27");
-    assert.equal(heatmap.zeroDte.gammaFlip, 5950);
-    assert.equal(heatmap.premarketInterpretation.regime, "pinning_range");
-    assert.match(heatmap.premarketInterpretation.paragraph, /大家好！今日盤前 Gamma 數據顯示/);
-    assert.match(heatmap.premarketInterpretation.levels.upside, /6050 call wall/);
-    assert.match(heatmap.premarketInterpretation.levels.downside, /5900/);
-    assert.equal(heatmap.cells.find((cell) => cell.strike === 6050 && cell.expdate === "2026-05-27")?.netGex, 2_000_000_000);
-    assert.equal(heatmap.cells.find((cell) => cell.strike === 6000 && cell.expdate === "2026-05-28")?.netGex, 500_000_000);
-  });
-});
-
-describe("SPX GEX heatmap D1 storage", () => {
-  it("stores JSON snapshots, reads them back, and retains only the latest seven trading dates", async () => {
+describe("SPX GEX intraday D1 storage", () => {
+  it("stores multiple snapshots per date, reads latest or selected slot, and retains seven trading dates", async () => {
     const db = new MemoryD1();
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T13:15:00.000Z", 6000), { retentionTradingDays: 7 });
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T13:30:00.000Z", 6010), { retentionTradingDays: 7 });
 
-    for (const date of [
-      "2026-05-15",
-      "2026-05-18",
-      "2026-05-19",
-      "2026-05-20",
-      "2026-05-21",
-      "2026-05-22",
-      "2026-05-26",
-      "2026-05-27",
-    ]) {
-      const snapshot = buildSampleHeatmap(`${date}T13:15:30.000Z`) as SpxGexHeatmapModel;
-      await upsertSpxGexHeatmap(db, date, snapshot, { retentionTradingDays: 7 });
+    for (const date of ["2026-05-18", "2026-05-19", "2026-05-20", "2026-05-21", "2026-05-22", "2026-05-26", "2026-05-28"]) {
+      await upsertSpxGexHeatmap(db, date, buildStructuredHeatmap(`${date}T13:15:00.000Z`), { retentionTradingDays: 7 });
     }
 
     assert.deepEqual(await listSpxGexHeatmapDates(db), [
+      "2026-05-28",
       "2026-05-27",
       "2026-05-26",
       "2026-05-22",
       "2026-05-21",
       "2026-05-20",
       "2026-05-19",
-      "2026-05-18",
     ]);
-    assert.equal(await readSpxGexHeatmap(db, "2026-05-15"), null);
-
-    const restored = await readSpxGexHeatmap(db, "2026-05-27");
-    assert.equal(restored?.generatedAt, "2026-05-27T13:15:30.000Z");
-    assert.equal(restored?.quote.last, 6000);
-    assert.equal(restored?.cells.length, 10);
-    assert.equal(restored?.zeroDte.topCallWallLevel, 6050);
-    assert.match(restored?.premarketInterpretation.paragraph || "", /多空分水嶺/);
+    assert.equal((await listSpxGexHeatmapSessions(db, "2026-05-27")).length, 2);
+    assert.equal((await readSpxGexHeatmap(db, "2026-05-27"))?.quote.last, 6010);
+    assert.equal((await readSpxGexHeatmap(db, "2026-05-27", 9 * 60 + 15))?.quote.last, 6000);
+    assert.equal(await readSpxGexHeatmap(db, "2026-05-18"), null);
   });
 
-  it("falls back to a gamma-only interpretation when an old D1 row has no interpretation_json", async () => {
+  it("falls back to the legacy daily table when no intraday snapshot exists", async () => {
     const db = new MemoryD1();
-    await upsertSpxGexHeatmap(db, "2026-05-27", buildSampleHeatmap("2026-05-27T13:15:30.000Z"));
-    const row = db.store.get("2026-05-27");
-    if (row) delete row.interpretation_json;
+    const legacy = buildLegacyHeatmap("2026-05-27T13:15:00.000Z");
+    await upsertSpxGexHeatmap(db, "2026-05-27", legacy);
+    db.intraday.clear();
 
     const restored = await readSpxGexHeatmap(db, "2026-05-27");
 
-    assert.equal(restored?.premarketInterpretation.regime, "pinning_range");
-    assert.equal(restored?.premarketInterpretation.context, null);
-    assert.match(restored?.premarketInterpretation.paragraph || "", /大家好！今日盤前 Gamma 數據顯示/);
+    assert.equal(restored?.quote.last, 6000);
+    assert.equal(restored?.source.gexTool, "get_options_gex");
+    assert.ok((await listSpxGexHeatmapSessions(db, "2026-05-27")).length === 1);
   });
 });
 
 describe("SPX GEX heatmap API", () => {
-  it("returns available dates, the selected JSON heatmap, and falls back to the latest date", async () => {
+  it("returns dates, sessions, selected latest snapshot, and supports explicit snapshot selection", async () => {
     const db = new MemoryD1();
-    await upsertSpxGexHeatmap(db, "2026-05-26", buildSampleHeatmap("2026-05-26T13:15:30.000Z"));
-    await upsertSpxGexHeatmap(db, "2026-05-27", buildSampleHeatmap("2026-05-27T13:15:30.000Z"));
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T13:15:00.000Z", 6000));
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T13:30:00.000Z", 6010));
 
-    const response = await getSpxGexHeatmapApi({
-      request: new Request("https://example.com/api/spx-gex-heatmap?date=2026-05-20"),
+    const latestResponse = await getSpxGexHeatmapApi({
+      request: new Request("https://example.com/api/spx-gex-heatmap?date=2026-05-27"),
       env: { SPX_RECAP_DB: db },
     });
-    const payload = (await response.json()) as {
-      availableDates: string[];
+    const latestPayload = (await latestResponse.json()) as {
       selectedDate: string;
+      sessions: Array<{ snapshotMinuteEt: number }>;
+      selectedSnapshot: { snapshotMinuteEt: number };
       heatmap: SpxGexHeatmapModel;
-      warnings: string[];
     };
 
-    assert.equal(response.status, 200);
-    assert.deepEqual(payload.availableDates, ["2026-05-27", "2026-05-26"]);
-    assert.equal(payload.selectedDate, "2026-05-27");
-    assert.equal(payload.heatmap.generatedAt, "2026-05-27T13:15:30.000Z");
-    assert.deepEqual(payload.warnings, []);
+    assert.equal(latestResponse.status, 200);
+    assert.equal(latestPayload.selectedDate, "2026-05-27");
+    assert.equal(latestPayload.sessions.length, 2);
+    assert.equal(latestPayload.selectedSnapshot.snapshotMinuteEt, 9 * 60 + 30);
+    assert.equal(latestPayload.heatmap.quote.last, 6010);
+
+    const selectedResponse = await getSpxGexHeatmapApi({
+      request: new Request("https://example.com/api/spx-gex-heatmap?date=2026-05-27&snapshot=555"),
+      env: { SPX_RECAP_DB: db },
+    });
+    const selectedPayload = (await selectedResponse.json()) as { heatmap: SpxGexHeatmapModel };
+
+    assert.equal(selectedPayload.heatmap.quote.last, 6000);
   });
 });
 
-describe("SPX GEX heatmap automation runner", () => {
-  it("generates once during the premarket window and skips retries when the date already exists", async () => {
+const createFakeDataClient = () => {
+  const calls: string[] = [];
+  const client: SpxGexDataClient = {
+    async getQuotes() {
+      calls.push("get_quotes");
+      return "| Ticker | Last | Change | Change % |\n| SPX | $6,000.00 | +12.50 | +0.21% |";
+    },
+    async getOptions() {
+      calls.push("get_options");
+      return `**Available expiries:** ${expiries.join(", ")}`;
+    },
+    async getOptions0Dte() {
+      calls.push("get_options_0dte");
+      return legacyZeroDteText;
+    },
+    async getOptionsGex(expiry: string) {
+      calls.push(`get_options_gex:${expiry}`);
+      return gexText(expiry, "| $6,050 | 1 | 2 | **2.00B** |\n| $6,000 | 1 | 2 | **-1.00B** |");
+    },
+    async getOptionsChain(expiry?: string) {
+      calls.push(`get_options_chain:${expiry || "front"}`);
+      return buildOptionChain(expiry || expiries[0]);
+    },
+    async getMarketContext() {
+      calls.push("get_market_context");
+      return {
+        macroRegime: "risk_off",
+        breadth: { advancers: 2, universeCount: 5, avgChange: -0.65 },
+        flow: { topTicker: "NVDA", proxyFlow: -125_000_000, changePercent: -1.2 },
+        latestHeadline: "Futures slip before the open",
+        warnings: [],
+      };
+    },
+  };
+
+  return { client, calls };
+};
+
+describe("SPX GEX intraday automation runner", () => {
+  it("generates once per 15-minute slot and skips only the same slot", async () => {
     const db = new MemoryD1();
-    const { client, calls, getMaxActiveCalls } = createFakeDataClient();
+    const { client, calls } = createFakeDataClient();
 
     const firstRun = await generateAndStoreSpxGexHeatmap({
       db,
       dataClient: client,
       now: new Date("2026-05-27T13:15:00Z"),
     });
-    const retryRun = await generateAndStoreSpxGexHeatmap({
-      db,
-      dataClient: client,
-      now: new Date("2026-05-27T13:20:00Z"),
-    });
-
-    assert.deepEqual(firstRun, { status: "generated", date: "2026-05-27" });
-    assert.deepEqual(retryRun, { status: "skipped_existing", date: "2026-05-27" });
-    assert.equal((await readSpxGexHeatmap(db, "2026-05-27"))?.cells.length, 10);
-    assert.equal(calls.filter((call) => call === "get_quotes").length, 1);
-    assert.equal(calls.filter((call) => call.startsWith("get_options_gex")).length, 5);
-    assert.equal(calls.filter((call) => call === "get_market_context").length, 1);
-    assert.equal(getMaxActiveCalls(), 1);
-  });
-
-  it("still generates the heatmap when market context fails", async () => {
-    const db = new MemoryD1();
-    const { client } = createFakeDataClient();
-    client.getMarketContext = async () => {
-      throw new Error("registry unavailable");
-    };
-
-    const result = await generateAndStoreSpxGexHeatmap({
+    const sameSlot = await generateAndStoreSpxGexHeatmap({
       db,
       dataClient: client,
       now: new Date("2026-05-27T13:15:00Z"),
     });
-    const restored = await readSpxGexHeatmap(db, "2026-05-27");
+    const nextSlot = await generateAndStoreSpxGexHeatmap({
+      db,
+      dataClient: client,
+      now: new Date("2026-05-27T13:30:00Z"),
+    });
 
-    assert.deepEqual(result, { status: "generated", date: "2026-05-27" });
-    assert.match(restored?.premarketInterpretation.warnings[0] || "", /registry unavailable/);
-    assert.equal(restored?.cells.length, 10);
+    assert.deepEqual(firstRun, { status: "generated", date: "2026-05-27", snapshotMinuteEt: 555, snapshotTimeEt: "09:15" });
+    assert.deepEqual(sameSlot, { status: "skipped_existing", date: "2026-05-27", snapshotMinuteEt: 555, snapshotTimeEt: "09:15" });
+    assert.deepEqual(nextSlot, { status: "generated", date: "2026-05-27", snapshotMinuteEt: 570, snapshotTimeEt: "09:30" });
+    assert.equal((await listSpxGexHeatmapSessions(db, "2026-05-27")).length, 2);
+    assert.equal(calls.filter((call) => call === "get_quotes").length, 2);
+    assert.equal(calls.filter((call) => call.startsWith("get_options_chain")).length, 12);
   });
 
   it("does not call the data client when the market is closed", async () => {

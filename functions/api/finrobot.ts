@@ -14,6 +14,8 @@ import { ALL_STOCK_TOOLS } from "./agent/tools/stock-tools";
 import { ALL_ANALYSIS_TOOLS } from "./agent/tools/analysis-tools";
 import { ALL_SEARCH_TOOLS } from "./agent/tools/search-tools";
 import { ALL_RETAIL_TOOLS } from "./agent/tools/retail-tools";
+import { ALL_ALPHAEAR_TOOLS } from "./agent/tools/alphaear-tools";
+import { ALL_FUNDAMENTALS_TOOLS } from "./agent/tools/fundamentals-tools";
 
 interface Env {
   OPENROUTER_API_KEY: string;
@@ -21,7 +23,7 @@ interface Env {
   ADANOS_API_KEY: string;
 }
 
-type AgentProfileId = "finrobot" | "buffett";
+type AgentProfileId = "finrobot" | "buffett" | "serenity";
 
 const TRADITIONAL_CHINESE_OUTPUT_RULE =
   "Language requirement: write the entire final Markdown report in Traditional Chinese only. Do not use Simplified Chinese, except when quoting exact source text or ticker/company names.";
@@ -135,6 +137,53 @@ Top 3 risks only.
 ## Final Verdict
 Direct long-term investor decision.`;
 
+const SERENITY_SUPPLY_CHAIN_PROMPT = `You are Serenity, a supply-chain bottleneck research agent for public-market investment research.
+Your job is research support only. Do not issue trade execution instructions, guaranteed returns, or invented price targets.
+
+Core method:
+1. Start from the user's target, which may be a ticker, company, sector, or theme.
+2. Translate the story into a system change: demand wave -> system pressure -> required technical/economic change -> constrained layer.
+3. Map the value chain before naming winners: downstream demand, system integrators, modules/subsystems, chips/devices, process/packaging/testing, equipment/metrology, materials/consumables, and physical infrastructure.
+4. Rank the scarce layers before ranking companies or funds.
+5. Look for supply-chain bottlenecks: low supplier count, long qualification cycles, hard expansion, customer certification, material purity, capacity reservations, prepayments, long-term contracts, or evidence that customers cannot route around the layer.
+6. Build a candidate universe from visible leaders, upstream suppliers, equipment, materials, testing, infrastructure, and obvious popular names that may deserve downgrading.
+7. Grade evidence with these exact labels:
+   - Strong: filings, official announcements, exchange documents, transcripts, regulator/project documents, patents, standards, or official contracts/orders.
+   - Medium: reputable media, trade publications, specialist analysis with visible assumptions, company product pages, or public supplier/customer cross-checks.
+   - Weak: social posts, forum chatter, unattributed channel checks, screenshots, or unexplained price/volume moves.
+   - Needs checking: important claims that this runtime did not verify with first-hand sources.
+
+Tool protocol:
+- Use search_market_news for themes, sectors, supply-chain terms, and mixed target searches.
+- Use get_alphaear_news when broad China/HK/A-share hot-news context is relevant.
+- If the target looks like a ticker, use get_realtime_quote, get_daily_history, get_company_overview, get_income_statement, get_balance_sheet, search_stock_news, and analysis tools when useful.
+- If the target is only a theme, do not force ticker-only tools. Build the value-chain map from market/news evidence and clearly mark company-specific claims that still need filing checks.
+- Current first-hand filing crawlers are not available in this endpoint. Therefore, never claim that you checked SEC, HKEX, SSE/SZSE filings, annual reports, exchange questions, patents, capacity approvals, tenders, or customer contracts unless a tool result actually provides that source. Mark those checks as Needs checking.
+
+Report contract:
+# [Target] Serenity 產業鏈卡點研究
+## 結論先講
+Lead with the ranked scarce layers and the strongest research direction.
+## 產業鏈層級排序
+Rank at least three layers when possible and explain why each layer is tight or weak.
+## 優先研究名單
+List 3-7 companies, ETFs, or research directions when enough evidence exists. For each: 卡住的環節 / 產業鏈位置 / 排序原因 / 證據 / 主要風險.
+## 證據分級
+Separate confirmed facts from interpretation. Use Strong, Medium, Weak, or Needs checking.
+## 被降級的熱門方向
+Name at least one obvious or crowded area that ranks lower and explain the missing proof.
+## 這個判斷會錯在哪
+Give concrete downgrade/failure conditions: substitution, faster competitor expansion, weak demand, margin failure, financing/dilution, customer loss, governance, geopolitics, or valuation already pricing in success.
+## 下一步查證清單
+Give specific source paths to verify next, such as filings, exchange announcements, transcripts, customer disclosures, capacity/project filings, tender records, patents/standards, margin/inventory/receivable checks, or fund holdings.
+
+Style:
+- Write like a direct research partner, not a broker report.
+- Use Traditional Chinese only.
+- Be skeptical of hype and weak evidence.
+- Say "Needs checking" instead of pretending.
+- ${TRADITIONAL_CHINESE_OUTPUT_RULE}`;
+
 const AGENT_PROFILES: Record<AgentProfileId, { label: string; prompt: string; userMessage: (ticker: string) => string; maxSteps: number }> = {
   finrobot: {
     label: "FinRobot Analyst",
@@ -150,13 +199,25 @@ const AGENT_PROFILES: Record<AgentProfileId, { label: string; prompt: string; us
     userMessage: (ticker) =>
       `Run a Buffett-style long-term investment quality review on "${ticker}". Force the mandatory quality checklist, gather first-hand financial and news evidence with tools, and output the final markdown report in Traditional Chinese only.`,
   },
+  serenity: {
+    label: "Serenity Supply-Chain Research",
+    prompt: SERENITY_SUPPLY_CHAIN_PROMPT,
+    maxSteps: 10,
+    userMessage: (target) =>
+      `Run a Serenity-style supply-chain bottleneck research pass on "${target}". Treat this input as either a ticker, company, sector, or theme. First rank the value-chain layers, then rank companies/funds/research directions only where evidence supports it. Use available tools, label unsupported first-hand checks as Needs checking, and output the final Markdown report in Traditional Chinese only.`,
+  },
 };
+
+function normalizeProfile(profileId?: string): AgentProfileId {
+  if (profileId === "buffett" || profileId === "serenity") return profileId;
+  return "finrobot";
+}
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
     const body = await context.request.json() as { ticker: string; agentProfile?: AgentProfileId };
-    const ticker = body.ticker?.trim().toUpperCase();
-    const profileId: AgentProfileId = body.agentProfile === "buffett" ? "buffett" : "finrobot";
+    const profileId = normalizeProfile(body.agentProfile);
+    const ticker = profileId === "serenity" ? body.ticker?.trim() : body.ticker?.trim().toUpperCase();
     const profile = AGENT_PROFILES[profileId];
 
     if (!ticker) {
@@ -177,6 +238,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     registry.registerAll(ALL_ANALYSIS_TOOLS);
     registry.registerAll(ALL_SEARCH_TOOLS);
     registry.registerAll(ALL_RETAIL_TOOLS);
+    registry.registerAll(ALL_ALPHAEAR_TOOLS);
+    registry.registerAll(ALL_FUNDAMENTALS_TOOLS);
 
     const adapter = new OpenRouterAdapter({ apiKey, model });
     
@@ -209,6 +272,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 function jsonResponse(body: any, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json; charset=utf-8" },
   });
 }

@@ -1,13 +1,41 @@
 import type { D1DatabaseLike } from "./spx-recap-d1";
 
 const MARKET_TIME_ZONE = "America/New_York";
-const GENERATION_MINUTES = new Set([9 * 60 + 15, 9 * 60 + 20, 9 * 60 + 25]);
+const SESSION_START_MINUTE_ET = 9 * 60 + 15;
+const SESSION_END_MINUTE_ET = 16 * 60;
+const SNAPSHOT_INTERVAL_MINUTES = 15;
+const CONTRACT_MULTIPLIER = 100;
+const RISK_FREE_RATE = 0.04;
+const MIN_DTE_YEARS = 1 / (365 * 24 * 4);
+const DEFAULT_EXPIRY_COUNT = 5;
+const DEFAULT_MAX_STRIKES = 96;
+const DEFAULT_STRIKE_RANGE_PCT = 0.05;
 
 export interface SpxGexQuote {
   ticker: string;
   last: number;
   change: string;
   changePercent: string;
+}
+
+export interface SpxGexOptionLeg {
+  contractSymbol?: string;
+  strike: number;
+  lastPrice?: number;
+  bid?: number;
+  ask?: number;
+  volume: number;
+  openInterest: number;
+  impliedVolatility: number;
+}
+
+export interface SpxGexOptionChain {
+  symbol: string;
+  spot: number;
+  expiries: string[];
+  selectedExpiry: string | null;
+  calls: SpxGexOptionLeg[];
+  puts: SpxGexOptionLeg[];
 }
 
 export interface SpxGexZeroDte {
@@ -18,6 +46,8 @@ export interface SpxGexZeroDte {
   gammaFlip: number | null;
   netGex: number | null;
   netDex: number | null;
+  netVex?: number | null;
+  netCex?: number | null;
   topCallWall: string | null;
   topCallWallLevel: number | null;
   topPutWall: string | null;
@@ -29,6 +59,57 @@ export interface SpxGexHeatmapCell {
   strike: number;
   expdate: string;
   netGex: number | null;
+  callGex?: number | null;
+  putGex?: number | null;
+  netDex?: number | null;
+  netVex?: number | null;
+  netCex?: number | null;
+  callOpenInterest?: number;
+  putOpenInterest?: number;
+  totalOpenInterest?: number;
+  totalVolume?: number;
+  avgIv?: number | null;
+  approximate?: boolean;
+}
+
+export interface SpxGexStrikeProfile {
+  strike: number;
+  netGex: number;
+  callGex: number;
+  putGex: number;
+  netDex: number;
+  netVex: number;
+  netCex: number;
+  totalOpenInterest: number;
+  totalVolume: number;
+  dominantExpiry: string | null;
+  tags: SpxGexStructureTag[];
+}
+
+export type SpxGexStructureTagType =
+  | "now"
+  | "pin"
+  | "gamma_flip"
+  | "near_resistance"
+  | "big_call_wall"
+  | "resistance_zone"
+  | "oi_spike"
+  | "key_support"
+  | "structural_support";
+
+export interface SpxGexStructureTag {
+  type: SpxGexStructureTagType;
+  label: string;
+  severity: "info" | "watch" | "major";
+  source: string;
+}
+
+export interface SpxGexSnapshotMeta {
+  tradingDate: string;
+  snapshotMinuteEt: number;
+  snapshotTimeEt: string;
+  generatedAt: string;
+  spot: number;
 }
 
 export type SpxGexPremarketRegime = "bullish_above_flip" | "bearish_below_flip" | "pinning_range" | "mixed";
@@ -66,6 +147,7 @@ export interface SpxGexHeatmapModel {
   ticker: "SPX";
   quote: SpxGexQuote;
   snapshot: string | null;
+  session: SpxGexSnapshotMeta | null;
   selectedExpiries: string[];
   strikeRange: {
     lower: number;
@@ -73,17 +155,32 @@ export interface SpxGexHeatmapModel {
   };
   strikes: number[];
   cells: SpxGexHeatmapCell[];
-  totals: { expdate: string; netGex: number }[];
+  totals: Array<{
+    expdate: string;
+    netGex: number;
+    netDex?: number;
+    netVex?: number;
+    netCex?: number;
+  }>;
+  strikeProfiles: SpxGexStrikeProfile[];
   zeroDte: SpxGexZeroDte;
   premarketInterpretation: SpxGexPremarketInterpretation;
   source: {
-    quoteTool: "get_quotes";
-    optionExpiryTool: "get_options";
-    gexTool: "get_options_gex";
-    zeroDteTool: "get_options_0dte";
-    gexTopRows: 20;
+    quoteTool: string;
+    optionExpiryTool: string;
+    gexTool: string;
+    zeroDteTool: string;
+    gexTopRows: number;
     note: string;
   };
+}
+
+export interface SpxGexSessionSummary {
+  tradingDate: string;
+  snapshotMinuteEt: number;
+  snapshotTimeEt: string;
+  generatedAt: string;
+  spot: number;
 }
 
 export interface BuildSpxGexHeatmapInput {
@@ -95,17 +192,27 @@ export interface BuildSpxGexHeatmapInput {
   marketContext?: SpxGexMarketContext | null;
 }
 
+export interface BuildSpxGexHeatmapFromOptionChainsInput {
+  generatedAt: string;
+  quoteText?: string;
+  chains: SpxGexOptionChain[];
+  selectedExpiries?: string[];
+  marketContext?: SpxGexMarketContext | null;
+  maxStrikes?: number;
+}
+
 export interface SpxGexDataClient {
   getQuotes: () => Promise<string>;
   getOptions: () => Promise<string>;
   getOptions0Dte: () => Promise<string>;
   getOptionsGex: (expiry: string) => Promise<string>;
+  getOptionsChain?: (expiry?: string) => Promise<SpxGexOptionChain>;
   getMarketContext?: () => Promise<SpxGexMarketContext>;
 }
 
 export type SpxGexGenerationResult =
-  | { status: "generated"; date: string }
-  | { status: "skipped_existing"; date: string }
+  | { status: "generated"; date: string; snapshotMinuteEt: number; snapshotTimeEt: string }
+  | { status: "skipped_existing"; date: string; snapshotMinuteEt: number; snapshotTimeEt: string }
   | { status: "skipped"; date: string; reason: string };
 
 interface D1SpxGexHeatmapRow {
@@ -124,12 +231,24 @@ interface D1SpxGexHeatmapRow {
   source_json: string;
 }
 
+interface D1SpxGexIntradayRow {
+  trading_date: string;
+  snapshot_minute_et: number;
+  snapshot_time_et: string;
+  generated_at: string;
+  spot: number;
+  snapshot_json: string;
+}
+
 const toDateKey = (year: number, month: number, day: number) =>
   `${year}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
 
 const toEasternDate = (date: Date) => new Date(date.toLocaleString("en-US", { timeZone: MARKET_TIME_ZONE }));
 
 const getEtMinutes = (date: Date) => date.getHours() * 60 + date.getMinutes();
+
+const formatEtMinute = (minute: number) =>
+  `${Math.floor(minute / 60).toString().padStart(2, "0")}:${(minute % 60).toString().padStart(2, "0")}`;
 
 const observedHolidayKey = (year: number, monthIndex: number, day: number) => {
   const date = new Date(year, monthIndex, day);
@@ -186,9 +305,7 @@ export const getFullMarketHolidayKeys = (year: number) => {
 
   addDate(lastWeekdayOfMonth(year, 4, 1));
 
-  if (year >= 2022) {
-    holidays.add(observedHolidayKey(year, 5, 19));
-  }
+  if (year >= 2022) holidays.add(observedHolidayKey(year, 5, 19));
 
   holidays.add(observedHolidayKey(year, 6, 4));
   addDate(nthWeekdayOfMonth(year, 8, 1, 1));
@@ -206,13 +323,19 @@ export const getSpxGexGenerationStatus = (now: Date = new Date()) => {
   const isWeekend = weekday === 0 || weekday === 6;
   const isFullHoliday = getFullMarketHolidayKeys(etNow.getFullYear()).has(etDateKey);
   const isMarketOpenDay = !isWeekend && !isFullHoliday;
+  const isGenerationMinute =
+    minutes >= SESSION_START_MINUTE_ET &&
+    minutes <= SESSION_END_MINUTE_ET &&
+    (minutes - SESSION_START_MINUTE_ET) % SNAPSHOT_INTERVAL_MINUTES === 0;
 
   return {
     etNow,
     etDateKey,
     minutes,
+    snapshotMinuteEt: minutes,
+    snapshotTimeEt: formatEtMinute(minutes),
     isMarketOpenDay,
-    isGenerationWindow: isMarketOpenDay && GENERATION_MINUTES.has(minutes),
+    isGenerationWindow: isMarketOpenDay && isGenerationMinute,
     skipReason: isWeekend ? "weekend" : isFullHoliday ? "us_market_holiday" : null,
   };
 };
@@ -248,12 +371,18 @@ const parseQuote = (text: string): SpxGexQuote => {
   const lastValue = parseDollarNumber(last);
   if (lastValue === null) throw new Error("Could not parse SPX quote last price.");
 
-  return {
-    ticker,
-    last: lastValue,
-    change,
-    changePercent,
-  };
+  return { ticker, last: lastValue, change, changePercent };
+};
+
+const quoteFromChain = (chain: SpxGexOptionChain, quoteText?: string): SpxGexQuote => {
+  if (quoteText) {
+    try {
+      return parseQuote(quoteText);
+    } catch {
+      // Chain spot is safer than failing a live snapshot because the quote table shape drifted.
+    }
+  }
+  return { ticker: "SPX", last: chain.spot, change: "n/a", changePercent: "n/a" };
 };
 
 const parseAvailableExpiries = (text: string) => {
@@ -300,13 +429,13 @@ const parseZeroDte = (text: string): SpxGexZeroDte => {
 const selectActiveExpiries = (availableExpiries: string[], frontExpiry: string, count: number) =>
   availableExpiries.filter((expiry) => expiry >= frontExpiry).slice(0, count);
 
-export const selectSpxGexActiveExpiriesFromToolText = (optionsText: string, zeroDteText: string, count = 5) => {
+export const selectSpxGexActiveExpiriesFromToolText = (optionsText: string, zeroDteText: string, count = DEFAULT_EXPIRY_COUNT) => {
   const zeroDte = parseZeroDte(zeroDteText);
   return selectActiveExpiries(parseAvailableExpiries(optionsText), zeroDte.expiry, count);
 };
 
 const parseGexRows = (expiry: string, text: string) => {
-  const rows: { strike: number; expdate: string; netGex: number }[] = [];
+  const rows: Array<{ strike: number; expdate: string; netGex: number }> = [];
 
   for (const line of text.split("\n")) {
     if (!/^\|\s*(\*\*)?\$[0-9,.]+/.test(line)) continue;
@@ -324,13 +453,6 @@ const parseGexRows = (expiry: string, text: string) => {
   };
 };
 
-const formatSpxLevel = (value: number | null | undefined) => value ? value.toFixed(0) : "n/a";
-
-const formatSignedPercent = (value: number | null | undefined) => {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
-  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
-};
-
 const compactExposure = (value: number | null | undefined) => {
   if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
   const abs = Math.abs(value);
@@ -340,31 +462,267 @@ const compactExposure = (value: number | null | undefined) => {
   return `${value >= 0 ? "+" : ""}${value.toFixed(0)}`;
 };
 
+const formatStoredLevel = (value: number) => `$${value.toFixed(0)}`;
+
+const normalPdf = (x: number) => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+
+const erf = (x: number) => {
+  const sign = x < 0 ? -1 : 1;
+  const abs = Math.abs(x);
+  const t = 1 / (1 + 0.3275911 * abs);
+  const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-abs * abs);
+  return sign * y;
+};
+
+const normalCdf = (x: number) => 0.5 * (1 + erf(x / Math.SQRT2));
+
+const normalizeIv = (value: number | undefined) => {
+  const raw = typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 20;
+  const decimal = raw > 3 ? raw / 100 : raw;
+  return Math.min(5, Math.max(0.01, decimal));
+};
+
+const effectiveOpenInterest = (leg: SpxGexOptionLeg | undefined) => {
+  if (!leg) return 0;
+  return leg.openInterest > 0 ? leg.openInterest : leg.volume;
+};
+
+const expiryToYears = (expiry: string, now: Date) => {
+  const expiryTime = new Date(`${expiry}T21:00:00Z`).getTime();
+  const years = (expiryTime - now.getTime()) / (365 * 24 * 60 * 60 * 1000);
+  return Math.max(MIN_DTE_YEARS, years);
+};
+
+export const calculateBlackScholesExposures = (input: {
+  spot: number;
+  strike: number;
+  yearsToExpiry: number;
+  callOpenInterest: number;
+  putOpenInterest: number;
+  callIv: number;
+  putIv: number;
+}) => {
+  const calculateSide = (side: "call" | "put", iv: number, oi: number) => {
+    if (input.spot <= 0 || input.strike <= 0 || oi <= 0) {
+      return { deltaExposure: 0, gammaExposure: 0, vannaExposure: 0, charmExposure: 0 };
+    }
+
+    const sigma = normalizeIv(iv);
+    const t = Math.max(MIN_DTE_YEARS, input.yearsToExpiry);
+    const sqrtT = Math.sqrt(t);
+    const d1 = (Math.log(input.spot / input.strike) + (RISK_FREE_RATE + 0.5 * sigma * sigma) * t) / (sigma * sqrtT);
+    const d2 = d1 - sigma * sqrtT;
+    const pdf = normalPdf(d1);
+    const delta = side === "call" ? normalCdf(d1) : normalCdf(d1) - 1;
+    const gamma = pdf / (input.spot * sigma * sqrtT);
+    const vanna = -pdf * d2 / sigma;
+    const charm = -pdf * ((2 * RISK_FREE_RATE * t) - (d2 * sigma * sqrtT)) / (2 * t * sigma * sqrtT);
+
+    return {
+      deltaExposure: delta * oi * CONTRACT_MULTIPLIER * input.spot,
+      gammaExposure: gamma * oi * CONTRACT_MULTIPLIER * input.spot * input.spot * 0.01,
+      vannaExposure: vanna * oi * CONTRACT_MULTIPLIER * input.spot * 0.01,
+      charmExposure: charm * oi * CONTRACT_MULTIPLIER * input.spot / 365,
+    };
+  };
+
+  const call = calculateSide("call", input.callIv, input.callOpenInterest);
+  const put = calculateSide("put", input.putIv, input.putOpenInterest);
+
+  return {
+    callGex: call.gammaExposure,
+    putGex: -put.gammaExposure,
+    netGex: call.gammaExposure - put.gammaExposure,
+    callDex: call.deltaExposure,
+    putDex: put.deltaExposure,
+    netDex: call.deltaExposure + put.deltaExposure,
+    callVex: call.vannaExposure,
+    putVex: put.vannaExposure,
+    netVex: call.vannaExposure + put.vannaExposure,
+    callCex: call.charmExposure,
+    putCex: put.charmExposure,
+    netCex: call.charmExposure + put.charmExposure,
+  };
+};
+
+const optionCellForStrike = (chain: SpxGexOptionChain, strike: number, now: Date): SpxGexHeatmapCell => {
+  const call = chain.calls.find((leg) => leg.strike === strike);
+  const put = chain.puts.find((leg) => leg.strike === strike);
+  const callOpenInterest = call?.openInterest || 0;
+  const putOpenInterest = put?.openInterest || 0;
+  const callEffectiveOpenInterest = effectiveOpenInterest(call);
+  const putEffectiveOpenInterest = effectiveOpenInterest(put);
+  const callIv = normalizeIv(call?.impliedVolatility);
+  const putIv = normalizeIv(put?.impliedVolatility);
+  const yearsToExpiry = expiryToYears(chain.selectedExpiry || "", now);
+  const exposures = calculateBlackScholesExposures({
+    spot: chain.spot,
+    strike,
+    yearsToExpiry,
+    callOpenInterest: callEffectiveOpenInterest,
+    putOpenInterest: putEffectiveOpenInterest,
+    callIv,
+    putIv,
+  });
+
+  return {
+    strike,
+    expdate: chain.selectedExpiry || "",
+    netGex: Math.round(exposures.netGex),
+    callGex: Math.round(exposures.callGex),
+    putGex: Math.round(exposures.putGex),
+    netDex: Math.round(exposures.netDex),
+    netVex: Math.round(exposures.netVex),
+    netCex: Math.round(exposures.netCex),
+    callOpenInterest,
+    putOpenInterest,
+    totalOpenInterest: callEffectiveOpenInterest + putEffectiveOpenInterest,
+    totalVolume: (call?.volume || 0) + (put?.volume || 0),
+    avgIv: Number((((callIv + putIv) / 2) * 100).toFixed(2)),
+    approximate: callOpenInterest + putOpenInterest <= 0 || !(call?.impliedVolatility && put?.impliedVolatility),
+  };
+};
+
+const buildGammaFlipFromProfiles = (profiles: Array<{ strike: number; netGex: number }>, spot: number) => {
+  const sorted = [...profiles].filter((row) => Number.isFinite(row.strike) && Number.isFinite(row.netGex)).sort((a, b) => a.strike - b.strike);
+  const candidates: number[] = [];
+
+  for (let index = 1; index < sorted.length; index += 1) {
+    const previous = sorted[index - 1];
+    const current = sorted[index];
+    if (!previous || !current) continue;
+    if (previous.netGex === 0) candidates.push(previous.strike);
+    if (current.netGex === 0) candidates.push(current.strike);
+    if (Math.sign(previous.netGex) === Math.sign(current.netGex)) continue;
+
+    const denominator = Math.abs(previous.netGex) + Math.abs(current.netGex);
+    const weight = denominator > 0 ? Math.abs(previous.netGex) / denominator : 0.5;
+    candidates.push(previous.strike + (current.strike - previous.strike) * weight);
+  }
+
+  if (candidates.length === 0) return null;
+  return Number(candidates.reduce((nearest, candidate) => Math.abs(candidate - spot) < Math.abs(nearest - spot) ? candidate : nearest).toFixed(2));
+};
+
+const uniqueSortedStrikes = (chains: SpxGexOptionChain[], spot: number, maxStrikes: number) => {
+  const lower = spot * (1 - DEFAULT_STRIKE_RANGE_PCT);
+  const upper = spot * (1 + DEFAULT_STRIKE_RANGE_PCT);
+  const allStrikes = Array.from(new Set(chains.flatMap((chain) => [...chain.calls, ...chain.puts].map((leg) => leg.strike))))
+    .filter((strike) => strike > 0);
+  const strikesInRange = allStrikes.filter((strike) => strike >= lower && strike <= upper);
+  const sourceStrikes = strikesInRange.length >= Math.min(40, maxStrikes) ? strikesInRange : allStrikes;
+
+  return sourceStrikes
+    .sort((a, b) => Math.abs(a - spot) - Math.abs(b - spot))
+    .slice(0, maxStrikes)
+    .sort((a, b) => b - a);
+};
+
+const addStructureTags = (profiles: Omit<SpxGexStrikeProfile, "tags">[], spot: number): SpxGexStrikeProfile[] => {
+  const maxOi = Math.max(1, ...profiles.map((row) => row.totalOpenInterest));
+  const aboveSpot = profiles.filter((row) => row.strike >= spot);
+  const belowSpot = profiles.filter((row) => row.strike <= spot);
+  const spotStrike = [...profiles].sort((a, b) => Math.abs(a.strike - spot) - Math.abs(b.strike - spot))[0]?.strike ?? null;
+  const hasSideGex = profiles.some((row) => Math.abs(row.callGex) > 0 || Math.abs(row.putGex) > 0);
+  const topOiStrikes = new Set(
+    [...profiles]
+      .filter((row) => row.totalOpenInterest > 0)
+      .sort((a, b) => b.totalOpenInterest - a.totalOpenInterest)
+      .slice(0, 3)
+      .map((row) => row.strike),
+  );
+  const callWall = aboveSpot.reduce<typeof profiles[number] | null>((best, row) => {
+    const value = hasSideGex ? row.callGex : row.netGex;
+    const bestValue = best ? (hasSideGex ? best.callGex : best.netGex) : -Infinity;
+    return !best || value > bestValue ? row : best;
+  }, null);
+  const resistanceZone = aboveSpot
+    .filter((row) => row.strike !== callWall?.strike)
+    .sort((a, b) => b.netGex - a.netGex)[0] || null;
+  const putWall = belowSpot.reduce<typeof profiles[number] | null>((best, row) => {
+    const value = hasSideGex ? row.putGex : row.netGex;
+    const bestValue = best ? (hasSideGex ? best.putGex : best.netGex) : Infinity;
+    return !best || value < bestValue ? row : best;
+  }, null);
+  const secondarySupport = belowSpot
+    .filter((row) => row.strike !== putWall?.strike)
+    .sort((a, b) => a.netGex - b.netGex)[0] || null;
+
+  return profiles.map((row) => {
+    const tags: SpxGexStructureTag[] = [];
+    if (row.strike === spotStrike) tags.push({ type: "now", label: "NOW", severity: "major", source: "nearest spot strike" });
+    if (row.strike === callWall?.strike) tags.push({ type: "big_call_wall", label: "Big call wall", severity: "major", source: "largest call GEX above spot" });
+    if (row.strike === resistanceZone?.strike && row.netGex > 0) tags.push({ type: "near_resistance", label: "Near resistance", severity: "watch", source: "positive GEX cluster above spot" });
+    if (row.strike > spot && row.netGex > 0 && Math.abs(row.strike - spot) / Math.max(1, spot) <= 0.01) {
+      tags.push({ type: "resistance_zone", label: "Resistance zone", severity: "watch", source: "nearby positive net GEX" });
+    }
+    if (row.strike === putWall?.strike) tags.push({ type: "key_support", label: "Key support - put wall", severity: "major", source: "largest put GEX below spot" });
+    if (row.strike === secondarySupport?.strike && row.netGex < 0) {
+      tags.push({ type: "structural_support", label: "Structural support", severity: "watch", source: "secondary negative GEX below spot" });
+    }
+    if (topOiStrikes.has(row.strike) && row.totalOpenInterest >= maxOi * 0.85) {
+      tags.push({ type: "oi_spike", label: "OI spike", severity: "major", source: "top open interest cluster" });
+    }
+    return { ...row, tags };
+  });
+};
+
+const nearestStrike = (profiles: SpxGexStrikeProfile[], target: number | null | undefined) => {
+  if (typeof target !== "number" || !Number.isFinite(target) || profiles.length === 0) return null;
+  return profiles.reduce((nearest, row) =>
+    Math.abs(row.strike - target) < Math.abs(nearest.strike - target) ? row : nearest,
+  ).strike;
+};
+
+const pushUniqueTag = (tags: SpxGexStructureTag[], tag: SpxGexStructureTag) => {
+  if (!tags.some((existing) => existing.type === tag.type)) tags.push(tag);
+};
+
+const addKeyLevelAnnotations = (profiles: SpxGexStrikeProfile[], zeroDte: SpxGexZeroDte): SpxGexStrikeProfile[] => {
+  const pinStrike = nearestStrike(profiles, zeroDte.pinLevel);
+  const gammaFlipStrike = nearestStrike(profiles, zeroDte.gammaFlip);
+
+  return profiles.map((row) => {
+    const tags = [...row.tags];
+    if (row.strike === pinStrike) {
+      pushUniqueTag(tags, { type: "pin", label: "PIN", severity: "major", source: "nearest pin level" });
+    }
+    if (row.strike === gammaFlipStrike) {
+      pushUniqueTag(tags, { type: "gamma_flip", label: "FLIP", severity: "major", source: "nearest gamma flip" });
+    }
+    return { ...row, tags };
+  });
+};
+
+const buildStrikeProfiles = (strikes: number[], selectedExpiries: string[], cells: SpxGexHeatmapCell[], spot: number) => {
+  const cellByKey = new Map(cells.map((cell) => [`${cell.strike}:${cell.expdate}`, cell]));
+  const baseProfiles = strikes.map((strike) => {
+    const rowCells = selectedExpiries.map((expiry) => cellByKey.get(`${strike}:${expiry}`)).filter((cell): cell is SpxGexHeatmapCell => Boolean(cell));
+    const dominant = rowCells.reduce<SpxGexHeatmapCell | null>((best, cell) => (!best || Math.abs(cell.netGex || 0) > Math.abs(best.netGex || 0) ? cell : best), null);
+    return {
+      strike,
+      netGex: rowCells.reduce((sum, cell) => sum + Number(cell.netGex || 0), 0),
+      callGex: rowCells.reduce((sum, cell) => sum + Number(cell.callGex || 0), 0),
+      putGex: rowCells.reduce((sum, cell) => sum + Number(cell.putGex || 0), 0),
+      netDex: rowCells.reduce((sum, cell) => sum + Number(cell.netDex || 0), 0),
+      netVex: rowCells.reduce((sum, cell) => sum + Number(cell.netVex || 0), 0),
+      netCex: rowCells.reduce((sum, cell) => sum + Number(cell.netCex || 0), 0),
+      totalOpenInterest: rowCells.reduce((sum, cell) => sum + Number(cell.totalOpenInterest || 0), 0),
+      totalVolume: rowCells.reduce((sum, cell) => sum + Number(cell.totalVolume || 0), 0),
+      dominantExpiry: dominant?.expdate || null,
+    };
+  });
+  return addStructureTags(baseProfiles, spot);
+};
+
 const buildMarketContextSentence = (context: SpxGexMarketContext | null | undefined) => {
   if (!context) return null;
   const parts: string[] = [];
-
-  if (context.macroRegime) {
-    parts.push(`regime 為 ${context.macroRegime}`);
-  }
-
-  if (context.breadth) {
-    parts.push(
-      `approved universe breadth 為 ${context.breadth.advancers}/${context.breadth.universeCount} positive，平均變動 ${formatSignedPercent(context.breadth.avgChange)}`,
-    );
-  }
-
-  if (context.flow) {
-    parts.push(
-      `flow proxy 最大為 ${context.flow.topTicker} ${compactExposure(context.flow.proxyFlow)}，變動 ${formatSignedPercent(context.flow.changePercent)}`,
-    );
-  }
-
-  if (context.latestHeadline) {
-    parts.push(`最新 Yahoo headline：${context.latestHeadline}`);
-  }
-
-  return parts.length > 0 ? `市場背景方面，${parts.join("；")}。` : null;
+  if (context.macroRegime) parts.push(`macro regime ${context.macroRegime}`);
+  if (context.breadth) parts.push(`breadth ${context.breadth.advancers}/${context.breadth.universeCount}`);
+  if (context.flow) parts.push(`largest flow proxy ${context.flow.topTicker} ${compactExposure(context.flow.proxyFlow)}`);
+  if (context.latestHeadline) parts.push(`latest headline: ${context.latestHeadline}`);
+  return parts.length > 0 ? parts.join("; ") : null;
 };
 
 export const buildSpxGexPremarketInterpretation = (
@@ -373,122 +731,108 @@ export const buildSpxGexPremarketInterpretation = (
 ): SpxGexPremarketInterpretation => {
   const spot = heatmap.quote.last;
   const flip = heatmap.zeroDte.gammaFlip;
-  const pin = heatmap.zeroDte.pinLevel;
   const callWall = heatmap.zeroDte.topCallWallLevel;
   const putWall = heatmap.zeroDte.topPutWallLevel;
-  const netGex = heatmap.zeroDte.netGex;
-  const isNearPin = Boolean(pin && Math.abs(spot - pin) / Math.max(1, spot) <= 0.003);
-  const regime: SpxGexPremarketRegime = isNearPin
+  const isNearFlip = Boolean(flip && Math.abs(spot - flip) / Math.max(1, spot) <= 0.003);
+  const regime: SpxGexPremarketRegime = isNearFlip
     ? "pinning_range"
     : flip
       ? spot >= flip
         ? "bullish_above_flip"
         : "bearish_below_flip"
       : "mixed";
-  const negativeClusters = heatmap.cells
-    .filter((cell) => cell.netGex !== null && cell.netGex < 0)
-    .sort((a, b) => Number(a.netGex) - Number(b.netGex))
-    .map((cell) => cell.strike)
-    .filter((strike, index, strikes) => strikes.indexOf(strike) === index)
-    .filter((strike) => strike !== putWall)
-    .slice(0, 2);
-  const downsideLevels = [putWall, ...negativeClusters].filter((value): value is number => typeof value === "number");
-  const dividingLine = flip ? `SPX ${formatSpxLevel(flip)} 為多空分水嶺` : "Gamma flip 暫時缺失，多空分水嶺不完整";
-  const upside = callWall ? `上方關鍵位 ${formatSpxLevel(callWall)} call wall` : "上方 call wall 暫時缺失";
-  const downside = downsideLevels.length > 0
-    ? `下方關鍵位 ${downsideLevels.map(formatSpxLevel).join("、")}`
-    : "下方 put wall / 負 GEX cluster 暫時缺失";
-  const sidePhrase = regime === "pinning_range"
-    ? `現價 ${formatSpxLevel(spot)} 貼近 pin ${formatSpxLevel(pin)}，短線以 pinning / 震盪消化為主`
-    : regime === "bullish_above_flip"
-      ? `站上 ${formatSpxLevel(flip)} 屬多頭領域`
-      : regime === "bearish_below_flip"
-        ? `跌在 ${formatSpxLevel(flip)} 下方屬空頭領域`
-        : "分水嶺資料不完整，方向判斷要降級處理";
-  const gexPhrase = typeof netGex === "number"
-    ? netGex >= 0
-      ? `0DTE NetGEX ${compactExposure(netGex)} 偏正，盤面較容易走震盪、拉回後被承接或反彈後被壓住`
-      : `0DTE NetGEX ${compactExposure(netGex)} 偏負，離開分水嶺後波動容易放大`
-    : "0DTE NetGEX 缺失，波動狀態只能用點位降級判斷";
+  const dividingLine = flip ? `SPX ${flip.toFixed(0)} gamma flip` : "Gamma flip unavailable";
+  const upside = callWall ? `${callWall.toFixed(0)} call wall / resistance` : "Call wall unavailable";
+  const downside = putWall ? `${putWall.toFixed(0)} put wall / support` : "Put wall unavailable";
   const contextSentence = buildMarketContextSentence(marketContext);
-  const paragraph = [
-    `大家好！今日盤前 Gamma 數據顯示，${dividingLine}；${sidePhrase}；${upside}；${downside}。${gexPhrase}。`,
-    contextSentence,
-  ].filter(Boolean).join("");
+  const paragraph = `Spot ${spot.toFixed(2)} vs ${dividingLine}. Upside: ${upside}. Downside: ${downside}. NetGEX ${compactExposure(heatmap.zeroDte.netGex)}, NetDEX ${compactExposure(heatmap.zeroDte.netDex)}, VEX ${compactExposure(heatmap.zeroDte.netVex)}, CEX ${compactExposure(heatmap.zeroDte.netCex)}.`;
 
   return {
-    paragraph,
-    levels: {
-      dividingLine,
-      upside,
-      downside,
-    },
+    paragraph: contextSentence ? `${paragraph} Context: ${contextSentence}.` : paragraph,
+    levels: { dividingLine, upside, downside },
     regime,
     context: contextSentence,
     warnings: marketContext?.warnings || [],
   };
 };
 
-export const buildSpxGexHeatmapFromToolText = (input: BuildSpxGexHeatmapInput): SpxGexHeatmapModel => {
-  const quote = parseQuote(input.quoteText);
-  const availableExpiries = parseAvailableExpiries(input.optionsText);
-  const zeroDte = parseZeroDte(input.zeroDteText);
-  const selectedExpiries = selectActiveExpiries(availableExpiries, zeroDte.expiry, 5);
+const buildSessionMeta = (generatedAt: string, spot: number): SpxGexSnapshotMeta => {
+  const status = getSpxGexGenerationStatus(new Date(generatedAt));
+  return {
+    tradingDate: status.etDateKey,
+    snapshotMinuteEt: status.snapshotMinuteEt,
+    snapshotTimeEt: status.snapshotTimeEt,
+    generatedAt,
+    spot,
+  };
+};
 
-  if (selectedExpiries.length < 5) {
-    throw new Error(`Expected 5 active expiries from front expiry ${zeroDte.expiry}, got ${selectedExpiries.length}.`);
-  }
+export const buildSpxGexHeatmapFromOptionChains = (input: BuildSpxGexHeatmapFromOptionChainsInput): SpxGexHeatmapModel => {
+  if (input.chains.length === 0) throw new Error("No SPX option chains supplied.");
+  const now = new Date(input.generatedAt);
+  const frontChain = input.chains[0];
+  const quote = quoteFromChain(frontChain, input.quoteText);
+  const selectedExpiries = (input.selectedExpiries || input.chains.map((chain) => chain.selectedExpiry).filter(Boolean) as string[])
+    .slice(0, DEFAULT_EXPIRY_COUNT);
+  const chainsByExpiry = new Map(input.chains.map((chain) => [chain.selectedExpiry || "", chain]));
+  const activeChains = selectedExpiries.map((expiry) => chainsByExpiry.get(expiry)).filter((chain): chain is SpxGexOptionChain => Boolean(chain));
+  const strikes = uniqueSortedStrikes(activeChains, quote.last, input.maxStrikes ?? DEFAULT_MAX_STRIKES);
+  const cells = activeChains.flatMap((chain) => strikes.map((strike) => optionCellForStrike(chain, strike, now)));
+  const totals = selectedExpiries.map((expiry) => {
+    const expiryCells = cells.filter((cell) => cell.expdate === expiry);
+    return {
+      expdate: expiry,
+      netGex: expiryCells.reduce((sum, cell) => sum + Number(cell.netGex || 0), 0),
+      netDex: expiryCells.reduce((sum, cell) => sum + Number(cell.netDex || 0), 0),
+      netVex: expiryCells.reduce((sum, cell) => sum + Number(cell.netVex || 0), 0),
+      netCex: expiryCells.reduce((sum, cell) => sum + Number(cell.netCex || 0), 0),
+    };
+  });
+  const strikeProfiles = buildStrikeProfiles(strikes, selectedExpiries, cells, quote.last);
+  const gammaFlip = buildGammaFlipFromProfiles(strikeProfiles, quote.last);
+  const callWall = strikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || row.callGex > best.callGex ? row : best), null);
+  const putWall = strikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || row.putGex < best.putGex ? row : best), null);
+  const pin = strikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || Math.abs(row.netGex) > Math.abs(best.netGex) ? row : best), null);
+  const frontExpiry = selectedExpiries[0] || frontChain.selectedExpiry || "";
+  const frontCells = cells.filter((cell) => cell.expdate === frontExpiry);
 
-  const parsedByExpiry = selectedExpiries.map((expiry) => parseGexRows(expiry, input.gexByExpiryText[expiry] || ""));
-  const lowerStrike = quote.last * 0.9;
-  const upperStrike = quote.last * 1.1;
-  const strikes = Array.from(
-    new Set(
-      parsedByExpiry
-        .flatMap((item) => item.rows)
-        .filter((row) => row.strike >= lowerStrike && row.strike <= upperStrike)
-        .map((row) => row.strike),
-    ),
-  ).sort((a, b) => b - a);
-
-  const cells: SpxGexHeatmapCell[] = [];
-  for (const strike of strikes) {
-    for (const expiry of selectedExpiries) {
-      const row = parsedByExpiry.flatMap((item) => item.rows).find((item) => item.strike === strike && item.expdate === expiry);
-      cells.push({
-        strike,
-        expdate: expiry,
-        netGex: row?.netGex ?? null,
-      });
-    }
-  }
+  const zeroDte: SpxGexZeroDte = {
+    expiry: frontExpiry,
+    sessionPhase: "intraday",
+    nowEt: buildSessionMeta(input.generatedAt, quote.last).snapshotTimeEt,
+    pinLevel: pin?.strike ?? null,
+    gammaFlip,
+    netGex: frontCells.reduce((sum, cell) => sum + Number(cell.netGex || 0), 0),
+    netDex: frontCells.reduce((sum, cell) => sum + Number(cell.netDex || 0), 0),
+    netVex: frontCells.reduce((sum, cell) => sum + Number(cell.netVex || 0), 0),
+    netCex: frontCells.reduce((sum, cell) => sum + Number(cell.netCex || 0), 0),
+    topCallWall: callWall ? formatStoredLevel(callWall.strike) : null,
+    topCallWallLevel: callWall?.strike ?? null,
+    topPutWall: putWall ? formatStoredLevel(putWall.strike) : null,
+    topPutWallLevel: putWall?.strike ?? null,
+    charmRegime: "black_scholes_approx",
+  };
 
   const heatmapWithoutInterpretation: Omit<SpxGexHeatmapModel, "premarketInterpretation"> = {
     generatedAt: input.generatedAt,
     ticker: "SPX",
     quote,
-    snapshot: parsedByExpiry.find((item) => item.snapshot)?.snapshot || null,
+    snapshot: input.generatedAt,
+    session: buildSessionMeta(input.generatedAt, quote.last),
     selectedExpiries,
-    strikeRange: {
-      lower: lowerStrike,
-      upper: upperStrike,
-    },
+    strikeRange: { lower: quote.last * 0.965, upper: quote.last * 1.035 },
     strikes,
     cells,
-    totals: selectedExpiries.map((expiry) => ({
-      expdate: expiry,
-      netGex: cells
-        .filter((cell) => cell.expdate === expiry && cell.netGex !== null)
-        .reduce((sum, cell) => sum + Number(cell.netGex || 0), 0),
-    })),
+    totals,
+    strikeProfiles: addKeyLevelAnnotations(strikeProfiles, zeroDte),
     zeroDte,
     source: {
       quoteTool: "get_quotes",
-      optionExpiryTool: "get_options",
-      gexTool: "get_options_gex",
-      zeroDteTool: "get_options_0dte",
-      gexTopRows: 20,
-      note: "Native Yahoo options data is transformed into per-strike exposure rows; all rendered strikes are filtered to spot +/- 10%.",
+      optionExpiryTool: "get_options_chain",
+      gexTool: "black_scholes_exposure_engine",
+      zeroDteTool: "black_scholes_exposure_engine",
+      gexTopRows: input.maxStrikes ?? DEFAULT_MAX_STRIKES,
+      note: "Yahoo option chains are transformed into Black-Scholes GEX, DEX, VEX (vanna), and CEX (charm) approximations. Missing OI falls back to volume.",
     },
   };
 
@@ -498,46 +842,273 @@ export const buildSpxGexHeatmapFromToolText = (input: BuildSpxGexHeatmapInput): 
   };
 };
 
+const buildStrikeProfileFromLegacyCells = (heatmap: Omit<SpxGexHeatmapModel, "premarketInterpretation">) =>
+  buildStrikeProfiles(heatmap.strikes, heatmap.selectedExpiries, heatmap.cells, heatmap.quote.last);
+
+const keyLevelsCollapsed = (zeroDte: SpxGexZeroDte) => {
+  const levelKeys = [zeroDte.pinLevel, zeroDte.gammaFlip, zeroDte.topCallWallLevel, zeroDte.topPutWallLevel]
+    .map((value) => (typeof value === "number" && Number.isFinite(value) ? value.toFixed(2) : null));
+  const [pin, gammaFlip, callWall, putWall] = levelKeys;
+  return [[pin, gammaFlip, callWall], [pin, gammaFlip, putWall], [pin, callWall, putWall], [gammaFlip, callWall, putWall]]
+    .some((group) => group.every(Boolean) && new Set(group).size === 1);
+};
+
+const normalizeLegacyCollapsedLevels = (heatmap: Omit<SpxGexHeatmapModel, "premarketInterpretation">) => {
+  const strikeProfiles = heatmap.strikeProfiles?.length ? heatmap.strikeProfiles : buildStrikeProfileFromLegacyCells(heatmap);
+  let zeroDte = heatmap.zeroDte;
+  let nextHeatmap = { ...heatmap, strikeProfiles: addKeyLevelAnnotations(strikeProfiles, zeroDte) };
+  if (!keyLevelsCollapsed(heatmap.zeroDte)) return { heatmap: nextHeatmap, normalized: false };
+
+  const upperWall = strikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || row.netGex > best.netGex ? row : best), null);
+  const negativeWall = strikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || row.netGex < best.netGex ? row : best), null);
+  const gammaFlip = buildGammaFlipFromProfiles(strikeProfiles, heatmap.quote.last);
+  zeroDte = { ...heatmap.zeroDte, gammaFlip };
+  if (upperWall) {
+    zeroDte.topCallWallLevel = upperWall.strike;
+    zeroDte.topCallWall = formatStoredLevel(upperWall.strike);
+  }
+  if (negativeWall && negativeWall.netGex < 0) {
+    zeroDte.topPutWallLevel = negativeWall.strike;
+    zeroDte.topPutWall = formatStoredLevel(negativeWall.strike);
+  }
+
+  nextHeatmap = { ...nextHeatmap, strikeProfiles: addKeyLevelAnnotations(strikeProfiles, zeroDte), zeroDte };
+  return { heatmap: nextHeatmap, normalized: true };
+};
+
+export const buildSpxGexHeatmapFromToolText = (input: BuildSpxGexHeatmapInput): SpxGexHeatmapModel => {
+  const quote = parseQuote(input.quoteText);
+  const availableExpiries = parseAvailableExpiries(input.optionsText);
+  const zeroDte = parseZeroDte(input.zeroDteText);
+  const selectedExpiries = selectActiveExpiries(availableExpiries, zeroDte.expiry, DEFAULT_EXPIRY_COUNT);
+  if (selectedExpiries.length < DEFAULT_EXPIRY_COUNT) {
+    throw new Error(`Expected ${DEFAULT_EXPIRY_COUNT} active expiries from front expiry ${zeroDte.expiry}, got ${selectedExpiries.length}.`);
+  }
+
+  const parsedByExpiry = selectedExpiries.map((expiry) => parseGexRows(expiry, input.gexByExpiryText[expiry] || ""));
+  const lowerStrike = quote.last * 0.9;
+  const upperStrike = quote.last * 1.1;
+  const strikes = Array.from(new Set(parsedByExpiry.flatMap((item) => item.rows).filter((row) => row.strike >= lowerStrike && row.strike <= upperStrike).map((row) => row.strike)))
+    .sort((a, b) => b - a);
+
+  const cells: SpxGexHeatmapCell[] = [];
+  for (const strike of strikes) {
+    for (const expiry of selectedExpiries) {
+      const row = parsedByExpiry.flatMap((item) => item.rows).find((item) => item.strike === strike && item.expdate === expiry);
+      cells.push({ strike, expdate: expiry, netGex: row?.netGex ?? null });
+    }
+  }
+
+  const heatmapWithoutInterpretation: Omit<SpxGexHeatmapModel, "premarketInterpretation"> = {
+    generatedAt: input.generatedAt,
+    ticker: "SPX",
+    quote,
+    snapshot: parsedByExpiry.find((item) => item.snapshot)?.snapshot || null,
+    session: buildSessionMeta(input.generatedAt, quote.last),
+    selectedExpiries,
+    strikeRange: { lower: lowerStrike, upper: upperStrike },
+    strikes,
+    cells,
+    totals: selectedExpiries.map((expiry) => ({
+      expdate: expiry,
+      netGex: cells.filter((cell) => cell.expdate === expiry && cell.netGex !== null).reduce((sum, cell) => sum + Number(cell.netGex || 0), 0),
+    })),
+    strikeProfiles: [],
+    zeroDte,
+    source: {
+      quoteTool: "get_quotes",
+      optionExpiryTool: "get_options",
+      gexTool: "get_options_gex",
+      zeroDteTool: "get_options_0dte",
+      gexTopRows: 20,
+      note: "Legacy markdown GEX parser fallback. It does not include DEX, VEX, or CEX cells.",
+    },
+  };
+
+  const withProfiles = { ...heatmapWithoutInterpretation, strikeProfiles: buildStrikeProfileFromLegacyCells(heatmapWithoutInterpretation) };
+  const normalizedHeatmap = normalizeLegacyCollapsedLevels(withProfiles).heatmap;
+  return {
+    ...normalizedHeatmap,
+    premarketInterpretation: buildSpxGexPremarketInterpretation(normalizedHeatmap, input.marketContext),
+  };
+};
+
 const parseJsonField = <T>(value: string): T => JSON.parse(value) as T;
 
-const rowToHeatmap = (row: D1SpxGexHeatmapRow): SpxGexHeatmapModel => {
+const rowToLegacyHeatmap = (row: D1SpxGexHeatmapRow): SpxGexHeatmapModel => {
+  const quote = parseJsonField<SpxGexQuote>(row.quote_json);
   const heatmapWithoutInterpretation: Omit<SpxGexHeatmapModel, "premarketInterpretation"> = {
     generatedAt: row.generated_at,
     ticker: "SPX",
-    quote: parseJsonField<SpxGexQuote>(row.quote_json),
+    quote,
     snapshot: row.snapshot_at,
+    session: buildSessionMeta(row.generated_at, quote.last),
     selectedExpiries: parseJsonField<string[]>(row.expiries_json),
-    strikeRange: {
-      lower: Number(row.spot) * 0.9,
-      upper: Number(row.spot) * 1.1,
-    },
+    strikeRange: { lower: Number(row.spot) * 0.9, upper: Number(row.spot) * 1.1 },
     strikes: parseJsonField<number[]>(row.strikes_json),
     cells: parseJsonField<SpxGexHeatmapCell[]>(row.cells_json),
-    totals: parseJsonField<{ expdate: string; netGex: number }[]>(row.totals_json),
+    totals: parseJsonField<Array<{ expdate: string; netGex: number }>>(row.totals_json),
+    strikeProfiles: [],
     zeroDte: parseJsonField<SpxGexZeroDte>(row.zero_dte_json),
     source: parseJsonField<SpxGexHeatmapModel["source"]>(row.source_json),
   };
 
+  const normalized = normalizeLegacyCollapsedLevels(heatmapWithoutInterpretation);
   return {
-    ...heatmapWithoutInterpretation,
-    premarketInterpretation: row.interpretation_json
+    ...normalized.heatmap,
+    premarketInterpretation: row.interpretation_json && !normalized.normalized
       ? parseJsonField<SpxGexPremarketInterpretation>(row.interpretation_json)
-      : buildSpxGexPremarketInterpretation(heatmapWithoutInterpretation),
+      : buildSpxGexPremarketInterpretation(normalized.heatmap),
   };
 };
 
+const rowToIntradayHeatmap = (row: D1SpxGexIntradayRow): SpxGexHeatmapModel => {
+  const parsed = parseJsonField<SpxGexHeatmapModel>(row.snapshot_json);
+  return {
+    ...parsed,
+    session: parsed.session || {
+      tradingDate: row.trading_date,
+      snapshotMinuteEt: Number(row.snapshot_minute_et),
+      snapshotTimeEt: row.snapshot_time_et,
+      generatedAt: row.generated_at,
+      spot: Number(row.spot),
+    },
+  };
+};
+
+const isMissingIntradayTable = (error: unknown) => /spx_gex_intraday_snapshots|no such table/i.test(error instanceof Error ? error.message : String(error));
+
 export const listSpxGexHeatmapDates = async (db: D1DatabaseLike) => {
+  try {
+    const result = await db.prepare("SELECT DISTINCT trading_date FROM spx_gex_intraday_snapshots ORDER BY trading_date DESC").all<{ trading_date: string }>();
+    const dates = (result.results || []).map((row) => row.trading_date);
+    if (dates.length > 0) return dates;
+  } catch (error) {
+    if (!isMissingIntradayTable(error)) throw error;
+  }
+
   const result = await db.prepare("SELECT date FROM spx_gex_heatmaps ORDER BY date DESC").all<{ date: string }>();
   return (result.results || []).map((row) => row.date);
 };
 
-export const readSpxGexHeatmap = async (db: D1DatabaseLike, date: string): Promise<SpxGexHeatmapModel | null> => {
-  const row = await db
-    .prepare("SELECT * FROM spx_gex_heatmaps WHERE date = ?")
-    .bind(date)
-    .first<D1SpxGexHeatmapRow>();
+export const listSpxGexHeatmapSessions = async (db: D1DatabaseLike, date: string): Promise<SpxGexSessionSummary[]> => {
+  try {
+    const result = await db
+      .prepare(`
+        SELECT trading_date, snapshot_minute_et, snapshot_time_et, generated_at, spot
+        FROM spx_gex_intraday_snapshots
+        WHERE trading_date = ?
+        ORDER BY snapshot_minute_et ASC
+      `)
+      .bind(date)
+      .all<D1SpxGexIntradayRow>();
+    const sessions = (result.results || []).map((row) => ({
+      tradingDate: row.trading_date,
+      snapshotMinuteEt: Number(row.snapshot_minute_et),
+      snapshotTimeEt: row.snapshot_time_et,
+      generatedAt: row.generated_at,
+      spot: Number(row.spot),
+    }));
+    if (sessions.length > 0) return sessions;
+  } catch (error) {
+    if (!isMissingIntradayTable(error)) throw error;
+  }
 
-  return row ? rowToHeatmap(row) : null;
+  const legacy = await readLegacySpxGexHeatmap(db, date);
+  return legacy?.session ? [legacy.session] : [];
+};
+
+const readLegacySpxGexHeatmap = async (db: D1DatabaseLike, date: string): Promise<SpxGexHeatmapModel | null> => {
+  const row = await db.prepare("SELECT * FROM spx_gex_heatmaps WHERE date = ?").bind(date).first<D1SpxGexHeatmapRow>();
+  return row ? rowToLegacyHeatmap(row) : null;
+};
+
+export const readSpxGexIntradaySnapshot = async (
+  db: D1DatabaseLike,
+  date: string,
+  snapshotMinuteEt?: number | null,
+): Promise<SpxGexHeatmapModel | null> => {
+  try {
+    const row = snapshotMinuteEt === null || snapshotMinuteEt === undefined
+      ? await db
+        .prepare(`
+          SELECT * FROM spx_gex_intraday_snapshots
+          WHERE trading_date = ?
+          ORDER BY snapshot_minute_et DESC
+          LIMIT 1
+        `)
+        .bind(date)
+        .first<D1SpxGexIntradayRow>()
+      : await db
+        .prepare(`
+          SELECT * FROM spx_gex_intraday_snapshots
+          WHERE trading_date = ? AND snapshot_minute_et = ?
+        `)
+        .bind(date, snapshotMinuteEt)
+        .first<D1SpxGexIntradayRow>();
+
+    return row ? rowToIntradayHeatmap(row) : null;
+  } catch (error) {
+    if (!isMissingIntradayTable(error)) throw error;
+    return null;
+  }
+};
+
+export const readSpxGexHeatmap = async (db: D1DatabaseLike, date: string, snapshotMinuteEt?: number | null): Promise<SpxGexHeatmapModel | null> => {
+  const intraday = await readSpxGexIntradaySnapshot(db, date, snapshotMinuteEt);
+  return intraday || readLegacySpxGexHeatmap(db, date);
+};
+
+const runStatement = async (db: D1DatabaseLike, statement: ReturnType<D1DatabaseLike["prepare"]>) => {
+  if (db.batch) await db.batch([statement]);
+  else await statement.run();
+};
+
+export const upsertSpxGexIntradaySnapshot = async (
+  db: D1DatabaseLike,
+  heatmap: SpxGexHeatmapModel,
+  options: { retentionTradingDays?: number } = {},
+) => {
+  if (!heatmap.session) throw new Error("Intraday heatmap snapshot requires session metadata.");
+  const retentionTradingDays = options.retentionTradingDays ?? 7;
+  const upsert = db.prepare(`
+    INSERT INTO spx_gex_intraday_snapshots (
+      trading_date, snapshot_minute_et, snapshot_time_et, generated_at, ticker, spot,
+      snapshot_json, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(trading_date, snapshot_minute_et) DO UPDATE SET
+      snapshot_time_et = excluded.snapshot_time_et,
+      generated_at = excluded.generated_at,
+      ticker = excluded.ticker,
+      spot = excluded.spot,
+      snapshot_json = excluded.snapshot_json,
+      updated_at = excluded.updated_at
+  `).bind(
+    heatmap.session.tradingDate,
+    heatmap.session.snapshotMinuteEt,
+    heatmap.session.snapshotTimeEt,
+    heatmap.generatedAt,
+    heatmap.ticker,
+    heatmap.quote.last,
+    JSON.stringify(heatmap),
+    heatmap.generatedAt,
+    heatmap.generatedAt,
+  );
+  const prune = db.prepare(`
+    DELETE FROM spx_gex_intraday_snapshots
+    WHERE trading_date NOT IN (
+      SELECT trading_date FROM (
+        SELECT DISTINCT trading_date FROM spx_gex_intraday_snapshots ORDER BY trading_date DESC LIMIT ?
+      )
+    )
+  `).bind(retentionTradingDays);
+
+  if (db.batch) await db.batch([upsert, prune]);
+  else {
+    await upsert.run();
+    await prune.run();
+  }
 };
 
 export const upsertSpxGexHeatmap = async (
@@ -547,23 +1118,7 @@ export const upsertSpxGexHeatmap = async (
   options: { retentionTradingDays?: number } = {},
 ) => {
   const retentionTradingDays = options.retentionTradingDays ?? 7;
-  const bindCommonUpsert = (query: string) => db.prepare(query).bind(
-    date,
-    heatmap.generatedAt,
-    heatmap.snapshot,
-    heatmap.ticker,
-    heatmap.quote.last,
-    JSON.stringify(heatmap.quote),
-    JSON.stringify(heatmap.selectedExpiries),
-    JSON.stringify(heatmap.strikes),
-    JSON.stringify(heatmap.cells),
-    JSON.stringify(heatmap.totals),
-    JSON.stringify(heatmap.zeroDte),
-    JSON.stringify(heatmap.source),
-    heatmap.generatedAt,
-    heatmap.generatedAt,
-  );
-  const upsert = db.prepare(`
+  const legacyUpsert = db.prepare(`
     INSERT INTO spx_gex_heatmaps (
       date, generated_at, snapshot_at, ticker, spot, quote_json, expiries_json,
       strikes_json, cells_json, totals_json, zero_dte_json, interpretation_json, source_json, created_at, updated_at
@@ -600,50 +1155,112 @@ export const upsertSpxGexHeatmap = async (
     heatmap.generatedAt,
     heatmap.generatedAt,
   );
-  const legacyUpsert = bindCommonUpsert(`
-    INSERT INTO spx_gex_heatmaps (
-      date, generated_at, snapshot_at, ticker, spot, quote_json, expiries_json,
-      strikes_json, cells_json, totals_json, zero_dte_json, source_json, created_at, updated_at
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(date) DO UPDATE SET
-      generated_at = excluded.generated_at,
-      snapshot_at = excluded.snapshot_at,
-      ticker = excluded.ticker,
-      spot = excluded.spot,
-      quote_json = excluded.quote_json,
-      expiries_json = excluded.expiries_json,
-      strikes_json = excluded.strikes_json,
-      cells_json = excluded.cells_json,
-      totals_json = excluded.totals_json,
-      zero_dte_json = excluded.zero_dte_json,
-      source_json = excluded.source_json,
-      updated_at = excluded.updated_at
-  `);
-
-  const prune = db.prepare(`
+  const legacyPrune = db.prepare(`
     DELETE FROM spx_gex_heatmaps
     WHERE date NOT IN (
       SELECT date FROM spx_gex_heatmaps ORDER BY date DESC LIMIT ?
     )
   `).bind(retentionTradingDays);
 
-  const runStatements = async (statement: typeof upsert) => {
-    if (db.batch) {
-      await db.batch([statement, prune]);
-    } else {
-      await statement.run();
-      await prune.run();
-    }
-  };
-
   try {
-    await runStatements(upsert);
+    if (db.batch) await db.batch([legacyUpsert, legacyPrune]);
+    else {
+      await legacyUpsert.run();
+      await legacyPrune.run();
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!message.includes("interpretation_json")) throw error;
-    await runStatements(legacyUpsert);
+    const fallback = db.prepare(`
+      INSERT INTO spx_gex_heatmaps (
+        date, generated_at, snapshot_at, ticker, spot, quote_json, expiries_json,
+        strikes_json, cells_json, totals_json, zero_dte_json, source_json, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(date) DO UPDATE SET
+        generated_at = excluded.generated_at,
+        snapshot_at = excluded.snapshot_at,
+        ticker = excluded.ticker,
+        spot = excluded.spot,
+        quote_json = excluded.quote_json,
+        expiries_json = excluded.expiries_json,
+        strikes_json = excluded.strikes_json,
+        cells_json = excluded.cells_json,
+        totals_json = excluded.totals_json,
+        zero_dte_json = excluded.zero_dte_json,
+        source_json = excluded.source_json,
+        updated_at = excluded.updated_at
+    `).bind(
+      date,
+      heatmap.generatedAt,
+      heatmap.snapshot,
+      heatmap.ticker,
+      heatmap.quote.last,
+      JSON.stringify(heatmap.quote),
+      JSON.stringify(heatmap.selectedExpiries),
+      JSON.stringify(heatmap.strikes),
+      JSON.stringify(heatmap.cells),
+      JSON.stringify(heatmap.totals),
+      JSON.stringify(heatmap.zeroDte),
+      JSON.stringify(heatmap.source),
+      heatmap.generatedAt,
+      heatmap.generatedAt,
+    );
+    await runStatement(db, fallback);
   }
+
+  try {
+    await upsertSpxGexIntradaySnapshot(db, heatmap, { retentionTradingDays });
+  } catch (error) {
+    if (!isMissingIntradayTable(error)) throw error;
+  }
+};
+
+const buildFromStructuredChains = async (options: {
+  dataClient: SpxGexDataClient;
+  now: Date;
+  marketContext: SpxGexMarketContext | null;
+}) => {
+  if (!options.dataClient.getOptionsChain) return null;
+  const quoteText = await options.dataClient.getQuotes();
+  const frontChain = await options.dataClient.getOptionsChain();
+  const frontExpiry = frontChain.selectedExpiry || frontChain.expiries[0];
+  if (!frontExpiry) throw new Error("SPX option chain returned no front expiry.");
+  const selectedExpiries = selectActiveExpiries(frontChain.expiries, frontExpiry, DEFAULT_EXPIRY_COUNT);
+  if (selectedExpiries.length < DEFAULT_EXPIRY_COUNT) {
+    throw new Error(`Expected ${DEFAULT_EXPIRY_COUNT} active expiries from front expiry ${frontExpiry}, got ${selectedExpiries.length}.`);
+  }
+  const chains = await Promise.all(selectedExpiries.map((expiry) => options.dataClient.getOptionsChain!(expiry)));
+  return buildSpxGexHeatmapFromOptionChains({
+    generatedAt: options.now.toISOString(),
+    quoteText,
+    chains,
+    selectedExpiries,
+    marketContext: options.marketContext,
+  });
+};
+
+const buildFromLegacyMarkdown = async (options: {
+  dataClient: SpxGexDataClient;
+  now: Date;
+  marketContext: SpxGexMarketContext | null;
+}) => {
+  const quoteText = await options.dataClient.getQuotes();
+  const optionsText = await options.dataClient.getOptions();
+  const zeroDteText = await options.dataClient.getOptions0Dte();
+  const selectedExpiries = selectSpxGexActiveExpiriesFromToolText(optionsText, zeroDteText, DEFAULT_EXPIRY_COUNT);
+  const gexByExpiryText: Record<string, string> = {};
+  for (const expiry of selectedExpiries) {
+    gexByExpiryText[expiry] = await options.dataClient.getOptionsGex(expiry);
+  }
+  return buildSpxGexHeatmapFromToolText({
+    generatedAt: options.now.toISOString(),
+    quoteText,
+    optionsText,
+    zeroDteText,
+    gexByExpiryText,
+    marketContext: options.marketContext,
+  });
 };
 
 export const generateAndStoreSpxGexHeatmap = async (options: {
@@ -657,21 +1274,19 @@ export const generateAndStoreSpxGexHeatmap = async (options: {
   const date = generationStatus.etDateKey;
 
   if (!options.force && !generationStatus.isGenerationWindow) {
+    return { status: "skipped", date, reason: generationStatus.skipReason || "outside_generation_window" };
+  }
+
+  const existing = await readSpxGexIntradaySnapshot(options.db, date, generationStatus.snapshotMinuteEt);
+  if (existing && !options.force) {
     return {
-      status: "skipped",
+      status: "skipped_existing",
       date,
-      reason: generationStatus.skipReason || "outside_generation_window",
+      snapshotMinuteEt: generationStatus.snapshotMinuteEt,
+      snapshotTimeEt: generationStatus.snapshotTimeEt,
     };
   }
 
-  const existing = await readSpxGexHeatmap(options.db, date);
-  if (existing && !options.force) {
-    return { status: "skipped_existing", date };
-  }
-
-  const quoteText = await options.dataClient.getQuotes();
-  const optionsText = await options.dataClient.getOptions();
-  const zeroDteText = await options.dataClient.getOptions0Dte();
   let marketContext: SpxGexMarketContext | null = null;
   if (options.dataClient.getMarketContext) {
     try {
@@ -686,22 +1301,16 @@ export const generateAndStoreSpxGexHeatmap = async (options: {
       };
     }
   }
-  const selectedExpiries = selectSpxGexActiveExpiriesFromToolText(optionsText, zeroDteText, 5);
-  const gexByExpiryText: Record<string, string> = {};
 
-  for (const expiry of selectedExpiries) {
-    gexByExpiryText[expiry] = await options.dataClient.getOptionsGex(expiry);
-  }
-
-  const heatmap = buildSpxGexHeatmapFromToolText({
-    generatedAt: now.toISOString(),
-    quoteText,
-    optionsText,
-    zeroDteText,
-    gexByExpiryText,
-    marketContext,
-  });
+  const heatmap =
+    (await buildFromStructuredChains({ dataClient: options.dataClient, now, marketContext })) ||
+    (await buildFromLegacyMarkdown({ dataClient: options.dataClient, now, marketContext }));
 
   await upsertSpxGexHeatmap(options.db, date, heatmap, { retentionTradingDays: 7 });
-  return { status: "generated", date };
+  return {
+    status: "generated",
+    date,
+    snapshotMinuteEt: generationStatus.snapshotMinuteEt,
+    snapshotTimeEt: generationStatus.snapshotTimeEt,
+  };
 };

@@ -601,7 +601,7 @@ function parseEtTimestamp(input: string | null): Date | null {
 const MARKET_TIME_ZONE = 'America/New_York';
 const TRADING_CRON = '*/15 14-20 * * MON-FRI';
 const AUDIT_CRON = '15 17-21 * * MON-FRI';
-const SPX_GEX_HEATMAP_CRON = '15,20,25 13-14 * * MON-FRI';
+const SPX_GEX_HEATMAP_CRON = '*/15 13-21 * * MON-FRI';
 
 interface ScheduledRunOptions {
   force?: boolean;

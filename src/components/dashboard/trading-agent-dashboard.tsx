@@ -1,11 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { Activity, Bot, Briefcase, Download, Eye, FileText, Landmark, Send, ShieldCheck, Users, X } from "lucide-react";
+import { Activity, Bot, Briefcase, Download, Eye, FileText, Landmark, Network, Send, ShieldCheck, Users, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-type AgentMode = "trading" | "buffett" | "finrobot";
+type AgentMode = "trading" | "buffett" | "finrobot" | "serenity";
 
 type TradingReports = {
   fundamentals_report?: string;
@@ -177,6 +177,19 @@ const AGENT_OPTIONS: Record<
       "[Perception Agent] Gathering fundamentals, price, strategy, sentiment, and catalysts...",
     ],
   },
+  serenity: {
+    title: "Serenity Bottleneck Research",
+    shortTitle: "Serenity",
+    description: "Theme-first supply-chain research that ranks scarce layers before stocks, funds, and risks.",
+    accent: "amber",
+    button: "Run Bottleneck Scan",
+    icon: Network,
+    startLog: (ticker) => [
+      `[Serenity Agent] Starting supply-chain bottleneck scan for ${ticker}...`,
+      "[Serenity Agent] Mapping system change and value-chain layers...",
+      "[Serenity Agent] Searching market evidence and grading proof strength...",
+    ],
+  },
 };
 
 const getAccentClasses = (mode: AgentMode) => {
@@ -203,6 +216,19 @@ const getAccentClasses = (mode: AgentMode) => {
       pulse: "text-cyan-400",
       dot: "bg-cyan-400",
       stamp: "text-cyan-500/50",
+    };
+  }
+
+  if (mode === "serenity") {
+    return {
+      glow: "bg-amber-500/20 border-amber-500/30 shadow-[0_0_15px_rgba(245,158,11,0.3)]",
+      icon: "text-amber-300",
+      active: "border-amber-300/60 bg-amber-500/15 text-white",
+      focus: "focus:border-amber-400/50 focus:bg-amber-500/5",
+      button: "bg-amber-600 hover:bg-amber-500 shadow-[0_0_20px_rgba(245,158,11,0.2)] hover:shadow-[0_0_25px_rgba(245,158,11,0.4)]",
+      pulse: "text-amber-300",
+      dot: "bg-amber-300",
+      stamp: "text-amber-500/50",
     };
   }
 
@@ -316,9 +342,12 @@ export function TradingAgentDashboard() {
   const profile = AGENT_OPTIONS[selectedAgent];
   const Icon = profile.icon;
   const accent = getAccentClasses(selectedAgent);
+  const isSerenity = selectedAgent === "serenity";
+  const targetLabel = isSerenity ? "Target Theme or Ticker" : "Target Ticker";
+  const targetPlaceholder = isSerenity ? "AI 半導體 / CPO / 機器人 / NVDA" : "e.g. NVDA";
 
   const startAnalysis = async () => {
-    const targetTicker = ticker.trim().toUpperCase();
+    const targetTicker = isSerenity ? ticker.trim() : ticker.trim().toUpperCase();
     if (!targetTicker) return;
 
     setTicker(targetTicker);
@@ -488,7 +517,7 @@ export function TradingAgentDashboard() {
             <div className="rounded-[1.5rem] border-[0.75px] border-white/10 bg-black/40 backdrop-blur-md p-6 shadow-xl">
               <h3 className="text-lg font-medium mb-4 text-white/90">Agent Type</h3>
 
-              <div className="grid grid-cols-3 gap-2 mb-5">
+              <div className="grid grid-cols-2 xl:grid-cols-4 gap-2 mb-5">
                 {(Object.keys(AGENT_OPTIONS) as AgentMode[]).map((mode) => {
                   const OptionIcon = AGENT_OPTIONS[mode].icon;
                   const isActive = selectedAgent === mode;
@@ -530,13 +559,13 @@ export function TradingAgentDashboard() {
 
               <div className="space-y-4">
                 <div>
-                  <label className="block text-xs uppercase tracking-wider text-white/50 mb-2 font-semibold">Target Ticker</label>
+                  <label className="block text-xs uppercase tracking-wider text-white/50 mb-2 font-semibold">{targetLabel}</label>
                   <input
                     type="text"
                     value={ticker}
-                    onChange={(e) => setTicker(e.target.value.toUpperCase())}
-                    className={`w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-white focus:outline-none transition-colors uppercase ${accent.focus}`}
-                    placeholder="e.g. NVDA"
+                    onChange={(e) => setTicker(isSerenity ? e.target.value : e.target.value.toUpperCase())}
+                    className={`w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-white focus:outline-none transition-colors ${isSerenity ? "" : "uppercase"} ${accent.focus}`}
+                    placeholder={targetPlaceholder}
                     disabled={isRunning}
                   />
                 </div>

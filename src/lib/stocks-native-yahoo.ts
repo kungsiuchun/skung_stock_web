@@ -1,4 +1,4 @@
-import type { SpxGexDataClient, SpxGexMarketContext } from "./spx-gex-heatmap";
+import type { SpxGexDataClient, SpxGexMarketContext, SpxGexOptionChain } from "./spx-gex-heatmap";
 import {
   STOCKS_WATCHER_QUOTE_SYMBOLS,
   STOCKS_WATCHER_SYMBOLS,
@@ -376,6 +376,75 @@ const optionRowsNearSpot = (chain: OptionChain, topRows = 12) => {
   });
 };
 
+export interface NativeOptionExposureLevelRow {
+  strike: number;
+  callGex: number;
+  putGex: number;
+  netGex: number;
+}
+
+const strongestBy = (
+  rows: NativeOptionExposureLevelRow[],
+  valueSelector: (row: NativeOptionExposureLevelRow) => number,
+  compare: (candidate: number, best: number) => boolean,
+) => rows.reduce<NativeOptionExposureLevelRow | null>((best, row) => {
+  if (!Number.isFinite(valueSelector(row))) return best;
+  if (!best || compare(valueSelector(row), valueSelector(best))) return row;
+  return best;
+}, null);
+
+const gammaFlipFromRows = (rows: NativeOptionExposureLevelRow[], spot: number) => {
+  const sortedRows = [...rows]
+    .filter((row) => Number.isFinite(row.strike) && Number.isFinite(row.netGex))
+    .sort((a, b) => a.strike - b.strike);
+  const candidates: number[] = [];
+
+  for (let index = 1; index < sortedRows.length; index += 1) {
+    const previous = sortedRows[index - 1];
+    const current = sortedRows[index];
+    if (!previous || !current) continue;
+
+    if (previous.netGex === 0) {
+      candidates.push(previous.strike);
+      continue;
+    }
+
+    if (current.netGex === 0) {
+      candidates.push(current.strike);
+      continue;
+    }
+
+    if (Math.sign(previous.netGex) === Math.sign(current.netGex)) continue;
+
+    const denominator = Math.abs(previous.netGex) + Math.abs(current.netGex);
+    const weight = denominator > 0 ? Math.abs(previous.netGex) / denominator : 0.5;
+    candidates.push(round(previous.strike + (current.strike - previous.strike) * weight));
+  }
+
+  if (candidates.length === 0) return null;
+  return candidates.reduce((nearest, candidate) =>
+    Math.abs(candidate - spot) < Math.abs(nearest - spot) ? candidate : nearest,
+  );
+};
+
+export const deriveNativeOptionExposureLevels = <T extends NativeOptionExposureLevelRow>(rows: T[], spot: number) => {
+  const pin = rows.reduce<T | null>((best, row) => {
+    if (!Number.isFinite(row.netGex)) return best;
+    if (!best || Math.abs(row.netGex) > Math.abs(best.netGex)) return row;
+    return best;
+  }, null);
+  const callWall = strongestBy(rows, (row) => row.callGex, (candidate, best) => candidate > best);
+  const putWall = strongestBy(rows, (row) => row.putGex, (candidate, best) => candidate < best);
+  const gammaFlip = gammaFlipFromRows(rows, spot);
+
+  return {
+    pin,
+    callWall,
+    putWall,
+    gammaFlip,
+  };
+};
+
 const markdownQuoteTable = (quotes: QuoteRow[]) => [
   "| Ticker | Name | Last | Change | Change % | Volume |",
   "| --- | --- | ---: | ---: | ---: | ---: |",
@@ -405,7 +474,7 @@ const markdownOptionChain = (chain: OptionChain, strikesAroundAtm = 12) => {
 };
 
 const markdownExposure = (chain: OptionChain, greek: "gex" | "dex", topRows = 12) => {
-  const rows = optionRowsNearSpot(chain, Math.max(5, Math.min(20, topRows)));
+  const rows = optionRowsNearSpot(chain, Math.max(5, Math.min(96, topRows)));
   if (greek === "dex") {
     return [
       `**Snapshot:** ${new Date().toISOString()} **Spot:** ${fmtMoney(chain.spot)}`,
@@ -616,25 +685,26 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     { name: "get_options_0dte", description: "Get nearest-expiry option exposure summary.", inputSchema: { properties: { ticker: { type: "string" } }, required: ["ticker"] } },
     async ({ ticker, expiry }) => {
       const chain = await fetchOptions(ticker, expiry);
-      const rows = optionRowsNearSpot(chain, 8);
+      const rows = optionRowsNearSpot(chain, 96);
       const netGex = rows.reduce((sum, row) => sum + row.netGex, 0);
       const netDex = rows.reduce((sum, row) => sum + row.netDex, 0);
-      const pin = rows.reduce((best, row) => Math.abs(row.netGex) > Math.abs(best.netGex) ? row : best, rows[0] || { strike: chain.spot, netGex: 0, netDex: 0 });
+      const levels = deriveNativeOptionExposureLevels(rows, chain.spot);
+      const pinStrike = levels.pin?.strike ?? chain.spot;
       const text = [
         `**Snapshot:** ${new Date().toISOString()} **Session phase:** \`native_yahoo\` **Now (ET):** ${new Date().toLocaleString("en-US", { timeZone: "America/New_York" })}`,
         `**Expiry:** ${chain.selectedExpiry || "none"}`,
-        `**Pin level:** ${fmtMoney(pin.strike)} (${chain.spot ? fmtPct(((pin.strike - chain.spot) / chain.spot) * 100) : "0.00%"})`,
-        `Flip level: ${fmtMoney(pin.strike)}`,
+        `**Pin level:** ${fmtMoney(pinStrike)} (${chain.spot ? fmtPct(((pinStrike - chain.spot) / chain.spot) * 100) : "0.00%"})`,
+        `Flip level: ${levels.gammaFlip === null ? "n/a" : fmtMoney(levels.gammaFlip)}`,
         "| Metric | Value |",
         "| --- | ---: |",
         `| Net GEX | **${compact(netGex)}** |`,
         `| Net DEX | **${compact(netDex)}** |`,
-        `| Top call wall | ${fmtMoney(pin.strike)} |`,
-        `| Top put wall | ${fmtMoney(pin.strike)} |`,
+        `| Top call wall | ${levels.callWall ? fmtMoney(levels.callWall.strike) : "n/a"} |`,
+        `| Top put wall | ${levels.putWall ? fmtMoney(levels.putWall.strike) : "n/a"} |`,
         "| Charm regime | `native_yahoo_approx` |",
-        markdownExposure(chain, "gex", 8),
+        markdownExposure(chain, "gex", 96),
       ].join("\n");
-      return toolResult(text, { chain, rows, netGex, netDex, pin });
+      return toolResult(text, { chain, rows, netGex, netDex, ...levels });
     },
   ),
   tool(
@@ -1012,13 +1082,17 @@ export class NativeSpxGexYahooClient implements SpxGexDataClient {
     return markdownOptionChain(chain, 25);
   }
 
+  async getOptionsChain(expiry?: string): Promise<SpxGexOptionChain> {
+    return fetchOptions("^SPX", expiry);
+  }
+
   async getOptions0Dte() {
     const result = await callNativeStocksTool("get_options_0dte", { ticker: "^SPX" });
     return result.text;
   }
 
   async getOptionsGex(expiry: string) {
-    const result = await callNativeStocksTool("get_options_gex", { ticker: "^SPX", expiry, topRows: 20 });
+    const result = await callNativeStocksTool("get_options_gex", { ticker: "^SPX", expiry, topRows: 96 });
     return result.text;
   }
 

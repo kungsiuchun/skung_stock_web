@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, AlertTriangle, ArrowLeft, CalendarDays, RefreshCw, Waves } from "lucide-react";
-import type { SpxGexHeatmapCell, SpxGexHeatmapModel } from "@/lib/spx-gex-heatmap";
+import { AlertTriangle, ArrowLeft, CalendarDays, Gauge, Pause, Play, RefreshCw, Waves } from "lucide-react";
+import type { SpxGexHeatmapCell, SpxGexHeatmapModel, SpxGexSessionSummary, SpxGexStrikeProfile } from "@/lib/spx-gex-heatmap";
 
 interface SpxGexHeatmapResponse {
   availableDates: string[];
   selectedDate: string | null;
+  sessions: SpxGexSessionSummary[];
+  selectedSnapshot: SpxGexSessionSummary | null;
   heatmap: SpxGexHeatmapModel | null;
   warnings: string[];
 }
@@ -16,71 +18,95 @@ interface SPXGexHeatmapPageProps {
 const emptyPayload: SpxGexHeatmapResponse = {
   availableDates: [],
   selectedDate: null,
+  sessions: [],
+  selectedSnapshot: null,
   heatmap: null,
   warnings: [],
 };
 
-const formatGexMillions = (value: number | null) => {
-  if (value === null) return "-";
-  const millions = value / 1_000_000;
-  if (Math.abs(millions) < 0.005) return "+0.00";
-  return `${millions > 0 ? "+" : ""}${millions.toFixed(2)}`;
-};
-
-const formatCompactGex = (value: number | null) => {
-  if (value === null) return "n/a";
+const formatCompact = (value: number | null | undefined) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
   const abs = Math.abs(value);
-  if (abs >= 1_000_000_000) return `${value >= 0 ? "+" : ""}${(value / 1_000_000_000).toFixed(2)}B`;
-  if (abs >= 1_000_000) return `${value >= 0 ? "+" : ""}${(value / 1_000_000).toFixed(2)}M`;
-  if (abs >= 1_000) return `${value >= 0 ? "+" : ""}${(value / 1_000).toFixed(0)}K`;
-  return `${value >= 0 ? "+" : ""}${value.toFixed(0)}`;
+  if (abs >= 1_000_000_000) return `${value >= 0 ? "" : "-"}${(abs / 1_000_000_000).toFixed(2)}B`;
+  if (abs >= 1_000_000) return `${value >= 0 ? "" : "-"}${(abs / 1_000_000).toFixed(2)}M`;
+  if (abs >= 1_000) return `${value >= 0 ? "" : "-"}${(abs / 1_000).toFixed(1)}K`;
+  return `${value >= 0 ? "" : "-"}${abs.toFixed(0)}`;
 };
 
-const getCellStyle = (value: number | null, globalMax: number) => {
-  if (value === null) return { backgroundColor: "#10161e", color: "#5f6b7a" };
-  const strength = Math.min(1, Math.abs(value) / Math.max(1, globalMax));
-  const base = 18;
-  const rgb = value >= 0
-    ? [
-        Math.round(base + (34 - base) * strength),
-        Math.round(base + (255 - base) * strength),
-        Math.round(base + (94 - base) * strength),
-      ]
-    : [
-        Math.round(base + (220 - base) * strength),
-        Math.round(base + (38 - base) * strength),
-        Math.round(base + (38 - base) * strength),
-      ];
-
-  return {
-    backgroundColor: `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`,
-    color: strength > 0.16 ? "#f8fbff" : "#9fc5ff",
-  };
+const formatSignedCompact = (value: number | null | undefined) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return `${value >= 0 ? "+" : "-"}${formatCompact(Math.abs(value))}`;
 };
 
-const findNearestStrike = (strikes: number[], target: number | null | undefined) => {
-  if (!target || strikes.length === 0) return null;
-  return [...strikes].sort((a, b) => Math.abs(a - target) - Math.abs(b - target))[0] ?? null;
+const cellStyle = (value: number | null | undefined, max: number) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return { backgroundColor: "#07111a", color: "#526171" };
+  const strength = Math.min(1, Math.abs(value) / Math.max(1, max));
+  if (value >= 0) {
+    const green = Math.round(52 + 175 * strength);
+    return { backgroundColor: `rgb(${Math.round(12 + 48 * strength)}, ${green}, ${Math.round(46 + 28 * strength)})`, color: "#f7fff8" };
+  }
+  const red = Math.round(88 + 178 * strength);
+  return { backgroundColor: `rgb(${red}, ${Math.round(28 + 34 * strength)}, ${Math.round(46 + 28 * strength)})`, color: "#fff7f7" };
+};
+
+const exposureColor = (value: number) => value >= 0 ? "#d000d4" : "#20d6c8";
+
+const tagClass = (severity: string) =>
+  severity === "major"
+    ? "border border-yellow-300/35 bg-yellow-300/15 text-yellow-100"
+    : severity === "watch"
+      ? "border border-pink-300/25 bg-pink-400/10 text-pink-100"
+      : "border border-cyan-300/25 bg-cyan-400/10 text-cyan-100";
+
+const buildFallbackProfiles = (heatmap: SpxGexHeatmapModel): SpxGexStrikeProfile[] => {
+  if (heatmap.strikeProfiles?.length) return heatmap.strikeProfiles;
+  const cellByStrike = new Map<number, SpxGexHeatmapCell[]>();
+  for (const cell of heatmap.cells) {
+    cellByStrike.set(cell.strike, [...(cellByStrike.get(cell.strike) || []), cell]);
+  }
+  return heatmap.strikes.map((strike) => {
+    const cells = cellByStrike.get(strike) || [];
+    return {
+      strike,
+      netGex: cells.reduce((sum, cell) => sum + Number(cell.netGex || 0), 0),
+      callGex: cells.reduce((sum, cell) => sum + Number(cell.callGex || 0), 0),
+      putGex: cells.reduce((sum, cell) => sum + Number(cell.putGex || 0), 0),
+      netDex: cells.reduce((sum, cell) => sum + Number(cell.netDex || 0), 0),
+      netVex: cells.reduce((sum, cell) => sum + Number(cell.netVex || 0), 0),
+      netCex: cells.reduce((sum, cell) => sum + Number(cell.netCex || 0), 0),
+      totalOpenInterest: cells.reduce((sum, cell) => sum + Number(cell.totalOpenInterest || 0), 0),
+      totalVolume: cells.reduce((sum, cell) => sum + Number(cell.totalVolume || 0), 0),
+      dominantExpiry: null,
+      tags: [],
+    };
+  });
 };
 
 export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const [data, setData] = useState<SpxGexHeatmapResponse>(emptyPayload);
   const [selectedDate, setSelectedDate] = useState("");
+  const [selectedMinute, setSelectedMinute] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [speedMs, setSpeedMs] = useState(900);
 
-  const loadHeatmap = async (date?: string) => {
+  const loadHeatmap = async (date?: string, snapshotMinute?: number | null) => {
     setLoading(true);
     setError(null);
     try {
-      const query = date ? `?date=${encodeURIComponent(date)}` : "";
-      const response = await fetch(`/api/spx-gex-heatmap${query}`);
+      const params = new URLSearchParams();
+      if (date) params.set("date", date);
+      if (snapshotMinute !== null && snapshotMinute !== undefined) params.set("snapshot", String(snapshotMinute));
+      const response = await fetch(`/api/spx-gex-heatmap${params.toString() ? `?${params.toString()}` : ""}`);
       const payload = (await response.json()) as SpxGexHeatmapResponse & { error?: string };
       if (!response.ok) throw new Error(payload.error || "SPX GEX heatmap API failed");
       setData(payload);
       setSelectedDate(payload.selectedDate || "");
+      setSelectedMinute(payload.selectedSnapshot?.snapshotMinuteEt ?? null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "SPX GEX heatmap failed");
+      setPlaying(false);
     } finally {
       setLoading(false);
     }
@@ -90,50 +116,86 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     void loadHeatmap();
   }, []);
 
+  useEffect(() => {
+    if (!playing || data.sessions.length <= 1 || !selectedDate) return undefined;
+    const timer = window.setInterval(() => {
+      const currentIndex = Math.max(0, data.sessions.findIndex((session) => session.snapshotMinuteEt === selectedMinute));
+      const next = data.sessions[(currentIndex + 1) % data.sessions.length];
+      if (next) void loadHeatmap(selectedDate, next.snapshotMinuteEt);
+    }, speedMs);
+    return () => window.clearInterval(timer);
+  }, [data.sessions, playing, selectedDate, selectedMinute, speedMs]);
+
   const heatmap = data.heatmap;
   const cellByKey = useMemo(() => {
     const map = new Map<string, SpxGexHeatmapCell>();
-    for (const cell of heatmap?.cells || []) {
-      map.set(`${cell.strike}:${cell.expdate}`, cell);
-    }
+    for (const cell of heatmap?.cells || []) map.set(`${cell.strike}:${cell.expdate}`, cell);
     return map;
   }, [heatmap?.cells]);
-  const globalMax = useMemo(
-    () => Math.max(1, ...(heatmap?.cells || []).map((cell) => Math.abs(cell.netGex || 0))),
-    [heatmap?.cells],
+  const profiles = useMemo(() => heatmap ? buildFallbackProfiles(heatmap) : [], [heatmap]);
+  const profileByStrike = useMemo(() => new Map(profiles.map((row) => [row.strike, row])), [profiles]);
+  const maxGex = useMemo(
+    () => Math.max(1, ...(heatmap?.cells || []).map((cell) => Math.abs(cell.netGex || 0)), ...profiles.map((row) => Math.abs(row.netGex))),
+    [heatmap?.cells, profiles],
   );
-  const gammaFlipRow = findNearestStrike(heatmap?.strikes || [], heatmap?.zeroDte.gammaFlip);
-  const pinRow = findNearestStrike(heatmap?.strikes || [], heatmap?.zeroDte.pinLevel);
-  const spotRow = findNearestStrike(heatmap?.strikes || [], heatmap?.quote.last);
+  const exposureMax = useMemo(() => ({
+    dex: Math.max(1, ...profiles.map((row) => Math.abs(row.netDex))),
+    vex: Math.max(1, ...profiles.map((row) => Math.abs(row.netVex))),
+    cex: Math.max(1, ...profiles.map((row) => Math.abs(row.netCex))),
+  }), [profiles]);
+  const laneExposureAvailable = useMemo(() => ({
+    dex: profiles.some((row) => Math.abs(row.netDex) > 0),
+    vex: profiles.some((row) => Math.abs(row.netVex) > 0),
+    cex: profiles.some((row) => Math.abs(row.netCex) > 0),
+  }), [profiles]);
+  const summaryExposureAvailable = useMemo(() => ({
+    dex: laneExposureAvailable.dex || Math.abs(heatmap?.zeroDte.netDex || 0) > 0,
+    vex: laneExposureAvailable.vex || Math.abs(heatmap?.zeroDte.netVex || 0) > 0,
+    cex: laneExposureAvailable.cex || Math.abs(heatmap?.zeroDte.netCex || 0) > 0,
+  }), [
+    heatmap?.zeroDte.netCex,
+    heatmap?.zeroDte.netDex,
+    heatmap?.zeroDte.netVex,
+    laneExposureAvailable.cex,
+    laneExposureAvailable.dex,
+    laneExposureAvailable.vex,
+  ]);
+  const selectedSessionIndex = Math.max(0, data.sessions.findIndex((session) => session.snapshotMinuteEt === selectedMinute));
 
   return (
-    <section className="h-full w-full overflow-y-auto bg-[#070b10] px-4 pb-10 pt-6 text-white sm:px-8 lg:px-12">
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
-        <header className="flex flex-col gap-5 border-b border-sky-400/15 pb-6 lg:flex-row lg:items-end lg:justify-between">
+    <section className="h-full w-full overflow-y-auto bg-[#02070d] px-3 pb-8 pt-4 text-white sm:px-5 lg:px-7">
+      <div className="mx-auto flex w-full max-w-[1800px] flex-col gap-4">
+        <header className="flex flex-col gap-4 border-b border-cyan-400/20 pb-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
             <button
               onClick={onBackToWork}
-              className="mb-5 inline-flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-sky-200/70 transition-colors hover:text-sky-100"
+              className="mb-4 inline-flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-cyan-200/70 transition-colors hover:text-cyan-100"
             >
               <ArrowLeft className="h-4 w-4" />
               Work gallery
             </button>
-            <div className="mb-3 inline-flex items-center gap-2 border border-sky-400/30 bg-sky-400/10 px-3 py-1 text-xs font-bold uppercase tracking-[0.2em] text-sky-200">
-              <Waves className="h-3.5 w-3.5" />
-              SPX GEX Heatmap
+            <div className="flex flex-wrap items-center gap-3">
+              <h1 className="text-2xl font-black tracking-normal text-white sm:text-4xl">SPX Intraday GEX Board</h1>
+              {heatmap && (
+                <span className="border border-cyan-300/25 bg-cyan-300/10 px-2 py-1 font-mono text-xs font-black text-cyan-100">
+                  Spot ${heatmap.quote.last.toFixed(2)}
+                </span>
+              )}
             </div>
-            <h1 className="text-3xl font-black tracking-normal text-white sm:text-5xl">Premarket Gamma Map</h1>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-500">
-              Stored as D1 JSON snapshots with a seven trading-day retention window.
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-zinc-500">
+              Strike-by-expiry GEX matrix with deterministic structure labels and DEX/VEX/CEX exposure lanes.
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
-            <label className="inline-flex items-center gap-2 border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-zinc-300">
-              <CalendarDays className="h-4 w-4 text-sky-200" />
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="inline-flex h-10 items-center gap-2 border border-white/10 bg-white/[0.04] px-3 text-sm text-zinc-300">
+              <CalendarDays className="h-4 w-4 text-cyan-200" />
               <select
                 value={selectedDate}
-                onChange={(event) => void loadHeatmap(event.target.value)}
+                onChange={(event) => {
+                  setPlaying(false);
+                  void loadHeatmap(event.target.value, null);
+                }}
                 className="bg-transparent text-sm font-bold text-white outline-none"
               >
                 {data.availableDates.length === 0 ? (
@@ -148,147 +210,153 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
               </select>
             </label>
             <button
-              onClick={() => void loadHeatmap(selectedDate)}
-              className="inline-flex h-10 w-10 items-center justify-center border border-sky-300/20 bg-sky-300/10 text-sky-100 transition-colors hover:bg-sky-300/20"
-              title="Refresh heatmap"
+              onClick={() => void loadHeatmap(selectedDate, selectedMinute)}
+              className="inline-flex h-10 w-10 items-center justify-center border border-cyan-300/20 bg-cyan-300/10 text-cyan-100 transition-colors hover:bg-cyan-300/20"
+              title="Refresh board"
             >
               <RefreshCw className="h-4 w-4" />
             </button>
           </div>
         </header>
 
-        {error && (
-          <div className="flex items-center gap-2 border border-red-400/30 bg-red-400/10 px-4 py-3 text-sm text-red-100">
-            <AlertTriangle className="h-4 w-4" />
-            {error}
-          </div>
-        )}
+        {error && <Notice tone="red" text={error} />}
+        {data.warnings.length > 0 && <Notice tone="amber" text={data.warnings.join(" ")} />}
 
-        {data.warnings.length > 0 && (
-          <div className="flex items-center gap-2 border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
-            <AlertTriangle className="h-4 w-4" />
-            {data.warnings.join(" ")}
-          </div>
-        )}
-
-        {loading ? (
-          <div className="flex h-64 items-center justify-center border border-white/10 bg-white/[0.03] text-sm uppercase tracking-[0.2em] text-zinc-500">
+        {loading && !heatmap ? (
+          <div className="flex h-72 items-center justify-center border border-white/10 bg-white/[0.03] text-sm uppercase tracking-[0.2em] text-zinc-500">
             Loading SPX GEX
           </div>
         ) : heatmap ? (
-          <div className="flex flex-col gap-4">
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-              <Metric label="Spot" value={`$${heatmap.quote.last.toFixed(2)}`} />
-              <Metric label="0DTE NetGEX" value={formatCompactGex(heatmap.zeroDte.netGex)} />
-              <Metric label="Gamma Flip" value={heatmap.zeroDte.gammaFlip ? `$${heatmap.zeroDte.gammaFlip.toFixed(0)}` : "n/a"} />
-              <Metric label="Snapshot" value={heatmap.snapshot || heatmap.generatedAt} />
-            </div>
-
-            <section className="grid gap-4 border border-sky-300/20 bg-[#0b1119] p-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-              <div>
-                <div className="mb-2 text-xs font-black uppercase tracking-[0.18em] text-sky-200">盤前 Gamma 解讀</div>
-                <p className="text-base font-bold leading-8 text-zinc-100 md:text-lg">
-                  {heatmap.premarketInterpretation.paragraph}
-                </p>
-                {heatmap.premarketInterpretation.warnings.length > 0 && (
-                  <p className="mt-3 text-xs leading-5 text-amber-200">
-                    Context warning: {heatmap.premarketInterpretation.warnings.join(" ")}
-                  </p>
-                )}
+          <>
+            <section className="border border-[#123142] bg-[#06111a] p-3">
+              <div className="mb-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+                <Metric label="Snapshot" value={heatmap.session?.snapshotTimeEt || "n/a"} />
+                <Metric label="0DTE NetGEX" value={formatSignedCompact(heatmap.zeroDte.netGex)} />
+                <Metric label="DEX" value={summaryExposureAvailable.dex ? formatSignedCompact(heatmap.zeroDte.netDex) : "-"} />
+                <Metric label="VEX" value={summaryExposureAvailable.vex ? formatSignedCompact(heatmap.zeroDte.netVex) : "-"} />
+                <Metric label="CEX" value={summaryExposureAvailable.cex ? formatSignedCompact(heatmap.zeroDte.netCex) : "-"} />
               </div>
-
-              <div className="grid gap-2 text-sm">
-                <LevelRow label="Regime" value={heatmap.premarketInterpretation.regime} />
-                <LevelRow label="多空分水嶺" value={heatmap.premarketInterpretation.levels.dividingLine} />
-                <LevelRow label="上方關鍵位" value={heatmap.premarketInterpretation.levels.upside} />
-                <LevelRow label="下方關鍵位" value={heatmap.premarketInterpretation.levels.downside} />
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+                <button
+                  onClick={() => setPlaying((value) => !value)}
+                  disabled={data.sessions.length <= 1}
+                  className="inline-flex h-10 w-12 items-center justify-center border border-pink-400/30 bg-pink-400/15 text-pink-100 transition-colors hover:bg-pink-400/25 disabled:cursor-not-allowed disabled:opacity-40"
+                  title={playing ? "Pause timeline" : "Play timeline"}
+                >
+                  {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                </button>
+                <div className="min-w-0 flex-1">
+                  <input
+                    type="range"
+                    min={0}
+                    max={Math.max(0, data.sessions.length - 1)}
+                    value={selectedSessionIndex}
+                    onChange={(event) => {
+                      const next = data.sessions[Number(event.target.value)];
+                      setPlaying(false);
+                      if (next) void loadHeatmap(selectedDate, next.snapshotMinuteEt);
+                    }}
+                    className="w-full accent-cyan-300"
+                  />
+                  <div className="mt-1 flex justify-between gap-2 overflow-hidden font-mono text-[10px] font-black text-cyan-200/70">
+                    {data.sessions.map((session) => (
+                      <button
+                        key={session.snapshotMinuteEt}
+                        onClick={() => {
+                          setPlaying(false);
+                          void loadHeatmap(selectedDate, session.snapshotMinuteEt);
+                        }}
+                        className={session.snapshotMinuteEt === selectedMinute ? "text-yellow-300" : "text-cyan-200/55"}
+                      >
+                        {session.snapshotTimeEt}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <select
+                  value={speedMs}
+                  onChange={(event) => setSpeedMs(Number(event.target.value))}
+                  className="h-10 border border-white/10 bg-[#08131d] px-3 text-sm font-bold text-white outline-none"
+                >
+                  <option value={1400}>1X</option>
+                  <option value={900}>2X</option>
+                  <option value={500}>3X</option>
+                </select>
               </div>
             </section>
 
-            <div className="overflow-x-auto border border-[#2c3540] bg-[#090e15]">
-              <div className="border-b border-[#2c3540] bg-[#0d131b] px-4 py-3 text-xs font-black leading-5 text-sky-100">
-                Active expiries start from 0DTE front expiry {heatmap.zeroDte.expiry} | Pin{" "}
-                {heatmap.zeroDte.pinLevel ? `$${heatmap.zeroDte.pinLevel.toFixed(0)}` : "n/a"} | Gamma flip{" "}
-                {heatmap.zeroDte.gammaFlip ? `$${heatmap.zeroDte.gammaFlip.toFixed(0)}` : "n/a"} | Call wall{" "}
-                {heatmap.zeroDte.topCallWall || "n/a"} | Put wall {heatmap.zeroDte.topPutWall || "n/a"} | Charm{" "}
-                {heatmap.zeroDte.charmRegime || "n/a"}
-              </div>
-              <table className="min-w-[1080px] w-full table-fixed border-collapse font-mono text-sm">
-                <thead>
+            <section className="overflow-x-auto border border-[#123142] bg-[#030910]">
+              <table className="w-full min-w-[1540px] table-fixed border-collapse font-mono text-[11px]">
+                <thead className="sticky top-0 z-20">
                   <tr>
-                    <th className="sticky left-0 z-20 w-64 border border-[#2c3540] bg-[#151c25] px-3 py-2 text-center text-sky-300">
-                      Strike
-                    </th>
+                    <HeaderCell width="70px">STRIKE</HeaderCell>
                     {heatmap.selectedExpiries.map((expiry) => (
-                      <th key={expiry} className="border border-[#2c3540] bg-[#151c25] px-3 py-2 text-center text-sky-300">
-                        {expiry}
-                      </th>
+                      <HeaderCell key={expiry}>{expiry.slice(5)}</HeaderCell>
                     ))}
+                    <HeaderCell width="76px">STRIKE</HeaderCell>
+                    <HeaderCell width="365px">NET GEX / STRUCTURE</HeaderCell>
+                    <HeaderCell width="220px">DEX</HeaderCell>
+                    <HeaderCell width="220px">VEX</HeaderCell>
+                    <HeaderCell width="220px">CEX</HeaderCell>
                   </tr>
                 </thead>
                 <tbody>
                   {heatmap.strikes.map((strike) => {
-                    const badges = [
-                      strike === spotRow ? "Spot" : null,
-                      strike === gammaFlipRow ? "Gamma flip" : null,
-                      strike === pinRow ? "Pin" : null,
-                      strike === heatmap.zeroDte.topCallWallLevel ? "Call wall" : null,
-                      strike === heatmap.zeroDte.topPutWallLevel ? "Put wall" : null,
-                    ].filter(Boolean);
-
+                    const profile = profileByStrike.get(strike);
                     return (
-                      <tr
-                        key={strike}
-                        className={
-                          strike === spotRow
-                            ? "border-y-[3px] border-yellow-200"
-                            : strike === gammaFlipRow
-                              ? "border-y-[3px] border-dashed border-sky-300"
-                              : ""
-                        }
-                      >
-                        <th className="sticky left-0 z-10 border border-[#2c3540] bg-[#141a22] px-3 py-2 text-left text-sky-100">
-                          {strike.toFixed(0)}
-                          {badges.length > 0 && <span className="ml-2 text-xs text-yellow-100">{badges.join(" / ")}</span>}
-                        </th>
+                      <tr key={strike} className={profile?.tags.some((tag) => tag.type === "now") ? "bg-yellow-400/10" : ""}>
+                        <StrikeCell strike={strike} now={profile?.tags.some((tag) => tag.type === "now") || false} />
                         {heatmap.selectedExpiries.map((expiry) => {
                           const cell = cellByKey.get(`${strike}:${expiry}`);
                           return (
                             <td
                               key={`${strike}-${expiry}`}
-                              className="border border-[#2c3540] px-3 py-2 text-right font-black tabular-nums"
-                              style={getCellStyle(cell?.netGex ?? null, globalMax)}
-                              title={`${expiry} / ${strike} / ${formatCompactGex(cell?.netGex ?? null)}`}
+                              className="border border-[#102433] px-1.5 py-[2px] text-right font-black tabular-nums"
+                              style={cellStyle(cell?.netGex, maxGex)}
                             >
-                              {formatGexMillions(cell?.netGex ?? null)}
+                              {formatCompact(cell?.netGex)}
                             </td>
                           );
                         })}
+                        <StrikeCell strike={strike} now={profile?.tags.some((tag) => tag.type === "now") || false} />
+                        <td className="border border-[#102433] bg-[#050c14] px-1.5 py-[2px]">
+                          <div className="grid grid-cols-[150px_72px_1fr] items-center gap-2">
+                            <ExposureBar value={profile?.netGex || 0} max={maxGex} />
+                            <span className="text-right font-black text-cyan-100">{formatSignedCompact(profile?.netGex)}</span>
+                            <span className="flex min-h-4 flex-wrap items-center gap-1 overflow-hidden">
+                              {(profile?.tags || []).map((tag) => (
+                                <span key={tag.type} className={`px-1 py-0 text-[9px] font-black ${tagClass(tag.severity)}`}>
+                                  {tag.label}
+                                </span>
+                              ))}
+                            </span>
+                          </div>
+                        </td>
+                        <ExposureCell value={laneExposureAvailable.dex ? profile?.netDex : null} max={exposureMax.dex} />
+                        <ExposureCell value={laneExposureAvailable.vex ? profile?.netVex : null} max={exposureMax.vex} />
+                        <ExposureCell value={laneExposureAvailable.cex ? profile?.netCex : null} max={exposureMax.cex} />
                       </tr>
                     );
                   })}
-                  <tr className="border-t-[3px] border-white">
-                    <th className="sticky left-0 z-10 border border-[#2c3540] bg-[#141a22] px-3 py-2 text-left text-yellow-100">
-                      Total NetGEX
-                    </th>
-                    {heatmap.totals.map((total) => (
-                      <td
-                        key={total.expdate}
-                        className="border border-[#2c3540] px-3 py-2 text-right font-black text-white tabular-nums"
-                        style={getCellStyle(total.netGex, globalMax)}
-                      >
-                        {formatGexMillions(total.netGex)}
-                      </td>
-                    ))}
-                  </tr>
                 </tbody>
               </table>
-            </div>
-          </div>
+            </section>
+
+            <section className="grid gap-3 text-xs text-zinc-400 lg:grid-cols-[1fr_360px]">
+              <div className="border border-[#123142] bg-[#050c14] p-3 leading-6">{heatmap.premarketInterpretation.paragraph}</div>
+              <div className="border border-[#123142] bg-[#050c14] p-3">
+                <div className="mb-2 flex items-center gap-2 font-black uppercase tracking-[0.16em] text-cyan-200">
+                  <Gauge className="h-4 w-4" />
+                  Source
+                </div>
+                <div className="leading-6">{heatmap.source.note}</div>
+              </div>
+            </section>
+          </>
         ) : (
-          <div className="flex h-64 flex-col items-center justify-center gap-3 border border-white/10 bg-white/[0.03] text-center">
-            <Activity className="h-8 w-8 text-zinc-600" />
-            <p className="text-sm text-zinc-500">No retained SPX GEX heatmap snapshots found.</p>
+          <div className="flex h-72 flex-col items-center justify-center gap-3 border border-white/10 bg-white/[0.03] text-center">
+            <Waves className="h-8 w-8 text-zinc-600" />
+            <p className="text-sm text-zinc-500">No retained SPX GEX snapshots found.</p>
           </div>
         )}
       </div>
@@ -296,16 +364,46 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   );
 }
 
-const Metric = ({ label, value }: { label: string; value: string }) => (
-  <div className="border border-white/10 bg-white/[0.04] px-4 py-3">
-    <div className="text-[0.68rem] font-bold uppercase tracking-[0.18em] text-zinc-500">{label}</div>
-    <div className="mt-2 break-words text-lg font-black text-white">{value}</div>
+const Notice = ({ tone, text }: { tone: "red" | "amber"; text: string }) => (
+  <div className={`flex items-center gap-2 border px-4 py-3 text-sm ${tone === "red" ? "border-red-400/30 bg-red-400/10 text-red-100" : "border-amber-400/30 bg-amber-400/10 text-amber-100"}`}>
+    <AlertTriangle className="h-4 w-4" />
+    {text}
   </div>
 );
 
-const LevelRow = ({ label, value }: { label: string; value: string }) => (
-  <div className="border border-white/10 bg-white/[0.03] px-3 py-2">
-    <div className="text-[0.68rem] font-black uppercase tracking-[0.14em] text-zinc-500">{label}</div>
-    <div className="mt-1 break-words font-black leading-5 text-white">{value}</div>
+const Metric = ({ label, value }: { label: string; value: string }) => (
+  <div className="border border-[#123142] bg-black/20 px-3 py-2">
+    <div className="text-[10px] font-black uppercase tracking-[0.16em] text-zinc-500">{label}</div>
+    <div className="mt-1 truncate font-mono text-lg font-black text-white">{value}</div>
   </div>
+);
+
+const HeaderCell = ({ children, width }: { children: string; width?: string }) => (
+  <th className="border border-[#102433] bg-[#07121c] px-1.5 py-1.5 text-center font-black text-cyan-300" style={{ width }}>
+    {children}
+  </th>
+);
+
+const StrikeCell = ({ strike, now }: { strike: number; now: boolean }) => (
+  <th className={`border border-[#102433] px-1.5 py-[2px] text-right font-black tabular-nums ${now ? "bg-yellow-300/15 text-yellow-100" : "bg-[#06121c] text-cyan-300"}`}>
+    {strike.toLocaleString("en-US", { maximumFractionDigits: 0 })}
+  </th>
+);
+
+const ExposureBar = ({ value, max }: { value: number; max: number }) => {
+  const width = `${Math.max(2, Math.min(100, (Math.abs(value) / Math.max(1, max)) * 100))}%`;
+  return (
+    <div className="h-2.5 overflow-hidden bg-[#07111b]">
+      <div className="h-full" style={{ width, background: `linear-gradient(90deg, ${exposureColor(value)}, transparent)` }} />
+    </div>
+  );
+};
+
+const ExposureCell = ({ value, max }: { value: number | null | undefined; max: number }) => (
+  <td className="border border-[#102433] bg-[#050c14] px-1.5 py-[2px]">
+    <div className="grid grid-cols-[1fr_72px] items-center gap-2">
+      {typeof value === "number" && Number.isFinite(value) ? <ExposureBar value={value} max={max} /> : <div className="h-2.5 bg-[#07111b]" />}
+      <span className="text-right font-black tabular-nums text-cyan-50">{formatSignedCompact(value)}</span>
+    </div>
+  </td>
 );
