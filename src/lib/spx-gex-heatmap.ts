@@ -90,9 +90,13 @@ export type SpxGexStructureTagType =
   | "now"
   | "pin"
   | "gamma_flip"
+  | "upper_shelf"
   | "near_resistance"
+  | "minor_resistance"
   | "big_call_wall"
   | "resistance_zone"
+  | "lower_shelf"
+  | "air_gap"
   | "oi_spike"
   | "key_support"
   | "structural_support";
@@ -618,81 +622,176 @@ const uniqueSortedStrikes = (chains: SpxGexOptionChain[], spot: number, maxStrik
     .sort((a, b) => b - a);
 };
 
-const addStructureTags = (profiles: Omit<SpxGexStrikeProfile, "tags">[], spot: number): SpxGexStrikeProfile[] => {
-  const maxOi = Math.max(1, ...profiles.map((row) => row.totalOpenInterest));
-  const aboveSpot = profiles.filter((row) => row.strike >= spot);
-  const belowSpot = profiles.filter((row) => row.strike <= spot);
-  const spotStrike = [...profiles].sort((a, b) => Math.abs(a.strike - spot) - Math.abs(b.strike - spot))[0]?.strike ?? null;
-  const hasSideGex = profiles.some((row) => Math.abs(row.callGex) > 0 || Math.abs(row.putGex) > 0);
-  const topOiStrikes = new Set(
-    [...profiles]
-      .filter((row) => row.totalOpenInterest > 0)
-      .sort((a, b) => b.totalOpenInterest - a.totalOpenInterest)
-      .slice(0, 3)
-      .map((row) => row.strike),
-  );
-  const callWall = aboveSpot.reduce<typeof profiles[number] | null>((best, row) => {
-    const value = hasSideGex ? row.callGex : row.netGex;
-    const bestValue = best ? (hasSideGex ? best.callGex : best.netGex) : -Infinity;
-    return !best || value > bestValue ? row : best;
-  }, null);
-  const resistanceZone = aboveSpot
-    .filter((row) => row.strike !== callWall?.strike)
-    .sort((a, b) => b.netGex - a.netGex)[0] || null;
-  const putWall = belowSpot.reduce<typeof profiles[number] | null>((best, row) => {
-    const value = hasSideGex ? row.putGex : row.netGex;
-    const bestValue = best ? (hasSideGex ? best.putGex : best.netGex) : Infinity;
-    return !best || value < bestValue ? row : best;
-  }, null);
-  const secondarySupport = belowSpot
-    .filter((row) => row.strike !== putWall?.strike)
-    .sort((a, b) => a.netGex - b.netGex)[0] || null;
+type StrikeProfileWithoutTags = Omit<SpxGexStrikeProfile, "tags"> | SpxGexStrikeProfile;
 
-  return profiles.map((row) => {
-    const tags: SpxGexStructureTag[] = [];
-    if (row.strike === spotStrike) tags.push({ type: "now", label: "NOW", severity: "major", source: "nearest spot strike" });
-    if (row.strike === callWall?.strike) tags.push({ type: "big_call_wall", label: "Big call wall", severity: "major", source: "largest call GEX above spot" });
-    if (row.strike === resistanceZone?.strike && row.netGex > 0) tags.push({ type: "near_resistance", label: "Near resistance", severity: "watch", source: "positive GEX cluster above spot" });
-    if (row.strike > spot && row.netGex > 0 && Math.abs(row.strike - spot) / Math.max(1, spot) <= 0.01) {
-      tags.push({ type: "resistance_zone", label: "Resistance zone", severity: "watch", source: "nearby positive net GEX" });
-    }
-    if (row.strike === putWall?.strike) tags.push({ type: "key_support", label: "Key support - put wall", severity: "major", source: "largest put GEX below spot" });
-    if (row.strike === secondarySupport?.strike && row.netGex < 0) {
-      tags.push({ type: "structural_support", label: "Structural support", severity: "watch", source: "secondary negative GEX below spot" });
-    }
-    if (topOiStrikes.has(row.strike) && row.totalOpenInterest >= maxOi * 0.85) {
-      tags.push({ type: "oi_spike", label: "OI spike", severity: "major", source: "top open interest cluster" });
-    }
-    return { ...row, tags };
-  });
+interface StructureCandidate {
+  strike: number;
+  priority: number;
+  score: number;
+  tag: SpxGexStructureTag;
+}
+
+const stripTags = (row: StrikeProfileWithoutTags): Omit<SpxGexStrikeProfile, "tags"> => {
+  const { tags: _tags, ...profile } = row as SpxGexStrikeProfile;
+  return profile;
 };
 
-const nearestStrike = (profiles: SpxGexStrikeProfile[], target: number | null | undefined) => {
+const nearestProfileStrike = (profiles: Omit<SpxGexStrikeProfile, "tags">[], target: number | null | undefined) => {
   if (typeof target !== "number" || !Number.isFinite(target) || profiles.length === 0) return null;
   return profiles.reduce((nearest, row) =>
     Math.abs(row.strike - target) < Math.abs(nearest.strike - target) ? row : nearest,
   ).strike;
 };
 
-const pushUniqueTag = (tags: SpxGexStructureTag[], tag: SpxGexStructureTag) => {
-  if (!tags.some((existing) => existing.type === tag.type)) tags.push(tag);
+const addCandidate = (
+  candidates: StructureCandidate[],
+  row: Omit<SpxGexStrikeProfile, "tags"> | undefined | null,
+  priority: number,
+  score: number,
+  tag: SpxGexStructureTag,
+) => {
+  if (!row) return;
+  candidates.push({ strike: row.strike, priority, score, tag });
 };
 
-const addKeyLevelAnnotations = (profiles: SpxGexStrikeProfile[], zeroDte: SpxGexZeroDte): SpxGexStrikeProfile[] => {
-  const pinStrike = nearestStrike(profiles, zeroDte.pinLevel);
-  const gammaFlipStrike = nearestStrike(profiles, zeroDte.gammaFlip);
+export const classifySpxGexStructureTags = (
+  inputProfiles: StrikeProfileWithoutTags[],
+  spot: number,
+  zeroDte?: Partial<SpxGexZeroDte> | null,
+): SpxGexStrikeProfile[] => {
+  const profiles = inputProfiles.map(stripTags);
+  if (profiles.length === 0) return [];
 
-  return profiles.map((row) => {
-    const tags = [...row.tags];
-    if (row.strike === pinStrike) {
-      pushUniqueTag(tags, { type: "pin", label: "PIN", severity: "major", source: "nearest pin level" });
-    }
-    if (row.strike === gammaFlipStrike) {
-      pushUniqueTag(tags, { type: "gamma_flip", label: "FLIP", severity: "major", source: "nearest gamma flip" });
-    }
-    return { ...row, tags };
+  const byStrike = new Map(profiles.map((row) => [row.strike, row]));
+  const maxOi = Math.max(1, ...profiles.map((row) => row.totalOpenInterest));
+  const maxVolume = Math.max(1, ...profiles.map((row) => row.totalVolume));
+  const maxAbsNetGex = Math.max(1, ...profiles.map((row) => Math.abs(row.netGex)));
+  const hasSideGex = profiles.some((row) => Math.abs(row.callGex) > 0 || Math.abs(row.putGex) > 0);
+  const aboveSpot = profiles.filter((row) => row.strike > spot).sort((a, b) => a.strike - b.strike);
+  const belowSpot = profiles.filter((row) => row.strike < spot).sort((a, b) => b.strike - a.strike);
+  const spotStrike = nearestProfileStrike(profiles, spot);
+  const pinStrike = nearestProfileStrike(profiles, zeroDte?.pinLevel);
+  const callWallStrike = nearestProfileStrike(profiles, zeroDte?.topCallWallLevel);
+  const putWallStrike = nearestProfileStrike(profiles, zeroDte?.topPutWallLevel);
+  const gammaFlipStrike = nearestProfileStrike(profiles, zeroDte?.gammaFlip);
+  const fallbackCallWall = aboveSpot.reduce<typeof profiles[number] | null>((best, row) => {
+    const value = hasSideGex ? row.callGex : row.netGex;
+    const bestValue = best ? (hasSideGex ? best.callGex : best.netGex) : -Infinity;
+    return !best || value > bestValue ? row : best;
+  }, null);
+  const fallbackPutWall = belowSpot.reduce<typeof profiles[number] | null>((best, row) => {
+    const value = hasSideGex ? row.putGex : row.netGex;
+    const bestValue = best ? (hasSideGex ? best.putGex : best.netGex) : Infinity;
+    return !best || value < bestValue ? row : best;
+  }, null);
+  const callWall = byStrike.get(callWallStrike ?? NaN) || fallbackCallWall;
+  const putWall = byStrike.get(putWallStrike ?? NaN) || fallbackPutWall;
+  const pin = byStrike.get(pinStrike ?? NaN) || profiles.reduce<typeof profiles[number] | null>(
+    (best, row) => (!best || Math.abs(row.netGex) > Math.abs(best.netGex) ? row : best),
+    null,
+  );
+  const spotRow = byStrike.get(spotStrike ?? NaN) || null;
+  const candidates: StructureCandidate[] = [];
+  const positiveAbove = aboveSpot
+    .filter((row) => row.netGex > 0 && row.strike !== callWall?.strike)
+    .sort((a, b) => b.netGex - a.netGex);
+  const nearPositiveAbove = positiveAbove
+    .filter((row) => Math.abs(row.strike - spot) / Math.max(1, spot) <= 0.01)
+    .sort((a, b) => (b.netGex / maxAbsNetGex + b.totalOpenInterest / maxOi) - (a.netGex / maxAbsNetGex + a.totalOpenInterest / maxOi));
+  const airGap = (gammaFlipStrike ? byStrike.get(gammaFlipStrike) : null)
+    || profiles
+      .filter((row) => Math.abs(row.strike - spot) / Math.max(1, spot) <= 0.015)
+      .sort((a, b) => Math.abs(a.netGex) - Math.abs(b.netGex))[0]
+    || null;
+
+  if (callWall) {
+    addCandidate(candidates, callWall, 100, Math.max(callWall.callGex, callWall.netGex), {
+      type: "big_call_wall",
+      label: "Big call wall · gamma ceiling",
+      severity: "major",
+      source: "ranked strongest call-side GEX wall above spot",
+    });
+  }
+
+  if (pin) {
+    addCandidate(candidates, pin, 92, Math.abs(pin.netGex), {
+      type: "pin",
+      label: "Pin Zone",
+      severity: "major",
+      source: "nearest 0DTE pin or strongest absolute net GEX row",
+    });
+  }
+
+  if (spotRow) {
+    const isPinSpot = pin?.strike === spotRow.strike;
+    const hasOiOrVolumeSpike = spotRow.totalOpenInterest >= maxOi * 0.7 || spotRow.totalVolume >= maxVolume * 0.7;
+    addCandidate(candidates, spotRow, isPinSpot && hasOiOrVolumeSpike ? 98 : 90, spotRow.totalOpenInterest, {
+      type: "now",
+      label: isPinSpot && hasOiOrVolumeSpike ? "NOW / OI spike / pin zone" : "NOW",
+      severity: "major",
+      source: isPinSpot && hasOiOrVolumeSpike ? "nearest spot strike overlapping pin and high participation" : "nearest spot strike",
+    });
+  }
+
+  if (putWall) {
+    addCandidate(candidates, putWall, 84, Math.abs(hasSideGex ? putWall.putGex : putWall.netGex), {
+      type: "lower_shelf",
+      label: "Lower Shelf",
+      severity: "major",
+      source: "ranked strongest downside put-GEX shelf below spot",
+    });
+  }
+
+  const upperShelf = positiveAbove[0] || null;
+  addCandidate(candidates, upperShelf, 76, upperShelf?.netGex || 0, {
+    type: "upper_shelf",
+    label: "Upper Shelf",
+    severity: "watch",
+    source: "largest positive net GEX shelf above the call wall",
   });
+
+  const resistanceZone = nearPositiveAbove.find((row) => row.strike !== upperShelf?.strike) || null;
+  addCandidate(candidates, resistanceZone, 68, resistanceZone?.netGex || 0, {
+    type: "resistance_zone",
+    label: "Resistance zone",
+    severity: "watch",
+    source: "highest ranked nearby positive net GEX cluster above spot",
+  });
+
+  const minorResistance = positiveAbove.find((row) =>
+    row.strike !== upperShelf?.strike
+    && row.strike !== resistanceZone?.strike
+    && row.netGex <= maxAbsNetGex * 0.4
+  ) || positiveAbove.find((row) => row.strike !== upperShelf?.strike && row.strike !== resistanceZone?.strike) || null;
+  addCandidate(candidates, minorResistance, 60, minorResistance?.netGex || 0, {
+    type: "minor_resistance",
+    label: "Minor resistance",
+    severity: "info",
+    source: "secondary positive net GEX row after higher ranked resistance structures",
+  });
+
+  if (airGap && Math.abs(airGap.netGex) <= maxAbsNetGex * 0.08) {
+    addCandidate(candidates, airGap, 52, maxAbsNetGex - Math.abs(airGap.netGex), {
+      type: "air_gap",
+      label: "Air Gap",
+      severity: "info",
+      source: "nearest gamma-flip or low absolute net GEX pocket",
+    });
+  }
+
+  const tagByStrike = new Map<number, SpxGexStructureTag>();
+  for (const candidate of candidates.sort((a, b) => b.priority - a.priority || b.score - a.score)) {
+    if (!tagByStrike.has(candidate.strike)) tagByStrike.set(candidate.strike, candidate.tag);
+  }
+
+  return profiles.map((row) => ({ ...row, tags: tagByStrike.get(row.strike) ? [tagByStrike.get(row.strike)!] : [] }));
 };
+
+const addStructureTags = (profiles: Omit<SpxGexStrikeProfile, "tags">[], spot: number): SpxGexStrikeProfile[] =>
+  classifySpxGexStructureTags(profiles, spot);
+
+const addKeyLevelAnnotations = (profiles: SpxGexStrikeProfile[], zeroDte: SpxGexZeroDte, spot: number): SpxGexStrikeProfile[] =>
+  classifySpxGexStructureTags(profiles, spot, zeroDte);
 
 const buildStrikeProfiles = (strikes: number[], selectedExpiries: string[], cells: SpxGexHeatmapCell[], spot: number) => {
   const cellByKey = new Map(cells.map((cell) => [`${cell.strike}:${cell.expdate}`, cell]));
@@ -824,7 +923,7 @@ export const buildSpxGexHeatmapFromOptionChains = (input: BuildSpxGexHeatmapFrom
     strikes,
     cells,
     totals,
-    strikeProfiles: addKeyLevelAnnotations(strikeProfiles, zeroDte),
+    strikeProfiles: addKeyLevelAnnotations(strikeProfiles, zeroDte, quote.last),
     zeroDte,
     source: {
       quoteTool: "get_quotes",
@@ -856,7 +955,7 @@ const keyLevelsCollapsed = (zeroDte: SpxGexZeroDte) => {
 const normalizeLegacyCollapsedLevels = (heatmap: Omit<SpxGexHeatmapModel, "premarketInterpretation">) => {
   const strikeProfiles = heatmap.strikeProfiles?.length ? heatmap.strikeProfiles : buildStrikeProfileFromLegacyCells(heatmap);
   let zeroDte = heatmap.zeroDte;
-  let nextHeatmap = { ...heatmap, strikeProfiles: addKeyLevelAnnotations(strikeProfiles, zeroDte) };
+  let nextHeatmap = { ...heatmap, strikeProfiles: addKeyLevelAnnotations(strikeProfiles, zeroDte, heatmap.quote.last) };
   if (!keyLevelsCollapsed(heatmap.zeroDte)) return { heatmap: nextHeatmap, normalized: false };
 
   const upperWall = strikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || row.netGex > best.netGex ? row : best), null);
@@ -872,7 +971,7 @@ const normalizeLegacyCollapsedLevels = (heatmap: Omit<SpxGexHeatmapModel, "prema
     zeroDte.topPutWall = formatStoredLevel(negativeWall.strike);
   }
 
-  nextHeatmap = { ...nextHeatmap, strikeProfiles: addKeyLevelAnnotations(strikeProfiles, zeroDte), zeroDte };
+  nextHeatmap = { ...nextHeatmap, strikeProfiles: addKeyLevelAnnotations(strikeProfiles, zeroDte, heatmap.quote.last), zeroDte };
   return { heatmap: nextHeatmap, normalized: true };
 };
 
@@ -964,8 +1063,16 @@ const rowToLegacyHeatmap = (row: D1SpxGexHeatmapRow): SpxGexHeatmapModel => {
 
 const rowToIntradayHeatmap = (row: D1SpxGexIntradayRow): SpxGexHeatmapModel => {
   const parsed = parseJsonField<SpxGexHeatmapModel>(row.snapshot_json);
+  const baseHeatmap: Omit<SpxGexHeatmapModel, "premarketInterpretation"> = {
+    ...parsed,
+    strikeProfiles: parsed.strikeProfiles?.length ? parsed.strikeProfiles : [],
+  };
+  const strikeProfiles = parsed.strikeProfiles?.length
+    ? addKeyLevelAnnotations(parsed.strikeProfiles, parsed.zeroDte, parsed.quote.last)
+    : addKeyLevelAnnotations(buildStrikeProfileFromLegacyCells(baseHeatmap), parsed.zeroDte, parsed.quote.last);
   return {
     ...parsed,
+    strikeProfiles,
     session: parsed.session || {
       tradingDate: row.trading_date,
       snapshotMinuteEt: Number(row.snapshot_minute_et),

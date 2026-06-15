@@ -5,6 +5,7 @@ import {
   buildSpxGexHeatmapFromOptionChains,
   buildSpxGexHeatmapFromToolText,
   calculateBlackScholesExposures,
+  classifySpxGexStructureTags,
   generateAndStoreSpxGexHeatmap,
   getSpxGexGenerationStatus,
   listSpxGexHeatmapDates,
@@ -14,6 +15,7 @@ import {
   type SpxGexDataClient,
   type SpxGexHeatmapModel,
   type SpxGexOptionChain,
+  type SpxGexStrikeProfile,
 } from "../src/lib/spx-gex-heatmap";
 import { onRequest as getSpxGexHeatmapApi } from "../functions/api/spx-gex-heatmap";
 
@@ -103,6 +105,19 @@ const buildStructuredHeatmap = (generatedAt = "2026-05-27T13:15:00.000Z", spot =
     maxStrikes: 5,
   });
 
+type StructureFixtureRow = Omit<SpxGexStrikeProfile, "tags" | "dominantExpiry"> & { dominantExpiry?: string | null };
+
+const structureRow = (row: StructureFixtureRow): Omit<SpxGexStrikeProfile, "tags"> => ({
+  dominantExpiry: null,
+  ...row,
+});
+
+const labelsFor = (profiles: SpxGexStrikeProfile[]) =>
+  profiles.flatMap((row) => row.tags.map((tag) => tag.label));
+
+const labelAt = (profiles: SpxGexStrikeProfile[], strike: number) =>
+  profiles.find((row) => row.strike === strike)?.tags[0]?.label || "";
+
 const gexText = (_expiry: string, rows: string) => `
 **Snapshot:** 2026-05-27T09:14:55 **Spot:** $6,000.00
 | Metric | Value |
@@ -140,6 +155,68 @@ const buildLegacyHeatmap = (generatedAt = "2026-05-27T13:15:00.000Z") =>
   });
 
 describe("SPX GEX exposure board model", () => {
+  it("classifies professional-style primary structure labels with ranked, testable rules", () => {
+    const profiles = classifySpxGexStructureTags([
+      structureRow({ strike: 6060, netGex: 1_200_000_000, callGex: 1_450_000_000, putGex: -250_000_000, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 8_000, totalVolume: 3_000 }),
+      structureRow({ strike: 6050, netGex: 5_000_000_000, callGex: 6_200_000_000, putGex: -1_200_000_000, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 50_000, totalVolume: 7_500 }),
+      structureRow({ strike: 6040, netGex: 300_000_000, callGex: 440_000_000, putGex: -140_000_000, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 3_000, totalVolume: 1_200 }),
+      structureRow({ strike: 6020, netGex: 800_000_000, callGex: 930_000_000, putGex: -130_000_000, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 12_000, totalVolume: 2_200 }),
+      structureRow({ strike: 6000, netGex: 100_000_000, callGex: 300_000_000, putGex: -200_000_000, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 60_000, totalVolume: 10_000 }),
+      structureRow({ strike: 5960, netGex: -1_400_000_000, callGex: 200_000_000, putGex: -1_600_000_000, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 25_000, totalVolume: 3_500 }),
+      structureRow({ strike: 5940, netGex: 20_000_000, callGex: 40_000_000, putGex: -20_000_000, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 500, totalVolume: 200 }),
+    ], 6000, {
+      pinLevel: 6000,
+      gammaFlip: 5940,
+      topCallWallLevel: 6050,
+      topPutWallLevel: 5960,
+    });
+
+    assert.deepEqual(labelsFor(profiles).sort(), [
+      "Air Gap",
+      "Big call wall · gamma ceiling",
+      "Lower Shelf",
+      "Minor resistance",
+      "NOW / OI spike / pin zone",
+      "Resistance zone",
+      "Upper Shelf",
+    ].sort());
+    assert.equal(labelAt(profiles, 6050), "Big call wall · gamma ceiling");
+    assert.equal(labelAt(profiles, 6000), "NOW / OI spike / pin zone");
+    assert.equal(profiles.every((row) => row.tags.length <= 1), true);
+  });
+
+  it("does not mark every positive NetGEX strike above spot as Resistance zone", () => {
+    const productionLikeProfiles = [
+      structureRow({ strike: 7610, netGex: 223_501_893, callGex: 932_653_255, putGex: -709_151_361, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 7_879, totalVolume: 2_100 }),
+      structureRow({ strike: 7605, netGex: 402_869_636, callGex: 1_441_864_441, putGex: -1_038_994_805, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 13_268, totalVolume: 2_600 }),
+      structureRow({ strike: 7600, netGex: 12_787_655_875, callGex: 13_443_621_205, putGex: -655_965_332, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 62_010, totalVolume: 9_000 }),
+      structureRow({ strike: 7595, netGex: 2_077_872_173, callGex: 2_256_386_093, putGex: -178_513_920, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 10_759, totalVolume: 3_000 }),
+      structureRow({ strike: 7590, netGex: 1_951_620_216, callGex: 2_138_821_231, putGex: -187_201_016, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 8_827, totalVolume: 2_800 }),
+      structureRow({ strike: 7585, netGex: 919_156_460, callGex: 1_063_248_485, putGex: -144_092_026, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 3_266, totalVolume: 1_300 }),
+      structureRow({ strike: 7580, netGex: 3_201_291_145, callGex: 3_832_132_312, putGex: -630_841_168, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 9_327, totalVolume: 3_200 }),
+      structureRow({ strike: 7575, netGex: 5_415_502_982, callGex: 7_144_427_868, putGex: -1_728_924_886, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 20_028, totalVolume: 5_000 }),
+      structureRow({ strike: 7570, netGex: 5_990_142_995, callGex: 6_490_895_072, putGex: -500_752_076, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 5_161, totalVolume: 2_400 }),
+      structureRow({ strike: 7545, netGex: -301_600_279, callGex: 517_105_335, putGex: -818_705_614, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 5_242, totalVolume: 1_400 }),
+      structureRow({ strike: 7535, netGex: 16_831_523, callGex: 1_411_161_037, putGex: -1_394_329_513, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 13_239, totalVolume: 2_900 }),
+      structureRow({ strike: 7500, netGex: -3_400_000_000, callGex: 1_200_000_000, putGex: -4_600_000_000, netDex: 0, netVex: 0, netCex: 0, totalOpenInterest: 31_000, totalVolume: 4_500 }),
+    ];
+    const profiles = classifySpxGexStructureTags(productionLikeProfiles, 7570.12, {
+      pinLevel: 7600,
+      gammaFlip: 7545.18,
+      topCallWallLevel: 7600,
+      topPutWallLevel: 7500,
+    });
+
+    const resistanceLabels = labelsFor(profiles).filter((label) => label === "Resistance zone");
+    const positiveAboveCount = productionLikeProfiles.filter((row) => row.strike > 7570.12 && row.netGex > 0).length;
+
+    assert.equal(positiveAboveCount, 8);
+    assert.equal(resistanceLabels.length <= 1, true);
+    assert.equal(profiles.every((row) => row.tags.length <= 1), true);
+    assert.equal(labelAt(profiles, 7600), "Big call wall · gamma ceiling");
+    assert.equal(labelsFor(profiles).includes("Pin Zone"), false);
+  });
+
   it("builds a professional exposure board with matrix cells, structure tags, DEX, VEX, and CEX", () => {
     const heatmap = buildStructuredHeatmap();
 
@@ -150,9 +227,9 @@ describe("SPX GEX exposure board model", () => {
     assert.equal(typeof heatmap.zeroDte.netVex, "number");
     assert.equal(typeof heatmap.zeroDte.netCex, "number");
     assert.ok(heatmap.strikeProfiles.some((row) => row.tags.some((tag) => tag.type === "big_call_wall")));
-    assert.ok(heatmap.strikeProfiles.some((row) => row.tags.some((tag) => tag.type === "key_support")));
-    assert.ok(heatmap.strikeProfiles.some((row) => row.tags.some((tag) => tag.type === "pin")));
-    assert.ok(heatmap.strikeProfiles.some((row) => row.tags.some((tag) => tag.type === "gamma_flip")));
+    assert.ok(heatmap.strikeProfiles.some((row) => row.tags.some((tag) => tag.type === "lower_shelf")));
+    assert.ok(heatmap.strikeProfiles.some((row) => row.tags.some((tag) => tag.type === "now")));
+    assert.ok(heatmap.strikeProfiles.every((row) => row.tags.length <= 1));
     assert.ok(heatmap.source.note.includes("Black-Scholes"));
   });
 
