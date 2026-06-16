@@ -72,16 +72,16 @@ export const portfolioConfig = {
     //   alt: "Himeji Castle seen from a distance",
     //   src: "https://images.unsplash.com/photo-1491884662610-dfcd28f30cfb?q=80&w=1974&auto=format&fit=crop",
     // },
-    // {
-    //   id: 14,
-    //   alt: "Torii gate pillars in vibrant orange and black",
-    //   src: "https://images.unsplash.com/photo-1585028281328-54ec883cd7cf?q=80&w=1935&auto=format&fit=crop",
-    // },
-    // {
-    //   id: 15,
-    //   alt: "Traditional Japanese home under daylight",
-    //   src: "https://images.unsplash.com/photo-1505069446780-4ef442b5207f?q=80&w=1974&auto=format&fit=crop",
-    // },
+    {
+      id: 14,
+      alt: "Torii gate pillars in vibrant orange and black",
+      src: "https://images.unsplash.com/photo-1585028281328-54ec883cd7cf?q=80&w=1935&auto=format&fit=crop",
+    },
+    {
+      id: 15,
+      alt: "Traditional Japanese home under daylight",
+      src: "https://images.unsplash.com/photo-1505069446780-4ef442b5207f?q=80&w=1974&auto=format&fit=crop",
+    },
     {
       id: 37,
       alt: "Garden portrait with straw hat",

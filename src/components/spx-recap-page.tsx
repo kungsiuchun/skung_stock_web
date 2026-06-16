@@ -531,8 +531,8 @@ export function SPXRecapPage() {
               </div>
             </section>
 
-            <section className="mb-5 grid grid-cols-1 gap-5 xl:grid-cols-[1.35fr_0.65fr]">
-              <div className="border border-white/10 bg-[#101118] p-4">
+            <section className="mb-5 grid grid-cols-1 items-stretch gap-5 xl:grid-cols-[1.35fr_0.65fr]">
+              <div className="flex min-h-[28rem] flex-col border border-white/10 bg-[#101118] p-4">
                 <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="flex items-center gap-2 text-sm font-black text-white">
                     <ListFilter className="h-4 w-4 text-amber-300" />
@@ -551,7 +551,7 @@ export function SPXRecapPage() {
                     ))}
                   </select>
                 </div>
-                <div className="max-h-[24rem] overflow-auto border border-white/10">
+                <div className="min-h-[24rem] flex-1 overflow-auto border border-white/10">
                   <table className="w-full min-w-[720px] text-left text-xs">
                     <thead className="sticky top-0 bg-[#0b0c11] text-zinc-500">
                       <tr>
