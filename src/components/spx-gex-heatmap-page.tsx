@@ -58,6 +58,8 @@ const tagClass = (severity: string) =>
       ? "border border-pink-300/25 bg-pink-400/10 text-pink-100"
       : "border border-cyan-300/25 bg-cyan-400/10 text-cyan-100";
 
+type RowRangeMode = "auto" | "all";
+
 const buildFallbackProfiles = (heatmap: SpxGexHeatmapModel): SpxGexStrikeProfile[] => {
   if (heatmap.strikeProfiles?.length) return heatmap.strikeProfiles;
   const cellByStrike = new Map<number, SpxGexHeatmapCell[]>();
@@ -90,6 +92,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [speedMs, setSpeedMs] = useState(900);
+  const [rowRangeMode, setRowRangeMode] = useState<RowRangeMode>("auto");
 
   const loadHeatmap = async (
     date?: string,
@@ -156,6 +159,12 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     vex: profiles.some((row) => Math.abs(row.netVex) > 0),
     cex: profiles.some((row) => Math.abs(row.netCex) > 0),
   }), [profiles]);
+  const visibleStrikes = useMemo(() => {
+    if (!heatmap || rowRangeMode === "all") return heatmap?.strikes || [];
+    const spot = heatmap.quote.last;
+    const autoStrikes = heatmap.strikes.filter((strike) => Math.abs(strike - spot) <= 100);
+    return autoStrikes.length > 0 ? autoStrikes : heatmap.strikes;
+  }, [heatmap, rowRangeMode]);
   const summaryExposureAvailable = useMemo(() => ({
     dex: laneExposureAvailable.dex || Math.abs(heatmap?.zeroDte.netDex || 0) > 0,
     vex: laneExposureAvailable.vex || Math.abs(heatmap?.zeroDte.netVex || 0) > 0,
@@ -308,6 +317,26 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
             </section>
 
             <section className="overflow-x-auto border border-[#123142] bg-[#030910]">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#123142] bg-[#06111a] px-3 py-2">
+                <div className="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200/70">
+                  {visibleStrikes.length} / {heatmap.strikes.length} strikes
+                </div>
+                <div className="inline-flex h-9 items-center border border-cyan-300/20 bg-cyan-300/10 p-0.5">
+                  {(["auto", "all"] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setRowRangeMode(mode)}
+                      className={`h-7 px-3 font-mono text-[11px] font-black uppercase transition-colors ${
+                        rowRangeMode === mode ? "bg-cyan-200 text-[#03111a]" : "text-cyan-100 hover:bg-cyan-300/15"
+                      }`}
+                      aria-pressed={rowRangeMode === mode}
+                    >
+                      {mode === "auto" ? "Auto" : "All"}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <table className="w-full min-w-[1540px] table-fixed border-collapse font-mono text-[11px]">
                 <thead className="sticky top-0 z-20">
                   <tr>
@@ -323,7 +352,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                   </tr>
                 </thead>
                 <tbody>
-                  {heatmap.strikes.map((strike) => {
+                  {visibleStrikes.map((strike) => {
                     const profile = profileByStrike.get(strike);
                     return (
                       <tr key={strike} className={profile?.tags.some((tag) => tag.type === "now") ? "bg-yellow-400/10" : ""}>
