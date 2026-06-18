@@ -462,6 +462,7 @@ describe("SPX GEX heatmap API", () => {
     const db = new MemoryD1();
     await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T13:45:00.000Z", 6000));
     await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T14:00:00.000Z", 6010));
+    await upsertSpxGexHeatmap(db, "2026-05-28", buildStructuredHeatmap("2026-05-28T14:15:00.000Z", 6020));
 
     const latestResponse = await getSpxGexHeatmapApi({
       request: new Request("https://example.com/api/spx-gex-heatmap?date=2026-05-27"),
@@ -488,6 +489,20 @@ describe("SPX GEX heatmap API", () => {
     const selectedPayload = (await selectedResponse.json()) as { heatmap: SpxGexHeatmapModel };
 
     assert.equal(selectedPayload.heatmap.quote.last, 6000);
+
+    const defaultResponse = await getSpxGexHeatmapApi({
+      request: new Request("https://example.com/api/spx-gex-heatmap"),
+      env: { SPX_RECAP_DB: db },
+    });
+    const defaultPayload = (await defaultResponse.json()) as {
+      selectedDate: string;
+      selectedSnapshot: { snapshotMinuteEt: number };
+      heatmap: SpxGexHeatmapModel;
+    };
+
+    assert.equal(defaultPayload.selectedDate, "2026-05-28");
+    assert.equal(defaultPayload.selectedSnapshot.snapshotMinuteEt, 10 * 60);
+    assert.equal(defaultPayload.heatmap.quote.last, 6020);
   });
 });
 

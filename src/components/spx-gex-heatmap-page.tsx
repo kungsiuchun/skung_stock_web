@@ -91,14 +91,22 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const [playing, setPlaying] = useState(false);
   const [speedMs, setSpeedMs] = useState(900);
 
-  const loadHeatmap = async (date?: string, snapshotMinute?: number | null) => {
+  const loadHeatmap = async (
+    date?: string,
+    snapshotMinute?: number | null,
+    options: { bypassCache?: boolean } = {},
+  ) => {
     setLoading(true);
     setError(null);
     try {
       const params = new URLSearchParams();
       if (date) params.set("date", date);
       if (snapshotMinute !== null && snapshotMinute !== undefined) params.set("snapshot", String(snapshotMinute));
-      const response = await fetch(`/api/spx-gex-heatmap${params.toString() ? `?${params.toString()}` : ""}`);
+      if (options.bypassCache) params.set("_", String(Date.now()));
+      const response = await fetch(
+        `/api/spx-gex-heatmap${params.toString() ? `?${params.toString()}` : ""}`,
+        options.bypassCache ? { cache: "no-store" } : undefined,
+      );
       const payload = (await response.json()) as SpxGexHeatmapResponse & { error?: string };
       if (!response.ok) throw new Error(payload.error || "SPX GEX heatmap API failed");
       setData(payload);
@@ -219,11 +227,16 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
               </select>
             </label>
             <button
-              onClick={() => void loadHeatmap(selectedDate, selectedMinute)}
-              className="inline-flex h-10 w-10 items-center justify-center border border-cyan-300/20 bg-cyan-300/10 text-cyan-100 transition-colors hover:bg-cyan-300/20"
-              title="Refresh board"
+              onClick={() => {
+                setPlaying(false);
+                void loadHeatmap(undefined, null, { bypassCache: true });
+              }}
+              disabled={loading}
+              className="inline-flex h-10 w-10 items-center justify-center border border-cyan-300/20 bg-cyan-300/10 text-cyan-100 transition-colors hover:bg-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-50"
+              title="Refresh latest DB snapshot"
+              aria-label="Refresh latest DB snapshot"
             >
-              <RefreshCw className="h-4 w-4" />
+              <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
             </button>
           </div>
         </header>
