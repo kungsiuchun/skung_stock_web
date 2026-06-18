@@ -51,6 +51,11 @@ const cellStyle = (value: number | null | undefined, max: number) => {
 
 const exposureColor = (value: number) => value >= 0 ? "#d000d4" : "#20d6c8";
 
+const nearestStrike = (strikes: number[], spot: number | null | undefined) => {
+  if (typeof spot !== "number" || !Number.isFinite(spot) || strikes.length === 0) return null;
+  return strikes.reduce((nearest, strike) => (Math.abs(strike - spot) < Math.abs(nearest - spot) ? strike : nearest));
+};
+
 const tagClass = (severity: string) =>
   severity === "major"
     ? "border border-yellow-300/35 bg-yellow-300/15 text-yellow-100"
@@ -165,6 +170,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     const autoStrikes = heatmap.strikes.filter((strike) => Math.abs(strike - spot) <= 100);
     return autoStrikes.length > 0 ? autoStrikes : heatmap.strikes;
   }, [heatmap, rowRangeMode]);
+  const spotStrike = useMemo(() => nearestStrike(heatmap?.strikes || [], heatmap?.quote.last), [heatmap?.quote.last, heatmap?.strikes]);
   const summaryExposureAvailable = useMemo(() => ({
     dex: laneExposureAvailable.dex || Math.abs(heatmap?.zeroDte.netDex || 0) > 0,
     vex: laneExposureAvailable.vex || Math.abs(heatmap?.zeroDte.netVex || 0) > 0,
@@ -354,9 +360,10 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                 <tbody>
                   {visibleStrikes.map((strike) => {
                     const profile = profileByStrike.get(strike);
+                    const isSpotStrike = strike === spotStrike;
                     return (
-                      <tr key={strike} className={profile?.tags.some((tag) => tag.type === "now") ? "bg-yellow-400/10" : ""}>
-                        <StrikeCell strike={strike} now={profile?.tags.some((tag) => tag.type === "now") || false} />
+                      <tr key={strike} className={isSpotStrike ? "bg-yellow-400/10" : ""}>
+                        <StrikeCell strike={strike} isSpotStrike={isSpotStrike} />
                         {heatmap.selectedExpiries.map((expiry) => {
                           const cell = cellByKey.get(`${strike}:${expiry}`);
                           return (
@@ -369,12 +376,17 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                             </td>
                           );
                         })}
-                        <StrikeCell strike={strike} now={profile?.tags.some((tag) => tag.type === "now") || false} />
+                        <StrikeCell strike={strike} isSpotStrike={isSpotStrike} />
                         <td className="border border-[#102433] bg-[#050c14] px-1.5 py-[2px]">
                           <div className="grid grid-cols-[150px_72px_1fr] items-center gap-2">
                             <ExposureBar value={profile?.netGex || 0} max={maxGex} />
                             <span className="text-right font-black text-cyan-100">{formatSignedCompact(profile?.netGex)}</span>
                             <span className="flex min-h-4 flex-wrap items-center gap-1 overflow-hidden">
+                              {isSpotStrike && (
+                                <span className="border border-yellow-300/45 bg-yellow-300/15 px-1 py-0 text-[9px] font-black text-yellow-100">
+                                  Spot ${heatmap.quote.last.toFixed(2)}
+                                </span>
+                              )}
                               {(profile?.tags || []).map((tag) => (
                                 <span key={tag.type} className={`px-1 py-0 text-[9px] font-black ${tagClass(tag.severity)}`}>
                                   {tag.label}
@@ -435,8 +447,8 @@ const HeaderCell = ({ children, width }: { children: string; width?: string }) =
   </th>
 );
 
-const StrikeCell = ({ strike, now }: { strike: number; now: boolean }) => (
-  <th className={`border border-[#102433] px-1.5 py-[2px] text-right font-black tabular-nums ${now ? "bg-yellow-300/15 text-yellow-100" : "bg-[#06121c] text-cyan-300"}`}>
+const StrikeCell = ({ strike, isSpotStrike }: { strike: number; isSpotStrike: boolean }) => (
+  <th className={`border border-[#102433] px-1.5 py-[2px] text-right font-black tabular-nums ${isSpotStrike ? "bg-yellow-300/15 text-yellow-100" : "bg-[#06121c] text-cyan-300"}`}>
     {strike.toLocaleString("en-US", { maximumFractionDigits: 0 })}
   </th>
 );
