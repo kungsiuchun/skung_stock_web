@@ -161,6 +161,15 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     laneExposureAvailable.vex,
   ]);
   const selectedSessionIndex = Math.max(0, data.sessions.findIndex((session) => session.snapshotMinuteEt === selectedMinute));
+  const selectedSession = data.selectedSnapshot || heatmap?.session || null;
+  const isDelayedSnapshot = Boolean(
+    selectedSession &&
+    selectedSession.collectedMinuteEt !== undefined &&
+    selectedSession.collectedMinuteEt !== selectedSession.snapshotMinuteEt,
+  );
+  const sourceText = heatmap
+    ? `${isDelayedSnapshot ? `15-min delayed Yahoo snapshot · collected ${selectedSession?.collectedTimeEt} ET. ` : ""}${heatmap.source.note}`
+    : "";
 
   return (
     <section className="h-full w-full overflow-y-auto bg-[#02070d] px-3 pb-8 pt-4 text-white sm:px-5 lg:px-7">
@@ -349,7 +358,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                   <Gauge className="h-4 w-4" />
                   Source
                 </div>
-                <div className="leading-6">{heatmap.source.note}</div>
+                <div className="leading-6">{sourceText}</div>
               </div>
             </section>
           </>

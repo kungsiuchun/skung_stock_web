@@ -1,8 +1,9 @@
 import type { D1DatabaseLike } from "./spx-recap-d1";
 
 const MARKET_TIME_ZONE = "America/New_York";
-const SESSION_START_MINUTE_ET = 9 * 60 + 15;
-const SESSION_END_MINUTE_ET = 16 * 60;
+const DELAYED_FEED_MINUTES = 15;
+const COLLECTION_START_MINUTE_ET = 9 * 60 + 45;
+const COLLECTION_END_MINUTE_ET = 16 * 60 + 15;
 const SNAPSHOT_INTERVAL_MINUTES = 15;
 const CONTRACT_MULTIPLIER = 100;
 const RISK_FREE_RATE = 0.04;
@@ -112,6 +113,8 @@ export interface SpxGexSnapshotMeta {
   tradingDate: string;
   snapshotMinuteEt: number;
   snapshotTimeEt: string;
+  collectedMinuteEt: number;
+  collectedTimeEt: string;
   generatedAt: string;
   spot: number;
 }
@@ -183,6 +186,8 @@ export interface SpxGexSessionSummary {
   tradingDate: string;
   snapshotMinuteEt: number;
   snapshotTimeEt: string;
+  collectedMinuteEt: number;
+  collectedTimeEt: string;
   generatedAt: string;
   spot: number;
 }
@@ -215,8 +220,8 @@ export interface SpxGexDataClient {
 }
 
 export type SpxGexGenerationResult =
-  | { status: "generated"; date: string; snapshotMinuteEt: number; snapshotTimeEt: string }
-  | { status: "skipped_existing"; date: string; snapshotMinuteEt: number; snapshotTimeEt: string }
+  | { status: "generated"; date: string; snapshotMinuteEt: number; snapshotTimeEt: string; collectedMinuteEt: number; collectedTimeEt: string }
+  | { status: "skipped_existing"; date: string; snapshotMinuteEt: number; snapshotTimeEt: string; collectedMinuteEt: number; collectedTimeEt: string }
   | { status: "skipped"; date: string; reason: string };
 
 interface D1SpxGexHeatmapRow {
@@ -324,20 +329,23 @@ export const getSpxGexGenerationStatus = (now: Date = new Date()) => {
   const etDateKey = toDateKey(etNow.getFullYear(), etNow.getMonth() + 1, etNow.getDate());
   const weekday = etNow.getDay();
   const minutes = getEtMinutes(etNow);
+  const snapshotMinuteEt = minutes - DELAYED_FEED_MINUTES;
   const isWeekend = weekday === 0 || weekday === 6;
   const isFullHoliday = getFullMarketHolidayKeys(etNow.getFullYear()).has(etDateKey);
   const isMarketOpenDay = !isWeekend && !isFullHoliday;
   const isGenerationMinute =
-    minutes >= SESSION_START_MINUTE_ET &&
-    minutes <= SESSION_END_MINUTE_ET &&
-    (minutes - SESSION_START_MINUTE_ET) % SNAPSHOT_INTERVAL_MINUTES === 0;
+    minutes >= COLLECTION_START_MINUTE_ET &&
+    minutes <= COLLECTION_END_MINUTE_ET &&
+    (minutes - COLLECTION_START_MINUTE_ET) % SNAPSHOT_INTERVAL_MINUTES === 0;
 
   return {
     etNow,
     etDateKey,
     minutes,
-    snapshotMinuteEt: minutes,
-    snapshotTimeEt: formatEtMinute(minutes),
+    collectedMinuteEt: minutes,
+    collectedTimeEt: formatEtMinute(minutes),
+    snapshotMinuteEt,
+    snapshotTimeEt: formatEtMinute(snapshotMinuteEt),
     isMarketOpenDay,
     isGenerationWindow: isMarketOpenDay && isGenerationMinute,
     skipReason: isWeekend ? "weekend" : isFullHoliday ? "us_market_holiday" : null,
@@ -861,6 +869,22 @@ const buildSessionMeta = (generatedAt: string, spot: number): SpxGexSnapshotMeta
     tradingDate: status.etDateKey,
     snapshotMinuteEt: status.snapshotMinuteEt,
     snapshotTimeEt: status.snapshotTimeEt,
+    collectedMinuteEt: status.collectedMinuteEt,
+    collectedTimeEt: status.collectedTimeEt,
+    generatedAt,
+    spot,
+  };
+};
+
+const buildUndelayedSessionMeta = (generatedAt: string, spot: number): SpxGexSnapshotMeta => {
+  const etDate = toEasternDate(new Date(generatedAt));
+  const minute = getEtMinutes(etDate);
+  return {
+    tradingDate: toDateKey(etDate.getFullYear(), etDate.getMonth() + 1, etDate.getDate()),
+    snapshotMinuteEt: minute,
+    snapshotTimeEt: formatEtMinute(minute),
+    collectedMinuteEt: minute,
+    collectedTimeEt: formatEtMinute(minute),
     generatedAt,
     spot,
   };
@@ -931,7 +955,7 @@ export const buildSpxGexHeatmapFromOptionChains = (input: BuildSpxGexHeatmapFrom
       gexTool: "black_scholes_exposure_engine",
       zeroDteTool: "black_scholes_exposure_engine",
       gexTopRows: input.maxStrikes ?? DEFAULT_MAX_STRIKES,
-      note: "Yahoo option chains are transformed into Black-Scholes GEX, DEX, VEX (vanna), and CEX (charm) approximations. Missing OI falls back to volume.",
+      note: "15-minute delayed Yahoo option chains are transformed into Black-Scholes GEX, DEX, VEX (vanna), and CEX (charm) approximations. Missing OI falls back to volume.",
     },
   };
 
@@ -1041,7 +1065,7 @@ const rowToLegacyHeatmap = (row: D1SpxGexHeatmapRow): SpxGexHeatmapModel => {
     ticker: "SPX",
     quote,
     snapshot: row.snapshot_at,
-    session: buildSessionMeta(row.generated_at, quote.last),
+    session: buildUndelayedSessionMeta(row.generated_at, quote.last),
     selectedExpiries: parseJsonField<string[]>(row.expiries_json),
     strikeRange: { lower: Number(row.spot) * 0.9, upper: Number(row.spot) * 1.1 },
     strikes: parseJsonField<number[]>(row.strikes_json),
@@ -1063,6 +1087,17 @@ const rowToLegacyHeatmap = (row: D1SpxGexHeatmapRow): SpxGexHeatmapModel => {
 
 const rowToIntradayHeatmap = (row: D1SpxGexIntradayRow): SpxGexHeatmapModel => {
   const parsed = parseJsonField<SpxGexHeatmapModel>(row.snapshot_json);
+  const collectionStatus = getSpxGexGenerationStatus(new Date(row.generated_at));
+  const parsedSession = parsed.session;
+  const session: SpxGexSnapshotMeta = {
+    tradingDate: parsedSession?.tradingDate ?? row.trading_date,
+    snapshotMinuteEt: parsedSession?.snapshotMinuteEt ?? Number(row.snapshot_minute_et),
+    snapshotTimeEt: parsedSession?.snapshotTimeEt ?? row.snapshot_time_et,
+    collectedMinuteEt: parsedSession?.collectedMinuteEt ?? collectionStatus.collectedMinuteEt,
+    collectedTimeEt: parsedSession?.collectedTimeEt ?? collectionStatus.collectedTimeEt,
+    generatedAt: parsedSession?.generatedAt ?? row.generated_at,
+    spot: parsedSession?.spot ?? Number(row.spot),
+  };
   const baseHeatmap: Omit<SpxGexHeatmapModel, "premarketInterpretation"> = {
     ...parsed,
     strikeProfiles: parsed.strikeProfiles?.length ? parsed.strikeProfiles : [],
@@ -1073,13 +1108,7 @@ const rowToIntradayHeatmap = (row: D1SpxGexIntradayRow): SpxGexHeatmapModel => {
   return {
     ...parsed,
     strikeProfiles,
-    session: parsed.session || {
-      tradingDate: row.trading_date,
-      snapshotMinuteEt: Number(row.snapshot_minute_et),
-      snapshotTimeEt: row.snapshot_time_et,
-      generatedAt: row.generated_at,
-      spot: Number(row.spot),
-    },
+    session,
   };
 };
 
@@ -1113,6 +1142,8 @@ export const listSpxGexHeatmapSessions = async (db: D1DatabaseLike, date: string
       tradingDate: row.trading_date,
       snapshotMinuteEt: Number(row.snapshot_minute_et),
       snapshotTimeEt: row.snapshot_time_et,
+      collectedMinuteEt: getSpxGexGenerationStatus(new Date(row.generated_at)).collectedMinuteEt,
+      collectedTimeEt: getSpxGexGenerationStatus(new Date(row.generated_at)).collectedTimeEt,
       generatedAt: row.generated_at,
       spot: Number(row.spot),
     }));
@@ -1391,6 +1422,8 @@ export const generateAndStoreSpxGexHeatmap = async (options: {
       date,
       snapshotMinuteEt: generationStatus.snapshotMinuteEt,
       snapshotTimeEt: generationStatus.snapshotTimeEt,
+      collectedMinuteEt: generationStatus.collectedMinuteEt,
+      collectedTimeEt: generationStatus.collectedTimeEt,
     };
   }
 
@@ -1419,5 +1452,7 @@ export const generateAndStoreSpxGexHeatmap = async (options: {
     date,
     snapshotMinuteEt: generationStatus.snapshotMinuteEt,
     snapshotTimeEt: generationStatus.snapshotTimeEt,
+    collectedMinuteEt: generationStatus.collectedMinuteEt,
+    collectedTimeEt: generationStatus.collectedTimeEt,
   };
 };

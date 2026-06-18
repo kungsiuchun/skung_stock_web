@@ -7,7 +7,7 @@ compatibility_flags = [ "nodejs_compat" ]
 # Cloudflare cron uses UTC. The Worker gates the real NYSE calendar and ET windows.
 # Trading: 10:00-15:45 ET every 15 minutes, 10:00-12:45 ET on early closes.
 # Audit: 16:15 ET, or 13:15 ET on early closes.
-# SPX GEX heatmap: 09:15-16:00 ET every 15 minutes. The Worker gates ET/DST/NYSE days.
+# SPX GEX heatmap: collect 09:45-16:15 ET, display 09:30-16:00 ET as a 15-min delayed feed.
 crons = [ "*/15 14-20 * * MON-FRI", "15 17-21 * * MON-FRI", "*/15 13-21 * * MON-FRI" ]
 
 [[kv_namespaces]]

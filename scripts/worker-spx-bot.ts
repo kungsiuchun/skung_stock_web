@@ -601,6 +601,8 @@ function parseEtTimestamp(input: string | null): Date | null {
 const MARKET_TIME_ZONE = 'America/New_York';
 const TRADING_CRON = '*/15 14-20 * * MON-FRI';
 const AUDIT_CRON = '15 17-21 * * MON-FRI';
+// SPX GEX collection is gated in src/lib/spx-gex-heatmap.ts as a 15-minute delayed feed:
+// collect 09:45-16:15 ET, display represented market time 09:30-16:00 ET.
 const SPX_GEX_HEATMAP_CRON = '*/15 13-21 * * MON-FRI';
 
 interface ScheduledRunOptions {

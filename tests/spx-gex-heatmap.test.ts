@@ -20,17 +20,25 @@ import {
 import { onRequest as getSpxGexHeatmapApi } from "../functions/api/spx-gex-heatmap";
 
 describe("SPX GEX intraday generation gate", () => {
-  it("allows every 15-minute slot from 09:15 through 16:00 ET on a trading day", () => {
-    const open = getSpxGexGenerationStatus(new Date("2026-05-27T13:15:00Z"));
+  it("collects a 15-minute delayed feed from 09:45 through 16:15 ET on a trading day", () => {
+    const tooEarly = getSpxGexGenerationStatus(new Date("2026-05-27T13:30:00Z"));
+    const open = getSpxGexGenerationStatus(new Date("2026-05-27T13:45:00Z"));
     const mid = getSpxGexGenerationStatus(new Date("2026-05-27T17:30:00Z"));
-    const close = getSpxGexGenerationStatus(new Date("2026-05-27T20:00:00Z"));
-    const outside = getSpxGexGenerationStatus(new Date("2026-05-27T20:15:00Z"));
+    const close = getSpxGexGenerationStatus(new Date("2026-05-27T20:15:00Z"));
+    const outside = getSpxGexGenerationStatus(new Date("2026-05-27T20:30:00Z"));
 
+    assert.equal(tooEarly.snapshotTimeEt, "09:15");
+    assert.equal(tooEarly.isGenerationWindow, false);
     assert.equal(open.etDateKey, "2026-05-27");
-    assert.equal(open.snapshotMinuteEt, 9 * 60 + 15);
+    assert.equal(open.snapshotMinuteEt, 9 * 60 + 30);
+    assert.equal(open.snapshotTimeEt, "09:30");
+    assert.equal(open.collectedMinuteEt, 9 * 60 + 45);
+    assert.equal(open.collectedTimeEt, "09:45");
     assert.equal(open.isGenerationWindow, true);
     assert.equal(mid.isGenerationWindow, true);
+    assert.equal(mid.snapshotTimeEt, "13:15");
     assert.equal(close.snapshotTimeEt, "16:00");
+    assert.equal(close.collectedTimeEt, "16:15");
     assert.equal(close.isGenerationWindow, true);
     assert.equal(outside.isGenerationWindow, false);
   });
@@ -39,6 +47,16 @@ describe("SPX GEX intraday generation gate", () => {
     const status = getSpxGexGenerationStatus(new Date("2026-05-25T13:15:00Z"));
 
     assert.equal(status.etDateKey, "2026-05-25");
+    assert.equal(status.isMarketOpenDay, false);
+    assert.equal(status.isGenerationWindow, false);
+    assert.equal(status.skipReason, "us_market_holiday");
+  });
+
+  it("blocks generation on Juneteenth", () => {
+    const status = getSpxGexGenerationStatus(new Date("2026-06-19T13:45:00Z"));
+
+    assert.equal(status.etDateKey, "2026-06-19");
+    assert.equal(status.snapshotTimeEt, "09:30");
     assert.equal(status.isMarketOpenDay, false);
     assert.equal(status.isGenerationWindow, false);
     assert.equal(status.skipReason, "us_market_holiday");
@@ -96,7 +114,7 @@ const buildOptionChain = (expiry: string, spot = 6000, multiplier = 1): SpxGexOp
   })),
 });
 
-const buildStructuredHeatmap = (generatedAt = "2026-05-27T13:15:00.000Z", spot = 6000) =>
+const buildStructuredHeatmap = (generatedAt = "2026-05-27T13:45:00.000Z", spot = 6000) =>
   buildSpxGexHeatmapFromOptionChains({
     generatedAt,
     quoteText: `| Ticker | Last | Change | Change % |\n| SPX | $${spot.toFixed(2)} | +12.50 | +0.21% |`,
@@ -401,11 +419,11 @@ class MemoryD1 {
 describe("SPX GEX intraday D1 storage", () => {
   it("stores multiple snapshots per date, reads latest or selected slot, and retains seven trading dates", async () => {
     const db = new MemoryD1();
-    await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T13:15:00.000Z", 6000), { retentionTradingDays: 7 });
-    await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T13:30:00.000Z", 6010), { retentionTradingDays: 7 });
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T13:45:00.000Z", 6000), { retentionTradingDays: 7 });
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T14:00:00.000Z", 6010), { retentionTradingDays: 7 });
 
     for (const date of ["2026-05-18", "2026-05-19", "2026-05-20", "2026-05-21", "2026-05-22", "2026-05-26", "2026-05-28"]) {
-      await upsertSpxGexHeatmap(db, date, buildStructuredHeatmap(`${date}T13:15:00.000Z`), { retentionTradingDays: 7 });
+      await upsertSpxGexHeatmap(db, date, buildStructuredHeatmap(`${date}T13:45:00.000Z`), { retentionTradingDays: 7 });
     }
 
     assert.deepEqual(await listSpxGexHeatmapDates(db), [
@@ -419,7 +437,7 @@ describe("SPX GEX intraday D1 storage", () => {
     ]);
     assert.equal((await listSpxGexHeatmapSessions(db, "2026-05-27")).length, 2);
     assert.equal((await readSpxGexHeatmap(db, "2026-05-27"))?.quote.last, 6010);
-    assert.equal((await readSpxGexHeatmap(db, "2026-05-27", 9 * 60 + 15))?.quote.last, 6000);
+    assert.equal((await readSpxGexHeatmap(db, "2026-05-27", 9 * 60 + 30))?.quote.last, 6000);
     assert.equal(await readSpxGexHeatmap(db, "2026-05-18"), null);
   });
 
@@ -432,6 +450,8 @@ describe("SPX GEX intraday D1 storage", () => {
     const restored = await readSpxGexHeatmap(db, "2026-05-27");
 
     assert.equal(restored?.quote.last, 6000);
+    assert.equal(restored?.session?.snapshotTimeEt, "09:15");
+    assert.equal(restored?.session?.collectedTimeEt, "09:15");
     assert.equal(restored?.source.gexTool, "get_options_gex");
     assert.ok((await listSpxGexHeatmapSessions(db, "2026-05-27")).length === 1);
   });
@@ -440,8 +460,8 @@ describe("SPX GEX intraday D1 storage", () => {
 describe("SPX GEX heatmap API", () => {
   it("returns dates, sessions, selected latest snapshot, and supports explicit snapshot selection", async () => {
     const db = new MemoryD1();
-    await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T13:15:00.000Z", 6000));
-    await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T13:30:00.000Z", 6010));
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T13:45:00.000Z", 6000));
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T14:00:00.000Z", 6010));
 
     const latestResponse = await getSpxGexHeatmapApi({
       request: new Request("https://example.com/api/spx-gex-heatmap?date=2026-05-27"),
@@ -449,19 +469,20 @@ describe("SPX GEX heatmap API", () => {
     });
     const latestPayload = (await latestResponse.json()) as {
       selectedDate: string;
-      sessions: Array<{ snapshotMinuteEt: number }>;
-      selectedSnapshot: { snapshotMinuteEt: number };
+      sessions: Array<{ snapshotMinuteEt: number; collectedTimeEt: string }>;
+      selectedSnapshot: { snapshotMinuteEt: number; collectedTimeEt: string };
       heatmap: SpxGexHeatmapModel;
     };
 
     assert.equal(latestResponse.status, 200);
     assert.equal(latestPayload.selectedDate, "2026-05-27");
     assert.equal(latestPayload.sessions.length, 2);
-    assert.equal(latestPayload.selectedSnapshot.snapshotMinuteEt, 9 * 60 + 30);
+    assert.equal(latestPayload.selectedSnapshot.snapshotMinuteEt, 9 * 60 + 45);
+    assert.equal(latestPayload.selectedSnapshot.collectedTimeEt, "10:00");
     assert.equal(latestPayload.heatmap.quote.last, 6010);
 
     const selectedResponse = await getSpxGexHeatmapApi({
-      request: new Request("https://example.com/api/spx-gex-heatmap?date=2026-05-27&snapshot=555"),
+      request: new Request("https://example.com/api/spx-gex-heatmap?date=2026-05-27&snapshot=570"),
       env: { SPX_RECAP_DB: db },
     });
     const selectedPayload = (await selectedResponse.json()) as { heatmap: SpxGexHeatmapModel };
@@ -516,22 +537,22 @@ describe("SPX GEX intraday automation runner", () => {
     const firstRun = await generateAndStoreSpxGexHeatmap({
       db,
       dataClient: client,
-      now: new Date("2026-05-27T13:15:00Z"),
+      now: new Date("2026-05-27T13:45:00Z"),
     });
     const sameSlot = await generateAndStoreSpxGexHeatmap({
       db,
       dataClient: client,
-      now: new Date("2026-05-27T13:15:00Z"),
+      now: new Date("2026-05-27T13:45:00Z"),
     });
     const nextSlot = await generateAndStoreSpxGexHeatmap({
       db,
       dataClient: client,
-      now: new Date("2026-05-27T13:30:00Z"),
+      now: new Date("2026-05-27T14:00:00Z"),
     });
 
-    assert.deepEqual(firstRun, { status: "generated", date: "2026-05-27", snapshotMinuteEt: 555, snapshotTimeEt: "09:15" });
-    assert.deepEqual(sameSlot, { status: "skipped_existing", date: "2026-05-27", snapshotMinuteEt: 555, snapshotTimeEt: "09:15" });
-    assert.deepEqual(nextSlot, { status: "generated", date: "2026-05-27", snapshotMinuteEt: 570, snapshotTimeEt: "09:30" });
+    assert.deepEqual(firstRun, { status: "generated", date: "2026-05-27", snapshotMinuteEt: 570, snapshotTimeEt: "09:30", collectedMinuteEt: 585, collectedTimeEt: "09:45" });
+    assert.deepEqual(sameSlot, { status: "skipped_existing", date: "2026-05-27", snapshotMinuteEt: 570, snapshotTimeEt: "09:30", collectedMinuteEt: 585, collectedTimeEt: "09:45" });
+    assert.deepEqual(nextSlot, { status: "generated", date: "2026-05-27", snapshotMinuteEt: 585, snapshotTimeEt: "09:45", collectedMinuteEt: 600, collectedTimeEt: "10:00" });
     assert.equal((await listSpxGexHeatmapSessions(db, "2026-05-27")).length, 2);
     assert.equal(calls.filter((call) => call === "get_quotes").length, 2);
     assert.equal(calls.filter((call) => call.startsWith("get_options_chain")).length, 12);
@@ -548,6 +569,20 @@ describe("SPX GEX intraday automation runner", () => {
     });
 
     assert.deepEqual(result, { status: "skipped", date: "2026-05-25", reason: "us_market_holiday" });
+    assert.deepEqual(calls, []);
+  });
+
+  it("does not call the data client on Juneteenth", async () => {
+    const db = new MemoryD1();
+    const { client, calls } = createFakeDataClient();
+
+    const result = await generateAndStoreSpxGexHeatmap({
+      db,
+      dataClient: client,
+      now: new Date("2026-06-19T13:45:00Z"),
+    });
+
+    assert.deepEqual(result, { status: "skipped", date: "2026-06-19", reason: "us_market_holiday" });
     assert.deepEqual(calls, []);
   });
 });

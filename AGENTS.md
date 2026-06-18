@@ -59,6 +59,16 @@ Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 - **AI Agent**: OpenRouter LLM + multi-tool ReAct agent
 - **Data Sources**: Yahoo Finance API (prices, VIX), EastMoney (A-share fund flow)
 
+## Codex Plugin Routing
+
+- Use `cloudflare@openai-curated` for Workers, Pages Functions, Wrangler config, D1 migrations, cron/scheduled Workers, and production deploy questions.
+- Use `browser@openai-bundled` after meaningful frontend/UI changes; verify the actual route, visible text, charts, and console errors instead of trusting code inspection.
+- Use `github@openai-curated` for PRs, CI, issues, and publish flows when GitHub context is needed.
+- Use `build-web-apps@openai-curated` for React/Vite/Tailwind implementation and frontend architecture work.
+- Use `build-web-data-visualization@openai-curated` for chart-heavy surfaces such as SPX GEX, Stocks Intelligence Watcher, OHLC, options exposure, and dashboard data visualization.
+- Keep `documents`, `spreadsheets`, `presentations`, and `pdf` enabled for artifact work, but do not route normal repo coding tasks through them.
+- Do not install or invoke Figma, Notion, Gmail, Slack, Stripe, Vercel, Netlify, or Sentry plugins unless the task explicitly depends on those external systems; extra connectors increase noise and auth surface.
+
 ---
 
 ## Architecture
