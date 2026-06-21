@@ -1,56 +1,40 @@
-import { useEffect, useRef } from "react";
+import { buildFinancialJuiceNewsWidgetSrc } from "@/lib/financial-juice-widget";
 
-declare global {
-  interface Window {
-    FJWidgets?: any;
-  }
-}
+const FINANCIAL_JUICE_CONTAINER_ID = "financialjuice-news-widget-container";
+const FINANCIAL_JUICE_HEIGHT = "450px";
 
 export function FinancialJuiceWidget() {
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    // Only mount script once
-    if (document.getElementById("FJ-Widgets")) return;
-
-    const script = document.createElement("script");
-    script.type = "text/javascript";
-    script.id = "FJ-Widgets";
-    const r = Math.floor(Math.random() * 10000);
-    script.src = `https://feed.financialjuice.com/widgets/widgets.js?r=${r}`;
-    
-    script.onload = () => {
-      if (window.FJWidgets) {
-        new window.FJWidgets.createWidget({
-          container: "financialjuice-news-widget-container",
-          mode: "Light", // Adjusted to Light to roughly match the dashboard, or we can use Dark
-          width: "100%",
-          height: "450px",
-          backColor: "ffffff",  
-          fontColor: "1e2329",
-          widgetType: "NEWS"
-        });
-      }
-    };
-
-    document.head.appendChild(script);
-
-    return () => {
-       // Optional: we can't easily wipe the iframe that FJ generates, but we can remove the script if needed.
-       // However, keeping it around is fine for SPA.
-    };
-  }, []);
+  const src = buildFinancialJuiceNewsWidgetSrc({
+    container: FINANCIAL_JUICE_CONTAINER_ID,
+    mode: "Light",
+    width: "100%",
+    height: FINANCIAL_JUICE_HEIGHT,
+    backColor: "ffffff",
+    fontColor: "1e2329",
+  });
 
   return (
-    <div className="bg-white border border-gray-100 rounded-3xl p-5 shadow-sm mt-6">
-      <div className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-4">
+    <div className="mt-6 rounded-3xl border border-gray-100 bg-white p-5 shadow-sm">
+      <div className="mb-4 text-xs font-bold uppercase tracking-widest text-gray-400">
         實時財經動態 (FinancialJuice)
       </div>
-      <div 
-        id="financialjuice-news-widget-container" 
-        ref={containerRef}
-        className="w-full rounded-2xl overflow-hidden shadow-inner border border-gray-50"
-      />
+      <div
+        id={FINANCIAL_JUICE_CONTAINER_ID}
+        className="w-full overflow-hidden rounded-2xl border border-gray-100 bg-white shadow-inner"
+        style={{ minHeight: FINANCIAL_JUICE_HEIGHT }}
+      >
+        <iframe
+          title="FinancialJuice real-time news feed"
+          src={src}
+          height={FINANCIAL_JUICE_HEIGHT}
+          width="100%"
+          scrolling="no"
+          frameBorder="0"
+          referrerPolicy="no-referrer-when-downgrade"
+          className="block w-full border-0"
+          style={{ height: FINANCIAL_JUICE_HEIGHT }}
+        />
+      </div>
     </div>
   );
 }
