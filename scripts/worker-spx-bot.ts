@@ -1,5 +1,5 @@
 import { RSI, BollingerBands, SMA, MACD, EMA } from 'technicalindicators';
-import { PERSONAS, ORCHESTRATOR_PROMPT, SYSTEM_PROMPT_PREFIX, SYSTEM_PROMPT_IC, AUDIT_AGENT_PROMPT, ALPHA_EAR_SENTIMENT_PROMPT } from './prompts';
+import { PERSONAS, ORCHESTRATOR_PROMPT, SYSTEM_PROMPT_PREFIX, AUDIT_AGENT_PROMPT } from './prompts';
 import { fetchAndCalculateGEX } from './gex-calculator';
 import { upsertRecapDay, type D1DatabaseLike } from '../src/lib/spx-recap-d1';
 import { generateAndStoreSpxGexHeatmap } from '../src/lib/spx-gex-heatmap';
@@ -198,44 +198,12 @@ async function fetchYahooOptionsPCR(symbol: string = '^SPX') {
 
 // --- 分析與邏輯函數 ---
 
-async function fetchNewsAndSentiment(env: Env) {
-  try {
-    const res = await fetchWithTimeout('https://query2.finance.yahoo.com/v1/finance/search?q=SPY&newsCount=10', {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
-    }, 10000);
-    if (!res.ok) return { score: 0, label: 'neutral', reason: `News API error: ${res.status}` };
-    const data = await res.json() as any;
-    const items = data.news?.slice(0, 10).map((i: any) => i.title).join('\n') || '';
-
-    if (!items) return { score: 0, label: 'neutral', reason: 'No news found' };
-
-    const response = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://spx-trading-pua.kungsiuchun0.workers.dev',
-        'X-OpenRouter-Title': 'SPX PUA Agent'
-      },
-      body: JSON.stringify({
-        model: env.OPENROUTER_MODEL || 'google/gemma-4-26b-a4b-it:free',
-        messages: [
-          { role: 'system', content: ALPHA_EAR_SENTIMENT_PROMPT },
-          { role: 'user', content: `News Headlines:\n${items}` }
-        ]
-      })
-    }, 15000);
-
-    if (response.ok) {
-      const gData = await response.json() as any;
-      let content = gData.choices[0].message.content;
-      content = content.replace(/```json/gi, '').replace(/```/g, '').trim();
-      return JSON.parse(content);
-    }
-  } catch (e) {
-    console.error('Sentiment Error:', e);
-  }
-  return { score: 0, label: 'neutral', reason: 'Sentiment calculation failed' };
+function getDisabledNewsSentiment() {
+  return {
+    score: 0,
+    label: 'neutral',
+    reason: 'News sentiment model call disabled to reduce token usage.'
+  };
 }
 
 async function calculateIndicators(quotes: any[]) {
@@ -571,15 +539,6 @@ function calculatePriceActionContext(d1Quotes: any[], h1Quotes: any[]) {
     nearestFVG: nearestFVG ? `${nearestFVG.type} [${nearestFVG.low.toFixed(2)}-${nearestFVG.high.toFixed(2)}]` : 'None detected',
     fibGoldenPocket: `${fibGoldenPocket.bottom.toFixed(2)} - ${fibGoldenPocket.top.toFixed(2)}`
   };
-}
-
-// --- IV Percentile Calculator (VIX-based for SPX) ---
-function calculateIVPercentile(vixQuotes: any[]): number {
-  if (vixQuotes.length < 20) return 50;
-  const closes = vixQuotes.map((q: any) => q.close).filter((c: number) => c !== null);
-  const currentVix = closes[closes.length - 1];
-  const belowCount = closes.filter((v: number) => v < currentVix).length;
-  return Math.round((belowCount / closes.length) * 100);
 }
 
 function clampNumber(value: number, min: number, max: number) {
@@ -1026,41 +985,6 @@ function analyzeZeroDteRules(args: {
   };
 }
 
-// --- IC-specific Agent Analyzer ---
-async function analyzeWithICAgent(personaPrompt: string, contextData: any, env: Env) {
-  const systemPrompt = `You are an institutional options strategist. Your persona is: ${personaPrompt}. \n${SYSTEM_PROMPT_IC}`;
-
-  try {
-    const response = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://spx-trading-pua.kungsiuchun0.workers.dev',
-        'X-OpenRouter-Title': 'SPX PUA Agent'
-      },
-      body: JSON.stringify({
-        model: env.OPENROUTER_MODEL || 'google/gemma-4-26b-a4b-it:free',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: `Market Data Context: ${JSON.stringify(contextData)}` }
-        ]
-      })
-    }, 15000);
-
-    if (!response.ok) {
-      return { ic_action: 'STAND_DOWN', ic_reasoning: '接口錯誤', gex_check: 'N/A', vix_check: 'N/A', event_check: 'N/A' };
-    }
-    const data = await response.json() as any;
-    let content = data.choices[0].message.content;
-    content = content.replace(/```json/gi, '').replace(/```/g, '').trim();
-    return JSON.parse(content);
-  } catch (e: any) {
-    console.error('IC Agent error:', e.message);
-    return { ic_action: 'STAND_DOWN', ic_reasoning: '分析失敗', gex_check: 'N/A', vix_check: 'N/A', event_check: 'N/A' };
-  }
-}
-
 async function analyzeWithAgent(personaKey: string, personaPrompt: string, contextData: any, env: Env) {
   const systemPrompt = `You are an elite stock trader. Your persona is: ${personaPrompt}. \n${SYSTEM_PROMPT_PREFIX}`;
 
@@ -1201,7 +1125,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       fetchYahooChart('XLK', '1d', '5d'),       // ETF Flow
       fetchYahooChart('XLV', '1d', '5d'),       // ETF Flow
       fetchYahooOptionsPCR('^SPX'),
-      fetchNewsAndSentiment(env),
+      getDisabledNewsSentiment(),
       fetchAndCalculateGEX()
     ]);
 
@@ -1328,32 +1252,15 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
         currentPosition: dailyMemory.currentPosition,
         entryPrice: dailyMemory.entryPrice,
         recentActions: dailyMemory.actionLog.slice(-3),
-        icPosition: dailyMemory.icPosition,
       }
     };
 
-    // IC Agent gets its own focused context
-    const ivPercentile = calculateIVPercentile(vixQuotes3mo);
-    const icContext = {
-      currentTime: etTime,
-      currentPrice: context.currentPrice,
-      currentVix: context.currentVix,
-      ivPercentile,
-      pcrValue: context.pcrValue,
-      calculatedGEX: calculatedGexContext,
-      trendDayContext,
-      zeroDteRuleEngine,
-      icPositionStatus: dailyMemory.icPosition,
-      newsSentiment: sentimentData,
-    };
-
-    console.log('[DEBUG] Step 3: Triggering 5 AI Agents (QM/CM/NT/PA + IC)...');
-    const [agent1, agent2, agent3, agent4, agentIC] = await Promise.all([
+    console.log('[DEBUG] Step 3: Triggering 4 AI Agents (QM/CM/NT/PA). IC disabled to reduce token spend...');
+    const [agent1, agent2, agent3, agent4] = await Promise.all([
       analyzeWithAgent('QM', PERSONAS.QM_MOMENTUM_SNIPER, extendedContext, env),
       analyzeWithAgent('CM', PERSONAS.CM_OPTIONS_MAKER, extendedContext, env),
       analyzeWithAgent('NT', PERSONAS.NT_MACRO_SENTIMENT, extendedContext, env),
-      analyzeWithAgent('PA', PERSONAS.PA_PRICE_ACTION, extendedContext, env),
-      analyzeWithICAgent(PERSONAS.IC_IRON_CONDOR, icContext, env)
+      analyzeWithAgent('PA', PERSONAS.PA_PRICE_ACTION, extendedContext, env)
     ]);
 
     const normalizeDecision = (d: string) => d ? d.toString().trim().toUpperCase() : "HOLD";
@@ -1385,7 +1292,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
           model: env.OPENROUTER_MODEL || 'google/gemma-4-26b-a4b-it:free',
           messages: [
             { role: 'system', content: ORCHESTRATOR_PROMPT },
-            { role: 'user', content: `Market Context: ${JSON.stringify(extendedContext)}\nQM (Momentum): ${JSON.stringify(agent1)}\nCM (GEX): ${JSON.stringify(agent2)}\nNT (Sentiment): ${JSON.stringify(agent3)}\nPA (Price Action): ${JSON.stringify(agent4)}\nIC (Iron Condor): ${JSON.stringify(agentIC)}` }
+            { role: 'user', content: `Market Context: ${JSON.stringify(extendedContext)}\nQM (Momentum): ${JSON.stringify(agent1)}\nCM (GEX): ${JSON.stringify(agent2)}\nNT (Sentiment): ${JSON.stringify(agent3)}\nPA (Price Action): ${JSON.stringify(agent4)}` }
           ]
         })
       }, 20000);
@@ -1521,45 +1428,6 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       dailyMemory.actionLog.push(appendPlanSnapshot({ time: etTime, price: currentPriceStr, action: '觀望防守', reasoning: planReason(orchestratorPlan) }, orchestratorPlan, zeroDteRuleEngine));
     }
 
-    // Update IC Position Memory
-    let icAction = agentIC.ic_action || (orchestratorPlan as any).iron_condor_assessment || 'STAND_DOWN';
-    if (zeroDteRuleEngine.verdict !== 'TRADE_ALLOWED' && icAction === 'DEPLOY') {
-      icAction = 'STAND_DOWN';
-      agentIC.ic_action = 'STAND_DOWN';
-      agentIC.event_check = zeroDteRuleEngine.hardBlocks.length > 0 ? 'FAIL' : agentIC.event_check;
-      agentIC.ic_reasoning = `0DTE rule engine blocked IC deployment: ${zeroDteRuleEngine.verdict}. ${zeroDteRuleEngine.hardBlocks.join(', ') || zeroDteRuleEngine.activeRisks.join(', ') || 'score_not_enough'}`;
-    } else if (!trendDayContext.icAllowed && icAction === 'DEPLOY') {
-      icAction = 'STAND_DOWN';
-      agentIC.ic_action = 'STAND_DOWN';
-      agentIC.gex_check = 'FAIL';
-      agentIC.ic_reasoning = `${trendDayContext.icBlockReason} ${trendDayContext.rationale}`;
-    } else if (!trendDayContext.icAllowed && dailyMemory.icPosition !== 'NONE' && !['CLOSE_WING', 'CLOSE_50PCT', 'EMERGENCY_CLOSE'].includes(icAction)) {
-      icAction = 'EMERGENCY_CLOSE';
-      agentIC.ic_action = 'EMERGENCY_CLOSE';
-      agentIC.gex_check = 'FAIL';
-      agentIC.ic_reasoning = `${trendDayContext.icBlockReason} ${trendDayContext.rationale}`;
-    }
-    if (icAction === 'DEPLOY' && dailyMemory.icPosition === 'NONE') {
-      dailyMemory.icPosition = 'DEPLOYED';
-      dailyMemory.icDeployTime = etTime;
-      dailyMemory.icAction = icAction;
-      dailyMemory.actionLog.push({ time: etTime, price: currentPriceStr, action: '🦅 鐵鷹部署(0DTE)', reasoning: agentIC.ic_reasoning || 'IC Deploy' });
-    } else if (icAction === 'CLOSE_WING' && dailyMemory.icPosition === 'DEPLOYED') {
-      dailyMemory.icPosition = 'PARTIAL';
-      dailyMemory.icAction = icAction;
-      dailyMemory.actionLog.push({ time: etTime, price: currentPriceStr, action: '🦅 鐵鷹單邊平倉', reasoning: agentIC.ic_reasoning || 'IC Close Wing' });
-    } else if (icAction === 'EMERGENCY_CLOSE' && dailyMemory.icPosition !== 'NONE') {
-      dailyMemory.icPosition = 'NONE';
-      dailyMemory.icDeployTime = null;
-      dailyMemory.icAction = null;
-      dailyMemory.actionLog.push({ time: etTime, price: currentPriceStr, action: '🦅 鐵鷹緊急撤退', reasoning: agentIC.ic_reasoning || 'IC Emergency Close' });
-    } else if (icAction === 'CLOSE_50PCT' && dailyMemory.icPosition !== 'NONE') {
-      dailyMemory.icPosition = 'NONE';
-      dailyMemory.icDeployTime = null;
-      dailyMemory.icAction = null;
-      dailyMemory.actionLog.push({ time: etTime, price: currentPriceStr, action: '🦅 鐵鷹獲利平倉(50%)', reasoning: agentIC.ic_reasoning || 'IC Close 50%' });
-    }
-
     // Save Memory
     const etNowDateStr = etTime.split(' ')[0].replace(/\//g, '-');
     const dbKey = `spx_memory_${etNowDateStr}`;
@@ -1576,85 +1444,12 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     const actionReasoning = (orchestratorPlan as any).action_reasoning || "策略執行";
     const finalDisplayAction = `${displayAction} (${actionReasoning})`;
 
-    // PA Context summary for display
-    const paCtx = extendedContext.priceActionContext;
-    const currentPriceNum = Number(context.currentPrice);
-    const parsePriceZone = (text: string | undefined) => {
-      if (!text || text === 'None detected') return null;
-      const match = text.match(/\[(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\]/);
-      if (!match) return null;
-      return { low: Number(match[1]), high: Number(match[2]) };
-    };
-    const zoneStatus = (label: string, text: string | undefined) => {
-      const zone = parsePriceZone(text);
-      if (!zone) return `${label}：未偵測`;
-      if (currentPriceNum >= zone.low && currentPriceNum <= zone.high) return `${label}：<code>${zone.low.toFixed(2)}-${zone.high.toFixed(2)}</code>（現價正在區內）`;
-      const distance = currentPriceNum < zone.low ? zone.low - currentPriceNum : currentPriceNum - zone.high;
-      const direction = currentPriceNum < zone.low ? '區間在現價上方' : '區間在現價下方';
-      return `${label}：<code>${zone.low.toFixed(2)}-${zone.high.toFixed(2)}</code>（距現價 ${distance.toFixed(2)} 點，${direction}）`;
-    };
-    const paBias = paCtx?.macroTrend?.includes('UPTREND')
-      ? '偏多，日線仍是 HH/HL 升勢'
-      : paCtx?.macroTrend?.includes('DOWNTREND')
-        ? '偏空，日線仍是 LH/LL 跌勢'
-        : '震盪，日線未有清晰方向';
-    const paStructure = paCtx?.recentCHoCH
-      ? '⚠️ 出現 CHoCH（性質變化），原趨勢有反轉警號'
-      : paCtx?.recentBOS
-        ? '✅ 出現 BOS（結構突破），原趨勢仍在延續'
-        : '— 未見新突破，等價格靠近關鍵區';
-    const paConclusion = paCtx
-      ? (paCtx.recentCHoCH
-        ? '結論：先降槓桿，等反轉確認或重新站回結構。'
-        : paCtx.recentBOS
-          ? '結論：PA 支持順勢背景；入場仍要等 0DTE / GEX / 動能共振。'
-          : '結論：只係背景參考，未提供即時入場觸發。')
-      : '';
-    const paContextDisplay = paCtx
-      ? `日線：${paBias}
-結構：${paStructure}
-關鍵區：${zoneStatus('OB 回踩區', paCtx.nearestOB)} | ${zoneStatus('FVG 缺口', paCtx.nearestFVG)}
-黃金口袋：<code>${paCtx.fibGoldenPocket}</code>
-${paConclusion}`
-      : '⚠️ 多週期數據不足，PA 暫時唔提供入場參考。';
-
-    const trendDayDisplay = `🎚️ <b>[Tape Regime · 單邊日雷達]</b>
-Regime：<code>${trendDayContext.regime}</code> | Bias：<code>${trendDayContext.directionalBias}</code> | Confidence：<code>${trendDayContext.confidence}%</code>
-建議：<code>${trendDayContext.recommendedAction}</code> | IC：<code>${trendDayContext.icAllowed ? 'ALLOWED' : 'BLOCKED'}</code>
-理由：${tgEscape(trendDayContext.rationale)}${trendDayContext.icBlockReason ? `\nIC Block：${tgEscape(trendDayContext.icBlockReason)}` : ''}`;
-
-    const fmtLevel = (level: IntradayKeyLevel | null) =>
-      level ? `<code>${level.level.toFixed(0)}</code> (${level.touches} touches, ${level.distance.toFixed(1)} pts away)` : '<code>N/A</code>';
-    const intradayStructureDisplay = `📐 <b>[日內結構 · 目標紀律]</b>
-Support：${fmtLevel(intradayStructure.nearestSupport)} | Resistance：${fmtLevel(intradayStructure.nearestResistance)}
-紀律：${tgEscape(intradayStructure.targetDisciplineNote)}`;
-
     // IC summary for display
-    const icDisplay = agentIC.ic_action === 'STAND_DOWN'
-      ? `🦅 鐵鷹：條件不滿足，按兵不動`
-      : `🦅 <b>鐵鷹策略：${agentIC.ic_action}</b>
-GEX檢查：${agentIC.gex_check} | VIX檢查：${agentIC.vix_check} | 事件檢查：${agentIC.event_check}
-📝 ${tgEscape(agentIC.ic_reasoning || 'N/A')}`;
+    const icDisplay = `🦅 鐵鷹：已停用，不再調用 AI model。`;
 
-    const zeroDteList = (items: string[]) => items.length > 0 ? items.slice(0, 5).join(', ') : 'None';
-    const zeroDteDisplay = `🧠 <b>[0DTE Rule Engine · Advisory Only]</b>
-Verdict：<code>${zeroDteRuleEngine.verdict}</code> | Bias：<code>${zeroDteRuleEngine.directionalBias}</code> | Regime：<code>${zeroDteRuleEngine.marketRegime}</code> | Score：<code>${zeroDteRuleEngine.signalScore}/100</code>
-Hard Blocks：<code>${tgEscape(zeroDteList(zeroDteRuleEngine.hardBlocks))}</code>
-Active Risks：<code>${tgEscape(zeroDteList(zeroDteRuleEngine.activeRisks))}</code>
-Final Advisory：<code>${zeroDteRuleEngine.allowNewSignal ? 'ALLOW_NEW_SIGNAL' : 'CONSERVATIVE_BLOCK_OR_WAIT'}</code>`;
 
     const message = `SPX: ${context.currentPrice} 操作：${displayAction}
 ⏱️ <b>美東時間：${etTime} ET</b> | <b>標的：SPX</b>
-
-🏛️ <b>[價格行為 · 機構足跡]</b> (Price Action)
-${trendDayDisplay}
-
-${paContextDisplay}
-
-${intradayStructureDisplay}
-
-📊 <b>[期權籌碼 · PCR 指標]</b>
-Put/Call Ratio：<code>${context.pcrValue}</code> — ${tgEscape(context.pcrStatus)}
 
 📡 <b>[期權 GEX 訊號]</b>${calculatedGex ? ` (${calculatedGex.generatedAt})` : ' 數據缺失'}
 ${calculatedGex ? `來源：<code>Internal Yahoo Options GEX Calculator</code>
@@ -1664,9 +1459,7 @@ ${calculatedGex ? `來源：<code>Internal Yahoo Options GEX Calculator</code>
 📊 Long Walls：${calculatedGex.longWalls?.slice(0, 3).map((w: any) => `${w.strike}(${w.gex})`).join(' ► ') || 'N/A'}
 📉 Short Pockets：${calculatedGex.shortPockets?.slice(0, 3).map((p: any) => `${p.strike}(${p.gex})`).join(' ► ') || 'N/A'}` : '⚠️ 數據抓取失敗'}
 
-${zeroDteDisplay}
-
-⚖️ <b>[理事會決議 · 專家辯論]</b> (4方向性 + 1鐵鷹)
+⚖️ <b>[理事會決議 · 專家辯論]</b> (4 directional agents)
 🟢 <code>${buyVotes}</code> | 🔴 <code>${sellVotes}</code> | ⚪ <code>${holdVotes}</code> [🔥 核心共識: <b>${consensusVote}</b>]
 🗣️ <b>專家深度腦爆</b> (Expert Rapid-Fire)
 
@@ -1691,7 +1484,7 @@ ${icDisplay}
 <b>止盈：</b> ${tgEscape((orchestratorPlan as any).take_profit || "N/A")}
 <b>風控：</b> ${tgEscape((orchestratorPlan as any).risk_warning || "N/A")}
 
-<pre>-- CF Worker v4.0.0 | 5-Agent Council (QM/CM/NT/PA/IC) --</pre>
+<pre>-- CF Worker v4.0.0 | lean Telegram output | IC disabled --</pre>
 `;
 
     console.log('[DEBUG] Step 6: Sending Final Report...');
