@@ -53,6 +53,7 @@ import {
   getStocksWatcherUniverseTypes,
 } from "@/lib/stocks-watcher-universe";
 import type { StocksWatcherUniverseStock } from "@/lib/stocks-watcher-universe";
+import { getStocksWatcherInitialSymbolFromHash, STOCKS_WATCHER_DEFAULT_SYMBOL } from "@/lib/stocks-intelligence-watcher-route";
 
 interface StocksIntelligenceWatcherPageProps {
   onBackToWork: () => void;
@@ -1022,7 +1023,11 @@ const ToolResultBlock = ({ result }: { result: NativeToolResult }) => {
 };
 
 export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligenceWatcherPageProps) {
-  const [selectedSymbol, setSelectedSymbol] = useState("NVDA");
+  const [selectedSymbol, setSelectedSymbol] = useState(() =>
+    typeof window === "undefined"
+      ? STOCKS_WATCHER_DEFAULT_SYMBOL
+      : getStocksWatcherInitialSymbolFromHash(window.location.hash),
+  );
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<StocksWatcherChartMode>("volume");
   const [strikeWindowSize, setStrikeWindowSize] = useState(29);

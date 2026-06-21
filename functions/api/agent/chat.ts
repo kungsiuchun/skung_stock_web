@@ -35,6 +35,16 @@ interface Env {
   OPENROUTER_MODEL: string;
 }
 
+const DASHBOARD_TOOL_ALLOWLIST = new Set([
+  "get_realtime_quote",
+  "get_options_chain",
+  "run_algorithmic_strategy",
+  "get_financial_signals",
+]);
+
+const onlyAllowedDashboardTools = (tools: any[]) =>
+  tools.filter((tool) => DASHBOARD_TOOL_ALLOWLIST.has(tool.name));
+
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
     const body = await context.request.json() as {
@@ -42,6 +52,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       history?: ChatMessage[];
       strategy_mode?: string;
       user_memories?: string[];
+      surface?: "finance_dashboard" | "finance_chat";
     };
 
     let message = body.message?.trim();
@@ -49,8 +60,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       return jsonResponse({ error: "No message provided" }, 400);
     }
 
-    // Force LLM to run algos if the user picked an algorithmic strategy
-    if (body.strategy_mode && body.strategy_mode !== "default") {
+    const isFinanceDashboard = body.surface === "finance_dashboard";
+
+    // Force LLM to run algos if the user picked an algorithmic strategy.
+    // Dashboard requests use their own narrow prompt and tool allowlist.
+    if (!isFinanceDashboard && body.strategy_mode && body.strategy_mode !== "default") {
       if (body.strategy_mode === "financial_expert") {
         message = `[用戶選擇了: 進階財務分析模式]
 請使用 get_financial_summary 和 get_options_chain 工具，對目標標的進行深度的基本面與期權情緒分析。
@@ -75,12 +89,18 @@ ${message}`;
 
     // 1. Build Agent & Tools
     const registry = new ToolRegistry();
-    registry.registerAll(ALL_STOCK_TOOLS);
-    registry.registerAll(ALL_ANALYSIS_TOOLS);
-    registry.registerAll(ALL_SEARCH_TOOLS);
-    registry.registerAll(ALL_ALPHAEAR_TOOLS);
-    registry.registerAll(ALL_RETAIL_TOOLS);
-    registry.registerAll(macroTools);
+    if (isFinanceDashboard) {
+      registry.registerAll(onlyAllowedDashboardTools(ALL_STOCK_TOOLS));
+      registry.registerAll(onlyAllowedDashboardTools(ALL_ANALYSIS_TOOLS));
+      registry.registerAll(onlyAllowedDashboardTools(ALL_ALPHAEAR_TOOLS));
+    } else {
+      registry.registerAll(ALL_STOCK_TOOLS);
+      registry.registerAll(ALL_ANALYSIS_TOOLS);
+      registry.registerAll(ALL_SEARCH_TOOLS);
+      registry.registerAll(ALL_ALPHAEAR_TOOLS);
+      registry.registerAll(ALL_RETAIL_TOOLS);
+      registry.registerAll(macroTools);
+    }
 
     // 2. Initialize Strategy System
     const skillManager = new SkillManager();
@@ -97,8 +117,10 @@ ${message}`;
     // 3. Setup Executor
     const adapter = new OpenRouterAdapter({ apiKey, model });
     const executor = new AgentExecutor(registry, adapter, { 
-      maxSteps: 10,
-      skillInstructions: skillInstructions + memoryContext
+      maxSteps: isFinanceDashboard ? 6 : 10,
+      skillInstructions: skillInstructions + memoryContext + (isFinanceDashboard
+        ? "\nDashboard surface rule: use only the registered dashboard tools. Do not delegate to subagents, do not save user memory, do not request macro/search/retail tools, and label missing data instead of inventing fallback data."
+        : "")
     });
 
     // 2. Sanitise history — only keep user & assistant messages (no system, tool etc.)
@@ -125,6 +147,11 @@ ${message}`;
       steps: result.steps,
       history: updatedHistory,
       new_memories: result.new_memories,
+      meta: {
+        surface: isFinanceDashboard ? "finance_dashboard" : "finance_chat",
+        max_openrouter_calls: isFinanceDashboard ? 6 : 10,
+        registered_tools: registry.getToolNames(),
+      },
       error: result.error,
     });
   } catch (error: any) {

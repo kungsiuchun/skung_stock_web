@@ -149,20 +149,13 @@ async function handleGetFinancialSignals(args: Record<string, any>): Promise<Rec
     const data = await res.json();
     let dataArr = data?.signals && Array.isArray(data.signals) ? data.signals : (Array.isArray(data) ? data : Object.values(data));
     
-    // Add fallback data for UI demonstration if DeepEar returns nothing
     if (!dataArr || dataArr.length === 0) {
-      dataArr = [
-        {
-          symbol: ticker || "AAPL",
-          name: "成交量能異動",
-          content: "開盤後一小時內成交量激增，主力資金出現明顯掃貨跡象，短線買盤動能強烈。",
-        },
-        {
-          symbol: ticker || "AAPL",
-          name: "空頭平倉觀察",
-          content: "技術線型觸及支撐位，觀察到空單平倉減少，部分資金有獲利了結（賣出）的準備。",
-        }
-      ];
+      return {
+        symbol: ticker || "all",
+        signals: [],
+        source_status: "empty",
+        generated_at: new Date().toISOString()
+      };
     }
     
     if (dataArr.length === 0) return { error: "信號數據為空", signals: [] };
@@ -182,8 +175,8 @@ async function handleGetFinancialSignals(args: Record<string, any>): Promise<Rec
         title: s.name || s.title || s.symbol || "預警信號",
         summary,
         sentiment: sentScore,
-        confidence: Number((0.80 + Math.random() * 0.15).toFixed(2)),
-        intensity: Math.floor(Math.random() * 4) + 6, // 6 ~ 9
+        confidence: typeof s.confidence === "number" ? s.confidence : 0,
+        intensity: typeof s.intensity === "number" ? s.intensity : 0,
       };
     });
 

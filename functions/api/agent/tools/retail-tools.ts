@@ -5,6 +5,12 @@
 
 import type { ToolDefinition } from "../types";
 
+const PLATFORMS = [
+  { key: "reddit", label: "Reddit", path: "/reddit/stocks/v1/compare", label_count: "Mentions", field_count: "mentions" },
+  { key: "x", label: "X.com", path: "/x/stocks/v1/compare", label_count: "Mentions", field_count: "mentions" },
+  { key: "polymarket", label: "Polymarket", path: "/polymarket/stocks/v1/compare", label_count: "Trades", field_count: "trade_count" },
+] as const;
+
 async function handleGetRetailSentiment(args: Record<string, any>, env?: any): Promise<Record<string, any>> {
   const ticker = (args.stock_code as string || "").toUpperCase();
   const days = args.days_back || 7;
@@ -16,12 +22,6 @@ async function handleGetRetailSentiment(args: Record<string, any>, env?: any): P
   let bullishPcts: number[] = [];
 
   if (apiKey) {
-    const PLATFORMS = [
-      { key: "reddit", label: "Reddit", path: "/reddit/stocks/v1/compare", label_count: "Mentions", field_count: "mentions" },
-      { key: "x", label: "X.com", path: "/x/stocks/v1/compare", label_count: "Mentions", field_count: "mentions" },
-      { key: "polymarket", label: "Polymarket", path: "/polymarket/stocks/v1/compare", label_count: "Trades", field_count: "trade_count" },
-    ];
-
     for (const plat of PLATFORMS) {
       try {
         const url = `https://api.adanos.org${plat.path}?tickers=${ticker}&days=${days}`;
@@ -57,17 +57,7 @@ async function handleGetRetailSentiment(args: Record<string, any>, env?: any): P
       }
     }
   } else {
-    console.warn("[Adanos] No API Key - using fallback data for UAT.");
-  }
-
-  // Fallback for demo/UAT purposes if API fails or returns no data
-  if (results.length === 0) {
-    results.push(
-      { platform: "Reddit", buzz_score: 85.2, bullish_pct: 68, activity_type: "Mentions", activity_count: 1250, trend: "up" },
-      { platform: "X.com", buzz_score: 92.5, bullish_pct: 55, activity_type: "Mentions", activity_count: 3400, trend: "up" },
-      { platform: "Polymarket", buzz_score: 64.0, bullish_pct: 42, activity_type: "Trades", activity_count: 320, trend: "down" }
-    );
-    bullishPcts = [68, 55, 42];
+    console.warn("[Adanos] No API Key - retail sentiment unavailable.");
   }
 
   const avgBullish = bullishPcts.length > 0 ? (bullishPcts.reduce((a,b)=>a+b,0)/bullishPcts.length).toFixed(1) : null;
@@ -77,7 +67,8 @@ async function handleGetRetailSentiment(args: Record<string, any>, env?: any): P
     period_days: days,
     coverage: `${results.length}/${PLATFORMS.length}`,
     average_bullish_pct: avgBullish,
-    sources: results
+    sources: results,
+    sourceType: results.length > 0 ? "retail" : "unavailable",
   };
 }
 

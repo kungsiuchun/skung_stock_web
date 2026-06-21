@@ -16,6 +16,12 @@ import { TechnicalRadar } from "./dashboard/technical-radar";
 import { FinancialJuiceWidget } from "./dashboard/financial-juice-widget";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import {
+  FINANCE_ANALYZER_MODEL_CALL_BUDGETS,
+  FINANCE_ANALYZER_SOURCE_MAP,
+  normalizeQuantStrategiesFromAgentResponse,
+} from "@/lib/finance-analyzer-contract";
+import type { SentimentApiResult } from "@/lib/market-sentiment";
 
 interface NewsItem {
   title: string;
@@ -30,7 +36,9 @@ interface DashboardData {
   price: number;
   change: string;
   algoRating: number;
-  marketSentiment: number;
+  marketSentiment: number | null;
+  sentimentSource?: string;
+  sentimentData?: SentimentApiResult | null;
   signal: string;
   trend: string;
   strategyPoints: {
@@ -125,28 +133,29 @@ export function FinanceDashboard() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          surface: "finance_dashboard",
           message: `分析 ${symbol.toUpperCase()}。
-1. 務必先使用 get_realtime_quote 獲取最新價格。
-2. 使用 get_options_chain 獲取期權數據 (包含 calls 和 puts 的未平倉數量)。
-3. 使用 get_financial_signals 獲取 DeepEar 預警信號。
-4. 對以下五個量化策略進行當前市況評分(0-100)：'均線金叉突破', '縮量回踩', '箱體震盪', '放量突破', '一陽夾三陰 (算法)'。在最終返回的 JSON 根目錄必須加上 'quant_strategies': [{ "name": "...", "score": 85 }, ...] 欄位。
-5. 使用 run_algorithmic_strategy (策略名稱為 emotion_cycle) 獲取量化數據。
-6. 最後綜合上述所有數據（特別是策略評分與信號）進行深度總結。`,
+1. 先使用 get_realtime_quote 取得最新價格。
+2. 使用 get_options_chain 取得股票期權鏈；如果 Yahoo 沒有資料，明確說沒有期權鏈資料。
+3. 使用 get_financial_signals 取得 DeepEar 訊號；如果來源為空，回傳空訊號，不要創作 demo 訊號。
+4. 使用 run_algorithmic_strategy，strategy_name 必須是 "all"，由 deterministic strategy engine 回傳策略分數。
+5. 最終回覆使用繁體中文，綜合工具結果做精簡 narrative；缺資料要標示，不要用假資料補洞。`,
           history: [],
-          strategy_mode: "emotion_cycle" 
         }),
       });
 
       const vixPromise = fetch(`/api/vix`).then(r => r.json()).catch(() => null);
       const valuationPromise = fetch(`/api/fundamentals?symbol=${symbol.toUpperCase()}`).then(r => r.json()).catch(() => null);
       const technicalPromise = fetch(`/api/technical-radar?symbol=${symbol.toUpperCase()}`).then(r => r.json()).catch(() => null);
+      const sentimentPromise = fetch(`/api/sentiment?symbol=${symbol.toUpperCase()}`).then(r => r.json()).catch(() => null);
 
-      const [data, newsData, vixResponse, valuationRes, technicalRes] = await Promise.all([
+      const [data, newsData, vixResponse, valuationRes, technicalRes, sentimentRes] = await Promise.all([
         response.json(),
         newsPromise,
         vixPromise,
         valuationPromise,
-        technicalPromise
+        technicalPromise,
+        sentimentPromise
       ]);
 
       if (vixResponse && !vixResponse.error) {
@@ -158,12 +167,16 @@ export function FinanceDashboard() {
 
       if (!response.ok) throw new Error(data.error || "API 請求失敗");
 
+      const sentimentPayload: SentimentApiResult | null =
+        sentimentRes && !sentimentRes.error ? sentimentRes as SentimentApiResult : null;
+
       // 2. Parse Tool Results from Steps
       let price = 0;
       let change = "0.00%";
       let signalResult = "觀望";
       let algoScore = 50;
-      let sentimentValue = 50;
+      let sentimentValue: number | null = null;
+      let sentimentSource: string | undefined;
       let entry = 0, sl = 0, tp = 0;
       let trendResult = "震盪";
       let parsedNews: NewsItem[] = (newsData.news || []).map((n: any) => ({
@@ -196,11 +209,6 @@ export function FinanceDashboard() {
                 }
               }
 
-              if (step.tool_name === "get_retail_sentiment") {
-                const rs = Number(resJson.average_bullish_pct || resJson.bullish_pct || resJson.buzz_score);
-                if (!isNaN(rs)) sentimentValue = rs;
-              }
-
               // Data-driven extraction to protect against LLM tool-calling drift
               if (resJson.chart_data && Array.isArray(resJson.chart_data)) {
                 chartDataArray = resJson.chart_data.map((d: any) => ({
@@ -214,7 +222,6 @@ export function FinanceDashboard() {
               }
 
               if (resJson.score !== undefined) algoScore = Number(resJson.score);
-              if (resJson.sentiment_score !== undefined) sentimentValue = Number(resJson.sentiment_score);
               if (resJson.entry !== undefined) entry = Number(resJson.entry);
               if (resJson.stopLoss !== undefined) sl = Number(resJson.stopLoss);
               if (resJson.target !== undefined) tp = Number(resJson.target);
@@ -276,6 +283,18 @@ export function FinanceDashboard() {
               if (step.tool_name === "get_financial_signals" && resJson.signals && Array.isArray(resJson.signals)) {
                 financialSignalsArray = resJson.signals;
               }
+
+              if (step.tool_name === "run_algorithmic_strategy" && Array.isArray(resJson.signals)) {
+                const topSignal = resJson.signals[0];
+                if (topSignal) {
+                  if (Number.isFinite(Number(topSignal.score))) algoScore = Number(topSignal.score);
+                  if (topSignal.signal) signalResult = topSignal.signal;
+                  if (topSignal.trend) trendResult = topSignal.trend;
+                  if (Number.isFinite(Number(topSignal.entry))) entry = Number(topSignal.entry);
+                  if (Number.isFinite(Number(topSignal.stopLoss))) sl = Number(topSignal.stopLoss);
+                  if (Number.isFinite(Number(topSignal.target))) tp = Number(topSignal.target);
+                }
+              }
             } catch (e) {
               console.warn("Failed to parse tool result for step:", step.tool_name, e);
             }
@@ -283,17 +302,12 @@ export function FinanceDashboard() {
         }
       }
 
-      // Hard UI Fallback: Create mock strategy scores if AI fails to return it (Requested by User)
-      if (!data.quant_strategies || !Array.isArray(data.quant_strategies) || data.quant_strategies.length === 0) {
-        quantStrategiesResult = [
-          { name: "均線金叉突破", score: 85 },
-          { name: "縮量回踩", score: 65 },
-          { name: "箱體震盪", score: 45 },
-          { name: "放量突破", score: 72 },
-          { name: "一陽夾三陰 (算法)", score: 88 }
-        ];
-      } else {
-        quantStrategiesResult = data.quant_strategies;
+      quantStrategiesResult = normalizeQuantStrategiesFromAgentResponse(data);
+      if (typeof sentimentPayload?.score === "number" && Number.isFinite(sentimentPayload.score)) {
+        sentimentValue = sentimentPayload.score;
+      }
+      if (sentimentPayload?.sourceLabel) {
+        sentimentSource = sentimentPayload.sourceLabel;
       }
 
       const finalData: DashboardData = {
@@ -302,6 +316,8 @@ export function FinanceDashboard() {
         change,
         algoRating: algoScore,
         marketSentiment: sentimentValue,
+        sentimentSource,
+        sentimentData: sentimentPayload,
         signal: signalResult,
         trend: trendResult,
         strategyPoints: { entry, stopLoss: sl, takeProfit: tp },
@@ -591,7 +607,7 @@ export function FinanceDashboard() {
                 </div>
                 
                 <div className="lg:col-span-4 space-y-8">
-                  <OptionsFlowCard data={activeData?.optionsFlow as any} />
+                  <OptionsFlowCard data={activeData?.optionsFlow as any} symbol={activeData?.symbol} />
                 </div>
               </div>
 
@@ -613,12 +629,59 @@ export function FinanceDashboard() {
             </div>
 
             {/* Right Side Column */}
-<div className="lg:col-span-4 space-y-8">
+              <div className="lg:col-span-4 space-y-8">
                 {/* Sentiment & Signal Section */}
                 <div className="grid grid-cols-1 gap-6">
+                  <div className="bg-white border border-gray-200 shadow-sm rounded-3xl p-5">
+                    <div className="flex items-start justify-between gap-4 mb-4">
+                      <div>
+                        <h3 className="text-sm font-black text-gray-900">資料來源與可信度</h3>
+                        <p className="text-[11px] text-gray-500 font-semibold leading-5 mt-1">
+                          價格、期權、新聞與指標先取市場資料；AI 只負責整合解讀。
+                        </p>
+                      </div>
+                      <a
+                        href="#/work/trading-agent-dashboard"
+                        className="shrink-0 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-[10px] font-black tracking-wider text-blue-700 hover:bg-blue-100"
+                      >
+                        深度分析
+                      </a>
+                    </div>
+                    <div className="mb-4 grid grid-cols-2 gap-2">
+                      <div className="rounded-2xl bg-emerald-50 px-3 py-2">
+                        <p className="text-[9px] font-black uppercase tracking-wider text-emerald-700">Data First</p>
+                        <p className="mt-1 text-[11px] font-bold text-emerald-950">市場資料優先</p>
+                      </div>
+                      <div className="rounded-2xl bg-blue-50 px-3 py-2">
+                        <p className="text-[9px] font-black uppercase tracking-wider text-blue-700">AI Guardrail</p>
+                        <p className="mt-1 text-[11px] font-bold text-blue-950">
+                          最多 {FINANCE_ANALYZER_MODEL_CALL_BUDGETS.dashboard.maxOpenRouterCalls} 次模型調用
+                        </p>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      {FINANCE_ANALYZER_SOURCE_MAP.slice(0, 7).map((item) => (
+                        <div
+                          key={item.layer}
+                          title={`${item.layer} | ${item.endpoint}`}
+                          className="flex items-start justify-between gap-3 rounded-xl bg-gray-50 px-3 py-2.5"
+                        >
+                          <div>
+                            <p className="text-[12px] font-bold text-gray-900">{item.displayLayer}</p>
+                            <p className="text-[10px] text-gray-500 leading-4">{item.displaySource}</p>
+                          </div>
+                          <span className={`shrink-0 rounded-full px-2 py-1 text-[9px] font-black tracking-wider ${item.deterministic ? "bg-emerald-50 text-emerald-700" : "bg-indigo-50 text-indigo-700"}`}>
+                            {item.deterministic ? "規則計算" : "AI 摘要"}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                     {activeData && <TechnicalRadar data={technicalData} loading={loading} />}
-                  <SentimentGauge 
-                    sentiment={activeData?.marketSentiment || 50} 
+                  <SentimentGauge
+                    sentiment={activeData?.marketSentiment ?? null}
+                    sentimentSource={activeData?.sentimentSource}
+                    sentimentData={activeData?.sentimentData ?? null}
                     news={activeData?.news || []} 
                     quantStrategies={activeData?.quantStrategies}
                   />
@@ -636,6 +699,7 @@ export function FinanceDashboard() {
            <div className="flex items-center gap-6">
               <span className="flex items-center gap-2"><div className="w-1 h-1 rounded-full bg-blue-500" /> AI AGENT ACTIVE</span>
               <span className="flex items-center gap-2"><div className="w-1 h-1 rounded-full bg-green-500" /> ALL API NOMINAL</span>
+              <span className="flex items-center gap-2"><div className="w-1 h-1 rounded-full bg-purple-500" /> AI 摘要上限 {FINANCE_ANALYZER_MODEL_CALL_BUDGETS.dashboard.maxOpenRouterCalls}</span>
            </div>
            <div>© 2026 ANTIGRAVITY QUANTUM RESEARCH | V4.0.0-LIGHT</div>
         </div>

@@ -5,6 +5,7 @@ interface OptionStrike {
 }
 
 interface OptionsFlowProps {
+  symbol?: string;
   data: {
     totalCallOI: number;
     totalPutOI: number;
@@ -16,7 +17,13 @@ interface OptionsFlowProps {
   };
 }
 
-export function OptionsFlowCard({ data }: OptionsFlowProps) {
+const buildWatcherHref = (symbol?: string) => {
+  const normalized = (symbol || "").trim().toUpperCase();
+  const suffix = /^[A-Z0-9.^-]{1,12}$/.test(normalized) ? `?symbol=${encodeURIComponent(normalized)}` : "";
+  return `#/work/stocks-intelligence-watcher${suffix}`;
+};
+
+export function OptionsFlowCard({ data, symbol }: OptionsFlowProps) {
   if (!data || data.error || !data.topStrikes || data.topStrikes.length === 0) {
     return (
       <div className="bg-white border border-gray-200 rounded-3xl p-5 shadow-sm flex flex-col items-center justify-center text-center py-10 h-full min-h-[280px]">
@@ -46,6 +53,7 @@ export function OptionsFlowCard({ data }: OptionsFlowProps) {
             {data.expirationDate && (
               <p className="text-[10px] text-gray-400 font-medium mt-0.5 tracking-wider border border-gray-100 bg-gray-50 px-1.5 py-0.5 rounded inline-block">EXP: {data.expirationDate}</p>
             )}
+            <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider mt-1">Yahoo stock options chain</p>
           </div>
           <div className={`text-xs font-bold ${isBullish ? 'text-green-500' : 'text-red-500'}`}>
             Call/Put {data.ratio.toFixed(2)}
@@ -91,6 +99,15 @@ export function OptionsFlowCard({ data }: OptionsFlowProps) {
         <p className="text-[10px] text-gray-600 leading-relaxed font-medium">
           {data.interpretation || (isBullish ? "Call 未平倉量佔優，市場預期偏向看漲。" : "Put 未平倉量佔優，市場避險情緒較高。")}
         </p>
+        <div className="mt-3 flex items-center justify-between gap-3 border-t border-gray-200 pt-3">
+          <span className="text-[9px] font-black uppercase tracking-wider text-gray-400">Stock chain layer</span>
+          <a
+            href={buildWatcherHref(symbol)}
+            className="text-[10px] font-black uppercase tracking-wider text-blue-600 hover:text-blue-700"
+          >
+            Open in Watcher
+          </a>
+        </div>
       </div>
     </div>
   );

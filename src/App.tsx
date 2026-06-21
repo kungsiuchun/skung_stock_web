@@ -32,6 +32,10 @@ const getViewFromHash = (): ViewState | null => {
     return 'spx-gex-heatmap';
   }
 
+  if (hash.startsWith('#/work/trading-agent-dashboard')) {
+    return 'trading-agent-dashboard';
+  }
+
   if (hash.startsWith('#/work/stocks-intelligence-watcher')) {
     return 'stocks-intelligence-watcher';
   }
@@ -82,6 +86,11 @@ function App() {
 
     if (view === 'spx-gex-heatmap') {
       window.location.hash = '#/work/spx-gex-heatmap';
+      return;
+    }
+
+    if (view === 'trading-agent-dashboard') {
+      window.location.hash = '#/work/trading-agent-dashboard';
       return;
     }
 

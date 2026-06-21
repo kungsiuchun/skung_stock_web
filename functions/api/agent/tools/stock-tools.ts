@@ -52,6 +52,51 @@ class YahooSessionManager {
   }
 }
 
+type YahooOptionLeg = {
+  strike?: number;
+  lastPrice?: number;
+  bid?: number;
+  ask?: number;
+  volume?: number;
+  openInterest?: number;
+  impliedVolatility?: number;
+};
+
+export function selectOptionLegsNearUnderlying<T extends YahooOptionLeg>(
+  legs: T[],
+  underlyingPrice: unknown,
+  limit = 40,
+): T[] {
+  const spot = Number(underlyingPrice);
+  const cappedLimit = Math.max(1, limit);
+  const validLegs = legs.filter((leg) => Number.isFinite(Number(leg.strike)));
+
+  if (!Number.isFinite(spot) || spot <= 0) {
+    return validLegs.slice(0, cappedLimit);
+  }
+
+  return [...validLegs]
+    .sort((a, b) => {
+      const strikeDistance = Math.abs(Number(a.strike) - spot) - Math.abs(Number(b.strike) - spot);
+      if (strikeDistance !== 0) return strikeDistance;
+      return Number(a.strike) - Number(b.strike);
+    })
+    .slice(0, cappedLimit)
+    .sort((a, b) => Number(a.strike) - Number(b.strike));
+}
+
+const serializeOptionLeg = (leg: YahooOptionLeg) => ({
+  strike: Number(leg.strike),
+  last_price: leg.lastPrice,
+  bid: leg.bid,
+  ask: leg.ask,
+  volume: leg.volume,
+  open_interest: leg.openInterest,
+  implied_volatility: Number.isFinite(Number(leg.impliedVolatility))
+    ? `${(Number(leg.impliedVolatility) * 100).toFixed(2)}%`
+    : undefined,
+});
+
 // ── Tool 1: get_realtime_quote ─────────────────────────────────────
 
 async function handleGetRealtimeQuote(args: Record<string, any>): Promise<Record<string, any>> {
@@ -323,29 +368,17 @@ async function handleGetOptionsChain(args: Record<string, any>): Promise<Record<
     if (!result) return { error: `No options data for ${symbol}` };
 
   const options = result.options?.[0] || {};
+  const underlyingPrice = result.quote?.regularMarketPrice;
+  const callsNearSpot = selectOptionLegsNearUnderlying(options.calls || [], underlyingPrice);
+  const putsNearSpot = selectOptionLegsNearUnderlying(options.puts || [], underlyingPrice);
+
   return {
     symbol,
-    underlying_price: result.quote?.regularMarketPrice,
+    underlying_price: underlyingPrice,
     expiration_dates: result.expirationDates,
     current_expiration: options.expirationDate,
-    calls: (options.calls || []).slice(0, 10).map((c: any) => ({
-      strike: c.strike,
-      last_price: c.lastPrice,
-      bid: c.bid,
-      ask: c.ask,
-      volume: c.volume,
-      open_interest: c.openInterest,
-      implied_volatility: (c.impliedVolatility * 100).toFixed(2) + "%"
-    })),
-    puts: (options.puts || []).slice(0, 10).map((p: any) => ({
-      strike: p.strike,
-      last_price: p.lastPrice,
-      bid: p.bid,
-      ask: p.ask,
-      volume: p.volume,
-      open_interest: p.openInterest,
-      implied_volatility: (p.impliedVolatility * 100).toFixed(2) + "%"
-    })),
+    calls: callsNearSpot.map(serializeOptionLeg),
+    puts: putsNearSpot.map(serializeOptionLeg),
   };
   } catch (err: any) {
     console.error("[Tool:get_options_chain] Session error:", err);
