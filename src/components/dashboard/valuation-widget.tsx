@@ -5,7 +5,7 @@ interface ValuationData {
   pe_ratio?: string;
   peg_ratio?: string;
   eps?: string;
-  analyst_target_price?: string;
+  analyst_target_price?: string | null;
   error?: string;
   rateLimited?: boolean;
 }
@@ -32,7 +32,7 @@ export function ValuationWidget({ data, loading }: { data: ValuationData | null,
 
   if (!data || !data.pe_ratio) return null;
 
-  const formatNumber = (val: string | undefined, type: 'currency' | 'ratio' = 'ratio') => {
+  const formatNumber = (val: string | null | undefined, type: 'currency' | 'ratio' = 'ratio') => {
     if (!val || val === "None" || val === "-") return "N/A";
     const num = Number(val);
     if (isNaN(num)) return val;

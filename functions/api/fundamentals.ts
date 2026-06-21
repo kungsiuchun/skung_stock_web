@@ -1,3 +1,5 @@
+import { normalizeYahooFundamentals } from "../../src/lib/fundamentals";
+
 export async function onRequest(context: any) {
   try {
     const url = new URL(context.request.url);
@@ -18,7 +20,7 @@ export async function onRequest(context: any) {
     const crumb = (await crumbRes.text()).trim();
 
     // 3. Fetch Data
-    const modules = "summaryDetail,defaultKeyStatistics,price";
+    const modules = "summaryDetail,defaultKeyStatistics,financialData,price";
     const yfUrl = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=${modules}&crumb=${crumb}`;
     
     const res = await fetch(yfUrl, { 
@@ -31,22 +33,7 @@ export async function onRequest(context: any) {
     
     if (!result) return new Response(JSON.stringify({ error: "No overview data found" }), { status: 404 });
 
-    const summary = result.summaryDetail || {};
-    const stats = result.defaultKeyStatistics || {};
-    const price = result.price || {};
-
-    return new Response(JSON.stringify({ 
-      symbol: symbol,
-      name: price.longName || price.shortName || symbol,
-      market_cap: summary.marketCap?.fmt || stats.enterpriseValue?.fmt,
-      pe_ratio: summary.trailingPE?.fmt || summary.forwardPE?.fmt,
-      peg_ratio: stats.pegRatio?.fmt,
-      eps: stats.trailingEps?.fmt || stats.forwardEps?.fmt,
-      dividend_yield: summary.dividendYield?.fmt || "N/A",
-      analyst_target_price: price.regularMarketPrice?.fmt, // mock target using current price if missing
-      week52_high: summary.fiftyTwoWeekHigh?.fmt,
-      week52_low: summary.fiftyTwoWeekLow?.fmt
-    }), {
+    return new Response(JSON.stringify(normalizeYahooFundamentals(symbol, result)), {
       headers: { "Content-Type": "application/json" }
     });
   } catch (error: any) {
