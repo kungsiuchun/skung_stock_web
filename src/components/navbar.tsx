@@ -1,5 +1,5 @@
 import { portfolioConfig } from "@/config/portfolio";
-import type { ViewState } from "@/App";
+import type { ViewState } from "@/lib/app-routes";
 
 interface NavbarProps {
   onWork: () => void;

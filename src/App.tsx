@@ -12,57 +12,19 @@ import { AboutPage } from './components/about-page'
 import { WorkGallery } from './components/work-gallery'
 import { SettleUpPage } from './components/settle-up-page'
 import { portfolioConfig } from '@/config/portfolio'
+import { getHashForView, getViewFromHash, type ViewState } from '@/lib/app-routes'
 import { Home, LineChart } from 'lucide-react'
-
-
-export type ViewState = 'home' | 'about' | 'work-gallery' | 'settle-up' | 'finance-dashboard' | 'trading-agent-dashboard' | 'spx-recap' | 'spx-gex-heatmap' | 'stocks-intelligence-watcher';
-
-const getViewFromHash = (): ViewState | null => {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-
-  const hash = window.location.hash;
-
-  if (hash.startsWith('#/work/settle-up')) {
-    return 'settle-up';
-  }
-
-  if (hash.startsWith('#/work/spx-gex-heatmap')) {
-    return 'spx-gex-heatmap';
-  }
-
-  if (hash.startsWith('#/work/trading-agent-dashboard')) {
-    return 'trading-agent-dashboard';
-  }
-
-  if (hash.startsWith('#/work/stocks-intelligence-watcher')) {
-    return 'stocks-intelligence-watcher';
-  }
-
-  if (hash.startsWith('#/work/finance-analyzer') || hash.startsWith('#/work/finance-dashboard')) {
-    return 'finance-dashboard';
-  }
-
-  if (hash.startsWith('#/work')) {
-    return 'work-gallery';
-  }
-
-  return null;
-};
 
 function App() {
   const [isAIOpen, setIsAIOpen] = useState(false);
   const [isFinanceChatOpen, setIsFinanceChatOpen] = useState(false);
-  const [currentView, setCurrentView] = useState<ViewState>('home');
+  const [currentView, setCurrentView] = useState<ViewState>(() =>
+    typeof window === 'undefined' ? 'home' : getViewFromHash(window.location.hash)
+  );
 
   useEffect(() => {
     const syncViewFromHash = () => {
-      const hashView = getViewFromHash();
-
-      if (hashView) {
-        setCurrentView(hashView);
-      }
+      setCurrentView(getViewFromHash(window.location.hash));
     };
 
     syncViewFromHash();
@@ -72,45 +34,11 @@ function App() {
   }, []);
 
   const navigateToView = (view: ViewState) => {
-    setCurrentView(view);
-
     if (typeof window === 'undefined') {
       return;
     }
 
-    if (view === 'work-gallery') {
-      window.location.hash = '#/work';
-      return;
-    }
-
-    if (view === 'settle-up') {
-      window.location.hash = '#/work/settle-up';
-      return;
-    }
-
-    if (view === 'spx-gex-heatmap') {
-      window.location.hash = '#/work/spx-gex-heatmap';
-      return;
-    }
-
-    if (view === 'trading-agent-dashboard') {
-      window.location.hash = '#/work/trading-agent-dashboard';
-      return;
-    }
-
-    if (view === 'finance-dashboard') {
-      window.location.hash = '#/work/finance-analyzer';
-      return;
-    }
-
-    if (view === 'stocks-intelligence-watcher') {
-      window.location.hash = '#/work/stocks-intelligence-watcher';
-      return;
-    }
-
-    if (window.location.hash.startsWith('#/work')) {
-      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
-    }
+    window.location.hash = getHashForView(view);
   };
 
   return (
