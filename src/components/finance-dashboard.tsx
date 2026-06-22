@@ -682,8 +682,7 @@ export function FinanceDashboard() {
                     sentiment={activeData?.marketSentiment ?? null}
                     sentimentSource={activeData?.sentimentSource}
                     sentimentData={activeData?.sentimentData ?? null}
-                    news={activeData?.news || []} 
-                    quantStrategies={activeData?.quantStrategies}
+                    news={activeData?.news || []}
                   />
                   <FearIndexCard data={vixData} />
                   <FinancialJuiceWidget />

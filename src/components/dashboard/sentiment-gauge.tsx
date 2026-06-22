@@ -5,7 +5,6 @@ interface SentimentGaugeProps {
   sentimentSource?: string;
   sentimentData?: SentimentApiResult | null;
   news?: { title: string }[];
-  quantStrategies?: { name: string; score: number }[];
 }
 
 function clampScore(score: number | null | undefined) {
@@ -40,7 +39,6 @@ export function SentimentGauge({
   sentimentSource,
   sentimentData,
   news = [],
-  quantStrategies = [],
 }: SentimentGaugeProps) {
   const score = sentimentData?.score ?? sentiment ?? null;
   const hasScore = typeof score === "number" && Number.isFinite(score);
@@ -74,7 +72,7 @@ export function SentimentGauge({
       <div className="mb-4 flex items-start justify-between gap-4">
         <div>
           <div className="text-gray-400 text-xs font-bold uppercase tracking-widest">
-            {title} ({quantStrategies.length})
+            {title}
           </div>
           <div className="mt-1 text-[11px] font-bold text-gray-500">{coverage}</div>
         </div>
