@@ -40,6 +40,10 @@ const getViewFromHash = (): ViewState | null => {
     return 'stocks-intelligence-watcher';
   }
 
+  if (hash.startsWith('#/work/finance-analyzer') || hash.startsWith('#/work/finance-dashboard')) {
+    return 'finance-dashboard';
+  }
+
   if (hash.startsWith('#/work')) {
     return 'work-gallery';
   }
@@ -91,6 +95,11 @@ function App() {
 
     if (view === 'trading-agent-dashboard') {
       window.location.hash = '#/work/trading-agent-dashboard';
+      return;
+    }
+
+    if (view === 'finance-dashboard') {
+      window.location.hash = '#/work/finance-analyzer';
       return;
     }
 
