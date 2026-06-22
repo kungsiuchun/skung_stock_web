@@ -237,6 +237,7 @@ describe("SPX GEX exposure board model", () => {
 
   it("builds a professional exposure board with matrix cells, structure tags, DEX, VEX, and CEX", () => {
     const heatmap = buildStructuredHeatmap();
+    const atTheMoneyCell = heatmap.cells.find((cell) => cell.expdate === expiries[0] && cell.strike === 6000);
 
     assert.deepEqual(heatmap.selectedExpiries, expiries);
     assert.equal(heatmap.cells.length, expiries.length * strikes.length);
@@ -249,6 +250,26 @@ describe("SPX GEX exposure board model", () => {
     assert.ok(heatmap.strikeProfiles.some((row) => row.tags.some((tag) => tag.type === "now")));
     assert.ok(heatmap.strikeProfiles.every((row) => row.tags.length <= 1));
     assert.ok(heatmap.source.note.includes("Black-Scholes"));
+    assert.ok(heatmap.source.note.includes("per-cell IV/OI/DTE audit inputs"));
+    assert.ok(atTheMoneyCell);
+    assert.equal(atTheMoneyCell.callIv, 0.2);
+    assert.equal(atTheMoneyCell.putIv, 0.22);
+    assert.equal(atTheMoneyCell.callIvPercent, 20);
+    assert.equal(atTheMoneyCell.putIvPercent, 22);
+    assert.equal(atTheMoneyCell.avgIv, 21);
+    assert.equal(atTheMoneyCell.callEffectiveOpenInterest, 7000);
+    assert.equal(atTheMoneyCell.putEffectiveOpenInterest, 7400);
+    assert.equal(atTheMoneyCell.callOpenInterest, 7000);
+    assert.equal(atTheMoneyCell.putOpenInterest, 7400);
+    assert.equal(atTheMoneyCell.callVolume, 1050);
+    assert.equal(atTheMoneyCell.putVolume, 920);
+    assert.equal(atTheMoneyCell.contractMultiplier, 100);
+    assert.equal(atTheMoneyCell.riskFreeRate, 0.04);
+    assert.equal(atTheMoneyCell.model, "black_scholes_gamma_exposure");
+    assert.equal(atTheMoneyCell.calculationTimestamp, "2026-05-27T13:45:00.000Z");
+    assert.equal(Number.isFinite(atTheMoneyCell.yearsToExpiry), true);
+    assert.equal(Number.isFinite(atTheMoneyCell.dteHours), true);
+    assert.equal(atTheMoneyCell.netGex, Number(atTheMoneyCell.callGex || 0) + Number(atTheMoneyCell.putGex || 0));
   });
 
   it("keeps dense SPX strike coverage near spot instead of collapsing to a sparse mock-table", () => {
@@ -437,7 +458,14 @@ describe("SPX GEX intraday D1 storage", () => {
     ]);
     assert.equal((await listSpxGexHeatmapSessions(db, "2026-05-27")).length, 2);
     assert.equal((await readSpxGexHeatmap(db, "2026-05-27"))?.quote.last, 6010);
-    assert.equal((await readSpxGexHeatmap(db, "2026-05-27", 9 * 60 + 30))?.quote.last, 6000);
+    const restoredFirstSlot = await readSpxGexHeatmap(db, "2026-05-27", 9 * 60 + 30);
+    const restoredAuditCell = restoredFirstSlot?.cells.find((cell) => cell.expdate === expiries[0] && cell.strike === 6000);
+    assert.equal(restoredFirstSlot?.quote.last, 6000);
+    assert.equal(restoredAuditCell?.callIvPercent, 20);
+    assert.equal(restoredAuditCell?.putIvPercent, 22);
+    assert.equal(restoredAuditCell?.callEffectiveOpenInterest, 7000);
+    assert.equal(restoredAuditCell?.putEffectiveOpenInterest, 7400);
+    assert.equal(restoredAuditCell?.model, "black_scholes_gamma_exposure");
     assert.equal(await readSpxGexHeatmap(db, "2026-05-18"), null);
   });
 
@@ -453,6 +481,8 @@ describe("SPX GEX intraday D1 storage", () => {
     assert.equal(restored?.session?.snapshotTimeEt, "09:15");
     assert.equal(restored?.session?.collectedTimeEt, "09:15");
     assert.equal(restored?.source.gexTool, "get_options_gex");
+    assert.equal(restored?.cells[0]?.callIv, undefined);
+    assert.equal(restored?.cells[0]?.model, undefined);
     assert.ok((await listSpxGexHeatmapSessions(db, "2026-05-27")).length === 1);
   });
 });

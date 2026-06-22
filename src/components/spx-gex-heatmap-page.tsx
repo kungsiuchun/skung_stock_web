@@ -38,6 +38,41 @@ const formatSignedCompact = (value: number | null | undefined) => {
   return `${value >= 0 ? "+" : "-"}${formatCompact(Math.abs(value))}`;
 };
 
+const formatPercent = (value: number | null | undefined) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return `${value.toFixed(2)}%`;
+};
+
+const formatNumber = (value: number | null | undefined) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return value.toLocaleString("en-US", { maximumFractionDigits: 2 });
+};
+
+const formatYears = (value: number | null | undefined) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return value.toFixed(6);
+};
+
+const cellAuditLines = (cell: SpxGexHeatmapCell | undefined) => {
+  if (!cell) return [];
+  if (cell.model !== "black_scholes_gamma_exposure") {
+    return [
+      `Strike ${cell.strike} ${cell.expdate}`,
+      "Audit inputs unavailable",
+    ];
+  }
+  return [
+    `Strike ${cell.strike} ${cell.expdate}`,
+    `Net GEX ${formatSignedCompact(cell.netGex)} = Call ${formatSignedCompact(cell.callGex)} + Put ${formatSignedCompact(cell.putGex)}`,
+    `Call IV ${formatPercent(cell.callIvPercent)} / Put IV ${formatPercent(cell.putIvPercent)}`,
+    `Call OI ${formatNumber(cell.callOpenInterest)} / Put OI ${formatNumber(cell.putOpenInterest)}`,
+    `Effective OI C ${formatNumber(cell.callEffectiveOpenInterest)} / P ${formatNumber(cell.putEffectiveOpenInterest)}`,
+    `DTE ${formatNumber(cell.dteHours)}h / t=${formatYears(cell.yearsToExpiry)}`,
+    `Formula: Net = Call gamma exposure - Put gamma exposure`,
+    `Model ${cell.model} @ ${cell.calculationTimestamp || "-"}`,
+  ];
+};
+
 const cellStyle = (value: number | null | undefined, max: number) => {
   if (typeof value !== "number" || !Number.isFinite(value)) return { backgroundColor: "#07111a", color: "#526171" };
   const strength = Math.min(1, Math.abs(value) / Math.max(1, max));
@@ -366,13 +401,28 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                         <StrikeCell strike={strike} isSpotStrike={isSpotStrike} />
                         {heatmap.selectedExpiries.map((expiry) => {
                           const cell = cellByKey.get(`${strike}:${expiry}`);
+                          const auditLines = cellAuditLines(cell);
                           return (
                             <td
                               key={`${strike}-${expiry}`}
-                              className="border border-[#102433] px-1.5 py-[2px] text-right font-black tabular-nums"
+                              className="group relative border border-[#102433] px-1.5 py-[2px] text-right font-black tabular-nums"
                               style={cellStyle(cell?.netGex, maxGex)}
+                              title={auditLines.join("\n")}
+                              data-gex-audit-cell={cell ? "true" : undefined}
                             >
-                              {formatCompact(cell?.netGex)}
+                              <span>{formatCompact(cell?.netGex)}</span>
+                              {cell && (
+                                <span
+                                  className="pointer-events-none absolute left-1/2 top-full z-50 hidden w-80 -translate-x-1/2 whitespace-normal border border-cyan-300/35 bg-[#02070d] p-2 text-left text-[10px] font-semibold leading-4 text-cyan-50 shadow-2xl shadow-black/60 group-hover:block"
+                                  data-gex-audit-tooltip="true"
+                                >
+                                  {auditLines.map((line) => (
+                                    <span key={line} className="block">
+                                      {line}
+                                    </span>
+                                  ))}
+                                </span>
+                              )}
                             </td>
                           );
                         })}

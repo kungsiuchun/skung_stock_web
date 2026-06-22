@@ -71,6 +71,20 @@ export interface SpxGexHeatmapCell {
   totalVolume?: number;
   avgIv?: number | null;
   approximate?: boolean;
+  callIv?: number | null;
+  putIv?: number | null;
+  callIvPercent?: number | null;
+  putIvPercent?: number | null;
+  callEffectiveOpenInterest?: number;
+  putEffectiveOpenInterest?: number;
+  callVolume?: number;
+  putVolume?: number;
+  yearsToExpiry?: number;
+  dteHours?: number;
+  calculationTimestamp?: string;
+  contractMultiplier?: number;
+  riskFreeRate?: number;
+  model?: "black_scholes_gamma_exposure";
 }
 
 export interface SpxGexStrikeProfile {
@@ -566,6 +580,8 @@ const optionCellForStrike = (chain: SpxGexOptionChain, strike: number, now: Date
   const putEffectiveOpenInterest = effectiveOpenInterest(put);
   const callIv = normalizeIv(call?.impliedVolatility);
   const putIv = normalizeIv(put?.impliedVolatility);
+  const callIvPercent = Number((callIv * 100).toFixed(2));
+  const putIvPercent = Number((putIv * 100).toFixed(2));
   const yearsToExpiry = expiryToYears(chain.selectedExpiry || "", now);
   const exposures = calculateBlackScholesExposures({
     spot: chain.spot,
@@ -590,8 +606,22 @@ const optionCellForStrike = (chain: SpxGexOptionChain, strike: number, now: Date
     putOpenInterest,
     totalOpenInterest: callEffectiveOpenInterest + putEffectiveOpenInterest,
     totalVolume: (call?.volume || 0) + (put?.volume || 0),
-    avgIv: Number((((callIv + putIv) / 2) * 100).toFixed(2)),
+    avgIv: Number(((callIvPercent + putIvPercent) / 2).toFixed(2)),
     approximate: callOpenInterest + putOpenInterest <= 0 || !(call?.impliedVolatility && put?.impliedVolatility),
+    callIv,
+    putIv,
+    callIvPercent,
+    putIvPercent,
+    callEffectiveOpenInterest,
+    putEffectiveOpenInterest,
+    callVolume: call?.volume || 0,
+    putVolume: put?.volume || 0,
+    yearsToExpiry,
+    dteHours: Number((yearsToExpiry * 365 * 24).toFixed(2)),
+    calculationTimestamp: now.toISOString(),
+    contractMultiplier: CONTRACT_MULTIPLIER,
+    riskFreeRate: RISK_FREE_RATE,
+    model: "black_scholes_gamma_exposure",
   };
 };
 
@@ -955,7 +985,7 @@ export const buildSpxGexHeatmapFromOptionChains = (input: BuildSpxGexHeatmapFrom
       gexTool: "black_scholes_exposure_engine",
       zeroDteTool: "black_scholes_exposure_engine",
       gexTopRows: input.maxStrikes ?? DEFAULT_MAX_STRIKES,
-      note: "15-minute delayed Yahoo option chains are transformed into Black-Scholes GEX, DEX, VEX (vanna), and CEX (charm) approximations. Missing OI falls back to volume.",
+      note: "15-minute delayed Yahoo option chains are transformed into Black-Scholes GEX, DEX, VEX (vanna), and CEX (charm) approximations. Missing OI falls back to volume. New snapshots retain per-cell IV/OI/DTE audit inputs; legacy snapshots may not.",
     },
   };
 
