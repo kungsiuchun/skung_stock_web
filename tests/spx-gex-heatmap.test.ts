@@ -82,6 +82,22 @@ describe("SPX GEX Black-Scholes exposure model", () => {
     assert.ok(exposure.callGex > 0);
     assert.ok(exposure.putGex < 0);
   });
+
+  it("uses a blended gamma IV so 0DTE side-IV skew does not zero out upside call gamma", () => {
+    const exposure = calculateBlackScholesExposures({
+      spot: 7475.79,
+      strike: 7550,
+      yearsToExpiry: 2.75 / (365 * 24),
+      callOpenInterest: 5254,
+      putOpenInterest: 3497,
+      callIv: 0.0846,
+      putIv: 0.1485,
+      gammaIv: (0.0846 + 0.1485) / 2,
+    });
+
+    assert.ok(exposure.callGex > Math.abs(exposure.putGex));
+    assert.ok(exposure.netGex > 0);
+  });
 });
 
 const expiries = ["2026-05-27", "2026-05-28", "2026-05-29", "2026-06-01", "2026-06-02"];
@@ -112,6 +128,33 @@ const buildOptionChain = (expiry: string, spot = 6000, multiplier = 1): SpxGexOp
     openInterest: Math.round((index === 0 ? 24_000 : 5_000 + index * 1_200) * multiplier),
     impliedVolatility: 20 + index,
   })),
+});
+
+const buildSideSkewChain = (): SpxGexOptionChain => ({
+  symbol: "SPX",
+  spot: 7475.79,
+  expiries: ["2026-06-22"],
+  selectedExpiry: "2026-06-22",
+  calls: [{
+    contractSymbol: "SPX20260622C7550",
+    strike: 7550,
+    lastPrice: 1,
+    bid: 1,
+    ask: 2,
+    volume: 53041,
+    openInterest: 5254,
+    impliedVolatility: 8.46,
+  }],
+  puts: [{
+    contractSymbol: "SPX20260622P7550",
+    strike: 7550,
+    lastPrice: 1,
+    bid: 1,
+    ask: 2,
+    volume: 2557,
+    openInterest: 3497,
+    impliedVolatility: 14.85,
+  }],
 });
 
 const buildStructuredHeatmap = (generatedAt = "2026-05-27T13:45:00.000Z", spot = 6000) =>
@@ -250,12 +293,15 @@ describe("SPX GEX exposure board model", () => {
     assert.ok(heatmap.strikeProfiles.some((row) => row.tags.some((tag) => tag.type === "now")));
     assert.ok(heatmap.strikeProfiles.every((row) => row.tags.length <= 1));
     assert.ok(heatmap.source.note.includes("Black-Scholes"));
-    assert.ok(heatmap.source.note.includes("per-cell IV/OI/DTE audit inputs"));
+    assert.ok(heatmap.source.note.includes("blended per-strike IV"));
+    assert.ok(heatmap.source.note.includes("raw call/put IV retained for audit"));
     assert.ok(atTheMoneyCell);
     assert.equal(atTheMoneyCell.callIv, 0.2);
     assert.equal(atTheMoneyCell.putIv, 0.22);
     assert.equal(atTheMoneyCell.callIvPercent, 20);
     assert.equal(atTheMoneyCell.putIvPercent, 22);
+    assert.equal(atTheMoneyCell.gammaIvPercent, 21);
+    assert.equal(atTheMoneyCell.gammaIv, 0.21);
     assert.equal(atTheMoneyCell.avgIv, 21);
     assert.equal(atTheMoneyCell.callEffectiveOpenInterest, 7000);
     assert.equal(atTheMoneyCell.putEffectiveOpenInterest, 7400);
@@ -265,7 +311,7 @@ describe("SPX GEX exposure board model", () => {
     assert.equal(atTheMoneyCell.putVolume, 920);
     assert.equal(atTheMoneyCell.contractMultiplier, 100);
     assert.equal(atTheMoneyCell.riskFreeRate, 0.04);
-    assert.equal(atTheMoneyCell.model, "black_scholes_gamma_exposure");
+    assert.equal(atTheMoneyCell.model, "black_scholes_gamma_exposure_blended_iv");
     assert.equal(atTheMoneyCell.calculationTimestamp, "2026-05-27T13:45:00.000Z");
     assert.equal(Number.isFinite(atTheMoneyCell.yearsToExpiry), true);
     assert.equal(Number.isFinite(atTheMoneyCell.dteHours), true);
@@ -406,10 +452,19 @@ class MemoryD1Statement {
 
     if (this.query.includes("FROM spx_gex_intraday_snapshots") && this.query.includes("WHERE trading_date = ?")) {
       const date = String(this.values[0]);
+      const includeSnapshotJson = this.query.includes("snapshot_json");
       return {
         results: [...this.db.intraday.values()]
           .filter((row) => row.trading_date === date)
-          .sort((a, b) => Number(a.snapshot_minute_et) - Number(b.snapshot_minute_et)) as T[],
+          .sort((a, b) => Number(a.snapshot_minute_et) - Number(b.snapshot_minute_et))
+          .map((row) => ({
+            trading_date: row.trading_date,
+            snapshot_minute_et: row.snapshot_minute_et,
+            snapshot_time_et: row.snapshot_time_et,
+            generated_at: row.generated_at,
+            spot: row.spot,
+            ...(includeSnapshotJson ? { snapshot_json: row.snapshot_json } : {}),
+          })) as T[],
       };
     }
 
@@ -437,6 +492,24 @@ class MemoryD1 {
   }
 }
 
+const seedLegacyHeatmapRow = (db: MemoryD1, date: string, heatmap: SpxGexHeatmapModel) => {
+  db.legacy.set(date, {
+    date,
+    generated_at: heatmap.generatedAt,
+    snapshot_at: heatmap.snapshot,
+    ticker: heatmap.ticker,
+    spot: heatmap.quote.last,
+    quote_json: JSON.stringify(heatmap.quote),
+    expiries_json: JSON.stringify(heatmap.selectedExpiries),
+    strikes_json: JSON.stringify(heatmap.strikes),
+    cells_json: JSON.stringify(heatmap.cells),
+    totals_json: JSON.stringify(heatmap.totals),
+    zero_dte_json: JSON.stringify(heatmap.zeroDte),
+    interpretation_json: JSON.stringify(heatmap.premarketInterpretation),
+    source_json: JSON.stringify(heatmap.source),
+  });
+};
+
 describe("SPX GEX intraday D1 storage", () => {
   it("stores multiple snapshots per date, reads latest or selected slot, and retains seven trading dates", async () => {
     const db = new MemoryD1();
@@ -463,27 +536,58 @@ describe("SPX GEX intraday D1 storage", () => {
     assert.equal(restoredFirstSlot?.quote.last, 6000);
     assert.equal(restoredAuditCell?.callIvPercent, 20);
     assert.equal(restoredAuditCell?.putIvPercent, 22);
+    assert.equal(restoredAuditCell?.gammaIvPercent, 21);
     assert.equal(restoredAuditCell?.callEffectiveOpenInterest, 7000);
     assert.equal(restoredAuditCell?.putEffectiveOpenInterest, 7400);
-    assert.equal(restoredAuditCell?.model, "black_scholes_gamma_exposure");
+    assert.equal(restoredAuditCell?.model, "black_scholes_gamma_exposure_blended_iv");
     assert.equal(await readSpxGexHeatmap(db, "2026-05-18"), null);
+    assert.equal(db.legacy.size, 0);
   });
 
-  it("falls back to the legacy daily table when no intraday snapshot exists", async () => {
+  it("recomputes audit-capable side-IV intraday snapshots with blended gamma IV at read time", async () => {
+    const db = new MemoryD1();
+    const heatmap = buildSpxGexHeatmapFromOptionChains({
+      generatedAt: "2026-06-22T18:15:07.000Z",
+      chains: [buildSideSkewChain()],
+      selectedExpiries: ["2026-06-22"],
+      maxStrikes: 1,
+    });
+    const storedCell = heatmap.cells[0];
+    assert.ok(storedCell);
+    Object.assign(storedCell, {
+      callGex: 4,
+      putGex: -3_538_819,
+      netGex: -3_538_815,
+      gammaIv: undefined,
+      gammaIvPercent: undefined,
+      model: "black_scholes_gamma_exposure",
+    });
+    heatmap.source.note = `${heatmap.source.note} New snapshots retain per-cell IV/OI/DTE audit inputs; legacy snapshots may not.`;
+    await upsertSpxGexHeatmap(db, "2026-06-22", heatmap, { retentionTradingDays: 7 });
+
+    const restored = await readSpxGexHeatmap(db, "2026-06-22", 14 * 60);
+    const restoredCell = restored?.cells[0];
+
+    assert.ok(restoredCell);
+    assert.equal(restoredCell.model, "black_scholes_gamma_exposure_blended_iv");
+    assert.equal(restoredCell.gammaIvPercent, 11.66);
+    assert.ok(Number(restoredCell.callGex) > Math.abs(Number(restoredCell.putGex)));
+    assert.ok(Number(restoredCell.netGex) > 0);
+    assert.equal(restored?.totals[0]?.netGex, restoredCell.netGex);
+    assert.equal(restored?.zeroDte.netGex, restoredCell.netGex);
+    assert.ok(!restored?.source.note.includes("legacy"));
+  });
+
+  it("does not fall back to the legacy daily table when no audited intraday snapshot exists", async () => {
     const db = new MemoryD1();
     const legacy = buildLegacyHeatmap("2026-05-27T13:15:00.000Z");
-    await upsertSpxGexHeatmap(db, "2026-05-27", legacy);
-    db.intraday.clear();
+    seedLegacyHeatmapRow(db, "2026-05-27", legacy);
 
     const restored = await readSpxGexHeatmap(db, "2026-05-27");
 
-    assert.equal(restored?.quote.last, 6000);
-    assert.equal(restored?.session?.snapshotTimeEt, "09:15");
-    assert.equal(restored?.session?.collectedTimeEt, "09:15");
-    assert.equal(restored?.source.gexTool, "get_options_gex");
-    assert.equal(restored?.cells[0]?.callIv, undefined);
-    assert.equal(restored?.cells[0]?.model, undefined);
-    assert.ok((await listSpxGexHeatmapSessions(db, "2026-05-27")).length === 1);
+    assert.equal(restored, null);
+    assert.deepEqual(await listSpxGexHeatmapDates(db), []);
+    assert.deepEqual(await listSpxGexHeatmapSessions(db, "2026-05-27"), []);
   });
 });
 
@@ -533,6 +637,30 @@ describe("SPX GEX heatmap API", () => {
     assert.equal(defaultPayload.selectedDate, "2026-05-28");
     assert.equal(defaultPayload.selectedSnapshot.snapshotMinuteEt, 10 * 60);
     assert.equal(defaultPayload.heatmap.quote.last, 6020);
+  });
+
+  it("returns no data instead of legacy fallback when only daily legacy rows exist", async () => {
+    const db = new MemoryD1();
+    seedLegacyHeatmapRow(db, "2026-05-27", buildLegacyHeatmap("2026-05-27T13:15:00.000Z"));
+
+    const response = await getSpxGexHeatmapApi({
+      request: new Request("https://example.com/api/spx-gex-heatmap?date=2026-05-27"),
+      env: { SPX_RECAP_DB: db },
+    });
+    const payload = (await response.json()) as {
+      availableDates: string[];
+      selectedDate: string | null;
+      sessions: unknown[];
+      selectedSnapshot: unknown | null;
+      heatmap: SpxGexHeatmapModel | null;
+    };
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(payload.availableDates, []);
+    assert.equal(payload.selectedDate, null);
+    assert.deepEqual(payload.sessions, []);
+    assert.equal(payload.selectedSnapshot, null);
+    assert.equal(payload.heatmap, null);
   });
 });
 

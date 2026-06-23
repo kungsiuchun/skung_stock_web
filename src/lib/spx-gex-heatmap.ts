@@ -11,6 +11,9 @@ const MIN_DTE_YEARS = 1 / (365 * 24 * 4);
 const DEFAULT_EXPIRY_COUNT = 5;
 const DEFAULT_MAX_STRIKES = 96;
 const DEFAULT_STRIKE_RANGE_PCT = 0.05;
+const SIDE_IV_MODEL = "black_scholes_gamma_exposure";
+const BLENDED_IV_MODEL = "black_scholes_gamma_exposure_blended_iv";
+const BLENDED_IV_SOURCE_NOTE = "New snapshots use blended per-strike IV for gamma; raw call/put IV retained for audit. Snapshots without per-cell audit inputs are rejected as no data.";
 
 export interface SpxGexQuote {
   ticker: string;
@@ -75,6 +78,8 @@ export interface SpxGexHeatmapCell {
   putIv?: number | null;
   callIvPercent?: number | null;
   putIvPercent?: number | null;
+  gammaIv?: number | null;
+  gammaIvPercent?: number | null;
   callEffectiveOpenInterest?: number;
   putEffectiveOpenInterest?: number;
   callVolume?: number;
@@ -84,7 +89,7 @@ export interface SpxGexHeatmapCell {
   calculationTimestamp?: string;
   contractMultiplier?: number;
   riskFreeRate?: number;
-  model?: "black_scholes_gamma_exposure";
+  model?: typeof SIDE_IV_MODEL | typeof BLENDED_IV_MODEL;
 }
 
 export interface SpxGexStrikeProfile {
@@ -237,22 +242,6 @@ export type SpxGexGenerationResult =
   | { status: "generated"; date: string; snapshotMinuteEt: number; snapshotTimeEt: string; collectedMinuteEt: number; collectedTimeEt: string }
   | { status: "skipped_existing"; date: string; snapshotMinuteEt: number; snapshotTimeEt: string; collectedMinuteEt: number; collectedTimeEt: string }
   | { status: "skipped"; date: string; reason: string };
-
-interface D1SpxGexHeatmapRow {
-  date: string;
-  generated_at: string;
-  snapshot_at: string | null;
-  ticker: string;
-  spot: number;
-  quote_json: string;
-  expiries_json: string;
-  strikes_json: string;
-  cells_json: string;
-  totals_json: string;
-  zero_dte_json: string;
-  interpretation_json?: string | null;
-  source_json: string;
-}
 
 interface D1SpxGexIntradayRow {
   trading_date: string;
@@ -502,15 +491,22 @@ const erf = (x: number) => {
 
 const normalCdf = (x: number) => 0.5 * (1 + erf(x / Math.SQRT2));
 
-const normalizeIv = (value: number | undefined) => {
-  const raw = typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 20;
-  const decimal = raw > 3 ? raw / 100 : raw;
+const normalizeIv = (value: number | null | undefined) => {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  const decimal = value > 3 ? value / 100 : value;
   return Math.min(5, Math.max(0.01, decimal));
 };
 
-const effectiveOpenInterest = (leg: SpxGexOptionLeg | undefined) => {
-  if (!leg) return 0;
-  return leg.openInterest > 0 ? leg.openInterest : leg.volume;
+const roundTo = (value: number, decimals: number) => {
+  const factor = 10 ** decimals;
+  return Math.round((value + 1e-9) * factor) / factor;
+};
+
+const blendedGammaIv = (callIv: number | null | undefined, putIv: number | null | undefined) => {
+  const call = normalizeIv(callIv);
+  const put = normalizeIv(putIv);
+  if (call === null || put === null) return null;
+  return (call + put) / 2;
 };
 
 const expiryToYears = (expiry: string, now: Date) => {
@@ -527,20 +523,24 @@ export const calculateBlackScholesExposures = (input: {
   putOpenInterest: number;
   callIv: number;
   putIv: number;
+  gammaIv?: number;
 }) => {
+  const gammaSigma = normalizeIv(input.gammaIv) ?? blendedGammaIv(input.callIv, input.putIv);
   const calculateSide = (side: "call" | "put", iv: number, oi: number) => {
-    if (input.spot <= 0 || input.strike <= 0 || oi <= 0) {
+    const sigma = normalizeIv(iv);
+    if (input.spot <= 0 || input.strike <= 0 || oi <= 0 || sigma === null || gammaSigma === null) {
       return { deltaExposure: 0, gammaExposure: 0, vannaExposure: 0, charmExposure: 0 };
     }
 
-    const sigma = normalizeIv(iv);
     const t = Math.max(MIN_DTE_YEARS, input.yearsToExpiry);
     const sqrtT = Math.sqrt(t);
     const d1 = (Math.log(input.spot / input.strike) + (RISK_FREE_RATE + 0.5 * sigma * sigma) * t) / (sigma * sqrtT);
     const d2 = d1 - sigma * sqrtT;
+    const gammaD1 = (Math.log(input.spot / input.strike) + (RISK_FREE_RATE + 0.5 * gammaSigma * gammaSigma) * t) / (gammaSigma * sqrtT);
     const pdf = normalPdf(d1);
+    const gammaPdf = normalPdf(gammaD1);
     const delta = side === "call" ? normalCdf(d1) : normalCdf(d1) - 1;
-    const gamma = pdf / (input.spot * sigma * sqrtT);
+    const gamma = gammaPdf / (input.spot * gammaSigma * sqrtT);
     const vanna = -pdf * d2 / sigma;
     const charm = -pdf * ((2 * RISK_FREE_RATE * t) - (d2 * sigma * sqrtT)) / (2 * t * sigma * sqrtT);
 
@@ -576,42 +576,51 @@ const optionCellForStrike = (chain: SpxGexOptionChain, strike: number, now: Date
   const put = chain.puts.find((leg) => leg.strike === strike);
   const callOpenInterest = call?.openInterest || 0;
   const putOpenInterest = put?.openInterest || 0;
-  const callEffectiveOpenInterest = effectiveOpenInterest(call);
-  const putEffectiveOpenInterest = effectiveOpenInterest(put);
+  const callEffectiveOpenInterest = callOpenInterest;
+  const putEffectiveOpenInterest = putOpenInterest;
   const callIv = normalizeIv(call?.impliedVolatility);
   const putIv = normalizeIv(put?.impliedVolatility);
-  const callIvPercent = Number((callIv * 100).toFixed(2));
-  const putIvPercent = Number((putIv * 100).toFixed(2));
+  const callIvPercent = callIv === null ? null : roundTo(callIv * 100, 2);
+  const putIvPercent = putIv === null ? null : roundTo(putIv * 100, 2);
+  const rawGammaIv = blendedGammaIv(call?.impliedVolatility, put?.impliedVolatility);
+  const gammaIv = rawGammaIv === null ? null : roundTo(rawGammaIv, 6);
+  const gammaIvPercent = gammaIv === null ? null : roundTo(gammaIv * 100, 2);
   const yearsToExpiry = expiryToYears(chain.selectedExpiry || "", now);
-  const exposures = calculateBlackScholesExposures({
-    spot: chain.spot,
-    strike,
-    yearsToExpiry,
-    callOpenInterest: callEffectiveOpenInterest,
-    putOpenInterest: putEffectiveOpenInterest,
-    callIv,
-    putIv,
-  });
+  const hasAuditInputs = callIv !== null && putIv !== null && gammaIv !== null;
+  const exposures = hasAuditInputs
+    ? calculateBlackScholesExposures({
+      spot: chain.spot,
+      strike,
+      yearsToExpiry,
+      callOpenInterest: callEffectiveOpenInterest,
+      putOpenInterest: putEffectiveOpenInterest,
+      callIv,
+      putIv,
+      gammaIv,
+    })
+    : null;
 
   return {
     strike,
     expdate: chain.selectedExpiry || "",
-    netGex: Math.round(exposures.netGex),
-    callGex: Math.round(exposures.callGex),
-    putGex: Math.round(exposures.putGex),
-    netDex: Math.round(exposures.netDex),
-    netVex: Math.round(exposures.netVex),
-    netCex: Math.round(exposures.netCex),
+    netGex: exposures ? Math.round(exposures.netGex) : null,
+    callGex: exposures ? Math.round(exposures.callGex) : null,
+    putGex: exposures ? Math.round(exposures.putGex) : null,
+    netDex: exposures ? Math.round(exposures.netDex) : null,
+    netVex: exposures ? Math.round(exposures.netVex) : null,
+    netCex: exposures ? Math.round(exposures.netCex) : null,
     callOpenInterest,
     putOpenInterest,
     totalOpenInterest: callEffectiveOpenInterest + putEffectiveOpenInterest,
     totalVolume: (call?.volume || 0) + (put?.volume || 0),
-    avgIv: Number(((callIvPercent + putIvPercent) / 2).toFixed(2)),
-    approximate: callOpenInterest + putOpenInterest <= 0 || !(call?.impliedVolatility && put?.impliedVolatility),
+    avgIv: callIvPercent === null || putIvPercent === null ? null : roundTo((callIvPercent + putIvPercent) / 2, 2),
+    approximate: !hasAuditInputs,
     callIv,
     putIv,
     callIvPercent,
     putIvPercent,
+    gammaIv,
+    gammaIvPercent,
     callEffectiveOpenInterest,
     putEffectiveOpenInterest,
     callVolume: call?.volume || 0,
@@ -621,7 +630,7 @@ const optionCellForStrike = (chain: SpxGexOptionChain, strike: number, now: Date
     calculationTimestamp: now.toISOString(),
     contractMultiplier: CONTRACT_MULTIPLIER,
     riskFreeRate: RISK_FREE_RATE,
-    model: "black_scholes_gamma_exposure",
+    model: hasAuditInputs ? BLENDED_IV_MODEL : undefined,
   };
 };
 
@@ -712,18 +721,18 @@ export const classifySpxGexStructureTags = (
   const callWallStrike = nearestProfileStrike(profiles, zeroDte?.topCallWallLevel);
   const putWallStrike = nearestProfileStrike(profiles, zeroDte?.topPutWallLevel);
   const gammaFlipStrike = nearestProfileStrike(profiles, zeroDte?.gammaFlip);
-  const fallbackCallWall = aboveSpot.reduce<typeof profiles[number] | null>((best, row) => {
+  const rankedCallWall = aboveSpot.reduce<typeof profiles[number] | null>((best, row) => {
     const value = hasSideGex ? row.callGex : row.netGex;
     const bestValue = best ? (hasSideGex ? best.callGex : best.netGex) : -Infinity;
     return !best || value > bestValue ? row : best;
   }, null);
-  const fallbackPutWall = belowSpot.reduce<typeof profiles[number] | null>((best, row) => {
+  const rankedPutWall = belowSpot.reduce<typeof profiles[number] | null>((best, row) => {
     const value = hasSideGex ? row.putGex : row.netGex;
     const bestValue = best ? (hasSideGex ? best.putGex : best.netGex) : Infinity;
     return !best || value < bestValue ? row : best;
   }, null);
-  const callWall = byStrike.get(callWallStrike ?? NaN) || fallbackCallWall;
-  const putWall = byStrike.get(putWallStrike ?? NaN) || fallbackPutWall;
+  const callWall = byStrike.get(callWallStrike ?? NaN) || rankedCallWall;
+  const putWall = byStrike.get(putWallStrike ?? NaN) || rankedPutWall;
   const pin = byStrike.get(pinStrike ?? NaN) || profiles.reduce<typeof profiles[number] | null>(
     (best, row) => (!best || Math.abs(row.netGex) > Math.abs(best.netGex) ? row : best),
     null,
@@ -906,20 +915,6 @@ const buildSessionMeta = (generatedAt: string, spot: number): SpxGexSnapshotMeta
   };
 };
 
-const buildUndelayedSessionMeta = (generatedAt: string, spot: number): SpxGexSnapshotMeta => {
-  const etDate = toEasternDate(new Date(generatedAt));
-  const minute = getEtMinutes(etDate);
-  return {
-    tradingDate: toDateKey(etDate.getFullYear(), etDate.getMonth() + 1, etDate.getDate()),
-    snapshotMinuteEt: minute,
-    snapshotTimeEt: formatEtMinute(minute),
-    collectedMinuteEt: minute,
-    collectedTimeEt: formatEtMinute(minute),
-    generatedAt,
-    spot,
-  };
-};
-
 export const buildSpxGexHeatmapFromOptionChains = (input: BuildSpxGexHeatmapFromOptionChainsInput): SpxGexHeatmapModel => {
   if (input.chains.length === 0) throw new Error("No SPX option chains supplied.");
   const now = new Date(input.generatedAt);
@@ -985,7 +980,7 @@ export const buildSpxGexHeatmapFromOptionChains = (input: BuildSpxGexHeatmapFrom
       gexTool: "black_scholes_exposure_engine",
       zeroDteTool: "black_scholes_exposure_engine",
       gexTopRows: input.maxStrikes ?? DEFAULT_MAX_STRIKES,
-      note: "15-minute delayed Yahoo option chains are transformed into Black-Scholes GEX, DEX, VEX (vanna), and CEX (charm) approximations. Missing OI falls back to volume. New snapshots retain per-cell IV/OI/DTE audit inputs; legacy snapshots may not.",
+      note: `15-minute delayed Yahoo option chains are transformed into Black-Scholes GEX, DEX, VEX (vanna), and CEX (charm) approximations. Missing IV/OI is not substituted; cells without required audit inputs remain no-data. ${BLENDED_IV_SOURCE_NOTE}`,
     },
   };
 
@@ -1027,6 +1022,138 @@ const normalizeLegacyCollapsedLevels = (heatmap: Omit<SpxGexHeatmapModel, "prema
 
   nextHeatmap = { ...nextHeatmap, strikeProfiles: addKeyLevelAnnotations(strikeProfiles, zeroDte, heatmap.quote.last), zeroDte };
   return { heatmap: nextHeatmap, normalized: true };
+};
+
+const noteWithBlendedIv = (note: string) => (
+  (note.includes("blended per-strike IV") ? note : `${note} ${BLENDED_IV_SOURCE_NOTE}`)
+    .replace(/Missing OI f\w+ back to volume\.\s*/g, "Missing IV/OI is not substituted; cells without required audit inputs remain no-data. ")
+    .replace(/New snapshots retain per-cell IV\/OI\/DTE audit inputs; legacy snapshots may not\.\s*/g, "")
+    .replace(/Legacy snapshots may not have audit inputs and cannot be recomputed\.\s*/g, "")
+);
+
+const finiteNumberOrNull = (value: unknown) => (
+  typeof value === "number" && Number.isFinite(value) ? value : null
+);
+
+const isAuditedBlendedCell = (cell: SpxGexHeatmapCell) => (
+  cell.model === BLENDED_IV_MODEL
+  && typeof cell.netGex === "number"
+  && Number.isFinite(cell.netGex)
+  && typeof cell.callIv === "number"
+  && Number.isFinite(cell.callIv)
+  && typeof cell.putIv === "number"
+  && Number.isFinite(cell.putIv)
+  && typeof cell.gammaIv === "number"
+  && Number.isFinite(cell.gammaIv)
+);
+
+const recomputeCellWithBlendedIv = (cell: SpxGexHeatmapCell, spot: number): SpxGexHeatmapCell => {
+  if (isAuditedBlendedCell(cell)) return cell;
+
+  const callIv = normalizeIv(cell.callIv);
+  const putIv = normalizeIv(cell.putIv);
+  const gammaIvRaw = blendedGammaIv(cell.callIv, cell.putIv);
+  const yearsToExpiry = typeof cell.yearsToExpiry === "number" && Number.isFinite(cell.yearsToExpiry)
+    ? cell.yearsToExpiry
+    : typeof cell.dteHours === "number" && Number.isFinite(cell.dteHours)
+      ? cell.dteHours / (365 * 24)
+      : null;
+  if (callIv === null || putIv === null || gammaIvRaw === null || yearsToExpiry === null) return cell;
+
+  const gammaIv = roundTo(gammaIvRaw, 6);
+  const callIvPercent = roundTo(callIv * 100, 2);
+  const putIvPercent = roundTo(putIv * 100, 2);
+  const gammaIvPercent = roundTo(gammaIv * 100, 2);
+  const callEffectiveOpenInterest = finiteNumberOrNull(cell.callOpenInterest) ?? 0;
+  const putEffectiveOpenInterest = finiteNumberOrNull(cell.putOpenInterest) ?? 0;
+  const exposures = calculateBlackScholesExposures({
+    spot,
+    strike: cell.strike,
+    yearsToExpiry,
+    callOpenInterest: callEffectiveOpenInterest,
+    putOpenInterest: putEffectiveOpenInterest,
+    callIv,
+    putIv,
+    gammaIv,
+  });
+
+  return {
+    ...cell,
+    netGex: Math.round(exposures.netGex),
+    callGex: Math.round(exposures.callGex),
+    putGex: Math.round(exposures.putGex),
+    netDex: Math.round(exposures.netDex),
+    netVex: Math.round(exposures.netVex),
+    netCex: Math.round(exposures.netCex),
+    callIv,
+    putIv,
+    callIvPercent,
+    putIvPercent,
+    gammaIv,
+    gammaIvPercent,
+    callEffectiveOpenInterest,
+    putEffectiveOpenInterest,
+    avgIv: roundTo((callIvPercent + putIvPercent) / 2, 2),
+    contractMultiplier: CONTRACT_MULTIPLIER,
+    riskFreeRate: RISK_FREE_RATE,
+    model: BLENDED_IV_MODEL,
+  };
+};
+
+const buildExposureTotals = (selectedExpiries: string[], cells: SpxGexHeatmapCell[]) =>
+  selectedExpiries.map((expiry) => {
+    const expiryCells = cells.filter((cell) => cell.expdate === expiry);
+    return {
+      expdate: expiry,
+      netGex: expiryCells.reduce((sum, cell) => sum + Number(cell.netGex || 0), 0),
+      netDex: expiryCells.reduce((sum, cell) => sum + Number(cell.netDex || 0), 0),
+      netVex: expiryCells.reduce((sum, cell) => sum + Number(cell.netVex || 0), 0),
+      netCex: expiryCells.reduce((sum, cell) => sum + Number(cell.netCex || 0), 0),
+    };
+  });
+
+const normalizeBlendedIvExposure = (heatmap: SpxGexHeatmapModel): SpxGexHeatmapModel => {
+  const cells = heatmap.cells.map((cell) => recomputeCellWithBlendedIv(cell, heatmap.quote.last));
+  if (cells.every((cell, index) => cell === heatmap.cells[index])) return heatmap;
+
+  const totals = buildExposureTotals(heatmap.selectedExpiries, cells);
+  const rawStrikeProfiles = buildStrikeProfiles(heatmap.strikes, heatmap.selectedExpiries, cells, heatmap.quote.last);
+  const frontExpiry = heatmap.selectedExpiries[0] || heatmap.zeroDte.expiry;
+  const frontCells = cells.filter((cell) => cell.expdate === frontExpiry);
+  const gammaFlip = buildGammaFlipFromProfiles(rawStrikeProfiles, heatmap.quote.last);
+  const callWall = rawStrikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || row.callGex > best.callGex ? row : best), null);
+  const putWall = rawStrikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || row.putGex < best.putGex ? row : best), null);
+  const pin = rawStrikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || Math.abs(row.netGex) > Math.abs(best.netGex) ? row : best), null);
+  const zeroDte: SpxGexZeroDte = {
+    ...heatmap.zeroDte,
+    expiry: frontExpiry,
+    pinLevel: pin?.strike ?? null,
+    gammaFlip,
+    netGex: frontCells.reduce((sum, cell) => sum + Number(cell.netGex || 0), 0),
+    netDex: frontCells.reduce((sum, cell) => sum + Number(cell.netDex || 0), 0),
+    netVex: frontCells.reduce((sum, cell) => sum + Number(cell.netVex || 0), 0),
+    netCex: frontCells.reduce((sum, cell) => sum + Number(cell.netCex || 0), 0),
+    topCallWall: callWall ? formatStoredLevel(callWall.strike) : null,
+    topCallWallLevel: callWall?.strike ?? null,
+    topPutWall: putWall ? formatStoredLevel(putWall.strike) : null,
+    topPutWallLevel: putWall?.strike ?? null,
+    charmRegime: "black_scholes_approx",
+  };
+  const normalizedHeatmap: Omit<SpxGexHeatmapModel, "premarketInterpretation"> = {
+    ...heatmap,
+    cells,
+    totals,
+    zeroDte,
+    strikeProfiles: addKeyLevelAnnotations(rawStrikeProfiles, zeroDte, heatmap.quote.last),
+    source: {
+      ...heatmap.source,
+      note: noteWithBlendedIv(heatmap.source.note),
+    },
+  };
+  return {
+    ...normalizedHeatmap,
+    premarketInterpretation: buildSpxGexPremarketInterpretation(normalizedHeatmap),
+  };
 };
 
 export const buildSpxGexHeatmapFromToolText = (input: BuildSpxGexHeatmapInput): SpxGexHeatmapModel => {
@@ -1074,7 +1201,7 @@ export const buildSpxGexHeatmapFromToolText = (input: BuildSpxGexHeatmapInput): 
       gexTool: "get_options_gex",
       zeroDteTool: "get_options_0dte",
       gexTopRows: 20,
-      note: "Legacy markdown GEX parser fallback. It does not include DEX, VEX, or CEX cells.",
+      note: "Legacy markdown GEX parser fixture. It is not used for intraday storage or API reads.",
     },
   };
 
@@ -1088,34 +1215,7 @@ export const buildSpxGexHeatmapFromToolText = (input: BuildSpxGexHeatmapInput): 
 
 const parseJsonField = <T>(value: string): T => JSON.parse(value) as T;
 
-const rowToLegacyHeatmap = (row: D1SpxGexHeatmapRow): SpxGexHeatmapModel => {
-  const quote = parseJsonField<SpxGexQuote>(row.quote_json);
-  const heatmapWithoutInterpretation: Omit<SpxGexHeatmapModel, "premarketInterpretation"> = {
-    generatedAt: row.generated_at,
-    ticker: "SPX",
-    quote,
-    snapshot: row.snapshot_at,
-    session: buildUndelayedSessionMeta(row.generated_at, quote.last),
-    selectedExpiries: parseJsonField<string[]>(row.expiries_json),
-    strikeRange: { lower: Number(row.spot) * 0.9, upper: Number(row.spot) * 1.1 },
-    strikes: parseJsonField<number[]>(row.strikes_json),
-    cells: parseJsonField<SpxGexHeatmapCell[]>(row.cells_json),
-    totals: parseJsonField<Array<{ expdate: string; netGex: number }>>(row.totals_json),
-    strikeProfiles: [],
-    zeroDte: parseJsonField<SpxGexZeroDte>(row.zero_dte_json),
-    source: parseJsonField<SpxGexHeatmapModel["source"]>(row.source_json),
-  };
-
-  const normalized = normalizeLegacyCollapsedLevels(heatmapWithoutInterpretation);
-  return {
-    ...normalized.heatmap,
-    premarketInterpretation: row.interpretation_json && !normalized.normalized
-      ? parseJsonField<SpxGexPremarketInterpretation>(row.interpretation_json)
-      : buildSpxGexPremarketInterpretation(normalized.heatmap),
-  };
-};
-
-const rowToIntradayHeatmap = (row: D1SpxGexIntradayRow): SpxGexHeatmapModel => {
+const rowToIntradayHeatmap = (row: D1SpxGexIntradayRow): SpxGexHeatmapModel | null => {
   const parsed = parseJsonField<SpxGexHeatmapModel>(row.snapshot_json);
   const collectionStatus = getSpxGexGenerationStatus(new Date(row.generated_at));
   const parsedSession = parsed.session;
@@ -1135,11 +1235,12 @@ const rowToIntradayHeatmap = (row: D1SpxGexIntradayRow): SpxGexHeatmapModel => {
   const strikeProfiles = parsed.strikeProfiles?.length
     ? addKeyLevelAnnotations(parsed.strikeProfiles, parsed.zeroDte, parsed.quote.last)
     : addKeyLevelAnnotations(buildStrikeProfileFromLegacyCells(baseHeatmap), parsed.zeroDte, parsed.quote.last);
-  return {
+  const normalized = normalizeBlendedIvExposure({
     ...parsed,
     strikeProfiles,
     session,
-  };
+  });
+  return normalized.cells.some(isAuditedBlendedCell) ? normalized : null;
 };
 
 const isMissingIntradayTable = (error: unknown) => /spx_gex_intraday_snapshots|no such table/i.test(error instanceof Error ? error.message : String(error));
@@ -1148,47 +1249,36 @@ export const listSpxGexHeatmapDates = async (db: D1DatabaseLike) => {
   try {
     const result = await db.prepare("SELECT DISTINCT trading_date FROM spx_gex_intraday_snapshots ORDER BY trading_date DESC").all<{ trading_date: string }>();
     const dates = (result.results || []).map((row) => row.trading_date);
-    if (dates.length > 0) return dates;
+    const auditedDates: string[] = [];
+    for (const date of dates) {
+      if (await readSpxGexIntradaySnapshot(db, date)) auditedDates.push(date);
+    }
+    return auditedDates;
   } catch (error) {
     if (!isMissingIntradayTable(error)) throw error;
+    return [];
   }
-
-  const result = await db.prepare("SELECT date FROM spx_gex_heatmaps ORDER BY date DESC").all<{ date: string }>();
-  return (result.results || []).map((row) => row.date);
 };
 
 export const listSpxGexHeatmapSessions = async (db: D1DatabaseLike, date: string): Promise<SpxGexSessionSummary[]> => {
   try {
     const result = await db
       .prepare(`
-        SELECT trading_date, snapshot_minute_et, snapshot_time_et, generated_at, spot
+        SELECT trading_date, snapshot_minute_et, snapshot_time_et, generated_at, spot, snapshot_json
         FROM spx_gex_intraday_snapshots
         WHERE trading_date = ?
         ORDER BY snapshot_minute_et ASC
       `)
       .bind(date)
       .all<D1SpxGexIntradayRow>();
-    const sessions = (result.results || []).map((row) => ({
-      tradingDate: row.trading_date,
-      snapshotMinuteEt: Number(row.snapshot_minute_et),
-      snapshotTimeEt: row.snapshot_time_et,
-      collectedMinuteEt: getSpxGexGenerationStatus(new Date(row.generated_at)).collectedMinuteEt,
-      collectedTimeEt: getSpxGexGenerationStatus(new Date(row.generated_at)).collectedTimeEt,
-      generatedAt: row.generated_at,
-      spot: Number(row.spot),
-    }));
-    if (sessions.length > 0) return sessions;
+    const sessions = (result.results || [])
+      .map((row) => rowToIntradayHeatmap(row)?.session)
+      .filter((session): session is SpxGexSessionSummary => Boolean(session));
+    return sessions;
   } catch (error) {
     if (!isMissingIntradayTable(error)) throw error;
+    return [];
   }
-
-  const legacy = await readLegacySpxGexHeatmap(db, date);
-  return legacy?.session ? [legacy.session] : [];
-};
-
-const readLegacySpxGexHeatmap = async (db: D1DatabaseLike, date: string): Promise<SpxGexHeatmapModel | null> => {
-  const row = await db.prepare("SELECT * FROM spx_gex_heatmaps WHERE date = ?").bind(date).first<D1SpxGexHeatmapRow>();
-  return row ? rowToLegacyHeatmap(row) : null;
 };
 
 export const readSpxGexIntradaySnapshot = async (
@@ -1223,13 +1313,7 @@ export const readSpxGexIntradaySnapshot = async (
 };
 
 export const readSpxGexHeatmap = async (db: D1DatabaseLike, date: string, snapshotMinuteEt?: number | null): Promise<SpxGexHeatmapModel | null> => {
-  const intraday = await readSpxGexIntradaySnapshot(db, date, snapshotMinuteEt);
-  return intraday || readLegacySpxGexHeatmap(db, date);
-};
-
-const runStatement = async (db: D1DatabaseLike, statement: ReturnType<D1DatabaseLike["prepare"]>) => {
-  if (db.batch) await db.batch([statement]);
-  else await statement.run();
+  return readSpxGexIntradaySnapshot(db, date, snapshotMinuteEt);
 };
 
 export const upsertSpxGexIntradaySnapshot = async (
@@ -1281,107 +1365,11 @@ export const upsertSpxGexIntradaySnapshot = async (
 
 export const upsertSpxGexHeatmap = async (
   db: D1DatabaseLike,
-  date: string,
+  _date: string,
   heatmap: SpxGexHeatmapModel,
   options: { retentionTradingDays?: number } = {},
 ) => {
-  const retentionTradingDays = options.retentionTradingDays ?? 7;
-  const legacyUpsert = db.prepare(`
-    INSERT INTO spx_gex_heatmaps (
-      date, generated_at, snapshot_at, ticker, spot, quote_json, expiries_json,
-      strikes_json, cells_json, totals_json, zero_dte_json, interpretation_json, source_json, created_at, updated_at
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(date) DO UPDATE SET
-      generated_at = excluded.generated_at,
-      snapshot_at = excluded.snapshot_at,
-      ticker = excluded.ticker,
-      spot = excluded.spot,
-      quote_json = excluded.quote_json,
-      expiries_json = excluded.expiries_json,
-      strikes_json = excluded.strikes_json,
-      cells_json = excluded.cells_json,
-      totals_json = excluded.totals_json,
-      zero_dte_json = excluded.zero_dte_json,
-      interpretation_json = excluded.interpretation_json,
-      source_json = excluded.source_json,
-      updated_at = excluded.updated_at
-  `).bind(
-    date,
-    heatmap.generatedAt,
-    heatmap.snapshot,
-    heatmap.ticker,
-    heatmap.quote.last,
-    JSON.stringify(heatmap.quote),
-    JSON.stringify(heatmap.selectedExpiries),
-    JSON.stringify(heatmap.strikes),
-    JSON.stringify(heatmap.cells),
-    JSON.stringify(heatmap.totals),
-    JSON.stringify(heatmap.zeroDte),
-    JSON.stringify(heatmap.premarketInterpretation),
-    JSON.stringify(heatmap.source),
-    heatmap.generatedAt,
-    heatmap.generatedAt,
-  );
-  const legacyPrune = db.prepare(`
-    DELETE FROM spx_gex_heatmaps
-    WHERE date NOT IN (
-      SELECT date FROM spx_gex_heatmaps ORDER BY date DESC LIMIT ?
-    )
-  `).bind(retentionTradingDays);
-
-  try {
-    if (db.batch) await db.batch([legacyUpsert, legacyPrune]);
-    else {
-      await legacyUpsert.run();
-      await legacyPrune.run();
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!message.includes("interpretation_json")) throw error;
-    const fallback = db.prepare(`
-      INSERT INTO spx_gex_heatmaps (
-        date, generated_at, snapshot_at, ticker, spot, quote_json, expiries_json,
-        strikes_json, cells_json, totals_json, zero_dte_json, source_json, created_at, updated_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(date) DO UPDATE SET
-        generated_at = excluded.generated_at,
-        snapshot_at = excluded.snapshot_at,
-        ticker = excluded.ticker,
-        spot = excluded.spot,
-        quote_json = excluded.quote_json,
-        expiries_json = excluded.expiries_json,
-        strikes_json = excluded.strikes_json,
-        cells_json = excluded.cells_json,
-        totals_json = excluded.totals_json,
-        zero_dte_json = excluded.zero_dte_json,
-        source_json = excluded.source_json,
-        updated_at = excluded.updated_at
-    `).bind(
-      date,
-      heatmap.generatedAt,
-      heatmap.snapshot,
-      heatmap.ticker,
-      heatmap.quote.last,
-      JSON.stringify(heatmap.quote),
-      JSON.stringify(heatmap.selectedExpiries),
-      JSON.stringify(heatmap.strikes),
-      JSON.stringify(heatmap.cells),
-      JSON.stringify(heatmap.totals),
-      JSON.stringify(heatmap.zeroDte),
-      JSON.stringify(heatmap.source),
-      heatmap.generatedAt,
-      heatmap.generatedAt,
-    );
-    await runStatement(db, fallback);
-  }
-
-  try {
-    await upsertSpxGexIntradaySnapshot(db, heatmap, { retentionTradingDays });
-  } catch (error) {
-    if (!isMissingIntradayTable(error)) throw error;
-  }
+  await upsertSpxGexIntradaySnapshot(db, heatmap, options);
 };
 
 const buildFromStructuredChains = async (options: {
@@ -1389,7 +1377,9 @@ const buildFromStructuredChains = async (options: {
   now: Date;
   marketContext: SpxGexMarketContext | null;
 }) => {
-  if (!options.dataClient.getOptionsChain) return null;
+  if (!options.dataClient.getOptionsChain) {
+    throw new Error("SPX GEX heatmap requires structured option-chain data; legacy markdown path is disabled.");
+  }
   const quoteText = await options.dataClient.getQuotes();
   const frontChain = await options.dataClient.getOptionsChain();
   const frontExpiry = frontChain.selectedExpiry || frontChain.expiries[0];
@@ -1404,29 +1394,6 @@ const buildFromStructuredChains = async (options: {
     quoteText,
     chains,
     selectedExpiries,
-    marketContext: options.marketContext,
-  });
-};
-
-const buildFromLegacyMarkdown = async (options: {
-  dataClient: SpxGexDataClient;
-  now: Date;
-  marketContext: SpxGexMarketContext | null;
-}) => {
-  const quoteText = await options.dataClient.getQuotes();
-  const optionsText = await options.dataClient.getOptions();
-  const zeroDteText = await options.dataClient.getOptions0Dte();
-  const selectedExpiries = selectSpxGexActiveExpiriesFromToolText(optionsText, zeroDteText, DEFAULT_EXPIRY_COUNT);
-  const gexByExpiryText: Record<string, string> = {};
-  for (const expiry of selectedExpiries) {
-    gexByExpiryText[expiry] = await options.dataClient.getOptionsGex(expiry);
-  }
-  return buildSpxGexHeatmapFromToolText({
-    generatedAt: options.now.toISOString(),
-    quoteText,
-    optionsText,
-    zeroDteText,
-    gexByExpiryText,
     marketContext: options.marketContext,
   });
 };
@@ -1472,9 +1439,7 @@ export const generateAndStoreSpxGexHeatmap = async (options: {
     }
   }
 
-  const heatmap =
-    (await buildFromStructuredChains({ dataClient: options.dataClient, now, marketContext })) ||
-    (await buildFromLegacyMarkdown({ dataClient: options.dataClient, now, marketContext }));
+  const heatmap = await buildFromStructuredChains({ dataClient: options.dataClient, now, marketContext });
 
   await upsertSpxGexHeatmap(options.db, date, heatmap, { retentionTradingDays: 7 });
   return {

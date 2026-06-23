@@ -55,20 +55,21 @@ const formatYears = (value: number | null | undefined) => {
 
 const cellAuditLines = (cell: SpxGexHeatmapCell | undefined) => {
   if (!cell) return [];
-  if (cell.model !== "black_scholes_gamma_exposure") {
+  if (cell.model !== "black_scholes_gamma_exposure_blended_iv") {
     return [
       `Strike ${cell.strike} ${cell.expdate}`,
-      "Audit inputs unavailable",
+      "No audited GEX data",
     ];
   }
   return [
     `Strike ${cell.strike} ${cell.expdate}`,
     `Net GEX ${formatSignedCompact(cell.netGex)} = Call ${formatSignedCompact(cell.callGex)} + Put ${formatSignedCompact(cell.putGex)}`,
+    `Gamma IV ${formatPercent(cell.gammaIvPercent)}`,
     `Call IV ${formatPercent(cell.callIvPercent)} / Put IV ${formatPercent(cell.putIvPercent)}`,
     `Call OI ${formatNumber(cell.callOpenInterest)} / Put OI ${formatNumber(cell.putOpenInterest)}`,
     `Effective OI C ${formatNumber(cell.callEffectiveOpenInterest)} / P ${formatNumber(cell.putEffectiveOpenInterest)}`,
     `DTE ${formatNumber(cell.dteHours)}h / t=${formatYears(cell.yearsToExpiry)}`,
-    `Formula: Net = Call gamma exposure - Put gamma exposure`,
+    `Formula: Net = Call gamma(gamma IV) - Put gamma(gamma IV)`,
     `Model ${cell.model} @ ${cell.calculationTimestamp || "-"}`,
   ];
 };
@@ -100,29 +101,7 @@ const tagClass = (severity: string) =>
 
 type RowRangeMode = "auto" | "all";
 
-const buildFallbackProfiles = (heatmap: SpxGexHeatmapModel): SpxGexStrikeProfile[] => {
-  if (heatmap.strikeProfiles?.length) return heatmap.strikeProfiles;
-  const cellByStrike = new Map<number, SpxGexHeatmapCell[]>();
-  for (const cell of heatmap.cells) {
-    cellByStrike.set(cell.strike, [...(cellByStrike.get(cell.strike) || []), cell]);
-  }
-  return heatmap.strikes.map((strike) => {
-    const cells = cellByStrike.get(strike) || [];
-    return {
-      strike,
-      netGex: cells.reduce((sum, cell) => sum + Number(cell.netGex || 0), 0),
-      callGex: cells.reduce((sum, cell) => sum + Number(cell.callGex || 0), 0),
-      putGex: cells.reduce((sum, cell) => sum + Number(cell.putGex || 0), 0),
-      netDex: cells.reduce((sum, cell) => sum + Number(cell.netDex || 0), 0),
-      netVex: cells.reduce((sum, cell) => sum + Number(cell.netVex || 0), 0),
-      netCex: cells.reduce((sum, cell) => sum + Number(cell.netCex || 0), 0),
-      totalOpenInterest: cells.reduce((sum, cell) => sum + Number(cell.totalOpenInterest || 0), 0),
-      totalVolume: cells.reduce((sum, cell) => sum + Number(cell.totalVolume || 0), 0),
-      dominantExpiry: null,
-      tags: [],
-    };
-  });
-};
+const auditedProfiles = (heatmap: SpxGexHeatmapModel): SpxGexStrikeProfile[] => heatmap.strikeProfiles || [];
 
 export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const [data, setData] = useState<SpxGexHeatmapResponse>(emptyPayload);
@@ -183,7 +162,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     for (const cell of heatmap?.cells || []) map.set(`${cell.strike}:${cell.expdate}`, cell);
     return map;
   }, [heatmap?.cells]);
-  const profiles = useMemo(() => heatmap ? buildFallbackProfiles(heatmap) : [], [heatmap]);
+  const profiles = useMemo(() => heatmap ? auditedProfiles(heatmap) : [], [heatmap]);
   const profileByStrike = useMemo(() => new Map(profiles.map((row) => [row.strike, row])), [profiles]);
   const maxGex = useMemo(
     () => Math.max(1, ...(heatmap?.cells || []).map((cell) => Math.abs(cell.netGex || 0)), ...profiles.map((row) => Math.abs(row.netGex))),
