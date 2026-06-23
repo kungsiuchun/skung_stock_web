@@ -1445,7 +1445,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     const finalDisplayAction = `${displayAction} (${actionReasoning})`;
 
     // IC summary for display
-    const icDisplay = `🦅 鐵鷹：已停用，不再調用 AI model。`;
+    const icDisplay = ``;
 
 
     const message = `SPX: ${context.currentPrice} 操作：${displayAction}
@@ -1474,8 +1474,6 @@ ${tgEscape(agent3.reasoning)}
 
 🏛️ <b>PA: ${formatAgentDecision(d4)} (Price Action)</b>:
 ${tgEscape(agent4.reasoning)}
-
-${icDisplay}
 
 🛡️ <b>[雷霆一擊 · 終極執行]</b> (Thor Execution Plan)
 <b>操作：</b> <code>${tgEscape(finalDisplayAction)}</code>
