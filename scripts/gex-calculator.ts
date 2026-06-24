@@ -1,13 +1,17 @@
-import { RSI } from 'technicalindicators';
-
 // scripts/gex-calculator.ts
 /**
  * SPX Gamma Exposure (GEX) Calculator
- * Fetches Yahoo Finance delayed options chain for SPX and calculates:
+ * Fetches CBOE delayed options chain for SPX and calculates:
  * - Gamma Flip Level (Zero Gamma)
  * - Most LONG/SHORT strike walls
  * - Net GEX
+ * 
+ * Data source: CBOE Delayed Quotes (free, no auth required)
+ * Previously used Yahoo Finance which now blocks cookie/crumb auth.
  */
+
+const CBOE_SPX_OPTIONS_URL = 'https://cdn.cboe.com/api/global/delayed_quotes/options/_SPX.json';
+const CBOE_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
 
 // Math utilities for Black-Scholes
 function stdNormalPDF(x: number): number {
@@ -20,94 +24,107 @@ function calculateGamma(S: number, K: number, T: number, r: number, sigma: numbe
     return stdNormalPDF(d1) / (S * sigma * Math.sqrt(T));
 }
 
+interface CboeOption {
+    option: string;
+    open_interest: number;
+    volume: number;
+    iv: number;
+    gamma: number;
+    delta: number;
+    last_trade_price: number;
+    bid: number;
+    ask: number;
+}
+
+function parseCboeSymbol(symbol: string): { expiry: string; side: 'C' | 'P'; strike: number } | null {
+    const match = symbol.match(/^(?:SPX|SPXW)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/);
+    if (!match) return null;
+    const [, yy, mm, dd, side, strikeRaw] = match;
+    const strike = Number(strikeRaw) / 1000;
+    if (!Number.isFinite(strike)) return null;
+    const expiry = `20${yy}-${mm}-${dd}`;
+    return { expiry, side: side as 'C' | 'P', strike };
+}
+
 export async function fetchAndCalculateGEX() {
     try {
-        // Step 1: Fetch Crumb & Cookie from Yahoo
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000);
-        
-        let cookies = '';
-        try {
-            const cookieRes = await fetch('https://finance.yahoo.com', {
-                headers: { 'User-Agent': 'Mozilla/5.0' },
-                signal: controller.signal
-            });
-            cookies = cookieRes.headers.get('set-cookie') || '';
-        } catch (e) {
-            console.warn("Cookie fetch failed, trying without cookie");
-        }
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
 
-        const crumbRes = await fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', {
-            headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies },
+        const res = await fetch(CBOE_SPX_OPTIONS_URL, {
+            headers: { 'User-Agent': CBOE_USER_AGENT, 'Accept': 'application/json' },
             signal: controller.signal
         });
-        const crumb = await crumbRes.text();
-        if (!crumb) throw new Error("Failed to get crumb");
-
-        // Step 2: Fetch Options Chain (nearest expiration)
-        const symbol = '%5ESPX';
-        const url = `https://query1.finance.yahoo.com/v7/finance/options/${symbol}?crumb=${crumb}`;
-        const res = await fetch(url, {
-            headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies },
-            signal: controller.signal
-        });
-        if (!res.ok) throw new Error("Failed to fetch options chain");
-
-        const data = await res.json() as any;
-        const result = data.optionChain.result[0];
-        const spot = result.quote.regularMarketPrice;
-        const expirationDates = result.expirationDates || [];
-
-        // Fetch up to 5 nearest expirations for a better Gamma profile
-        const datesToFetch = expirationDates.slice(0, 5);
-        const allOptions: any[] = [];
-        allOptions.push(result.options[0]); // First one is already included in the base response
-
-        for (let i = 1; i < datesToFetch.length; i++) {
-            const dateUrl = `https://query1.finance.yahoo.com/v7/finance/options/${symbol}?crumb=${crumb}&date=${datesToFetch[i]}`;
-            const dateRes = await fetch(dateUrl, { 
-                headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies },
-                signal: controller.signal 
-            });
-            if (dateRes.ok) {
-                const dateData = await dateRes.json() as any;
-                if (dateData.optionChain.result[0]?.options?.[0]) {
-                    allOptions.push(dateData.optionChain.result[0].options[0]);
-                }
-            }
-        }
-        
         clearTimeout(timeoutId);
 
-        const r = 0.05; // Assumed 5% risk-free rate
+        if (!res.ok) throw new Error(`CBOE API error: ${res.status}`);
+
+        const payload = await res.json() as any;
+        const spot = payload.data?.current_price;
+        if (!spot || !Number.isFinite(spot)) throw new Error("No spot price from CBOE");
+
+        const rawOptions: CboeOption[] = payload.data?.options || [];
+        if (rawOptions.length === 0) throw new Error("No options data from CBOE");
+
+        const r = 0.05;
         const minStrike = spot * 0.80;
         const maxStrike = spot * 1.20;
+        const now = Date.now();
 
-        const gexByStrike = new Map<number, { callGEX: number, putGEX: number, netGEX: number }>();
+        // Parse and group options by expiry
+        const optionsByExpiry = new Map<string, { calls: any[]; puts: any[]; expiryMs: number }>();
+
+        for (const opt of rawOptions) {
+            const parsed = parseCboeSymbol(opt.option);
+            if (!parsed) continue;
+            if (parsed.strike < minStrike || parsed.strike > maxStrike) continue;
+
+            const oi = opt.open_interest || 0;
+            if (!oi) continue;
+
+            // Normalize IV: CBOE returns IV as decimal (e.g., 0.25 = 25%) or sometimes >1
+            let iv = opt.iv;
+            if (iv > 3) iv = iv / 100; // e.g., 5.15 → 0.0515 (deep ITM, fine)
+            if (!iv || iv <= 0) continue;
+
+            if (!optionsByExpiry.has(parsed.expiry)) {
+                const expiryDate = new Date(parsed.expiry + 'T16:00:00-04:00');
+                optionsByExpiry.set(parsed.expiry, { calls: [], puts: [], expiryMs: expiryDate.getTime() });
+            }
+
+            const group = optionsByExpiry.get(parsed.expiry)!;
+            const legData = { strike: parsed.strike, oi, iv };
+            if (parsed.side === 'C') {
+                group.calls.push(legData);
+            } else {
+                group.puts.push(legData);
+            }
+        }
+
+        // Sort expiries and take nearest 5
+        const sortedExpiries = Array.from(optionsByExpiry.entries())
+            .sort((a, b) => a[1].expiryMs - b[1].expiryMs)
+            .filter(([, v]) => v.expiryMs > now)
+            .slice(0, 5);
+
+        const gexByStrike = new Map<number, { callGEX: number; putGEX: number; netGEX: number }>();
         let totalCallGex = 0;
         let totalPutGex = 0;
         let zeroDteCallGex = 0;
         let zeroDtePutGex = 0;
 
-        const now = Date.now() / 1000;
-
-        // Process all options across all fetched expirations for Spot GEX
-        for (let optIndex = 0; optIndex < allOptions.length; optIndex++) {
-            const opt = allOptions[optIndex];
-            const isNearestExpiry = optIndex === 0;
-            let T = (opt.expirationDate - now) / (365 * 24 * 3600);
+        for (let idx = 0; idx < sortedExpiries.length; idx++) {
+            const [, group] = sortedExpiries[idx];
+            const isNearestExpiry = idx === 0;
+            let T = (group.expiryMs - now) / (365 * 24 * 3600 * 1000);
             if (T <= 0.001) T = 0.001;
-            
+
             const multiplier = 100 * spot * spot * 0.01 / 1e9;
 
-            for (const call of opt.calls || []) {
-                if (call.strike < minStrike || call.strike > maxStrike) continue;
-                const callOI = call.openInterest || call.volume || 0;
-                if (!callOI || !call.impliedVolatility) continue;
+            for (const call of group.calls) {
+                const gamma = calculateGamma(spot, call.strike, T, r, call.iv);
+                const gex = call.oi * gamma * multiplier;
 
-                const gamma = calculateGamma(spot, call.strike, T, r, call.impliedVolatility);
-                const gex = callOI * gamma * multiplier;
-                
                 const entry = gexByStrike.get(call.strike) || { callGEX: 0, putGEX: 0, netGEX: 0 };
                 entry.callGEX += gex;
                 entry.netGEX += gex;
@@ -116,14 +133,10 @@ export async function fetchAndCalculateGEX() {
                 if (isNearestExpiry) zeroDteCallGex += gex;
             }
 
-            for (const put of opt.puts || []) {
-                if (put.strike < minStrike || put.strike > maxStrike) continue;
-                const putOI = put.openInterest || put.volume || 0;
-                if (!putOI || !put.impliedVolatility) continue;
+            for (const put of group.puts) {
+                const gamma = calculateGamma(spot, put.strike, T, r, put.iv);
+                const gex = -(put.oi * gamma * multiplier);
 
-                const gamma = calculateGamma(spot, put.strike, T, r, put.impliedVolatility);
-                const gex = -(putOI * gamma * multiplier);
-                
                 const entry = gexByStrike.get(put.strike) || { callGEX: 0, putGEX: 0, netGEX: 0 };
                 entry.putGEX += gex;
                 entry.netGEX += gex;
@@ -144,30 +157,24 @@ export async function fetchAndCalculateGEX() {
             levels.push(S_sim);
         }
 
-        let prevTotalGEX = null;
-        let prevLevel = null;
+        let prevTotalGEX: number | null = null;
+        let prevLevel: number | null = null;
 
         for (const S_sim of levels) {
             let simTotalGEX = 0;
             const multiplier = 100 * S_sim * S_sim * 0.01 / 1e9;
 
-            for (const opt of allOptions) {
-                let T = (opt.expirationDate - now) / (365 * 24 * 3600);
+            for (const [, group] of sortedExpiries) {
+                let T = (group.expiryMs - now) / (365 * 24 * 3600 * 1000);
                 if (T <= 0.001) T = 0.001;
 
-                for (const call of opt.calls || []) {
-                    if (call.strike < spot * 0.8 || call.strike > spot * 1.2) continue;
-                    const callOI = call.openInterest || call.volume || 0;
-                    if (!callOI || !call.impliedVolatility) continue;
-                    const gamma = calculateGamma(S_sim, call.strike, T, r, call.impliedVolatility);
-                    simTotalGEX += callOI * gamma * multiplier;
+                for (const call of group.calls) {
+                    const gamma = calculateGamma(S_sim, call.strike, T, r, call.iv);
+                    simTotalGEX += call.oi * gamma * multiplier;
                 }
-                for (const put of opt.puts || []) {
-                    if (put.strike < spot * 0.8 || put.strike > spot * 1.2) continue;
-                    const putOI = put.openInterest || put.volume || 0;
-                    if (!putOI || !put.impliedVolatility) continue;
-                    const gamma = calculateGamma(S_sim, put.strike, T, r, put.impliedVolatility);
-                    simTotalGEX -= putOI * gamma * multiplier;
+                for (const put of group.puts) {
+                    const gamma = calculateGamma(S_sim, put.strike, T, r, put.iv);
+                    simTotalGEX -= put.oi * gamma * multiplier;
                 }
             }
 
@@ -209,7 +216,7 @@ export async function fetchAndCalculateGEX() {
             mostShortGex: mostShortGex,
             longWalls: sortedLong.slice(0, 3).map(w => ({ strike: w.strike, gex: '+' + w.netGEX.toFixed(2) + 'B' })),
             shortPockets: sortedShort.slice(0, 3).map(w => ({ strike: w.strike, gex: w.netGEX.toFixed(2) + 'B' })),
-            generatedAt: new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York' }) + ' ET (Delayed)',
+            generatedAt: new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York' }) + ' ET (CBOE Delayed)',
             parsedAt: new Date().toISOString(),
         };
 
@@ -218,3 +225,4 @@ export async function fetchAndCalculateGEX() {
         return null;
     }
 }
+

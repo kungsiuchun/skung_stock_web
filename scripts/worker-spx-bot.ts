@@ -158,41 +158,36 @@ async function fetchYahooChart(symbol: string, interval: string, range: string) 
   })).filter((q: any) => q.close !== null);
 }
 
-// --- 輕量級 Yahoo Finance 期權 PCR 調用 ---
+// --- 輕量級 CBOE 期權 PCR 調用 (Yahoo cookie/crumb 已失效) ---
 async function fetchYahooOptionsPCR(symbol: string = '^SPX') {
   try {
-    let cookies = '';
-    try {
-      const cookieRes = await fetchWithTimeout('https://finance.yahoo.com', {
-        headers: { 'User-Agent': 'Mozilla/5.0' }
-      }, 5000);
-      cookies = cookieRes.headers.get('set-cookie') || '';
-    } catch (e) {
-      console.warn("Cookie fetch failed, trying without cookie");
-    }
-
-    const crumbRes = await fetchWithTimeout('https://query1.finance.yahoo.com/v1/test/getcrumb', {
-      headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies }
-    }, 5000);
-    const crumb = await crumbRes.text();
-    if (!crumb) return null;
-
-    const url = `https://query1.finance.yahoo.com/v7/finance/options/${encodeURIComponent(symbol)}?crumb=${crumb}`;
-    const res = await fetchWithTimeout(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies }
-    }, 5000);
+    const res = await fetchWithTimeout('https://cdn.cboe.com/api/global/delayed_quotes/options/_SPX.json', {
+      headers: { 
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+        'Accept': 'application/json'
+      }
+    }, 10000);
     if (!res.ok) return null;
 
-    const data = await res.json() as any;
-    const options = data.optionChain.result[0].options[0];
-    if (!options) return null;
+    const payload = await res.json() as any;
+    const rawOptions = payload.data?.options || [];
+    if (rawOptions.length === 0) return null;
 
-    const calls = options.calls || [];
-    const puts = options.puts || [];
-    const totalCallVolume = calls.reduce((acc: number, curr: any) => acc + (curr.volume || 0), 0);
-    const totalPutVolume = puts.reduce((acc: number, curr: any) => acc + (curr.volume || 0), 0);
+    let totalCallVolume = 0;
+    let totalPutVolume = 0;
+
+    for (const opt of rawOptions) {
+      const sym = opt.option || '';
+      const vol = opt.volume || 0;
+      if (!vol) continue;
+      // Parse C/P from CBOE symbol: e.g. SPX260717C00200000
+      const match = sym.match(/[CP](?=\d{8}$)/);
+      if (!match) continue;
+      if (match[0] === 'C') totalCallVolume += vol;
+      else totalPutVolume += vol;
+    }
+
     if (totalCallVolume === 0) return null;
-
     return totalPutVolume / totalCallVolume;
   } catch (e) {
     console.error('Fetch PCR Error:', e);
