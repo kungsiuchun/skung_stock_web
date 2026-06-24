@@ -3,7 +3,7 @@ import { PERSONAS, ORCHESTRATOR_PROMPT, SYSTEM_PROMPT_PREFIX, AUDIT_AGENT_PROMPT
 import { fetchAndCalculateGEX } from './gex-calculator';
 import { upsertRecapDay, type D1DatabaseLike } from '../src/lib/spx-recap-d1';
 import { generateAndStoreSpxGexHeatmap } from '../src/lib/spx-gex-heatmap';
-import { NativeSpxGexYahooClient } from '../src/lib/stocks-native-yahoo';
+import { createSpxGexIntradayDataClient } from '../src/lib/spx-gex-cboe';
 
 // Cloudflare Worker Environment Types
 interface Env {
@@ -1594,7 +1594,7 @@ async function runSpxGexHeatmapGeneration(env: Env, now: Date = new Date(), opti
   try {
     const result = await generateAndStoreSpxGexHeatmap({
       db: env.SPX_RECAP_DB,
-      dataClient: new NativeSpxGexYahooClient(),
+      dataClient: createSpxGexIntradayDataClient(),
       now,
       force: options.force
     });

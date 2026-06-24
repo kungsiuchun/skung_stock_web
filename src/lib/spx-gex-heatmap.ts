@@ -25,13 +25,15 @@ export interface SpxGexQuote {
 export interface SpxGexOptionLeg {
   contractSymbol?: string;
   strike: number;
-  lastPrice?: number;
-  bid?: number;
-  ask?: number;
-  volume: number;
-  openInterest: number;
-  impliedVolatility: number;
+  lastPrice?: number | null;
+  bid?: number | null;
+  ask?: number | null;
+  volume?: number | null;
+  openInterest?: number | null;
+  impliedVolatility?: number | null;
 }
+
+export type SpxGexInputStatus = "reported" | "missing" | "absent";
 
 export interface SpxGexOptionChain {
   symbol: string;
@@ -40,6 +42,13 @@ export interface SpxGexOptionChain {
   selectedExpiry: string | null;
   calls: SpxGexOptionLeg[];
   puts: SpxGexOptionLeg[];
+  source?: {
+    provider: string;
+    label: string;
+    timestamp?: string | null;
+    url?: string;
+    fallbackFrom?: string;
+  };
 }
 
 export interface SpxGexZeroDte {
@@ -68,10 +77,10 @@ export interface SpxGexHeatmapCell {
   netDex?: number | null;
   netVex?: number | null;
   netCex?: number | null;
-  callOpenInterest?: number;
-  putOpenInterest?: number;
-  totalOpenInterest?: number;
-  totalVolume?: number;
+  callOpenInterest?: number | null;
+  putOpenInterest?: number | null;
+  totalOpenInterest?: number | null;
+  totalVolume?: number | null;
   avgIv?: number | null;
   approximate?: boolean;
   callIv?: number | null;
@@ -80,10 +89,15 @@ export interface SpxGexHeatmapCell {
   putIvPercent?: number | null;
   gammaIv?: number | null;
   gammaIvPercent?: number | null;
-  callEffectiveOpenInterest?: number;
-  putEffectiveOpenInterest?: number;
-  callVolume?: number;
-  putVolume?: number;
+  callEffectiveOpenInterest?: number | null;
+  putEffectiveOpenInterest?: number | null;
+  callOpenInterestStatus?: SpxGexInputStatus;
+  putOpenInterestStatus?: SpxGexInputStatus;
+  callIvStatus?: SpxGexInputStatus;
+  putIvStatus?: SpxGexInputStatus;
+  callVolume?: number | null;
+  putVolume?: number | null;
+  missingReasons?: string[];
   yearsToExpiry?: number;
   dteHours?: number;
   calculationTimestamp?: string;
@@ -477,6 +491,25 @@ const compactExposure = (value: number | null | undefined) => {
   return `${value >= 0 ? "+" : ""}${value.toFixed(0)}`;
 };
 
+export const formatSpxGexCompactExposure = (
+  value: number | null | undefined,
+  options: { signed?: boolean; missingLabel?: string } = {},
+) => {
+  const missingLabel = options.missingLabel ?? "n/a";
+  if (typeof value !== "number" || !Number.isFinite(value)) return missingLabel;
+  const abs = Math.abs(value);
+  if (abs === 0) return options.signed ? "+0" : "0";
+  if (abs < 1) {
+    if (value < 0) return ">-1";
+    return `${options.signed ? "+" : ""}<1`;
+  }
+  const sign = options.signed ? (value >= 0 ? "+" : "-") : value < 0 ? "-" : "";
+  if (abs >= 1_000_000_000) return `${sign}${(abs / 1_000_000_000).toFixed(2)}B`;
+  if (abs >= 1_000_000) return `${sign}${(abs / 1_000_000).toFixed(2)}M`;
+  if (abs >= 1_000) return `${sign}${(abs / 1_000).toFixed(1)}K`;
+  return `${sign}${abs.toFixed(0)}`;
+};
+
 const formatStoredLevel = (value: number) => `$${value.toFixed(0)}`;
 
 const normalPdf = (x: number) => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
@@ -495,6 +528,28 @@ const normalizeIv = (value: number | null | undefined) => {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
   const decimal = value > 3 ? value / 100 : value;
   return Math.min(5, Math.max(0.01, decimal));
+};
+
+const finiteNumberOrNull = (value: unknown) => (
+  typeof value === "number" && Number.isFinite(value) ? value : null
+);
+
+const nonNegativeNumberOrNull = (value: unknown) => {
+  const number = finiteNumberOrNull(value);
+  return number !== null && number >= 0 ? number : null;
+};
+
+const inputStatus = (leg: SpxGexOptionLeg | undefined, value: unknown): SpxGexInputStatus => {
+  if (!leg) return "absent";
+  return nonNegativeNumberOrNull(value) === null ? "missing" : "reported";
+};
+
+const sumFinite = (values: Array<number | null | undefined>) =>
+  values.reduce<number>((sum, value) => sum + (typeof value === "number" && Number.isFinite(value) ? value : 0), 0);
+
+const sumPresentOrNull = (values: Array<number | null | undefined>) => {
+  const present = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  return present.length > 0 ? present.reduce((sum, value) => sum + value, 0) : null;
 };
 
 const roundTo = (value: number, decimals: number) => {
@@ -574,8 +629,8 @@ export const calculateBlackScholesExposures = (input: {
 const optionCellForStrike = (chain: SpxGexOptionChain, strike: number, now: Date): SpxGexHeatmapCell => {
   const call = chain.calls.find((leg) => leg.strike === strike);
   const put = chain.puts.find((leg) => leg.strike === strike);
-  const callOpenInterest = call?.openInterest || 0;
-  const putOpenInterest = put?.openInterest || 0;
+  const callOpenInterest = nonNegativeNumberOrNull(call?.openInterest);
+  const putOpenInterest = nonNegativeNumberOrNull(put?.openInterest);
   const callEffectiveOpenInterest = callOpenInterest;
   const putEffectiveOpenInterest = putOpenInterest;
   const callIv = normalizeIv(call?.impliedVolatility);
@@ -586,14 +641,24 @@ const optionCellForStrike = (chain: SpxGexOptionChain, strike: number, now: Date
   const gammaIv = rawGammaIv === null ? null : roundTo(rawGammaIv, 6);
   const gammaIvPercent = gammaIv === null ? null : roundTo(gammaIv * 100, 2);
   const yearsToExpiry = expiryToYears(chain.selectedExpiry || "", now);
-  const hasAuditInputs = callIv !== null && putIv !== null && gammaIv !== null;
+  const callOpenInterestStatus = inputStatus(call, call?.openInterest);
+  const putOpenInterestStatus = inputStatus(put, put?.openInterest);
+  const callIvStatus = inputStatus(call, call?.impliedVolatility);
+  const putIvStatus = inputStatus(put, put?.impliedVolatility);
+  const missingReasons = [
+    callOpenInterestStatus !== "reported" ? `${callOpenInterestStatus} call open interest` : null,
+    putOpenInterestStatus !== "reported" ? `${putOpenInterestStatus} put open interest` : null,
+    callIvStatus !== "reported" ? `${callIvStatus} call IV` : null,
+    putIvStatus !== "reported" ? `${putIvStatus} put IV` : null,
+  ].filter((reason): reason is string => Boolean(reason));
+  const hasAuditInputs = missingReasons.length === 0 && callIv !== null && putIv !== null && gammaIv !== null && callOpenInterest !== null && putOpenInterest !== null;
   const exposures = hasAuditInputs
     ? calculateBlackScholesExposures({
       spot: chain.spot,
       strike,
       yearsToExpiry,
-      callOpenInterest: callEffectiveOpenInterest,
-      putOpenInterest: putEffectiveOpenInterest,
+      callOpenInterest,
+      putOpenInterest,
       callIv,
       putIv,
       gammaIv,
@@ -611,8 +676,8 @@ const optionCellForStrike = (chain: SpxGexOptionChain, strike: number, now: Date
     netCex: exposures ? Math.round(exposures.netCex) : null,
     callOpenInterest,
     putOpenInterest,
-    totalOpenInterest: callEffectiveOpenInterest + putEffectiveOpenInterest,
-    totalVolume: (call?.volume || 0) + (put?.volume || 0),
+    totalOpenInterest: callOpenInterest !== null && putOpenInterest !== null ? callOpenInterest + putOpenInterest : null,
+    totalVolume: sumFinite([call?.volume, put?.volume]),
     avgIv: callIvPercent === null || putIvPercent === null ? null : roundTo((callIvPercent + putIvPercent) / 2, 2),
     approximate: !hasAuditInputs,
     callIv,
@@ -623,8 +688,13 @@ const optionCellForStrike = (chain: SpxGexOptionChain, strike: number, now: Date
     gammaIvPercent,
     callEffectiveOpenInterest,
     putEffectiveOpenInterest,
-    callVolume: call?.volume || 0,
-    putVolume: put?.volume || 0,
+    callOpenInterestStatus,
+    putOpenInterestStatus,
+    callIvStatus,
+    putIvStatus,
+    callVolume: nonNegativeNumberOrNull(call?.volume),
+    putVolume: nonNegativeNumberOrNull(put?.volume),
+    missingReasons,
     yearsToExpiry,
     dteHours: Number((yearsToExpiry * 365 * 24).toFixed(2)),
     calculationTimestamp: now.toISOString(),
@@ -858,7 +928,25 @@ const buildStrikeProfiles = (strikes: number[], selectedExpiries: string[], cell
       dominantExpiry: dominant?.expdate || null,
     };
   });
+  if (!hasMaterialProfileExposure(baseProfiles)) {
+    return baseProfiles.map((row) => ({ ...row, tags: [] }));
+  }
   return addStructureTags(baseProfiles, spot);
+};
+
+const hasMaterialProfileExposure = (profiles: Array<Pick<SpxGexStrikeProfile, "callGex" | "putGex" | "netGex">>) =>
+  profiles.some((row) => Math.abs(row.callGex) > 0 || Math.abs(row.putGex) > 0 || Math.abs(row.netGex) > 0);
+
+const deriveKeyLevelsFromProfiles = (profiles: SpxGexStrikeProfile[], spot: number) => {
+  if (!hasMaterialProfileExposure(profiles)) {
+    return { gammaFlip: null, callWall: null, putWall: null, pin: null };
+  }
+  return {
+    gammaFlip: buildGammaFlipFromProfiles(profiles, spot),
+    callWall: profiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || row.callGex > best.callGex ? row : best), null),
+    putWall: profiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || row.putGex < best.putGex ? row : best), null),
+    pin: profiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || Math.abs(row.netGex) > Math.abs(best.netGex) ? row : best), null),
+  };
 };
 
 const buildMarketContextSentence = (context: SpxGexMarketContext | null | undefined) => {
@@ -924,6 +1012,9 @@ export const buildSpxGexHeatmapFromOptionChains = (input: BuildSpxGexHeatmapFrom
     .slice(0, DEFAULT_EXPIRY_COUNT);
   const chainsByExpiry = new Map(input.chains.map((chain) => [chain.selectedExpiry || "", chain]));
   const activeChains = selectedExpiries.map((expiry) => chainsByExpiry.get(expiry)).filter((chain): chain is SpxGexOptionChain => Boolean(chain));
+  const chainSource = activeChains.find((chain) => chain.source)?.source;
+  const sourceLabel = chainSource?.label || "Yahoo delayed";
+  const sourceTimestamp = chainSource?.timestamp ? ` Source timestamp: ${chainSource.timestamp}.` : "";
   const strikes = uniqueSortedStrikes(activeChains, quote.last, input.maxStrikes ?? DEFAULT_MAX_STRIKES);
   const cells = activeChains.flatMap((chain) => strikes.map((strike) => optionCellForStrike(chain, strike, now)));
   const totals = selectedExpiries.map((expiry) => {
@@ -937,12 +1028,10 @@ export const buildSpxGexHeatmapFromOptionChains = (input: BuildSpxGexHeatmapFrom
     };
   });
   const strikeProfiles = buildStrikeProfiles(strikes, selectedExpiries, cells, quote.last);
-  const gammaFlip = buildGammaFlipFromProfiles(strikeProfiles, quote.last);
-  const callWall = strikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || row.callGex > best.callGex ? row : best), null);
-  const putWall = strikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || row.putGex < best.putGex ? row : best), null);
-  const pin = strikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || Math.abs(row.netGex) > Math.abs(best.netGex) ? row : best), null);
   const frontExpiry = selectedExpiries[0] || frontChain.selectedExpiry || "";
   const frontCells = cells.filter((cell) => cell.expdate === frontExpiry);
+  const frontProfiles = buildStrikeProfiles(strikes, [frontExpiry], frontCells, quote.last);
+  const { gammaFlip, callWall, putWall, pin } = deriveKeyLevelsFromProfiles(frontProfiles, quote.last);
 
   const zeroDte: SpxGexZeroDte = {
     expiry: frontExpiry,
@@ -950,16 +1039,27 @@ export const buildSpxGexHeatmapFromOptionChains = (input: BuildSpxGexHeatmapFrom
     nowEt: buildSessionMeta(input.generatedAt, quote.last).snapshotTimeEt,
     pinLevel: pin?.strike ?? null,
     gammaFlip,
-    netGex: frontCells.reduce((sum, cell) => sum + Number(cell.netGex || 0), 0),
-    netDex: frontCells.reduce((sum, cell) => sum + Number(cell.netDex || 0), 0),
-    netVex: frontCells.reduce((sum, cell) => sum + Number(cell.netVex || 0), 0),
-    netCex: frontCells.reduce((sum, cell) => sum + Number(cell.netCex || 0), 0),
+    netGex: sumPresentOrNull(frontCells.map((cell) => cell.netGex)),
+    netDex: sumPresentOrNull(frontCells.map((cell) => cell.netDex)),
+    netVex: sumPresentOrNull(frontCells.map((cell) => cell.netVex)),
+    netCex: sumPresentOrNull(frontCells.map((cell) => cell.netCex)),
     topCallWall: callWall ? formatStoredLevel(callWall.strike) : null,
     topCallWallLevel: callWall?.strike ?? null,
     topPutWall: putWall ? formatStoredLevel(putWall.strike) : null,
     topPutWallLevel: putWall?.strike ?? null,
     charmRegime: "black_scholes_approx",
   };
+  const structureZeroDte: SpxGexZeroDte = hasMaterialProfileExposure(strikeProfiles)
+    ? {
+      ...zeroDte,
+      gammaFlip: buildGammaFlipFromProfiles(strikeProfiles, quote.last),
+      topCallWallLevel: strikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || row.callGex > best.callGex ? row : best), null)?.strike ?? null,
+      topPutWallLevel: strikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || row.putGex < best.putGex ? row : best), null)?.strike ?? null,
+    }
+    : zeroDte;
+  const annotatedStrikeProfiles = hasMaterialProfileExposure(strikeProfiles)
+    ? addKeyLevelAnnotations(strikeProfiles, structureZeroDte, quote.last)
+    : strikeProfiles.map((row) => ({ ...row, tags: [] }));
 
   const heatmapWithoutInterpretation: Omit<SpxGexHeatmapModel, "premarketInterpretation"> = {
     generatedAt: input.generatedAt,
@@ -972,7 +1072,7 @@ export const buildSpxGexHeatmapFromOptionChains = (input: BuildSpxGexHeatmapFrom
     strikes,
     cells,
     totals,
-    strikeProfiles: addKeyLevelAnnotations(strikeProfiles, zeroDte, quote.last),
+    strikeProfiles: annotatedStrikeProfiles,
     zeroDte,
     source: {
       quoteTool: "get_quotes",
@@ -980,7 +1080,7 @@ export const buildSpxGexHeatmapFromOptionChains = (input: BuildSpxGexHeatmapFrom
       gexTool: "black_scholes_exposure_engine",
       zeroDteTool: "black_scholes_exposure_engine",
       gexTopRows: input.maxStrikes ?? DEFAULT_MAX_STRIKES,
-      note: `15-minute delayed Yahoo option chains are transformed into Black-Scholes GEX, DEX, VEX (vanna), and CEX (charm) approximations. Missing IV/OI is not substituted; cells without required audit inputs remain no-data. ${BLENDED_IV_SOURCE_NOTE}`,
+      note: `${sourceLabel} option chains are transformed into Black-Scholes GEX, DEX, VEX (vanna), and CEX (charm) approximations.${sourceTimestamp} Missing IV/OI is not substituted; cells without required audit inputs remain no-data. ${BLENDED_IV_SOURCE_NOTE}`,
     },
   };
 
@@ -1031,10 +1131,6 @@ const noteWithBlendedIv = (note: string) => (
     .replace(/Legacy snapshots may not have audit inputs and cannot be recomputed\.\s*/g, "")
 );
 
-const finiteNumberOrNull = (value: unknown) => (
-  typeof value === "number" && Number.isFinite(value) ? value : null
-);
-
 const isAuditedBlendedCell = (cell: SpxGexHeatmapCell) => (
   cell.model === BLENDED_IV_MODEL
   && typeof cell.netGex === "number"
@@ -1064,8 +1160,9 @@ const recomputeCellWithBlendedIv = (cell: SpxGexHeatmapCell, spot: number): SpxG
   const callIvPercent = roundTo(callIv * 100, 2);
   const putIvPercent = roundTo(putIv * 100, 2);
   const gammaIvPercent = roundTo(gammaIv * 100, 2);
-  const callEffectiveOpenInterest = finiteNumberOrNull(cell.callOpenInterest) ?? 0;
-  const putEffectiveOpenInterest = finiteNumberOrNull(cell.putOpenInterest) ?? 0;
+  const callEffectiveOpenInterest = nonNegativeNumberOrNull(cell.callOpenInterest);
+  const putEffectiveOpenInterest = nonNegativeNumberOrNull(cell.putOpenInterest);
+  if (callEffectiveOpenInterest === null || putEffectiveOpenInterest === null) return cell;
   const exposures = calculateBlackScholesExposures({
     spot,
     strike: cell.strike,
@@ -1093,6 +1190,11 @@ const recomputeCellWithBlendedIv = (cell: SpxGexHeatmapCell, spot: number): SpxG
     gammaIvPercent,
     callEffectiveOpenInterest,
     putEffectiveOpenInterest,
+    callOpenInterestStatus: "reported",
+    putOpenInterestStatus: "reported",
+    callIvStatus: "reported",
+    putIvStatus: "reported",
+    missingReasons: [],
     avgIv: roundTo((callIvPercent + putIvPercent) / 2, 2),
     contractMultiplier: CONTRACT_MULTIPLIER,
     riskFreeRate: RISK_FREE_RATE,
@@ -1114,37 +1216,45 @@ const buildExposureTotals = (selectedExpiries: string[], cells: SpxGexHeatmapCel
 
 const normalizeBlendedIvExposure = (heatmap: SpxGexHeatmapModel): SpxGexHeatmapModel => {
   const cells = heatmap.cells.map((cell) => recomputeCellWithBlendedIv(cell, heatmap.quote.last));
-  if (cells.every((cell, index) => cell === heatmap.cells[index])) return heatmap;
 
   const totals = buildExposureTotals(heatmap.selectedExpiries, cells);
   const rawStrikeProfiles = buildStrikeProfiles(heatmap.strikes, heatmap.selectedExpiries, cells, heatmap.quote.last);
   const frontExpiry = heatmap.selectedExpiries[0] || heatmap.zeroDte.expiry;
   const frontCells = cells.filter((cell) => cell.expdate === frontExpiry);
-  const gammaFlip = buildGammaFlipFromProfiles(rawStrikeProfiles, heatmap.quote.last);
-  const callWall = rawStrikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || row.callGex > best.callGex ? row : best), null);
-  const putWall = rawStrikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || row.putGex < best.putGex ? row : best), null);
-  const pin = rawStrikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || Math.abs(row.netGex) > Math.abs(best.netGex) ? row : best), null);
+  const frontProfiles = buildStrikeProfiles(heatmap.strikes, [frontExpiry], frontCells, heatmap.quote.last);
+  const { gammaFlip, callWall, putWall, pin } = deriveKeyLevelsFromProfiles(frontProfiles, heatmap.quote.last);
   const zeroDte: SpxGexZeroDte = {
     ...heatmap.zeroDte,
     expiry: frontExpiry,
     pinLevel: pin?.strike ?? null,
     gammaFlip,
-    netGex: frontCells.reduce((sum, cell) => sum + Number(cell.netGex || 0), 0),
-    netDex: frontCells.reduce((sum, cell) => sum + Number(cell.netDex || 0), 0),
-    netVex: frontCells.reduce((sum, cell) => sum + Number(cell.netVex || 0), 0),
-    netCex: frontCells.reduce((sum, cell) => sum + Number(cell.netCex || 0), 0),
+    netGex: sumPresentOrNull(frontCells.map((cell) => cell.netGex)),
+    netDex: sumPresentOrNull(frontCells.map((cell) => cell.netDex)),
+    netVex: sumPresentOrNull(frontCells.map((cell) => cell.netVex)),
+    netCex: sumPresentOrNull(frontCells.map((cell) => cell.netCex)),
     topCallWall: callWall ? formatStoredLevel(callWall.strike) : null,
     topCallWallLevel: callWall?.strike ?? null,
     topPutWall: putWall ? formatStoredLevel(putWall.strike) : null,
     topPutWallLevel: putWall?.strike ?? null,
     charmRegime: "black_scholes_approx",
   };
+  const structureZeroDte: SpxGexZeroDte = hasMaterialProfileExposure(rawStrikeProfiles)
+    ? {
+      ...zeroDte,
+      gammaFlip: buildGammaFlipFromProfiles(rawStrikeProfiles, heatmap.quote.last),
+      topCallWallLevel: rawStrikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || row.callGex > best.callGex ? row : best), null)?.strike ?? null,
+      topPutWallLevel: rawStrikeProfiles.reduce<SpxGexStrikeProfile | null>((best, row) => (!best || row.putGex < best.putGex ? row : best), null)?.strike ?? null,
+    }
+    : zeroDte;
+  const annotatedStrikeProfiles = hasMaterialProfileExposure(rawStrikeProfiles)
+    ? addKeyLevelAnnotations(rawStrikeProfiles, structureZeroDte, heatmap.quote.last)
+    : rawStrikeProfiles.map((row) => ({ ...row, tags: [] }));
   const normalizedHeatmap: Omit<SpxGexHeatmapModel, "premarketInterpretation"> = {
     ...heatmap,
     cells,
     totals,
     zeroDte,
-    strikeProfiles: addKeyLevelAnnotations(rawStrikeProfiles, zeroDte, heatmap.quote.last),
+    strikeProfiles: annotatedStrikeProfiles,
     source: {
       ...heatmap.source,
       note: noteWithBlendedIv(heatmap.source.note),

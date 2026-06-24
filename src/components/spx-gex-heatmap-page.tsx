@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, ArrowLeft, CalendarDays, Gauge, Pause, Play, RefreshCw, Waves } from "lucide-react";
-import type { SpxGexHeatmapCell, SpxGexHeatmapModel, SpxGexSessionSummary, SpxGexStrikeProfile } from "@/lib/spx-gex-heatmap";
+import { formatSpxGexCompactExposure, type SpxGexHeatmapCell, type SpxGexHeatmapModel, type SpxGexSessionSummary, type SpxGexStrikeProfile } from "@/lib/spx-gex-heatmap";
 
 interface SpxGexHeatmapResponse {
   availableDates: string[];
@@ -25,31 +25,25 @@ const emptyPayload: SpxGexHeatmapResponse = {
 };
 
 const formatCompact = (value: number | null | undefined) => {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
-  const abs = Math.abs(value);
-  if (abs >= 1_000_000_000) return `${value >= 0 ? "" : "-"}${(abs / 1_000_000_000).toFixed(2)}B`;
-  if (abs >= 1_000_000) return `${value >= 0 ? "" : "-"}${(abs / 1_000_000).toFixed(2)}M`;
-  if (abs >= 1_000) return `${value >= 0 ? "" : "-"}${(abs / 1_000).toFixed(1)}K`;
-  return `${value >= 0 ? "" : "-"}${abs.toFixed(0)}`;
+  return formatSpxGexCompactExposure(value, { missingLabel: "n/a" });
 };
 
 const formatSignedCompact = (value: number | null | undefined) => {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
-  return `${value >= 0 ? "+" : "-"}${formatCompact(Math.abs(value))}`;
+  return formatSpxGexCompactExposure(value, { signed: true, missingLabel: "n/a" });
 };
 
 const formatPercent = (value: number | null | undefined) => {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
   return `${value.toFixed(2)}%`;
 };
 
 const formatNumber = (value: number | null | undefined) => {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
   return value.toLocaleString("en-US", { maximumFractionDigits: 2 });
 };
 
 const formatYears = (value: number | null | undefined) => {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
   return value.toFixed(6);
 };
 
@@ -59,6 +53,7 @@ const cellAuditLines = (cell: SpxGexHeatmapCell | undefined) => {
     return [
       `Strike ${cell.strike} ${cell.expdate}`,
       "No audited GEX data",
+      ...(cell.missingReasons?.length ? [`Missing: ${cell.missingReasons.join(", ")}`] : []),
     ];
   }
   return [
@@ -86,6 +81,12 @@ const cellStyle = (value: number | null | undefined, max: number) => {
 };
 
 const exposureColor = (value: number) => value >= 0 ? "#d000d4" : "#20d6c8";
+
+const exposureState = (value: number | null | undefined) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "missing";
+  if (value === 0) return "true-zero";
+  return Math.abs(value) < 1 ? "threshold" : "reported";
+};
 
 const nearestStrike = (strikes: number[], spot: number | null | undefined) => {
   if (typeof spot !== "number" || !Number.isFinite(spot) || strikes.length === 0) return null;
@@ -205,7 +206,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     selectedSession.collectedMinuteEt !== selectedSession.snapshotMinuteEt,
   );
   const sourceText = heatmap
-    ? `${isDelayedSnapshot ? `15-min delayed Yahoo snapshot · collected ${selectedSession?.collectedTimeEt} ET. ` : ""}${heatmap.source.note}`
+    ? `${isDelayedSnapshot ? `15-min delayed snapshot · collected ${selectedSession?.collectedTimeEt} ET. ` : ""}${heatmap.source.note}`
     : "";
 
   return (
@@ -388,6 +389,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                               style={cellStyle(cell?.netGex, maxGex)}
                               title={auditLines.join("\n")}
                               data-gex-audit-cell={cell ? "true" : undefined}
+                              data-gex-value-state={exposureState(cell?.netGex)}
                             >
                               <span>{formatCompact(cell?.netGex)}</span>
                               {cell && (
@@ -408,7 +410,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                         <StrikeCell strike={strike} isSpotStrike={isSpotStrike} />
                         <td className="border border-[#102433] bg-[#050c14] px-1.5 py-[2px]">
                           <div className="grid grid-cols-[150px_72px_1fr] items-center gap-2">
-                            <ExposureBar value={profile?.netGex || 0} max={maxGex} />
+                            {typeof profile?.netGex === "number" && Number.isFinite(profile.netGex) ? <ExposureBar value={profile.netGex} max={maxGex} /> : <div className="h-2.5 bg-[#07111b]" />}
                             <span className="text-right font-black text-cyan-100">{formatSignedCompact(profile?.netGex)}</span>
                             <span className="flex min-h-4 flex-wrap items-center gap-1 overflow-hidden">
                               {isSpotStrike && (

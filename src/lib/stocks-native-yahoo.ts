@@ -54,12 +54,12 @@ interface HistoryRow {
 interface OptionLeg {
   contractSymbol: string;
   strike: number;
-  lastPrice: number;
-  bid: number;
-  ask: number;
-  volume: number;
-  openInterest: number;
-  impliedVolatility: number;
+  lastPrice: number | null;
+  bid: number | null;
+  ask: number | null;
+  volume: number | null;
+  openInterest: number | null;
+  impliedVolatility: number | null;
 }
 
 interface OptionChain {
@@ -69,6 +69,7 @@ interface OptionChain {
   selectedExpiry: string | null;
   calls: OptionLeg[];
   puts: OptionLeg[];
+  source?: SpxGexOptionChain["source"];
 }
 
 const SUPPORTED_SYMBOLS = new Set<string>(STOCKS_WATCHER_SYMBOLS);
@@ -92,16 +93,42 @@ const round = (value: number, digits = 2) => {
 const toNumber = (value: unknown, fallback = 0) =>
   typeof value === "number" && Number.isFinite(value) ? value : fallback;
 
+const toOptionalNumber = (value: unknown) =>
+  typeof value === "number" && Number.isFinite(value) ? value : null;
+
+const roundOptional = (value: unknown, digits = 2) => {
+  const number = toOptionalNumber(value);
+  return number === null ? null : round(number, digits);
+};
+
+const roundOptionalInteger = (value: unknown) => {
+  const number = toOptionalNumber(value);
+  return number === null ? null : Math.round(number);
+};
+
 const fmtMoney = (value: number) => `$${value.toLocaleString("en-US", { maximumFractionDigits: 2, minimumFractionDigits: 2 })}`;
 const fmtPct = (value: number) => `${value >= 0 ? "+" : ""}${round(value, 2).toFixed(2)}%`;
 const fmtSigned = (value: number) => `${value >= 0 ? "+" : ""}${round(value, 2).toFixed(2)}`;
 
-const compact = (value: number) => {
+const compact = (value: number | null | undefined) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
   const abs = Math.abs(value);
   if (abs >= 1_000_000_000) return `${round(value / 1_000_000_000, 2)}B`;
   if (abs >= 1_000_000) return `${round(value / 1_000_000, 2)}M`;
   if (abs >= 1_000) return `${round(value / 1_000, 2)}K`;
+  if (abs > 0 && abs < 1) return value < 0 ? ">-1" : "<1";
   return String(round(value, 2));
+};
+
+const displayNumber = (value: number | null | undefined) =>
+  typeof value === "number" && Number.isFinite(value) ? String(value) : "n/a";
+
+const numberOrZero = (value: number | null | undefined) =>
+  typeof value === "number" && Number.isFinite(value) ? value : 0;
+
+const sumPresent = (values: Array<number | null | undefined>) => {
+  const present = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  return present.length > 0 ? present.reduce((sum, value) => sum + value, 0) : null;
 };
 
 const dateFromSeconds = (seconds: number) => new Date(seconds * 1000).toISOString().slice(0, 10);
@@ -297,30 +324,36 @@ const fetchOptions = async (symbol: string, expiry?: string): Promise<OptionChai
     selectedExpiry: typeof selected.expirationDate === "number" ? dateFromSeconds(selected.expirationDate) : expiries[0] || null,
     calls: (selected.calls || []).map(normalizeOptionLeg),
     puts: (selected.puts || []).map(normalizeOptionLeg),
+    source: {
+      provider: "yahoo",
+      label: "Yahoo delayed",
+    },
   };
 };
 
 const normalizeOptionLeg = (leg: Record<string, any>): OptionLeg => ({
   contractSymbol: String(leg.contractSymbol || ""),
   strike: round(toNumber(leg.strike)),
-  lastPrice: round(toNumber(leg.lastPrice)),
-  bid: round(toNumber(leg.bid)),
-  ask: round(toNumber(leg.ask)),
-  volume: Math.round(toNumber(leg.volume)),
-  openInterest: Math.round(toNumber(leg.openInterest)),
-  impliedVolatility: round(toNumber(leg.impliedVolatility) * 100, 2),
+  lastPrice: roundOptional(leg.lastPrice),
+  bid: roundOptional(leg.bid),
+  ask: roundOptional(leg.ask),
+  volume: roundOptionalInteger(leg.volume),
+  openInterest: roundOptionalInteger(leg.openInterest),
+  impliedVolatility: toOptionalNumber(leg.impliedVolatility) === null ? null : round(toNumber(leg.impliedVolatility) * 100, 2),
 });
 
 const effectiveOpenInterest = (leg: OptionLeg | undefined) => {
-  if (!leg) return 0;
-  return leg.openInterest > 0 ? leg.openInterest : leg.volume;
+  if (!leg) return null;
+  return typeof leg.openInterest === "number" && Number.isFinite(leg.openInterest) && leg.openInterest >= 0
+    ? leg.openInterest
+    : null;
 };
 
 const effectiveIv = (leg: OptionLeg | undefined) => {
-  if (!leg) return 0;
-  if (leg.impliedVolatility > 0) return leg.impliedVolatility;
-  if (leg.lastPrice > 0) return 20;
-  return 0;
+  if (!leg) return null;
+  return typeof leg.impliedVolatility === "number" && Number.isFinite(leg.impliedVolatility) && leg.impliedVolatility > 0
+    ? leg.impliedVolatility
+    : null;
 };
 
 const optionRowsNearSpot = (chain: OptionChain, topRows = 12) => {
@@ -334,23 +367,25 @@ const optionRowsNearSpot = (chain: OptionChain, topRows = 12) => {
   return strikes.map((strike) => {
     const call = chain.calls.find((leg) => leg.strike === strike);
     const put = chain.puts.find((leg) => leg.strike === strike);
-    const callOpenInterest = call?.openInterest || 0;
-    const putOpenInterest = put?.openInterest || 0;
+    const callOpenInterest = call?.openInterest ?? null;
+    const putOpenInterest = put?.openInterest ?? null;
     const callEffectiveOpenInterest = effectiveOpenInterest(call);
     const putEffectiveOpenInterest = effectiveOpenInterest(put);
     const callIvPercent = effectiveIv(call);
     const putIvPercent = effectiveIv(put);
-    const validIvValues = [callIvPercent, putIvPercent].filter((value) => value > 0);
-    const callIv = (callIvPercent || 20) / 100;
-    const putIv = (putIvPercent || 20) / 100;
+    const validIvValues = [callIvPercent, putIvPercent].filter((value): value is number => typeof value === "number" && value > 0);
+    const callIv = callIvPercent === null ? null : callIvPercent / 100;
+    const putIv = putIvPercent === null ? null : putIvPercent / 100;
     const moneyness = spot > 0 ? (spot - strike) / spot : 0;
     const callDelta = Math.max(0.05, Math.min(0.95, 0.5 + moneyness * 5));
     const putDelta = callDelta - 1;
-    const callGex = Math.round(callEffectiveOpenInterest * spot * Math.max(0.05, callIv) * 8);
-    const putGex = -Math.round(putEffectiveOpenInterest * spot * Math.max(0.05, putIv) * 8);
-    const callDex = Math.round(callEffectiveOpenInterest * 100 * callDelta);
-    const putDex = Math.round(putEffectiveOpenInterest * 100 * putDelta);
-    const openInterestSource = callOpenInterest + putOpenInterest > 0 ? "open_interest" : "volume_proxy";
+    const callGex = callEffectiveOpenInterest === null || callIv === null ? null : Math.round(callEffectiveOpenInterest * spot * Math.max(0.05, callIv) * 8);
+    const putGex = putEffectiveOpenInterest === null || putIv === null ? null : -Math.round(putEffectiveOpenInterest * spot * Math.max(0.05, putIv) * 8);
+    const callDex = callEffectiveOpenInterest === null ? null : Math.round(callEffectiveOpenInterest * 100 * callDelta);
+    const putDex = putEffectiveOpenInterest === null ? null : Math.round(putEffectiveOpenInterest * 100 * putDelta);
+    const netGex = callGex === null || putGex === null ? null : callGex + putGex;
+    const netDex = callDex === null || putDex === null ? null : callDex + putDex;
+    const openInterestSource = callOpenInterest !== null || putOpenInterest !== null ? "open_interest" : "missing";
 
     return {
       strike,
@@ -358,44 +393,48 @@ const optionRowsNearSpot = (chain: OptionChain, topRows = 12) => {
       put,
       callOpenInterest,
       putOpenInterest,
-      callVolume: call?.volume || 0,
-      putVolume: put?.volume || 0,
+      callVolume: call?.volume ?? null,
+      putVolume: put?.volume ?? null,
       callEffectiveOpenInterest,
       putEffectiveOpenInterest,
       openInterestSource,
       callGex,
       putGex,
-      netGex: callGex + putGex,
+      netGex,
       callDex,
       putDex,
-      netDex: callDex + putDex,
+      netDex,
       callIv: callIvPercent,
       putIv: putIvPercent,
-      avgIv: round(validIvValues.reduce((sum, value) => sum + value, 0) / Math.max(1, validIvValues.length), 2),
+      avgIv: validIvValues.length > 0 ? round(validIvValues.reduce((sum, value) => sum + value, 0) / validIvValues.length, 2) : null,
     };
   });
 };
 
 export interface NativeOptionExposureLevelRow {
   strike: number;
-  callGex: number;
-  putGex: number;
-  netGex: number;
+  callGex: number | null;
+  putGex: number | null;
+  netGex: number | null;
 }
 
 const strongestBy = (
   rows: NativeOptionExposureLevelRow[],
-  valueSelector: (row: NativeOptionExposureLevelRow) => number,
+  valueSelector: (row: NativeOptionExposureLevelRow) => number | null,
   compare: (candidate: number, best: number) => boolean,
 ) => rows.reduce<NativeOptionExposureLevelRow | null>((best, row) => {
-  if (!Number.isFinite(valueSelector(row))) return best;
-  if (!best || compare(valueSelector(row), valueSelector(best))) return row;
+  const candidateValue = valueSelector(row);
+  if (typeof candidateValue !== "number" || !Number.isFinite(candidateValue)) return best;
+  const bestValue = best ? valueSelector(best) : null;
+  if (!best || typeof bestValue !== "number" || compare(candidateValue, bestValue)) return row;
   return best;
 }, null);
 
 const gammaFlipFromRows = (rows: NativeOptionExposureLevelRow[], spot: number) => {
   const sortedRows = [...rows]
-    .filter((row) => Number.isFinite(row.strike) && Number.isFinite(row.netGex))
+    .filter((row): row is NativeOptionExposureLevelRow & { netGex: number } =>
+      Number.isFinite(row.strike) && typeof row.netGex === "number" && Number.isFinite(row.netGex),
+    )
     .sort((a, b) => a.strike - b.strike);
   const candidates: number[] = [];
 
@@ -429,8 +468,8 @@ const gammaFlipFromRows = (rows: NativeOptionExposureLevelRow[], spot: number) =
 
 export const deriveNativeOptionExposureLevels = <T extends NativeOptionExposureLevelRow>(rows: T[], spot: number) => {
   const pin = rows.reduce<T | null>((best, row) => {
-    if (!Number.isFinite(row.netGex)) return best;
-    if (!best || Math.abs(row.netGex) > Math.abs(best.netGex)) return row;
+    if (typeof row.netGex !== "number" || !Number.isFinite(row.netGex)) return best;
+    if (!best || typeof best.netGex !== "number" || Math.abs(row.netGex) > Math.abs(best.netGex)) return row;
     return best;
   }, null);
   const callWall = strongestBy(rows, (row) => row.callGex, (candidate, best) => candidate > best);
@@ -466,8 +505,8 @@ const markdownOptionChain = (chain: OptionChain, strikesAroundAtm = 12) => {
     "| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: |",
     ...rows.flatMap((row) => {
       const lines: string[] = [];
-      if (row.call) lines.push(`| ${chain.selectedExpiry || ""} | ${row.callEffectiveOpenInterest} | ${row.strike} | ${row.call.volume} | C | ${row.call.bid} | ${row.call.ask} | ${row.callIv}% |`);
-      if (row.put) lines.push(`| ${chain.selectedExpiry || ""} | ${row.putEffectiveOpenInterest} | ${row.strike} | ${row.put.volume} | P | ${row.put.bid} | ${row.put.ask} | ${row.putIv}% |`);
+      if (row.call) lines.push(`| ${chain.selectedExpiry || ""} | ${displayNumber(row.callEffectiveOpenInterest)} | ${row.strike} | ${displayNumber(row.call.volume)} | C | ${displayNumber(row.call.bid)} | ${displayNumber(row.call.ask)} | ${row.callIv === null ? "n/a" : `${row.callIv}%`} |`);
+      if (row.put) lines.push(`| ${chain.selectedExpiry || ""} | ${displayNumber(row.putEffectiveOpenInterest)} | ${row.strike} | ${displayNumber(row.put.volume)} | P | ${displayNumber(row.put.bid)} | ${displayNumber(row.put.ask)} | ${row.putIv === null ? "n/a" : `${row.putIv}%`} |`);
       return lines;
     }),
   ].join("\n");
@@ -686,8 +725,8 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     async ({ ticker, expiry }) => {
       const chain = await fetchOptions(ticker, expiry);
       const rows = optionRowsNearSpot(chain, 96);
-      const netGex = rows.reduce((sum, row) => sum + row.netGex, 0);
-      const netDex = rows.reduce((sum, row) => sum + row.netDex, 0);
+      const netGex = sumPresent(rows.map((row) => row.netGex));
+      const netDex = sumPresent(rows.map((row) => row.netDex));
       const levels = deriveNativeOptionExposureLevels(rows, chain.spot);
       const pinStrike = levels.pin?.strike ?? chain.spot;
       const text = [
@@ -715,7 +754,7 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
       const text = [
         "| Strike | Avg IV | Call OI | Put OI | Net GEX | Net DEX |",
         "| ---: | ---: | ---: | ---: | ---: | ---: |",
-        ...rows.map((row) => `| ${row.strike} | ${row.avgIv}% | ${row.callEffectiveOpenInterest} | ${row.putEffectiveOpenInterest} | ${compact(row.netGex)} | ${compact(row.netDex)} |`),
+        ...rows.map((row) => `| ${row.strike} | ${row.avgIv === null ? "n/a" : `${row.avgIv}%`} | ${displayNumber(row.callEffectiveOpenInterest)} | ${displayNumber(row.putEffectiveOpenInterest)} | ${compact(row.netGex)} | ${compact(row.netDex)} |`),
       ].join("\n");
       return toolResult(text, { chain, rows });
     },
@@ -739,7 +778,7 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
         `- Spot: ${fmtMoney(chain.spot)}`,
         "| Strike | Call IV | Put IV | Avg IV | IV source |",
         "| ---: | ---: | ---: | ---: | --- |",
-        ...rows.map((row) => `| ${row.strike} | ${row.callIv}% | ${row.putIv}% | ${row.avgIv}% | Yahoo option chain |`),
+        ...rows.map((row) => `| ${row.strike} | ${row.callIv === null ? "n/a" : `${row.callIv}%`} | ${row.putIv === null ? "n/a" : `${row.putIv}%`} | ${row.avgIv === null ? "n/a" : `${row.avgIv}%`} | Yahoo option chain |`),
       ].join("\n");
       return toolResult(text, { chain, rows, metric: "current_iv" });
     },
@@ -748,10 +787,10 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     { name: "get_options_pcr", description: "Put/call ratio from Yahoo option volume and open interest.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
     async ({ ticker, expiry }) => {
       const chain = await fetchOptions(ticker, expiry);
-      const callOi = chain.calls.reduce((sum, leg) => sum + leg.openInterest, 0);
-      const putOi = chain.puts.reduce((sum, leg) => sum + leg.openInterest, 0);
-      const callVol = chain.calls.reduce((sum, leg) => sum + leg.volume, 0);
-      const putVol = chain.puts.reduce((sum, leg) => sum + leg.volume, 0);
+      const callOi = chain.calls.reduce((sum, leg) => sum + numberOrZero(leg.openInterest), 0);
+      const putOi = chain.puts.reduce((sum, leg) => sum + numberOrZero(leg.openInterest), 0);
+      const callVol = chain.calls.reduce((sum, leg) => sum + numberOrZero(leg.volume), 0);
+      const putVol = chain.puts.reduce((sum, leg) => sum + numberOrZero(leg.volume), 0);
       const raw = { ticker, expiry: chain.selectedExpiry, putCallOpenInterest: round(putOi / Math.max(1, callOi), 2), putCallVolume: round(putVol / Math.max(1, callVol), 2), callOi, putOi, callVol, putVol };
       return toolResult(`| Metric | Value |\n| --- | ---: |\n| P/C open interest | ${raw.putCallOpenInterest} |\n| P/C volume | ${raw.putCallVolume} |`, raw);
     },
@@ -760,8 +799,8 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     { name: "get_options_sweeps", description: "Native placeholder for unusual options rows ranked by volume.", inputSchema: { properties: { ticker: { type: "string" }, topN: { type: "integer" } }, required: ["ticker"] } },
     async ({ ticker, expiry }) => {
       const chain = await fetchOptions(ticker, expiry);
-      const legs = [...chain.calls.map((leg) => ({ ...leg, type: "C" })), ...chain.puts.map((leg) => ({ ...leg, type: "P" }))].sort((a, b) => b.volume - a.volume).slice(0, 12);
-      const text = `# ${ticker} unusual options volume proxy\n| Type | Strike | Volume | OI | Vol/OI | Bid | Ask | IV |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${legs.map((leg) => `| ${leg.type} | ${leg.strike} | ${leg.volume} | ${leg.openInterest} | ${round(leg.volume / Math.max(1, leg.openInterest), 2)} | ${leg.bid} | ${leg.ask} | ${leg.impliedVolatility}% |`).join("\n")}`;
+      const legs = [...chain.calls.map((leg) => ({ ...leg, type: "C" })), ...chain.puts.map((leg) => ({ ...leg, type: "P" }))].sort((a, b) => numberOrZero(b.volume) - numberOrZero(a.volume)).slice(0, 12);
+      const text = `# ${ticker} unusual options volume proxy\n| Type | Strike | Volume | OI | Vol/OI | Bid | Ask | IV |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${legs.map((leg) => `| ${leg.type} | ${leg.strike} | ${displayNumber(leg.volume)} | ${displayNumber(leg.openInterest)} | ${round(numberOrZero(leg.volume) / Math.max(1, numberOrZero(leg.openInterest)), 2)} | ${displayNumber(leg.bid)} | ${displayNumber(leg.ask)} | ${leg.impliedVolatility === null ? "n/a" : `${leg.impliedVolatility}%`} |`).join("\n")}`;
       return toolResult(text, { chain, legs });
     },
   ),
@@ -770,10 +809,15 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     async ({ ticker, expiry }) => {
       const chain = await fetchOptions(ticker, expiry);
       const legs = [...chain.calls.map((leg) => ({ ...leg, type: "C" })), ...chain.puts.map((leg) => ({ ...leg, type: "P" }))]
-        .map((leg) => ({ ...leg, spread: round(leg.ask - leg.bid), spreadPct: round(((leg.ask - leg.bid) / Math.max(0.01, leg.lastPrice || leg.ask)) * 100, 2) }))
+        .map((leg) => {
+          const ask = numberOrZero(leg.ask);
+          const bid = numberOrZero(leg.bid);
+          const reference = Math.max(0.01, numberOrZero(leg.lastPrice) || ask || 0.01);
+          return { ...leg, spread: round(ask - bid), spreadPct: round(((ask - bid) / reference) * 100, 2) };
+        })
         .sort((a, b) => b.spreadPct - a.spreadPct)
         .slice(0, 12);
-      const text = `# ${ticker} option bid/ask and IV sanity scan\n| Type | Strike | Last | Bid | Ask | Spread | Spread % | IV |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${legs.map((leg) => `| ${leg.type} | ${leg.strike} | ${leg.lastPrice} | ${leg.bid} | ${leg.ask} | ${leg.spread} | ${leg.spreadPct}% | ${leg.impliedVolatility}% |`).join("\n")}`;
+      const text = `# ${ticker} option bid/ask and IV sanity scan\n| Type | Strike | Last | Bid | Ask | Spread | Spread % | IV |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${legs.map((leg) => `| ${leg.type} | ${leg.strike} | ${displayNumber(leg.lastPrice)} | ${displayNumber(leg.bid)} | ${displayNumber(leg.ask)} | ${leg.spread} | ${leg.spreadPct}% | ${leg.impliedVolatility === null ? "n/a" : `${leg.impliedVolatility}%`} |`).join("\n")}`;
       return toolResult(text, { chain, legs, metric: "spread_pct" });
     },
   ),

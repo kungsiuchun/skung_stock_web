@@ -6,6 +6,7 @@ import {
   buildSpxGexHeatmapFromToolText,
   calculateBlackScholesExposures,
   classifySpxGexStructureTags,
+  formatSpxGexCompactExposure,
   generateAndStoreSpxGexHeatmap,
   getSpxGexGenerationStatus,
   listSpxGexHeatmapDates,
@@ -17,6 +18,13 @@ import {
   type SpxGexOptionChain,
   type SpxGexStrikeProfile,
 } from "../src/lib/spx-gex-heatmap";
+import { deriveNativeOptionExposureLevels } from "../src/lib/stocks-native-yahoo";
+import {
+  CboeSpxGexDataClient,
+  FallbackSpxGexDataClient,
+  parseCboeOptionSymbol,
+  parseCboeSpxOptionsPayload,
+} from "../src/lib/spx-gex-cboe";
 import { onRequest as getSpxGexHeatmapApi } from "../functions/api/spx-gex-heatmap";
 
 describe("SPX GEX intraday generation gate", () => {
@@ -98,6 +106,188 @@ describe("SPX GEX Black-Scholes exposure model", () => {
     assert.ok(exposure.callGex > Math.abs(exposure.putGex));
     assert.ok(exposure.netGex > 0);
   });
+
+  it("keeps Yahoo rows with missing open interest as no-data instead of volume-proxy zero", () => {
+    const heatmap = buildSpxGexHeatmapFromOptionChains({
+      generatedAt: "2026-06-22T18:15:07.000Z",
+      chains: [buildMissingOpenInterestChain()],
+      selectedExpiries: ["2026-06-22"],
+      maxStrikes: 1,
+    });
+    const cell = heatmap.cells[0];
+
+    assert.ok(cell);
+    assert.equal(cell.netGex, null);
+    assert.equal(cell.callEffectiveOpenInterest, null);
+    assert.equal(cell.putEffectiveOpenInterest, null);
+    assert.equal(cell.callOpenInterestStatus, "missing");
+    assert.equal(cell.putOpenInterestStatus, "missing");
+    assert.deepEqual(cell.missingReasons, ["missing call open interest", "missing put open interest"]);
+    assert.equal(cell.model, undefined);
+    assert.equal(heatmap.zeroDte.netGex, null);
+    assert.equal(heatmap.zeroDte.pinLevel, null);
+  });
+
+  it("treats reported zero open interest as true zero with audited inputs", () => {
+    const heatmap = buildSpxGexHeatmapFromOptionChains({
+      generatedAt: "2026-06-22T18:15:07.000Z",
+      chains: [buildZeroOpenInterestChain()],
+      selectedExpiries: ["2026-06-22"],
+      maxStrikes: 1,
+    });
+    const cell = heatmap.cells[0];
+
+    assert.ok(cell);
+    assert.equal(cell.netGex, 0);
+    assert.equal(cell.callEffectiveOpenInterest, 0);
+    assert.equal(cell.putEffectiveOpenInterest, 0);
+    assert.equal(cell.callOpenInterestStatus, "reported");
+    assert.equal(cell.putOpenInterestStatus, "reported");
+    assert.deepEqual(cell.missingReasons, []);
+    assert.equal(cell.model, "black_scholes_gamma_exposure_blended_iv");
+    assert.equal(heatmap.zeroDte.netGex, 0);
+    assert.equal(heatmap.zeroDte.pinLevel, null);
+    assert.equal(heatmap.zeroDte.topCallWallLevel, null);
+    assert.equal(heatmap.zeroDte.topPutWallLevel, null);
+    assert.deepEqual(heatmap.strikeProfiles.flatMap((row) => row.tags), []);
+  });
+
+  it("formats tiny non-zero exposure as a threshold, not a misleading display zero", () => {
+    assert.equal(formatSpxGexCompactExposure(0.4), "<1");
+    assert.equal(formatSpxGexCompactExposure(0.4, { signed: true }), "+<1");
+    assert.equal(formatSpxGexCompactExposure(-0.4, { signed: true }), ">-1");
+    assert.equal(formatSpxGexCompactExposure(null), "n/a");
+  });
+
+  it("derives native pin, call wall, put wall, and gamma flip independently from finite Yahoo rows", () => {
+    const rows = [
+      { strike: 7450, callGex: 200_000, putGex: -5_000_000, netGex: -4_800_000 },
+      { strike: 7475, callGex: 8_000_000, putGex: -2_000_000, netGex: 6_000_000 },
+      { strike: 7500, callGex: 1_000_000, putGex: -900_000, netGex: 100_000 },
+      { strike: 7525, callGex: 6_000_000, putGex: -1_000_000, netGex: 5_000_000 },
+    ];
+
+    const levels = deriveNativeOptionExposureLevels(rows, 7475);
+
+    assert.equal(levels.pin?.strike, 7475);
+    assert.equal(levels.callWall?.strike, 7475);
+    assert.equal(levels.putWall?.strike, 7450);
+    assert.equal(levels.gammaFlip, 7461.11);
+  });
+});
+
+describe("SPX GEX Cboe delayed source adapter", () => {
+  it("normalizes Cboe OCC-style symbols into expiry, side, and strike", () => {
+    assert.deepEqual(parseCboeOptionSymbol("SPX260624C07365000"), {
+      root: "SPX",
+      expiry: "2026-06-24",
+      side: "C",
+      strike: 7365,
+    });
+    assert.deepEqual(parseCboeOptionSymbol("SPX260717P00200000"), {
+      root: "SPX",
+      expiry: "2026-07-17",
+      side: "P",
+      strike: 200,
+    });
+    assert.equal(parseCboeOptionSymbol("BROKEN"), null);
+  });
+
+  it("preserves reported zero separately from missing fields when mapping raw Cboe JSON", () => {
+    const chains = parseCboeSpxOptionsPayload(buildCboeFixturePayload(), { todayEt: "2026-06-24" });
+    const front = chains.find((chain) => chain.selectedExpiry === "2026-06-24");
+    const call = front?.calls.find((leg) => leg.strike === 7365);
+    const put = front?.puts.find((leg) => leg.strike === 7365);
+
+    assert.ok(front);
+    assert.equal(front.source?.label, "Cboe delayed");
+    assert.equal(call?.openInterest, 0);
+    assert.equal(call?.volume, 0);
+    assert.equal(call?.bid, 0);
+    assert.equal(call?.impliedVolatility, 12.5);
+    assert.equal(put?.openInterest, null);
+    assert.equal(put?.volume, null);
+    assert.equal(put?.impliedVolatility, 13.1);
+  });
+
+  it("selects the current ET front expiry instead of an expired Cboe row", async () => {
+    const client = new CboeSpxGexDataClient({
+      fetchJson: async () => buildCboeFixturePayload(),
+      now: () => new Date("2026-06-24T14:00:00Z"),
+    });
+
+    const chain = await client.getOptionsChain();
+
+    assert.equal(chain.selectedExpiry, "2026-06-24");
+    assert.deepEqual(chain.expiries.slice(0, 2), ["2026-06-24", "2026-06-25"]);
+    assert.equal(chain.spot, 7365.46);
+    assert.equal(chain.calls.length, 1);
+    assert.equal(chain.puts.length, 1);
+  });
+
+  it("accepts Cboe SPXW weekly option roots as SPX contracts", () => {
+    const chains = parseCboeSpxOptionsPayload({
+      timestamp: "2026-06-24 05:12:52",
+      data: {
+        symbol: "SPX",
+        current_price: 7365.46,
+        options: [
+          cboeOption("SPXW260624C07365000", { open_interest: 10, volume: 2, iv: 0.12 }),
+          cboeOption("SPXW260624P07365000", { open_interest: 11, volume: 3, iv: 0.13 }),
+        ],
+      },
+    }, { todayEt: "2026-06-24" });
+
+    assert.equal(chains[0]?.selectedExpiry, "2026-06-24");
+    assert.equal(chains[0]?.calls[0]?.contractSymbol, "SPXW260624C07365000");
+    assert.equal(chains[0]?.puts[0]?.contractSymbol, "SPXW260624P07365000");
+  });
+
+  it("marks Cboe as the heatmap source label and keeps source-specific timestamp text", async () => {
+    const client = new CboeSpxGexDataClient({
+      fetchJson: async () => buildDenseCboePayload(),
+      now: () => new Date("2026-06-24T14:00:00Z"),
+    });
+    const front = await client.getOptionsChain();
+    const chains = await Promise.all(front.expiries.slice(0, 5).map((expiry) => client.getOptionsChain(expiry)));
+    const heatmap = buildSpxGexHeatmapFromOptionChains({
+      generatedAt: "2026-06-24T14:00:00.000Z",
+      quoteText: await client.getQuotes(),
+      chains,
+      selectedExpiries: front.expiries.slice(0, 5),
+      maxStrikes: 5,
+    });
+
+    assert.ok(heatmap.source.note.includes("Cboe delayed"));
+    assert.ok(heatmap.source.note.includes("2026-06-24 05:12:52"));
+    assert.equal(heatmap.selectedExpiries[0], "2026-06-24");
+  });
+
+  it("falls back to Yahoo-compatible data when Cboe selection fails", async () => {
+    const fallbackChain = buildOptionChain("2026-06-24", 7365.46);
+    const client = new FallbackSpxGexDataClient({
+      primary: {
+        async getQuotes() { throw new Error("primary quote should not be used after selection failure"); },
+        async getOptions() { throw new Error("primary options should not be used after selection failure"); },
+        async getOptions0Dte() { throw new Error("primary 0dte should not be used after selection failure"); },
+        async getOptionsGex() { throw new Error("primary gex should not be used after selection failure"); },
+        async getOptionsChain() { throw new Error("Cboe unavailable"); },
+      },
+      fallback: {
+        async getQuotes() { return "| Ticker | Last | Change | Change % |\n| SPX | $7,365.46 | n/a | n/a |"; },
+        async getOptions() { return ""; },
+        async getOptions0Dte() { return ""; },
+        async getOptionsGex() { return ""; },
+        async getOptionsChain() { return { ...fallbackChain, source: { provider: "yahoo", label: "Yahoo delayed fallback" } }; },
+      },
+    });
+
+    const chain = await client.getOptionsChain();
+    const quoteText = await client.getQuotes();
+
+    assert.equal(chain.source?.label, "Yahoo delayed fallback");
+    assert.ok(quoteText.includes("SPX"));
+  });
 });
 
 const expiries = ["2026-05-27", "2026-05-28", "2026-05-29", "2026-06-01", "2026-06-02"];
@@ -156,6 +346,122 @@ const buildSideSkewChain = (): SpxGexOptionChain => ({
     impliedVolatility: 14.85,
   }],
 });
+
+const buildMissingOpenInterestChain = (): SpxGexOptionChain => ({
+  symbol: "SPX",
+  spot: 7475.79,
+  expiries: ["2026-06-22"],
+  selectedExpiry: "2026-06-22",
+  calls: [{
+    contractSymbol: "SPX20260622C7475",
+    strike: 7475,
+    lastPrice: 12,
+    bid: 11,
+    ask: 12.5,
+    volume: 1550,
+    impliedVolatility: 12.1,
+  }],
+  puts: [{
+    contractSymbol: "SPX20260622P7475",
+    strike: 7475,
+    lastPrice: 10,
+    bid: 9,
+    ask: 10.5,
+    volume: 1440,
+    impliedVolatility: 13.4,
+  }],
+} as SpxGexOptionChain);
+
+const buildZeroOpenInterestChain = (): SpxGexOptionChain => ({
+  symbol: "SPX",
+  spot: 7475.79,
+  expiries: ["2026-06-22"],
+  selectedExpiry: "2026-06-22",
+  calls: [{
+    contractSymbol: "SPX20260622C7475",
+    strike: 7475,
+    lastPrice: 12,
+    bid: 11,
+    ask: 12.5,
+    volume: 1550,
+    openInterest: 0,
+    impliedVolatility: 12.1,
+  }],
+  puts: [{
+    contractSymbol: "SPX20260622P7475",
+    strike: 7475,
+    lastPrice: 10,
+    bid: 9,
+    ask: 10.5,
+    volume: 1440,
+    openInterest: 0,
+    impliedVolatility: 13.4,
+  }],
+});
+
+const cboeOption = (
+  option: string,
+  fields: Record<string, unknown>,
+) => ({
+  option,
+  bid: 1,
+  ask: 2,
+  iv: 0.12,
+  open_interest: 100,
+  volume: 10,
+  last_trade_price: 1.5,
+  ...fields,
+});
+
+const buildCboeFixturePayload = () => ({
+  timestamp: "2026-06-24 05:12:52",
+  data: {
+    symbol: "SPX",
+    current_price: 7365.46,
+    price_change: -12.34,
+    price_change_percent: -0.17,
+    options: [
+      cboeOption("SPX260623C07365000", { open_interest: 10, volume: 2, iv: 0.111 }),
+      cboeOption("SPX260624C07365000", { bid: 0, open_interest: 0, volume: 0, iv: 0.125, last_trade_price: 7.1 }),
+      cboeOption("SPX260624P07365000", { open_interest: undefined, volume: undefined, iv: 0.131, last_trade_price: 8.2 }),
+      cboeOption("SPX260625C07365000", { open_interest: 5, volume: 1, iv: 0.14 }),
+      cboeOption("SPX260625P07365000", { open_interest: 6, volume: 1, iv: 0.15 }),
+    ],
+  },
+});
+
+const buildDenseCboePayload = () => {
+  const denseExpiries = ["2026-06-24", "2026-06-25", "2026-06-26", "2026-06-29", "2026-06-30"];
+  const denseStrikes = [7325, 7350, 7365, 7375, 7400];
+  const options = denseExpiries.flatMap((expiry, expiryIndex) => {
+    const yymmdd = expiry.slice(2).replaceAll("-", "");
+    return denseStrikes.flatMap((strike, strikeIndex) => {
+      const encodedStrike = String(strike * 1000).padStart(8, "0");
+      return [
+        cboeOption(`SPX${yymmdd}C${encodedStrike}`, {
+          open_interest: 1000 + expiryIndex * 100 + strikeIndex,
+          volume: 100 + strikeIndex,
+          iv: 0.12 + strikeIndex / 100,
+        }),
+        cboeOption(`SPX${yymmdd}P${encodedStrike}`, {
+          open_interest: 1200 + expiryIndex * 100 + strikeIndex,
+          volume: 90 + strikeIndex,
+          iv: 0.14 + strikeIndex / 100,
+        }),
+      ];
+    });
+  });
+  return {
+    timestamp: "2026-06-24 05:12:52",
+    data: {
+      symbol: "SPX",
+      current_price: 7365.46,
+      price_change: -12.34,
+      price_change_percent: -0.17,
+      options,
+    },
+  };
+};
 
 const buildStructuredHeatmap = (generatedAt = "2026-05-27T13:45:00.000Z", spot = 6000) =>
   buildSpxGexHeatmapFromOptionChains({
