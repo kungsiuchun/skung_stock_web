@@ -161,22 +161,26 @@ async function fetchYahooChart(symbol: string, interval: string, range: string) 
 // --- 輕量級 Yahoo Finance 期權 PCR 調用 ---
 async function fetchYahooOptionsPCR(symbol: string = '^SPX') {
   try {
-    const cookieRes = await fetch('https://fc.yahoo.com', {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      redirect: 'manual'
-    });
-    const cookies = cookieRes.headers.get('set-cookie') || '';
+    let cookies = '';
+    try {
+      const cookieRes = await fetchWithTimeout('https://finance.yahoo.com', {
+        headers: { 'User-Agent': 'Mozilla/5.0' }
+      }, 5000);
+      cookies = cookieRes.headers.get('set-cookie') || '';
+    } catch (e) {
+      console.warn("Cookie fetch failed, trying without cookie");
+    }
 
-    const crumbRes = await fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', {
+    const crumbRes = await fetchWithTimeout('https://query1.finance.yahoo.com/v1/test/getcrumb', {
       headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies }
-    });
+    }, 5000);
     const crumb = await crumbRes.text();
     if (!crumb) return null;
 
     const url = `https://query1.finance.yahoo.com/v7/finance/options/${encodeURIComponent(symbol)}?crumb=${crumb}`;
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
       headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies }
-    });
+    }, 5000);
     if (!res.ok) return null;
 
     const data = await res.json() as any;

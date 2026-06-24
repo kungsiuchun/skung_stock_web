@@ -23,13 +23,23 @@ function calculateGamma(S: number, K: number, T: number, r: number, sigma: numbe
 export async function fetchAndCalculateGEX() {
     try {
         // Step 1: Fetch Crumb & Cookie from Yahoo
-        const cookieRes = await fetch('https://fc.yahoo.com', {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-            redirect: 'manual' 
-        });
-        const cookies = cookieRes.headers.get('set-cookie') || '';
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+        
+        let cookies = '';
+        try {
+            const cookieRes = await fetch('https://finance.yahoo.com', {
+                headers: { 'User-Agent': 'Mozilla/5.0' },
+                signal: controller.signal
+            });
+            cookies = cookieRes.headers.get('set-cookie') || '';
+        } catch (e) {
+            console.warn("Cookie fetch failed, trying without cookie");
+        }
+
         const crumbRes = await fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', {
-            headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies }
+            headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies },
+            signal: controller.signal
         });
         const crumb = await crumbRes.text();
         if (!crumb) throw new Error("Failed to get crumb");
@@ -38,7 +48,8 @@ export async function fetchAndCalculateGEX() {
         const symbol = '%5ESPX';
         const url = `https://query1.finance.yahoo.com/v7/finance/options/${symbol}?crumb=${crumb}`;
         const res = await fetch(url, {
-            headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies }
+            headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies },
+            signal: controller.signal
         });
         if (!res.ok) throw new Error("Failed to fetch options chain");
 
@@ -54,7 +65,10 @@ export async function fetchAndCalculateGEX() {
 
         for (let i = 1; i < datesToFetch.length; i++) {
             const dateUrl = `https://query1.finance.yahoo.com/v7/finance/options/${symbol}?crumb=${crumb}&date=${datesToFetch[i]}`;
-            const dateRes = await fetch(dateUrl, { headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies } });
+            const dateRes = await fetch(dateUrl, { 
+                headers: { 'User-Agent': 'Mozilla/5.0', 'Cookie': cookies },
+                signal: controller.signal 
+            });
             if (dateRes.ok) {
                 const dateData = await dateRes.json() as any;
                 if (dateData.optionChain.result[0]?.options?.[0]) {
@@ -62,6 +76,8 @@ export async function fetchAndCalculateGEX() {
                 }
             }
         }
+        
+        clearTimeout(timeoutId);
 
         const r = 0.05; // Assumed 5% risk-free rate
         const minStrike = spot * 0.80;
