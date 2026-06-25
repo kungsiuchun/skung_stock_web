@@ -58,6 +58,14 @@ SPX GEX Heatmap should show retained JSON snapshots as a live product surface, n
 
 SPX GEX Heatmap should treat seven trading days as the retention window, so weekends and NYSE full holidays do not consume retention slots.
 
+## CBOE Chain Cache
+
+CBOE Chain Cache is the 24-hour D1 cache of normalized SPX option chains from the CBOE delayed feed.
+
+CBOE Chain Cache stores reusable upstream option-chain inputs for Worker jobs. It is not the SPX GEX Heatmap snapshot and should not be treated as the visual replay source.
+
+SPX GEX Heatmap snapshots remain the retained intraday product surface for browsing and replay.
+
 ## Stocks Intelligence Watcher
 
 Stocks Intelligence Watcher is a Work Item that turns the Stocks Intelligence MCP ticker workflow into a dense live ticker terminal.

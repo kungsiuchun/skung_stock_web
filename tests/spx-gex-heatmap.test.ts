@@ -20,11 +20,14 @@ import {
 } from "../src/lib/spx-gex-heatmap";
 import { deriveNativeOptionExposureLevels } from "../src/lib/stocks-native-yahoo";
 import {
+  CboeD1Cache,
   CboeSpxGexDataClient,
   FallbackSpxGexDataClient,
+  createSpxGexIntradayDataClient,
   parseCboeOptionSymbol,
   parseCboeSpxOptionsPayload,
 } from "../src/lib/spx-gex-cboe";
+import { calculateGexFromOptionChains } from "../scripts/gex-calculator";
 import { onRequest as getSpxGexHeatmapApi } from "../functions/api/spx-gex-heatmap";
 
 describe("SPX GEX intraday generation gate", () => {
@@ -371,6 +374,167 @@ describe("SPX GEX Cboe delayed source adapter", () => {
     assert.deepEqual(context.warnings, [
       "Cboe delayed source selected; Yahoo market context skipped to keep heatmap generation independent of Yahoo crumb/4xx failures.",
     ]);
+  });
+
+  it("writes a normalized D1 cache on miss and reuses it for the same 15-minute bucket", async () => {
+    const db = new MemoryD1();
+    let fetches = 0;
+    const now = () => new Date("2026-06-24T14:00:00Z");
+
+    const firstClient = new CboeSpxGexDataClient({
+      db,
+      fetchJson: async () => {
+        fetches += 1;
+        return buildDenseCboePayload();
+      },
+      now,
+    });
+
+    const firstChain = await firstClient.getOptionsChain();
+    const secondClient = new CboeSpxGexDataClient({
+      db,
+      fetchJson: async () => {
+        fetches += 1;
+        throw new Error("cache hit should not refetch Cboe");
+      },
+      now,
+    });
+    const secondChain = await secondClient.getOptionsChain();
+
+    assert.equal(fetches, 1);
+    assert.equal(db.cboeCache.size, 1);
+    assert.equal(firstChain.selectedExpiry, "2026-06-24");
+    assert.equal(secondChain.selectedExpiry, "2026-06-24");
+    assert.equal(secondChain.source?.label, "Cboe delayed cache");
+  });
+
+  it("ignores expired exact cache rows and refetches Cboe", async () => {
+    const db = new MemoryD1();
+    const cache = new CboeD1Cache(db, { now: () => new Date("2026-06-24T14:00:00Z") });
+    const chains = parseCboeSpxOptionsPayload(buildDenseCboePayload(), { todayEt: "2026-06-24" }).slice(0, 5);
+    await cache.write({
+      cacheKey: "SPX:CBOE_DELAYED:2026-06-24:600",
+      tradingDate: "2026-06-24",
+      collectedMinuteEt: 600,
+      sourceTimestamp: "2026-06-24 05:12:52",
+      spot: 7365.46,
+      chains,
+      pcrValue: 1.23,
+      rawBytes: 1000,
+      fetchMs: 10,
+      createdAt: "2026-06-24T13:00:00.000Z",
+      expiresAt: "2026-06-24T13:59:59.000Z",
+    });
+
+    let fetches = 0;
+    const client = new CboeSpxGexDataClient({
+      db,
+      fetchJson: async () => {
+        fetches += 1;
+        return buildDenseCboePayload();
+      },
+      now: () => new Date("2026-06-24T14:00:00Z"),
+    });
+
+    const chain = await client.getOptionsChain();
+
+    assert.equal(fetches, 1);
+    assert.equal(chain.source?.label, "Cboe delayed");
+  });
+
+  it("uses today's latest stale D1 cache when live Cboe fetch fails", async () => {
+    const db = new MemoryD1();
+    const cache = new CboeD1Cache(db, { now: () => new Date("2026-06-24T15:00:00Z") });
+    const chains = parseCboeSpxOptionsPayload(buildDenseCboePayload(), { todayEt: "2026-06-24" }).slice(0, 5);
+    await cache.write({
+      cacheKey: "SPX:CBOE_DELAYED:2026-06-24:600",
+      tradingDate: "2026-06-24",
+      collectedMinuteEt: 600,
+      sourceTimestamp: "2026-06-24 05:12:52",
+      spot: 7365.46,
+      chains,
+      pcrValue: 1.23,
+      rawBytes: 1000,
+      fetchMs: 10,
+      createdAt: "2026-06-24T14:00:00.000Z",
+      expiresAt: "2026-06-25T14:00:00.000Z",
+    });
+
+    const client = new CboeSpxGexDataClient({
+      db,
+      fetchJson: async () => {
+        throw new Error("Cboe network down");
+      },
+      now: () => new Date("2026-06-24T15:00:00Z"),
+    });
+
+    const chain = await client.getOptionsChain();
+
+    assert.equal(chain.source?.label, "Cboe delayed cache stale");
+    assert.equal(chain.source?.timestamp, "2026-06-24 05:12:52");
+  });
+
+  it("does not write normalized chains that exceed the D1 row guard", async () => {
+    const db = new MemoryD1();
+    const chains = parseCboeSpxOptionsPayload(buildDenseCboePayload(), { todayEt: "2026-06-24" }).slice(0, 5);
+    const oversized = chains.map((chain) => ({
+      ...chain,
+      calls: Array.from({ length: 2500 }, (_, index) => ({ ...chain.calls[0], contractSymbol: `SPX_BIG_C_${index}`, strike: 5000 + index })),
+      puts: Array.from({ length: 2500 }, (_, index) => ({ ...chain.puts[0], contractSymbol: `SPX_BIG_P_${index}`, strike: 5000 + index })),
+    }));
+    const cache = new CboeD1Cache(db);
+
+    const written = await cache.write({
+      cacheKey: "SPX:CBOE_DELAYED:2026-06-24:600",
+      tradingDate: "2026-06-24",
+      collectedMinuteEt: 600,
+      sourceTimestamp: "2026-06-24 05:12:52",
+      spot: 7365.46,
+      chains: oversized,
+      pcrValue: 1.23,
+      rawBytes: 1000,
+      fetchMs: 10,
+      createdAt: "2026-06-24T14:00:00.000Z",
+      expiresAt: "2026-06-25T14:00:00.000Z",
+    });
+
+    assert.equal(written, false);
+    assert.equal(db.cboeCache.size, 0);
+  });
+
+  it("derives Telegram PCR and GEX summary from the same cached chains", async () => {
+    const db = new MemoryD1();
+    const client = createSpxGexIntradayDataClient({
+      db,
+      fetchJson: async () => buildDenseCboePayload(),
+      now: () => new Date("2026-06-24T14:00:00Z"),
+    });
+    const front = await client.getOptionsChain();
+    const chains = await Promise.all(front.expiries.slice(0, 5).map((expiry) => client.getOptionsChain!(expiry)));
+    const pcrValue = await client.getOptionsPcr?.();
+    const gex = calculateGexFromOptionChains(chains, new Date("2026-06-24T14:00:00Z"));
+
+    assert.equal(db.cboeCache.size, 1);
+    assert.equal(pcrValue, 0.9);
+    assert.equal(gex?.gammaStatus, "negative_gamma");
+    assert.ok(gex?.generatedAt.includes("CBOE Delayed"));
+  });
+
+  it("continues with live Cboe data when the D1 cache table is unavailable", async () => {
+    let fetches = 0;
+    const client = new CboeSpxGexDataClient({
+      db: new ThrowingD1(),
+      fetchJson: async () => {
+        fetches += 1;
+        return buildDenseCboePayload();
+      },
+      now: () => new Date("2026-06-24T14:00:00Z"),
+    });
+
+    const chain = await client.getOptionsChain();
+
+    assert.equal(fetches, 1);
+    assert.equal(chain.source?.label, "Cboe delayed");
   });
 });
 
@@ -841,6 +1005,30 @@ class MemoryD1Statement {
   }
 
   async run() {
+    if (this.query.includes("INSERT INTO spx_cboe_option_chain_cache")) {
+      this.db.cboeCache.set(String(this.values[0]), {
+        cache_key: this.values[0],
+        trading_date: this.values[1],
+        collected_minute_et: this.values[2],
+        source_timestamp: this.values[3],
+        spot: this.values[4],
+        chains_json: this.values[5],
+        pcr_value: this.values[6],
+        raw_bytes: this.values[7],
+        normalized_bytes: this.values[8],
+        fetch_ms: this.values[9],
+        created_at: this.values[10],
+        expires_at: this.values[11],
+      });
+    }
+
+    if (this.query.includes("DELETE FROM spx_cboe_option_chain_cache")) {
+      const cutoff = String(this.values[0]);
+      for (const [key, row] of [...this.db.cboeCache.entries()]) {
+        if (String(row.expires_at) < cutoff) this.db.cboeCache.delete(key);
+      }
+    }
+
     if (this.query.includes("INSERT INTO spx_gex_intraday_snapshots")) {
       const key = `${this.values[0]}:${this.values[1]}`;
       this.db.intraday.set(key, {
@@ -893,6 +1081,20 @@ class MemoryD1Statement {
   }
 
   async first<T = Record<string, unknown>>() {
+    if (this.query.includes("FROM spx_cboe_option_chain_cache") && this.query.includes("cache_key = ?")) {
+      const row = this.db.cboeCache.get(String(this.values[0]));
+      if (!row) return null;
+      if (this.query.includes("expires_at > ?") && !(String(row.expires_at) > String(this.values[1]))) return null;
+      return row as T;
+    }
+
+    if (this.query.includes("FROM spx_cboe_option_chain_cache") && this.query.includes("trading_date = ?")) {
+      const rows = [...this.db.cboeCache.values()]
+        .filter((row) => row.trading_date === this.values[0])
+        .sort((a, b) => Number(b.collected_minute_et) - Number(a.collected_minute_et) || String(b.created_at).localeCompare(String(a.created_at)));
+      return (rows[0] || null) as T | null;
+    }
+
     if (this.query.includes("FROM spx_gex_intraday_snapshots")) {
       const date = String(this.values[0]);
       if (this.query.includes("snapshot_minute_et = ?")) {
@@ -952,6 +1154,7 @@ class MemoryD1Statement {
 class MemoryD1 {
   readonly intraday = new Map<string, Record<string, unknown>>();
   readonly legacy = new Map<string, Record<string, unknown>>();
+  readonly cboeCache = new Map<string, Record<string, unknown>>();
 
   prepare(query: string) {
     return new MemoryD1Statement(this, query);
@@ -960,6 +1163,12 @@ class MemoryD1 {
   async batch(statements: MemoryD1Statement[]) {
     for (const statement of statements) await statement.run();
     return [];
+  }
+}
+
+class ThrowingD1 {
+  prepare() {
+    throw new Error("no such table: spx_cboe_option_chain_cache");
   }
 }
 

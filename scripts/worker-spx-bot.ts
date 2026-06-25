@@ -1,9 +1,9 @@
 import { RSI, BollingerBands, SMA, MACD, EMA } from 'technicalindicators';
 import { PERSONAS, ORCHESTRATOR_PROMPT, SYSTEM_PROMPT_PREFIX, AUDIT_AGENT_PROMPT } from './prompts';
-import { fetchAndCalculateGEX } from './gex-calculator';
+import { calculateGexFromOptionChains } from './gex-calculator';
 import { upsertRecapDay, type D1DatabaseLike } from '../src/lib/spx-recap-d1';
 import { generateAndStoreSpxGexHeatmap } from '../src/lib/spx-gex-heatmap';
-import { createSpxGexIntradayDataClient } from '../src/lib/spx-gex-cboe';
+import { calculateCboePcrFromChains, createSpxGexIntradayDataClient } from '../src/lib/spx-gex-cboe';
 
 // Cloudflare Worker Environment Types
 interface Env {
@@ -185,41 +185,19 @@ async function fetchOptionalMarketData<T>(label: string, task: Promise<T>, fallb
     return fallback;
   }
 }
-// --- 輕量級 CBOE 期權 PCR 調用 (Yahoo cookie/crumb 已失效) ---
-async function fetchYahooOptionsPCR(symbol: string = '^SPX') {
-  try {
-    const res = await fetchWithTimeout('https://cdn.cboe.com/api/global/delayed_quotes/options/_SPX.json', {
-      headers: { 
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
-        'Accept': 'application/json'
-      }
-    }, 10000);
-    if (!res.ok) return null;
+async function fetchCachedCboeOptionsSnapshot(env: Env, now: Date) {
+  const client = createSpxGexIntradayDataClient({
+    db: env.SPX_RECAP_DB,
+    now,
+  });
+  if (!client.getOptionsChain) return { pcrValue: null, calculatedGex: null };
 
-    const payload = await res.json() as any;
-    const rawOptions = payload.data?.options || [];
-    if (rawOptions.length === 0) return null;
-
-    let totalCallVolume = 0;
-    let totalPutVolume = 0;
-
-    for (const opt of rawOptions) {
-      const sym = opt.option || '';
-      const vol = opt.volume || 0;
-      if (!vol) continue;
-      // Parse C/P from CBOE symbol: e.g. SPX260717C00200000
-      const match = sym.match(/[CP](?=\d{8}$)/);
-      if (!match) continue;
-      if (match[0] === 'C') totalCallVolume += vol;
-      else totalPutVolume += vol;
-    }
-
-    if (totalCallVolume === 0) return null;
-    return totalPutVolume / totalCallVolume;
-  } catch (e) {
-    console.error('Fetch PCR Error:', e);
-    return null;
-  }
+  const front = await client.getOptionsChain();
+  const selectedExpiries = front.expiries.slice(0, 5);
+  const chains = await Promise.all(selectedExpiries.map((expiry) => client.getOptionsChain!(expiry)));
+  const pcrValue = client.getOptionsPcr ? await client.getOptionsPcr() : calculateCboePcrFromChains(chains);
+  const calculatedGex = calculateGexFromOptionChains(chains, now);
+  return { pcrValue, calculatedGex };
 }
 
 // --- 分析與邏輯函數 ---
@@ -1142,7 +1120,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       fetchYahooChart('^GSPC', '15m', '7d'),
       fetchYahooChart('^GSPC', '5m', '2d')
     ]);
-    const [spxQuotesD1, spxQuotesH1, vixQuotes, vixQuotes3mo, vixQuotes9d, spyQuotes, iwmQuotes, xlkQuotes, xlvQuotes, pcrValue, sentimentData, calculatedGex] = await Promise.all([
+    const [spxQuotesD1, spxQuotesH1, vixQuotes, vixQuotes3mo, vixQuotes9d, spyQuotes, iwmQuotes, xlkQuotes, xlvQuotes, cboeOptionsSnapshot, sentimentData] = await Promise.all([
       fetchOptionalMarketData('SPX D1 price-action chart', fetchYahooChart('^GSPC', '1d', '3mo'), []),
       fetchOptionalMarketData('SPX H1 price-action chart', fetchYahooChart('^GSPC', '1h', '10d'), []),
       fetchOptionalMarketData('VIX 15m chart', fetchYahooChart('^VIX', '15m', '7d'), []),
@@ -1152,10 +1130,11 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       fetchOptionalMarketData('IWM ETF flow chart', fetchYahooChart('IWM', '1d', '5d'), []),
       fetchOptionalMarketData('XLK ETF flow chart', fetchYahooChart('XLK', '1d', '5d'), []),
       fetchOptionalMarketData('XLV ETF flow chart', fetchYahooChart('XLV', '1d', '5d'), []),
-      fetchOptionalMarketData('CBOE options PCR', fetchYahooOptionsPCR('^SPX'), null),
+      fetchOptionalMarketData('CBOE cached options snapshot', fetchCachedCboeOptionsSnapshot(env, now), { pcrValue: null, calculatedGex: null }),
       getDisabledNewsSentiment(),
-      fetchOptionalMarketData('CBOE internal GEX calculator', fetchAndCalculateGEX(), null)
     ]);
+    const pcrValue = cboeOptionsSnapshot.pcrValue;
+    const calculatedGex = cboeOptionsSnapshot.calculatedGex;
 
     console.log('[DEBUG] Step 2: Calculating Indicators...');
     const spxInd = await calculateIndicators(spxQuotes);
@@ -1622,7 +1601,7 @@ async function runSpxGexHeatmapGeneration(env: Env, now: Date = new Date(), opti
   try {
     const result = await generateAndStoreSpxGexHeatmap({
       db: env.SPX_RECAP_DB,
-      dataClient: createSpxGexIntradayDataClient(),
+      dataClient: createSpxGexIntradayDataClient({ db: env.SPX_RECAP_DB, now }),
       now,
       force: options.force
     });
