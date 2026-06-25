@@ -33,6 +33,7 @@ dist-ssr
 # Custom tools / Agent outputs
 .agents/
 scratch/
+.tmp/
 uat_screenshots/
 .claude/
 .mcp.json
