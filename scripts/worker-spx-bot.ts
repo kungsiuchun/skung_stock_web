@@ -133,31 +133,58 @@ async function fetchWithTimeout(url: string, options: any, timeoutMs: number = 1
 // --- 輕量級 Yahoo Finance API 調用 ---
 
 async function fetchYahooChart(symbol: string, interval: string, range: string) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}`;
-  const response = await fetchWithTimeout(url, {
-    headers: { 'User-Agent': 'Mozilla/5.0' }
-  }, 10000); // 10s timeout for Yahoo
+  const encodedSymbol = encodeURIComponent(symbol);
+  const errors: string[] = [];
 
-  if (!response.ok) throw new Error(`Yahoo API error: ${response.statusText}`);
+  for (const host of ['query1.finance.yahoo.com', 'query2.finance.yahoo.com']) {
+    const url = `https://${host}/v8/finance/chart/${encodedSymbol}?interval=${interval}&range=${range}`;
+    try {
+      const response = await fetchWithTimeout(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0',
+          'Accept': 'application/json'
+        }
+      }, 10000);
+      const text = await response.text();
 
-  const data = await response.json() as any;
-  const result = data.chart.result?.[0];
-  if (!result) return [];
+      if (!response.ok) {
+        errors.push(`${host} HTTP ${response.status}: ${text.slice(0, 160)}`);
+        continue;
+      }
 
-  const timestamps = result.timestamp || [];
-  const quotes = result.indicators.quote[0];
+      const data = JSON.parse(text) as any;
+      const result = data.chart?.result?.[0];
+      const timestamps = result?.timestamp || [];
+      const quotes = result?.indicators?.quote?.[0];
+      if (!result || !quotes || timestamps.length === 0) {
+        errors.push(`${host} returned empty chart payload`);
+        continue;
+      }
 
-  // 轉換為分析函數期望的格式
-  return timestamps.map((t: number, i: number) => ({
-    date: new Date(t * 1000),
-    open: quotes.open[i],
-    high: quotes.high[i],
-    low: quotes.low[i],
-    close: quotes.close[i],
-    volume: quotes.volume[i]
-  })).filter((q: any) => q.close !== null);
+      return timestamps.map((t: number, i: number) => ({
+        date: new Date(t * 1000),
+        open: quotes.open?.[i],
+        high: quotes.high?.[i],
+        low: quotes.low?.[i],
+        close: quotes.close?.[i],
+        volume: quotes.volume?.[i]
+      })).filter((q: any) => q.close !== null);
+    } catch (error) {
+      errors.push(`${host}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  throw new Error(`Yahoo chart failed for ${symbol} ${interval}/${range}: ${errors.join(' | ')}`);
 }
 
+async function fetchOptionalMarketData<T>(label: string, task: Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await task;
+  } catch (error) {
+    console.error(`[DATA] Optional market data failed: ${label}`, error instanceof Error ? error.message : String(error));
+    return fallback;
+  }
+}
 // --- 輕量級 CBOE 期權 PCR 調用 (Yahoo cookie/crumb 已失效) ---
 async function fetchYahooOptionsPCR(symbol: string = '^SPX') {
   try {
@@ -1110,22 +1137,24 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     // Ensure IC fields exist for legacy memory
     if (!dailyMemory.icPosition) { dailyMemory.icPosition = 'NONE'; dailyMemory.icDeployTime = null; dailyMemory.icAction = null; }
 
-    console.log('[DEBUG] Step 1: Fetching Yahoo Quotes, Options, News, GEX & Multi-TF data...');
-    const [spxQuotes, spxQuotesM5, spxQuotesD1, spxQuotesH1, vixQuotes, vixQuotes3mo, vixQuotes9d, spyQuotes, iwmQuotes, xlkQuotes, xlvQuotes, pcrValue, sentimentData, calculatedGex] = await Promise.all([
+    console.log('[DEBUG] Step 1: Fetching core SPX data, optional market context, CBOE PCR & GEX...');
+    const [spxQuotes, spxQuotesM5] = await Promise.all([
       fetchYahooChart('^GSPC', '15m', '7d'),
-      fetchYahooChart('^GSPC', '5m', '2d'),
-      fetchYahooChart('^GSPC', '1d', '3mo'),   // PA: D1 macro structure
-      fetchYahooChart('^GSPC', '1h', '10d'),    // PA: 1H Order Blocks & FVG
-      fetchYahooChart('^VIX', '15m', '7d'),
-      fetchYahooChart('^VIX', '1d', '3mo'),     // IC: IV Percentile baseline
-      fetchYahooChart('^VIX9D', '1d', '3mo'),   // VIX Term Structure
-      fetchYahooChart('SPY', '1d', '5d'),       // ETF Flow
-      fetchYahooChart('IWM', '1d', '5d'),       // ETF Flow
-      fetchYahooChart('XLK', '1d', '5d'),       // ETF Flow
-      fetchYahooChart('XLV', '1d', '5d'),       // ETF Flow
-      fetchYahooOptionsPCR('^SPX'),
+      fetchYahooChart('^GSPC', '5m', '2d')
+    ]);
+    const [spxQuotesD1, spxQuotesH1, vixQuotes, vixQuotes3mo, vixQuotes9d, spyQuotes, iwmQuotes, xlkQuotes, xlvQuotes, pcrValue, sentimentData, calculatedGex] = await Promise.all([
+      fetchOptionalMarketData('SPX D1 price-action chart', fetchYahooChart('^GSPC', '1d', '3mo'), []),
+      fetchOptionalMarketData('SPX H1 price-action chart', fetchYahooChart('^GSPC', '1h', '10d'), []),
+      fetchOptionalMarketData('VIX 15m chart', fetchYahooChart('^VIX', '15m', '7d'), []),
+      fetchOptionalMarketData('VIX 3m chart', fetchYahooChart('^VIX', '1d', '3mo'), []),
+      fetchOptionalMarketData('VIX9D term-structure chart', fetchYahooChart('^VIX9D', '1d', '3mo'), []),
+      fetchOptionalMarketData('SPY ETF flow chart', fetchYahooChart('SPY', '1d', '5d'), []),
+      fetchOptionalMarketData('IWM ETF flow chart', fetchYahooChart('IWM', '1d', '5d'), []),
+      fetchOptionalMarketData('XLK ETF flow chart', fetchYahooChart('XLK', '1d', '5d'), []),
+      fetchOptionalMarketData('XLV ETF flow chart', fetchYahooChart('XLV', '1d', '5d'), []),
+      fetchOptionalMarketData('CBOE options PCR', fetchYahooOptionsPCR('^SPX'), null),
       getDisabledNewsSentiment(),
-      fetchAndCalculateGEX()
+      fetchOptionalMarketData('CBOE internal GEX calculator', fetchAndCalculateGEX(), null)
     ]);
 
     console.log('[DEBUG] Step 2: Calculating Indicators...');
@@ -1192,7 +1221,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
 
     // GEX 整合到 AI context
     const calculatedGexContext = calculatedGex ? {
-      source: `Internal Yahoo Options GEX Calculator (${calculatedGex.generatedAt})`,
+      source: `Internal CBOE Options GEX Calculator (${calculatedGex.generatedAt})`,
       gammaFlipLevel: calculatedGex.gammaFlipLevel,
       gammaStatus: calculatedGex.gammaStatus,
       broadGammaStatus: calculatedGex.broadGammaStatus,
@@ -1451,7 +1480,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
 ⏱️ <b>美東時間：${etTime} ET</b> | <b>標的：SPX</b>
 
 📡 <b>[期權 GEX 訊號]</b>${calculatedGex ? ` (${calculatedGex.generatedAt})` : ' 數據缺失'}
-${calculatedGex ? `來源：<code>Internal Yahoo Options GEX Calculator</code>
+${calculatedGex ? `來源：<code>Internal CBOE Options GEX Calculator</code>
 系統態勢：<b>${calculatedGex.gammaStatus === 'positive_gamma' ? '✅ Positive Gamma — 橡皮筋模式（做市商吸收波動）' : '⚠️ Negative Gamma — 滑滑梯模式（波動放大）'}</b>
 🔄 Gamma Flip (ZG)：<code>${calculatedGex.gammaFlipLevel}</code> (${(spxInd.currentClose > (calculatedGex.gammaFlipLevel || 0)) ? '在 Flip 之上↑ 多方有利' : '在 Flip 之下↓ 空方佔優'})
 🟢 最強多方 (SG_High)：<code>${calculatedGex.mostLongStrike}</code> (${calculatedGex.mostLongGex}) | 🔴 最強空方 (SG_Low)：<code>${calculatedGex.mostShortStrike}</code> (${calculatedGex.mostShortGex})

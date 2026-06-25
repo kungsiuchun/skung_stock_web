@@ -34,6 +34,8 @@ export interface SpxGexOptionLeg {
 }
 
 export type SpxGexInputStatus = "reported" | "missing" | "absent";
+export type SpxGexIvSource = "reported" | "repaired_from_mid" | "excluded_low_time_value" | "unpriced" | "missing" | "absent";
+export type SpxGexPricingQuality = "priced" | "repaired" | "partial" | "unpriced";
 
 export interface SpxGexOptionChain {
   symbol: string;
@@ -85,10 +87,24 @@ export interface SpxGexHeatmapCell {
   approximate?: boolean;
   callIv?: number | null;
   putIv?: number | null;
+  callRawIv?: number | null;
+  putRawIv?: number | null;
   callIvPercent?: number | null;
   putIvPercent?: number | null;
+  callBid?: number | null;
+  callAsk?: number | null;
+  callMid?: number | null;
+  callLastPrice?: number | null;
+  putBid?: number | null;
+  putAsk?: number | null;
+  putMid?: number | null;
+  putLastPrice?: number | null;
   gammaIv?: number | null;
   gammaIvPercent?: number | null;
+  callIvSource?: SpxGexIvSource;
+  putIvSource?: SpxGexIvSource;
+  pricingQuality?: SpxGexPricingQuality;
+  repairNotes?: string[];
   callEffectiveOpenInterest?: number | null;
   putEffectiveOpenInterest?: number | null;
   callOpenInterestStatus?: SpxGexInputStatus;
@@ -213,6 +229,16 @@ export interface SpxGexHeatmapModel {
     gexTopRows: number;
     note: string;
   };
+  dataQuality?: SpxGexDataQualitySummary;
+}
+
+export interface SpxGexDataQualitySummary {
+  total: number;
+  priced: number;
+  repaired: number;
+  partial: number;
+  unpriced: number;
+  excluded: number;
 }
 
 export interface SpxGexSessionSummary {
@@ -530,6 +556,91 @@ const normalizeIv = (value: number | null | undefined) => {
   return Math.min(5, Math.max(0.01, decimal));
 };
 
+const rawIvValue = (value: number | null | undefined) => (
+  typeof value === "number" && Number.isFinite(value) ? value : null
+);
+
+const optionMid = (leg: SpxGexOptionLeg | undefined) => {
+  const bid = finiteNumberOrNull(leg?.bid);
+  const ask = finiteNumberOrNull(leg?.ask);
+  if (bid === null || ask === null || bid < 0 || ask < bid) return null;
+  return (bid + ask) / 2;
+};
+
+const optionIntrinsic = (side: "call" | "put", spot: number, strike: number) => (
+  side === "call" ? Math.max(0, spot - strike) : Math.max(0, strike - spot)
+);
+
+const optionTimeValue = (side: "call" | "put", spot: number, strike: number, price: number) => (
+  Math.max(0, price - optionIntrinsic(side, spot, strike))
+);
+
+const hasNearZeroTimeValue = (side: "call" | "put", leg: SpxGexOptionLeg, spot: number, strike: number) => {
+  const mid = optionMid(leg);
+  const last = finiteNumberOrNull(leg.lastPrice);
+  const price = mid ?? last;
+  if (price === null) return false;
+  const intrinsic = optionIntrinsic(side, spot, strike);
+  const timeValue = optionTimeValue(side, spot, strike, price);
+  const isOtm = side === "call" ? strike > spot : strike < spot;
+  return (isOtm && price <= 0.1) || (!isOtm && intrinsic > 0 && timeValue <= 0.1);
+};
+
+const blackScholesOptionPrice = (input: {
+  side: "call" | "put";
+  spot: number;
+  strike: number;
+  yearsToExpiry: number;
+  iv: number;
+}) => {
+  const sigma = normalizeIv(input.iv);
+  if (input.spot <= 0 || input.strike <= 0 || sigma === null) return null;
+  const t = Math.max(MIN_DTE_YEARS, input.yearsToExpiry);
+  const sqrtT = Math.sqrt(t);
+  const d1 = (Math.log(input.spot / input.strike) + (RISK_FREE_RATE + 0.5 * sigma * sigma) * t) / (sigma * sqrtT);
+  const d2 = d1 - sigma * sqrtT;
+  const discountedStrike = input.strike * Math.exp(-RISK_FREE_RATE * t);
+  return input.side === "call"
+    ? input.spot * normalCdf(d1) - discountedStrike * normalCdf(d2)
+    : discountedStrike * normalCdf(-d2) - input.spot * normalCdf(-d1);
+};
+
+const impliedIvFromMid = (input: {
+  side: "call" | "put";
+  spot: number;
+  strike: number;
+  yearsToExpiry: number;
+  leg: SpxGexOptionLeg;
+}) => {
+  const bid = finiteNumberOrNull(input.leg.bid);
+  const ask = finiteNumberOrNull(input.leg.ask);
+  const mid = optionMid(input.leg);
+  if (bid === null || ask === null || mid === null || mid <= 0) return null;
+
+  const spread = ask - bid;
+  if (spread > Math.max(10, mid * 1.25)) return null;
+
+  const intrinsic = optionIntrinsic(input.side, input.spot, input.strike);
+  if (mid <= intrinsic + 0.01) return null;
+
+  const lowIv = 0.0001;
+  const highIv = 3;
+  const lowPrice = blackScholesOptionPrice({ ...input, iv: lowIv });
+  const highPrice = blackScholesOptionPrice({ ...input, iv: highIv });
+  if (lowPrice === null || highPrice === null || mid < lowPrice - 0.01 || mid > highPrice + 0.01) return null;
+
+  let low = lowIv;
+  let high = highIv;
+  for (let step = 0; step < 64; step += 1) {
+    const candidate = (low + high) / 2;
+    const price = blackScholesOptionPrice({ ...input, iv: candidate });
+    if (price === null) return null;
+    if (price > mid) high = candidate;
+    else low = candidate;
+  }
+  return normalizeIv((low + high) / 2);
+};
+
 const finiteNumberOrNull = (value: unknown) => (
   typeof value === "number" && Number.isFinite(value) ? value : null
 );
@@ -581,34 +692,24 @@ export const calculateBlackScholesExposures = (input: {
   gammaIv?: number;
 }) => {
   const gammaSigma = normalizeIv(input.gammaIv) ?? blendedGammaIv(input.callIv, input.putIv);
-  const calculateSide = (side: "call" | "put", iv: number, oi: number) => {
-    const sigma = normalizeIv(iv);
-    if (input.spot <= 0 || input.strike <= 0 || oi <= 0 || sigma === null || gammaSigma === null) {
-      return { deltaExposure: 0, gammaExposure: 0, vannaExposure: 0, charmExposure: 0 };
-    }
-
-    const t = Math.max(MIN_DTE_YEARS, input.yearsToExpiry);
-    const sqrtT = Math.sqrt(t);
-    const d1 = (Math.log(input.spot / input.strike) + (RISK_FREE_RATE + 0.5 * sigma * sigma) * t) / (sigma * sqrtT);
-    const d2 = d1 - sigma * sqrtT;
-    const gammaD1 = (Math.log(input.spot / input.strike) + (RISK_FREE_RATE + 0.5 * gammaSigma * gammaSigma) * t) / (gammaSigma * sqrtT);
-    const pdf = normalPdf(d1);
-    const gammaPdf = normalPdf(gammaD1);
-    const delta = side === "call" ? normalCdf(d1) : normalCdf(d1) - 1;
-    const gamma = gammaPdf / (input.spot * gammaSigma * sqrtT);
-    const vanna = -pdf * d2 / sigma;
-    const charm = -pdf * ((2 * RISK_FREE_RATE * t) - (d2 * sigma * sqrtT)) / (2 * t * sigma * sqrtT);
-
-    return {
-      deltaExposure: delta * oi * CONTRACT_MULTIPLIER * input.spot,
-      gammaExposure: gamma * oi * CONTRACT_MULTIPLIER * input.spot * input.spot * 0.01,
-      vannaExposure: vanna * oi * CONTRACT_MULTIPLIER * input.spot * 0.01,
-      charmExposure: charm * oi * CONTRACT_MULTIPLIER * input.spot / 365,
-    };
-  };
-
-  const call = calculateSide("call", input.callIv, input.callOpenInterest);
-  const put = calculateSide("put", input.putIv, input.putOpenInterest);
+  const call = calculateBlackScholesSideExposure({
+    side: "call",
+    spot: input.spot,
+    strike: input.strike,
+    yearsToExpiry: input.yearsToExpiry,
+    openInterest: input.callOpenInterest,
+    iv: input.callIv,
+    gammaIv: gammaSigma ?? undefined,
+  });
+  const put = calculateBlackScholesSideExposure({
+    side: "put",
+    spot: input.spot,
+    strike: input.strike,
+    yearsToExpiry: input.yearsToExpiry,
+    openInterest: input.putOpenInterest,
+    iv: input.putIv,
+    gammaIv: gammaSigma ?? undefined,
+  });
 
   return {
     callGex: call.gammaExposure,
@@ -626,6 +727,155 @@ export const calculateBlackScholesExposures = (input: {
   };
 };
 
+const calculateBlackScholesSideExposure = (input: {
+  side: "call" | "put";
+  spot: number;
+  strike: number;
+  yearsToExpiry: number;
+  openInterest: number;
+  iv: number;
+  gammaIv?: number;
+}) => {
+  const sigma = normalizeIv(input.iv);
+  const gammaSigma = normalizeIv(input.gammaIv) ?? sigma;
+  if (input.spot <= 0 || input.strike <= 0 || input.openInterest <= 0 || sigma === null || gammaSigma === null) {
+    return { deltaExposure: 0, gammaExposure: 0, vannaExposure: 0, charmExposure: 0 };
+  }
+
+  const t = Math.max(MIN_DTE_YEARS, input.yearsToExpiry);
+  const sqrtT = Math.sqrt(t);
+  const d1 = (Math.log(input.spot / input.strike) + (RISK_FREE_RATE + 0.5 * sigma * sigma) * t) / (sigma * sqrtT);
+  const d2 = d1 - sigma * sqrtT;
+  const gammaD1 = (Math.log(input.spot / input.strike) + (RISK_FREE_RATE + 0.5 * gammaSigma * gammaSigma) * t) / (gammaSigma * sqrtT);
+  const pdf = normalPdf(d1);
+  const gammaPdf = normalPdf(gammaD1);
+  const delta = input.side === "call" ? normalCdf(d1) : normalCdf(d1) - 1;
+  const gamma = gammaPdf / (input.spot * gammaSigma * sqrtT);
+  const vanna = -pdf * d2 / sigma;
+  const charm = -pdf * ((2 * RISK_FREE_RATE * t) - (d2 * sigma * sqrtT)) / (2 * t * sigma * sqrtT);
+
+  return {
+    deltaExposure: delta * input.openInterest * CONTRACT_MULTIPLIER * input.spot,
+    gammaExposure: gamma * input.openInterest * CONTRACT_MULTIPLIER * input.spot * input.spot * 0.01,
+    vannaExposure: vanna * input.openInterest * CONTRACT_MULTIPLIER * input.spot * 0.01,
+    charmExposure: charm * input.openInterest * CONTRACT_MULTIPLIER * input.spot / 365,
+  };
+};
+
+interface ResolvedSideIv {
+  side: "call" | "put";
+  rawIv: number | null;
+  iv: number | null;
+  source: SpxGexIvSource;
+  status: SpxGexInputStatus;
+  canPrice: boolean;
+  excluded: boolean;
+  reason: string | null;
+  note: string | null;
+}
+
+const resolveSideIv = (input: {
+  side: "call" | "put";
+  leg: SpxGexOptionLeg | undefined;
+  spot: number;
+  strike: number;
+  yearsToExpiry: number;
+}): ResolvedSideIv => {
+  const label = input.side;
+  if (!input.leg) {
+    return {
+      side: input.side,
+      rawIv: null,
+      iv: null,
+      source: "absent",
+      status: "absent",
+      canPrice: false,
+      excluded: false,
+      reason: `absent ${label} IV`,
+      note: null,
+    };
+  }
+
+  const rawIv = rawIvValue(input.leg.impliedVolatility);
+  const reportedIv = normalizeIv(rawIv);
+  if (reportedIv !== null) {
+    return {
+      side: input.side,
+      rawIv,
+      iv: reportedIv,
+      source: "reported",
+      status: "reported",
+      canPrice: true,
+      excluded: false,
+      reason: null,
+      note: null,
+    };
+  }
+
+  if (rawIv === null) {
+    return {
+      side: input.side,
+      rawIv,
+      iv: null,
+      source: "missing",
+      status: "missing",
+      canPrice: false,
+      excluded: false,
+      reason: `missing ${label} IV`,
+      note: null,
+    };
+  }
+
+  const mid = optionMid(input.leg);
+  if (hasNearZeroTimeValue(input.side, input.leg, input.spot, input.strike)) {
+    return {
+      side: input.side,
+      rawIv,
+      iv: null,
+      source: "excluded_low_time_value",
+      status: "reported",
+      canPrice: false,
+      excluded: true,
+      reason: `excluded ${label} IV`,
+      note: `${label} IV excluded as low time value; gamma treated as 0`,
+    };
+  }
+
+  const repairedIv = impliedIvFromMid({
+    side: input.side,
+    spot: input.spot,
+    strike: input.strike,
+    yearsToExpiry: input.yearsToExpiry,
+    leg: input.leg,
+  });
+  if (repairedIv !== null) {
+    const midText = typeof mid === "number" && Number.isFinite(mid) ? mid.toFixed(2) : "n/a";
+    return {
+      side: input.side,
+      rawIv,
+      iv: repairedIv,
+      source: "repaired_from_mid",
+      status: "reported",
+      canPrice: true,
+      excluded: false,
+      reason: null,
+      note: `${label} IV repaired from bid/ask mid ${midText} -> ${roundTo(repairedIv * 100, 2).toFixed(2)}%`,
+    };
+  }
+
+  return {
+    side: input.side,
+    rawIv,
+    iv: null,
+    source: "unpriced",
+    status: "reported",
+    canPrice: false,
+    excluded: false,
+    reason: `unpriced ${label} IV`,
+    note: `${label} IV reported as ${rawIv} but bid/ask could not produce a safe implied volatility`,
+  };
+};
+
 const optionCellForStrike = (chain: SpxGexOptionChain, strike: number, now: Date): SpxGexHeatmapCell => {
   const call = chain.calls.find((leg) => leg.strike === strike);
   const put = chain.puts.find((leg) => leg.strike === strike);
@@ -633,36 +883,79 @@ const optionCellForStrike = (chain: SpxGexOptionChain, strike: number, now: Date
   const putOpenInterest = nonNegativeNumberOrNull(put?.openInterest);
   const callEffectiveOpenInterest = callOpenInterest;
   const putEffectiveOpenInterest = putOpenInterest;
-  const callIv = normalizeIv(call?.impliedVolatility);
-  const putIv = normalizeIv(put?.impliedVolatility);
+  const yearsToExpiry = expiryToYears(chain.selectedExpiry || "", now);
+  const callResolvedIv = resolveSideIv({ side: "call", leg: call, spot: chain.spot, strike, yearsToExpiry });
+  const putResolvedIv = resolveSideIv({ side: "put", leg: put, spot: chain.spot, strike, yearsToExpiry });
+  const callIv = callResolvedIv.iv;
+  const putIv = putResolvedIv.iv;
   const callIvPercent = callIv === null ? null : roundTo(callIv * 100, 2);
   const putIvPercent = putIv === null ? null : roundTo(putIv * 100, 2);
-  const rawGammaIv = blendedGammaIv(call?.impliedVolatility, put?.impliedVolatility);
+  const calculableIvs = [callResolvedIv, putResolvedIv]
+    .filter((resolution) => resolution.canPrice && resolution.iv !== null)
+    .map((resolution) => resolution.iv as number);
+  const rawGammaIv = callResolvedIv.canPrice && putResolvedIv.canPrice
+    ? blendedGammaIv(callIv, putIv)
+    : calculableIvs.length === 1
+      ? calculableIvs[0]
+      : null;
   const gammaIv = rawGammaIv === null ? null : roundTo(rawGammaIv, 6);
   const gammaIvPercent = gammaIv === null ? null : roundTo(gammaIv * 100, 2);
-  const yearsToExpiry = expiryToYears(chain.selectedExpiry || "", now);
   const callOpenInterestStatus = inputStatus(call, call?.openInterest);
   const putOpenInterestStatus = inputStatus(put, put?.openInterest);
-  const callIvStatus = inputStatus(call, call?.impliedVolatility);
-  const putIvStatus = inputStatus(put, put?.impliedVolatility);
+  const callIvStatus = callResolvedIv.status;
+  const putIvStatus = putResolvedIv.status;
   const missingReasons = [
     callOpenInterestStatus !== "reported" ? `${callOpenInterestStatus} call open interest` : null,
     putOpenInterestStatus !== "reported" ? `${putOpenInterestStatus} put open interest` : null,
-    callIvStatus !== "reported" ? `${callIvStatus} call IV` : null,
-    putIvStatus !== "reported" ? `${putIvStatus} put IV` : null,
+    callResolvedIv.reason,
+    putResolvedIv.reason,
   ].filter((reason): reason is string => Boolean(reason));
-  const hasAuditInputs = missingReasons.length === 0 && callIv !== null && putIv !== null && gammaIv !== null && callOpenInterest !== null && putOpenInterest !== null;
-  const exposures = hasAuditInputs
-    ? calculateBlackScholesExposures({
+  const hasOpenInterestInputs = callOpenInterest !== null && putOpenInterest !== null;
+  const fullPriced = callResolvedIv.canPrice && putResolvedIv.canPrice;
+  const partialPriced = hasOpenInterestInputs && gammaIv !== null && (
+    (callResolvedIv.canPrice && putResolvedIv.excluded) || (putResolvedIv.canPrice && callResolvedIv.excluded)
+  );
+  const repaired = callResolvedIv.source === "repaired_from_mid" || putResolvedIv.source === "repaired_from_mid";
+  const hasAuditInputs = hasOpenInterestInputs && gammaIv !== null && (fullPriced || partialPriced);
+  const pricingQuality: SpxGexPricingQuality = hasAuditInputs
+    ? partialPriced
+      ? "partial"
+      : repaired
+        ? "repaired"
+        : "priced"
+    : "unpriced";
+  const callSideExposure = hasAuditInputs && callResolvedIv.canPrice && callIv !== null
+    ? calculateBlackScholesSideExposure({
+      side: "call",
       spot: chain.spot,
       strike,
       yearsToExpiry,
-      callOpenInterest,
-      putOpenInterest,
-      callIv,
-      putIv,
+      openInterest: callOpenInterest,
+      iv: callIv,
       gammaIv,
     })
+    : { deltaExposure: 0, gammaExposure: 0, vannaExposure: 0, charmExposure: 0 };
+  const putSideExposure = hasAuditInputs && putResolvedIv.canPrice && putIv !== null
+    ? calculateBlackScholesSideExposure({
+      side: "put",
+      spot: chain.spot,
+      strike,
+      yearsToExpiry,
+      openInterest: putOpenInterest,
+      iv: putIv,
+      gammaIv,
+    })
+    : { deltaExposure: 0, gammaExposure: 0, vannaExposure: 0, charmExposure: 0 };
+  const repairNotes = [callResolvedIv.note, putResolvedIv.note].filter((note): note is string => Boolean(note));
+  const exposures = hasAuditInputs
+    ? {
+      callGex: callSideExposure.gammaExposure,
+      putGex: -putSideExposure.gammaExposure,
+      netGex: callSideExposure.gammaExposure - putSideExposure.gammaExposure,
+      netDex: callSideExposure.deltaExposure + putSideExposure.deltaExposure,
+      netVex: callSideExposure.vannaExposure + putSideExposure.vannaExposure,
+      netCex: callSideExposure.charmExposure + putSideExposure.charmExposure,
+    }
     : null;
 
   return {
@@ -679,13 +972,27 @@ const optionCellForStrike = (chain: SpxGexOptionChain, strike: number, now: Date
     totalOpenInterest: callOpenInterest !== null && putOpenInterest !== null ? callOpenInterest + putOpenInterest : null,
     totalVolume: sumFinite([call?.volume, put?.volume]),
     avgIv: callIvPercent === null || putIvPercent === null ? null : roundTo((callIvPercent + putIvPercent) / 2, 2),
-    approximate: !hasAuditInputs,
+    approximate: pricingQuality !== "priced",
     callIv,
     putIv,
+    callRawIv: callResolvedIv.rawIv,
+    putRawIv: putResolvedIv.rawIv,
     callIvPercent,
     putIvPercent,
+    callBid: nonNegativeNumberOrNull(call?.bid),
+    callAsk: nonNegativeNumberOrNull(call?.ask),
+    callMid: optionMid(call),
+    callLastPrice: nonNegativeNumberOrNull(call?.lastPrice),
+    putBid: nonNegativeNumberOrNull(put?.bid),
+    putAsk: nonNegativeNumberOrNull(put?.ask),
+    putMid: optionMid(put),
+    putLastPrice: nonNegativeNumberOrNull(put?.lastPrice),
     gammaIv,
     gammaIvPercent,
+    callIvSource: callResolvedIv.source,
+    putIvSource: putResolvedIv.source,
+    pricingQuality,
+    repairNotes,
     callEffectiveOpenInterest,
     putEffectiveOpenInterest,
     callOpenInterestStatus,
@@ -724,6 +1031,18 @@ const buildGammaFlipFromProfiles = (profiles: Array<{ strike: number; netGex: nu
   if (candidates.length === 0) return null;
   return Number(candidates.reduce((nearest, candidate) => Math.abs(candidate - spot) < Math.abs(nearest - spot) ? candidate : nearest).toFixed(2));
 };
+
+const buildDataQualitySummary = (cells: SpxGexHeatmapCell[]): SpxGexDataQualitySummary => ({
+  total: cells.length,
+  priced: cells.filter((cell) => cell.pricingQuality === "priced").length,
+  repaired: cells.filter((cell) => cell.pricingQuality === "repaired").length,
+  partial: cells.filter((cell) => cell.pricingQuality === "partial").length,
+  unpriced: cells.filter((cell) => cell.pricingQuality === "unpriced" || !cell.pricingQuality).length,
+  excluded: cells.filter((cell) => cell.callIvSource === "excluded_low_time_value" || cell.putIvSource === "excluded_low_time_value").length,
+});
+
+const formatDataQualitySummary = (summary: SpxGexDataQualitySummary) =>
+  `Data quality: priced ${summary.priced} · repaired ${summary.repaired} · partial ${summary.partial} · unpriced ${summary.unpriced} · excluded ${summary.excluded}.`;
 
 const uniqueSortedStrikes = (chains: SpxGexOptionChain[], spot: number, maxStrikes: number) => {
   const lower = spot * (1 - DEFAULT_STRIKE_RANGE_PCT);
@@ -1017,6 +1336,7 @@ export const buildSpxGexHeatmapFromOptionChains = (input: BuildSpxGexHeatmapFrom
   const sourceTimestamp = chainSource?.timestamp ? ` Source timestamp: ${chainSource.timestamp}.` : "";
   const strikes = uniqueSortedStrikes(activeChains, quote.last, input.maxStrikes ?? DEFAULT_MAX_STRIKES);
   const cells = activeChains.flatMap((chain) => strikes.map((strike) => optionCellForStrike(chain, strike, now)));
+  const dataQuality = buildDataQualitySummary(cells);
   const totals = selectedExpiries.map((expiry) => {
     const expiryCells = cells.filter((cell) => cell.expdate === expiry);
     return {
@@ -1080,8 +1400,9 @@ export const buildSpxGexHeatmapFromOptionChains = (input: BuildSpxGexHeatmapFrom
       gexTool: "black_scholes_exposure_engine",
       zeroDteTool: "black_scholes_exposure_engine",
       gexTopRows: input.maxStrikes ?? DEFAULT_MAX_STRIKES,
-      note: `${sourceLabel} option chains are transformed into Black-Scholes GEX, DEX, VEX (vanna), and CEX (charm) approximations.${sourceTimestamp} Missing IV/OI is not substituted; cells without required audit inputs remain no-data. ${BLENDED_IV_SOURCE_NOTE}`,
+      note: `${sourceLabel} option chains are transformed into Black-Scholes GEX, DEX, VEX (vanna), and CEX (charm) approximations.${sourceTimestamp} Missing IV/OI is not substituted; zero IV is repaired only from safe bid/ask mid or labelled unpriced. ${formatDataQualitySummary(dataQuality)} ${BLENDED_IV_SOURCE_NOTE}`,
     },
+    dataQuality,
   };
 
   return {
@@ -1143,18 +1464,50 @@ const isAuditedBlendedCell = (cell: SpxGexHeatmapCell) => (
   && Number.isFinite(cell.gammaIv)
 );
 
+const normalizeStoredCellAuditMetadata = (cell: SpxGexHeatmapCell): SpxGexHeatmapCell => {
+  if (isAuditedBlendedCell(cell)) {
+    return {
+      ...cell,
+      callRawIv: cell.callRawIv ?? cell.callIv ?? null,
+      putRawIv: cell.putRawIv ?? cell.putIv ?? null,
+      callIvSource: cell.callIvSource ?? "reported",
+      putIvSource: cell.putIvSource ?? "reported",
+      pricingQuality: cell.pricingQuality ?? "priced",
+      repairNotes: cell.repairNotes ?? [],
+      missingReasons: cell.missingReasons ?? [],
+    };
+  }
+
+  const missingReasons = [
+    ...(cell.missingReasons ?? []),
+    cell.callIvStatus === "reported" && normalizeIv(cell.callIv) === null ? "unpriced call IV" : null,
+    cell.putIvStatus === "reported" && normalizeIv(cell.putIv) === null ? "unpriced put IV" : null,
+  ].filter((reason): reason is string => Boolean(reason));
+
+  return {
+    ...cell,
+    callRawIv: cell.callRawIv ?? cell.callIv ?? null,
+    putRawIv: cell.putRawIv ?? cell.putIv ?? null,
+    callIvSource: cell.callIvSource ?? (cell.callIvStatus === "absent" ? "absent" : cell.callIvStatus === "missing" ? "missing" : "unpriced"),
+    putIvSource: cell.putIvSource ?? (cell.putIvStatus === "absent" ? "absent" : cell.putIvStatus === "missing" ? "missing" : "unpriced"),
+    pricingQuality: cell.pricingQuality ?? "unpriced",
+    repairNotes: cell.repairNotes ?? [],
+    missingReasons: Array.from(new Set(missingReasons)),
+  };
+};
+
 const recomputeCellWithBlendedIv = (cell: SpxGexHeatmapCell, spot: number): SpxGexHeatmapCell => {
-  if (isAuditedBlendedCell(cell)) return cell;
+  if (isAuditedBlendedCell(cell)) return normalizeStoredCellAuditMetadata(cell);
 
   const callIv = normalizeIv(cell.callIv);
   const putIv = normalizeIv(cell.putIv);
   const gammaIvRaw = blendedGammaIv(cell.callIv, cell.putIv);
   const yearsToExpiry = typeof cell.yearsToExpiry === "number" && Number.isFinite(cell.yearsToExpiry)
     ? cell.yearsToExpiry
-    : typeof cell.dteHours === "number" && Number.isFinite(cell.dteHours)
-      ? cell.dteHours / (365 * 24)
-      : null;
-  if (callIv === null || putIv === null || gammaIvRaw === null || yearsToExpiry === null) return cell;
+      : typeof cell.dteHours === "number" && Number.isFinite(cell.dteHours)
+        ? cell.dteHours / (365 * 24)
+        : null;
+  if (callIv === null || putIv === null || gammaIvRaw === null || yearsToExpiry === null) return normalizeStoredCellAuditMetadata(cell);
 
   const gammaIv = roundTo(gammaIvRaw, 6);
   const callIvPercent = roundTo(callIv * 100, 2);
@@ -1162,7 +1515,7 @@ const recomputeCellWithBlendedIv = (cell: SpxGexHeatmapCell, spot: number): SpxG
   const gammaIvPercent = roundTo(gammaIv * 100, 2);
   const callEffectiveOpenInterest = nonNegativeNumberOrNull(cell.callOpenInterest);
   const putEffectiveOpenInterest = nonNegativeNumberOrNull(cell.putOpenInterest);
-  if (callEffectiveOpenInterest === null || putEffectiveOpenInterest === null) return cell;
+  if (callEffectiveOpenInterest === null || putEffectiveOpenInterest === null) return normalizeStoredCellAuditMetadata(cell);
   const exposures = calculateBlackScholesExposures({
     spot,
     strike: cell.strike,
@@ -1184,10 +1537,16 @@ const recomputeCellWithBlendedIv = (cell: SpxGexHeatmapCell, spot: number): SpxG
     netCex: Math.round(exposures.netCex),
     callIv,
     putIv,
+    callRawIv: cell.callRawIv ?? cell.callIv ?? null,
+    putRawIv: cell.putRawIv ?? cell.putIv ?? null,
     callIvPercent,
     putIvPercent,
     gammaIv,
     gammaIvPercent,
+    callIvSource: cell.callIvSource ?? "reported",
+    putIvSource: cell.putIvSource ?? "reported",
+    pricingQuality: cell.pricingQuality ?? "priced",
+    repairNotes: cell.repairNotes ?? [],
     callEffectiveOpenInterest,
     putEffectiveOpenInterest,
     callOpenInterestStatus: "reported",
@@ -1216,6 +1575,7 @@ const buildExposureTotals = (selectedExpiries: string[], cells: SpxGexHeatmapCel
 
 const normalizeBlendedIvExposure = (heatmap: SpxGexHeatmapModel): SpxGexHeatmapModel => {
   const cells = heatmap.cells.map((cell) => recomputeCellWithBlendedIv(cell, heatmap.quote.last));
+  const dataQuality = buildDataQualitySummary(cells);
 
   const totals = buildExposureTotals(heatmap.selectedExpiries, cells);
   const rawStrikeProfiles = buildStrikeProfiles(heatmap.strikes, heatmap.selectedExpiries, cells, heatmap.quote.last);
@@ -1257,8 +1617,9 @@ const normalizeBlendedIvExposure = (heatmap: SpxGexHeatmapModel): SpxGexHeatmapM
     strikeProfiles: annotatedStrikeProfiles,
     source: {
       ...heatmap.source,
-      note: noteWithBlendedIv(heatmap.source.note),
+      note: `${noteWithBlendedIv(heatmap.source.note)} ${formatDataQualitySummary(dataQuality)}`,
     },
+    dataQuality,
   };
   return {
     ...normalizedHeatmap,

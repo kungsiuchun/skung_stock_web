@@ -8,6 +8,9 @@ const MARKET_TIME_ZONE = "America/New_York";
 type OptionSide = "C" | "P";
 type FetchJson = () => Promise<unknown>;
 
+const CBOE_FETCH_TIMEOUT_MS = 12_000;
+const CBOE_FETCH_ATTEMPTS = 2;
+
 export interface ParsedCboeOptionSymbol {
   root: string;
   expiry: string;
@@ -135,17 +138,35 @@ export const parseCboeSpxOptionsPayload = (
 };
 
 const fetchCboeJson = async () => {
-  const response = await fetch(CBOE_SPX_OPTIONS_URL, {
-    headers: {
-      "User-Agent": CBOE_USER_AGENT,
-      Accept: "application/json",
-    },
-  });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`Cboe delayed options request failed ${response.status}: ${text.slice(0, 180)}`);
+  const errors: string[] = [];
+
+  for (let attempt = 1; attempt <= CBOE_FETCH_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), CBOE_FETCH_TIMEOUT_MS);
+    try {
+      const response = await fetch(CBOE_SPX_OPTIONS_URL, {
+        headers: {
+          "User-Agent": CBOE_USER_AGENT,
+          Accept: "application/json",
+        },
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`HTTP ${response.status}: ${text.slice(0, 180)}`);
+      }
+
+      return await response.json() as unknown;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`attempt ${attempt}: ${message}`);
+    }
   }
-  return JSON.parse(text) as unknown;
+
+  throw new Error(`Cboe delayed options request failed after ${CBOE_FETCH_ATTEMPTS} attempts: ${errors.join(" | ")}`);
 };
 
 export class CboeSpxGexDataClient implements SpxGexDataClient {
@@ -264,13 +285,15 @@ export class FallbackSpxGexDataClient implements SpxGexDataClient {
   }
 
   async getMarketContext(): Promise<SpxGexMarketContext> {
-    if (this.fallback.getMarketContext) return this.fallback.getMarketContext();
+    const client = await this.selectedClient();
+    if (client === this.fallback && this.fallback.getMarketContext) return this.fallback.getMarketContext();
+
     return {
       macroRegime: null,
       breadth: null,
       flow: null,
       latestHeadline: null,
-      warnings: [],
+      warnings: ["Cboe delayed source selected; Yahoo market context skipped to keep heatmap generation independent of Yahoo crumb/4xx failures."],
     };
   }
 }

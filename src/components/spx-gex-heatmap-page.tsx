@@ -47,26 +47,46 @@ const formatYears = (value: number | null | undefined) => {
   return value.toFixed(6);
 };
 
+const formatIvSource = (source: string | null | undefined) => source ? source.replace(/_/g, " ") : "n/a";
+
+const cellDisplayLabel = (cell: SpxGexHeatmapCell | undefined) => {
+  if (!cell) return "-";
+  if (typeof cell.netGex === "number" && Number.isFinite(cell.netGex)) return formatCompact(cell.netGex);
+  if (cell.callIvSource === "excluded_low_time_value" || cell.putIvSource === "excluded_low_time_value") return "excluded";
+  if (cell.pricingQuality === "unpriced") return "unpriced";
+  return "no-data";
+};
+
+const cellBadges = (cell: SpxGexHeatmapCell | undefined) => {
+  if (!cell || typeof cell.netGex !== "number" || !Number.isFinite(cell.netGex)) return [];
+  const badges: string[] = [];
+  if (cell.pricingQuality === "repaired") badges.push("R");
+  if (cell.pricingQuality === "partial") badges.push("partial");
+  return badges;
+};
+
 const cellAuditLines = (cell: SpxGexHeatmapCell | undefined) => {
   if (!cell) return [];
-  if (cell.model !== "black_scholes_gamma_exposure_blended_iv") {
-    return [
-      `Strike ${cell.strike} ${cell.expdate}`,
-      "No audited GEX data",
-      ...(cell.missingReasons?.length ? [`Missing: ${cell.missingReasons.join(", ")}`] : []),
-    ];
-  }
+  const priced = typeof cell.netGex === "number" && Number.isFinite(cell.netGex);
   return [
     `Strike ${cell.strike} ${cell.expdate}`,
-    `Net GEX ${formatSignedCompact(cell.netGex)} = Call ${formatSignedCompact(cell.callGex)} + Put ${formatSignedCompact(cell.putGex)}`,
+    `Quality ${cell.pricingQuality || "legacy"} / Model ${cell.model || "none"}`,
+    priced
+      ? `Net GEX ${formatSignedCompact(cell.netGex)} = Call ${formatSignedCompact(cell.callGex)} + Put ${formatSignedCompact(cell.putGex)}`
+      : `State ${cellDisplayLabel(cell)}`,
     `Gamma IV ${formatPercent(cell.gammaIvPercent)}`,
-    `Call IV ${formatPercent(cell.callIvPercent)} / Put IV ${formatPercent(cell.putIvPercent)}`,
+    `Call IV raw ${formatNumber(cell.callRawIv)} -> ${formatPercent(cell.callIvPercent)} (${formatIvSource(cell.callIvSource)})`,
+    `Put IV raw ${formatNumber(cell.putRawIv)} -> ${formatPercent(cell.putIvPercent)} (${formatIvSource(cell.putIvSource)})`,
+    `Call bid/ask/last ${formatNumber(cell.callBid)} / ${formatNumber(cell.callAsk)} / ${formatNumber(cell.callLastPrice)}`,
+    `Put bid/ask/last ${formatNumber(cell.putBid)} / ${formatNumber(cell.putAsk)} / ${formatNumber(cell.putLastPrice)}`,
     `Call OI ${formatNumber(cell.callOpenInterest)} / Put OI ${formatNumber(cell.putOpenInterest)}`,
     `Effective OI C ${formatNumber(cell.callEffectiveOpenInterest)} / P ${formatNumber(cell.putEffectiveOpenInterest)}`,
     `DTE ${formatNumber(cell.dteHours)}h / t=${formatYears(cell.yearsToExpiry)}`,
     `Formula: Net = Call gamma(gamma IV) - Put gamma(gamma IV)`,
-    `Model ${cell.model} @ ${cell.calculationTimestamp || "-"}`,
-  ];
+    ...(cell.repairNotes?.length ? cell.repairNotes.map((note) => `Repair: ${note}`) : []),
+    ...(cell.missingReasons?.length ? [`Audit flags: ${cell.missingReasons.join(", ")}`] : []),
+    `Calculated @ ${cell.calculationTimestamp || "-"}`,
+  ].filter(Boolean);
 };
 
 const cellStyle = (value: number | null | undefined, max: number) => {
@@ -78,6 +98,13 @@ const cellStyle = (value: number | null | undefined, max: number) => {
   }
   const red = Math.round(88 + 178 * strength);
   return { backgroundColor: `rgb(${red}, ${Math.round(28 + 34 * strength)}, ${Math.round(46 + 28 * strength)})`, color: "#fff7f7" };
+};
+
+const cellStyleForCell = (cell: SpxGexHeatmapCell | undefined, max: number) => {
+  if (!cell) return { backgroundColor: "#04101a", color: "#334454" };
+  if (typeof cell.netGex === "number" && Number.isFinite(cell.netGex)) return cellStyle(cell.netGex, max);
+  if (cell.pricingQuality === "unpriced") return { backgroundColor: "#151923", color: "#a7b0bd" };
+  return { backgroundColor: "#07111a", color: "#526171" };
 };
 
 const exposureColor = (value: number) => value >= 0 ? "#d000d4" : "#20d6c8";
@@ -103,6 +130,12 @@ const tagClass = (severity: string) =>
 type RowRangeMode = "auto" | "all";
 
 const auditedProfiles = (heatmap: SpxGexHeatmapModel): SpxGexStrikeProfile[] => heatmap.strikeProfiles || [];
+
+const dataQualityText = (heatmap: SpxGexHeatmapModel) => {
+  const summary = heatmap.dataQuality;
+  if (!summary) return "quality unavailable";
+  return `priced ${summary.priced} · repaired ${summary.repaired} · partial ${summary.partial} · unpriced ${summary.unpriced} · excluded ${summary.excluded}`;
+};
 
 export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const [data, setData] = useState<SpxGexHeatmapResponse>(emptyPayload);
@@ -281,7 +314,10 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
         ) : heatmap ? (
           <>
             <section className="border border-[#123142] bg-[#06111a] p-3">
-              <div className="mb-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+              <div
+                className="mb-4 flex snap-x snap-mandatory gap-2 overflow-x-auto overscroll-x-contain pb-2 [scrollbar-width:thin] sm:mb-3 sm:grid sm:grid-cols-2 sm:overflow-visible sm:pb-0 lg:grid-cols-5"
+                aria-label="SPX GEX summary metrics"
+              >
                 <Metric label="Snapshot" value={heatmap.session?.snapshotTimeEt || "n/a"} />
                 <Metric label="0DTE NetGEX" value={formatSignedCompact(heatmap.zeroDte.netGex)} />
                 <Metric label="DEX" value={summaryExposureAvailable.dex ? formatSignedCompact(heatmap.zeroDte.netDex) : "-"} />
@@ -339,8 +375,9 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
 
             <section className="overflow-x-auto border border-[#123142] bg-[#030910]">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#123142] bg-[#06111a] px-3 py-2">
-                <div className="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200/70">
-                  {visibleStrikes.length} / {heatmap.strikes.length} strikes
+                <div className="flex flex-wrap items-center gap-3 font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200/70">
+                  <span>{visibleStrikes.length} / {heatmap.strikes.length} strikes</span>
+                  <span className="border-l border-cyan-300/20 pl-3 text-yellow-100/90">{dataQualityText(heatmap)}</span>
                 </div>
                 <div className="inline-flex h-9 items-center border border-cyan-300/20 bg-cyan-300/10 p-0.5">
                   {(["auto", "all"] as const).map((mode) => (
@@ -386,12 +423,21 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                             <td
                               key={`${strike}-${expiry}`}
                               className="group relative border border-[#102433] px-1.5 py-[2px] text-right font-black tabular-nums"
-                              style={cellStyle(cell?.netGex, maxGex)}
+                              style={cellStyleForCell(cell, maxGex)}
                               title={auditLines.join("\n")}
                               data-gex-audit-cell={cell ? "true" : undefined}
                               data-gex-value-state={exposureState(cell?.netGex)}
+                              data-gex-pricing-quality={cell?.pricingQuality}
                             >
-                              <span>{formatCompact(cell?.netGex)}</span>
+                              <span>{cellDisplayLabel(cell)}</span>
+                              {cellBadges(cell).map((badge) => (
+                                <span
+                                  key={badge}
+                                  className="ml-1 inline-flex h-3.5 items-center border border-white/20 bg-black/25 px-1 align-middle text-[8px] font-black uppercase text-white/90"
+                                >
+                                  {badge}
+                                </span>
+                              ))}
                               {cell && (
                                 <span
                                   className="pointer-events-none absolute left-1/2 top-full z-50 hidden w-80 -translate-x-1/2 whitespace-normal border border-cyan-300/35 bg-[#02070d] p-2 text-left text-[10px] font-semibold leading-4 text-cyan-50 shadow-2xl shadow-black/60 group-hover:block"
@@ -466,7 +512,7 @@ const Notice = ({ tone, text }: { tone: "red" | "amber"; text: string }) => (
 );
 
 const Metric = ({ label, value }: { label: string; value: string }) => (
-  <div className="border border-[#123142] bg-black/20 px-3 py-2">
+  <div className="w-[42vw] min-w-[150px] max-w-[190px] shrink-0 snap-start border border-[#123142] bg-black/20 px-3 py-2 sm:w-auto sm:min-w-0 sm:max-w-none sm:shrink">
     <div className="text-[10px] font-black uppercase tracking-[0.16em] text-zinc-500">{label}</div>
     <div className="mt-1 truncate font-mono text-lg font-black text-white">{value}</div>
   </div>

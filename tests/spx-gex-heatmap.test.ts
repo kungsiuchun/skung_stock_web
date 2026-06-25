@@ -152,6 +152,65 @@ describe("SPX GEX Black-Scholes exposure model", () => {
     assert.deepEqual(heatmap.strikeProfiles.flatMap((row) => row.tags), []);
   });
 
+  it("repairs reported zero IV from a valid bid/ask mid and marks the cell as repaired", () => {
+    const heatmap = buildSpxGexHeatmapFromOptionChains({
+      generatedAt: "2026-06-22T18:15:07.000Z",
+      chains: [buildZeroIvRepairableChain()],
+      selectedExpiries: ["2026-06-22"],
+      maxStrikes: 1,
+    });
+    const cell = heatmap.cells[0];
+
+    assert.ok(cell);
+    assert.equal(typeof cell.netGex, "number");
+    assert.equal(Number.isFinite(cell.netGex), true);
+    assert.equal(cell.callIvSource, "repaired_from_mid");
+    assert.equal(cell.putIvSource, "reported");
+    assert.equal(cell.pricingQuality, "repaired");
+    assert.equal(cell.callIvStatus, "reported");
+    assert.ok(Number(cell.callIv) > 0);
+    assert.ok(cell.repairNotes?.some((note) => note.includes("call IV repaired from bid/ask mid")));
+    assert.deepEqual(cell.missingReasons, []);
+  });
+
+  it("excludes a zero-IV OTM near-zero leg as zero gamma and keeps the priced side", () => {
+    const heatmap = buildSpxGexHeatmapFromOptionChains({
+      generatedAt: "2026-06-22T18:15:07.000Z",
+      chains: [buildZeroIvLowTimeValueChain()],
+      selectedExpiries: ["2026-06-22"],
+      maxStrikes: 1,
+    });
+    const cell = heatmap.cells[0];
+
+    assert.ok(cell);
+    assert.equal(typeof cell.netGex, "number");
+    assert.equal(Number.isFinite(cell.netGex), true);
+    assert.equal(cell.callGex, 0);
+    assert.ok(Number(cell.putGex) < 0);
+    assert.equal(cell.callIvSource, "excluded_low_time_value");
+    assert.equal(cell.putIvSource, "reported");
+    assert.equal(cell.pricingQuality, "partial");
+    assert.ok(cell.missingReasons?.some((reason) => reason === "excluded call IV"));
+  });
+
+  it("keeps zero IV with no safe price repair as unpriced instead of fabricating GEX", () => {
+    const heatmap = buildSpxGexHeatmapFromOptionChains({
+      generatedAt: "2026-06-22T18:15:07.000Z",
+      chains: [buildZeroIvUnpricedChain()],
+      selectedExpiries: ["2026-06-22"],
+      maxStrikes: 1,
+    });
+    const cell = heatmap.cells[0];
+
+    assert.ok(cell);
+    assert.equal(cell.netGex, null);
+    assert.equal(cell.callIvSource, "unpriced");
+    assert.equal(cell.putIvSource, "reported");
+    assert.equal(cell.pricingQuality, "unpriced");
+    assert.ok(cell.missingReasons?.some((reason) => reason === "unpriced call IV"));
+    assert.equal(cell.model, undefined);
+  });
+
   it("formats tiny non-zero exposure as a threshold, not a misleading display zero", () => {
     assert.equal(formatSpxGexCompactExposure(0.4), "<1");
     assert.equal(formatSpxGexCompactExposure(0.4, { signed: true }), "+<1");
@@ -288,6 +347,31 @@ describe("SPX GEX Cboe delayed source adapter", () => {
     assert.equal(chain.source?.label, "Yahoo delayed fallback");
     assert.ok(quoteText.includes("SPX"));
   });
+
+  it("does not call Yahoo market context when Cboe delayed source is healthy", async () => {
+    const client = new FallbackSpxGexDataClient({
+      primary: new CboeSpxGexDataClient({
+        fetchJson: async () => buildDenseCboePayload(),
+        now: () => new Date("2026-06-24T14:00:00Z"),
+      }),
+      fallback: {
+        async getQuotes() { throw new Error("fallback quote should not be used"); },
+        async getOptions() { throw new Error("fallback options should not be used"); },
+        async getOptions0Dte() { throw new Error("fallback 0dte should not be used"); },
+        async getOptionsGex() { throw new Error("fallback gex should not be used"); },
+        async getOptionsChain() { throw new Error("fallback chain should not be used"); },
+        async getMarketContext() { throw new Error("Yahoo market context should not be called for healthy Cboe"); },
+      },
+    });
+
+    const chain = await client.getOptionsChain();
+    const context = await client.getMarketContext();
+
+    assert.equal(chain.source?.label, "Cboe delayed");
+    assert.deepEqual(context.warnings, [
+      "Cboe delayed source selected; Yahoo market context skipped to keep heatmap generation independent of Yahoo crumb/4xx failures.",
+    ]);
+  });
 });
 
 const expiries = ["2026-05-27", "2026-05-28", "2026-05-29", "2026-06-01", "2026-06-02"];
@@ -396,6 +480,87 @@ const buildZeroOpenInterestChain = (): SpxGexOptionChain => ({
     volume: 1440,
     openInterest: 0,
     impliedVolatility: 13.4,
+  }],
+});
+
+const buildZeroIvRepairableChain = (): SpxGexOptionChain => ({
+  symbol: "SPX",
+  spot: 7475,
+  expiries: ["2026-06-22"],
+  selectedExpiry: "2026-06-22",
+  calls: [{
+    contractSymbol: "SPX20260622C7475",
+    strike: 7475,
+    lastPrice: 31,
+    bid: 30,
+    ask: 32,
+    volume: 1550,
+    openInterest: 800,
+    impliedVolatility: 0,
+  }],
+  puts: [{
+    contractSymbol: "SPX20260622P7475",
+    strike: 7475,
+    lastPrice: 28,
+    bid: 27,
+    ask: 29,
+    volume: 1440,
+    openInterest: 900,
+    impliedVolatility: 12.5,
+  }],
+});
+
+const buildZeroIvLowTimeValueChain = (): SpxGexOptionChain => ({
+  symbol: "SPX",
+  spot: 7475,
+  expiries: ["2026-06-22"],
+  selectedExpiry: "2026-06-22",
+  calls: [{
+    contractSymbol: "SPX20260622C7600",
+    strike: 7600,
+    lastPrice: 0,
+    bid: 0,
+    ask: 0.05,
+    volume: 120,
+    openInterest: 500,
+    impliedVolatility: 0,
+  }],
+  puts: [{
+    contractSymbol: "SPX20260622P7600",
+    strike: 7600,
+    lastPrice: 124,
+    bid: 123,
+    ask: 125,
+    volume: 240,
+    openInterest: 700,
+    impliedVolatility: 15,
+  }],
+});
+
+const buildZeroIvUnpricedChain = (): SpxGexOptionChain => ({
+  symbol: "SPX",
+  spot: 7475,
+  expiries: ["2026-06-22"],
+  selectedExpiry: "2026-06-22",
+  calls: [{
+    contractSymbol: "SPX20260622C7475",
+    strike: 7475,
+    lastPrice: 9,
+    bid: 0,
+    ask: 80,
+    volume: 1550,
+    openInterest: 800,
+    impliedVolatility: 0,
+  }],
+  puts: [{
+    contractSymbol: "SPX20260622P7475",
+    strike: 7475,
+    lastPrice: 28,
+    bid: 27,
+    ask: 29,
+    volume: 1440,
+    openInterest: 900,
+    impliedVolatility: 12.5,
   }],
 });
 
