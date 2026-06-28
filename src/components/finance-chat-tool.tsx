@@ -1,5 +1,15 @@
-import { useState, useRef, useEffect } from "react";
-import { X, TrendingUp, Loader2, Wrench, Send, Bot, User, Cpu } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import {
+  Bot,
+  ChevronDown,
+  Cpu,
+  Loader2,
+  Send,
+  TrendingUp,
+  User,
+  Wrench,
+  X,
+} from "lucide-react";
 
 interface AgentStep {
   step: number;
@@ -17,7 +27,6 @@ interface ChatMsg {
   new_memories?: string[];
 }
 
-// Simplified history for the API (no steps, just role + content)
 interface HistoryMsg {
   role: "user" | "assistant";
   content: string;
@@ -28,7 +37,35 @@ interface FinanceChatToolProps {
   onClose: () => void;
 }
 
-export default function FinanceChatTool({ isOpen, onClose }: FinanceChatToolProps) {
+interface FinanceChatPanelProps {
+  onClose?: () => void;
+  className?: string;
+  title?: string;
+  subtitle?: string;
+}
+
+const STRATEGY_OPTIONS = [
+  { value: "default", label: "AI 智能分析", hint: "General ReAct analysis" },
+  { value: "financial_expert", label: "進階財務分析", hint: "Fundamentals + options" },
+  { value: "bull_trend", label: "多頭趨勢", hint: "Strict quant trend" },
+  { value: "ma_golden_cross", label: "均線金叉", hint: "MA crossover" },
+  { value: "shrink_pullback", label: "縮量回踩", hint: "Pullback setup" },
+  { value: "box_oscillation", label: "箱體震盪", hint: "Range behavior" },
+  { value: "volume_breakout", label: "放量突破", hint: "Breakout volume" },
+  { value: "dragon_head", label: "龍頭策略", hint: "Leadership setup" },
+  { value: "emotion_cycle", label: "情緒週期", hint: "Sentiment cycle" },
+  { value: "chan_theory", label: "纏論策略", hint: "Chan structure" },
+  { value: "wave_theory", label: "波浪理論", hint: "Wave structure" },
+  { value: "one_yang_three_yin", label: "一陽夾三陰", hint: "Pattern scan" },
+  { value: "bottom_volume", label: "底部放量", hint: "Bottoming volume" },
+] as const;
+
+export function FinanceChatPanel({
+  onClose,
+  className = "",
+  title = "Finance Agent Chat",
+  subtitle = "ReAct Agent · Multi-turn · Tool Calling",
+}: FinanceChatPanelProps) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [messages, setMessages] = useState<ChatMsg[]>([]);
@@ -37,27 +74,26 @@ export default function FinanceChatTool({ isOpen, onClose }: FinanceChatToolProp
   const [userMemories, setUserMemories] = useState<string[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to bottom when messages change
+  const selectedStrategyMeta =
+    STRATEGY_OPTIONS.find((item) => item.value === selectedStrategy) ?? STRATEGY_OPTIONS[0];
+
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages, loading]);
 
-  // Load memories from localStorage on mount
   useEffect(() => {
     const saved = localStorage.getItem("finance_agent_user_memory");
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) setUserMemories(parsed);
-      } catch (e) {
-        console.error("Failed to parse user memory", e);
-      }
+    if (!saved) return;
+
+    try {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed)) setUserMemories(parsed);
+    } catch (e) {
+      console.error("Failed to parse user memory", e);
     }
   }, []);
-
-  if (!isOpen) return null;
 
   const handleSend = async () => {
     const msg = input.trim();
@@ -66,7 +102,6 @@ export default function FinanceChatTool({ isOpen, onClose }: FinanceChatToolProp
     setInput("");
     setLoading(true);
 
-    // Add user message to UI
     const newMessages: ChatMsg[] = [...messages, { role: "user", content: msg }];
     setMessages(newMessages);
 
@@ -78,7 +113,8 @@ export default function FinanceChatTool({ isOpen, onClose }: FinanceChatToolProp
           message: msg,
           history: apiHistory,
           strategy_mode: selectedStrategy,
-          user_memories: userMemories
+          user_memories: userMemories,
+          surface: "finance_chat",
         }),
       });
 
@@ -88,7 +124,6 @@ export default function FinanceChatTool({ isOpen, onClose }: FinanceChatToolProp
         throw new Error(data.error || "Failed to get response");
       }
 
-      // Add assistant reply to UI
       setMessages((prev) => [
         ...prev,
         {
@@ -99,14 +134,10 @@ export default function FinanceChatTool({ isOpen, onClose }: FinanceChatToolProp
         },
       ]);
 
-      // Update API history
       setApiHistory(data.history || []);
 
-      // Update memories if new ones arrived
       if (data.new_memories && Array.isArray(data.new_memories)) {
-        const updatedMemories = [...userMemories, ...data.new_memories];
-        // Deduplicate
-        const uniqueMemories = Array.from(new Set(updatedMemories));
+        const uniqueMemories = Array.from(new Set([...userMemories, ...data.new_memories]));
         setUserMemories(uniqueMemories);
         localStorage.setItem("finance_agent_user_memory", JSON.stringify(uniqueMemories));
       }
@@ -115,7 +146,7 @@ export default function FinanceChatTool({ isOpen, onClose }: FinanceChatToolProp
         ...prev,
         {
           role: "assistant",
-          content: `❌ Error: ${err.message}`,
+          content: `Error: ${err.message}`,
         },
       ]);
     } finally {
@@ -123,118 +154,136 @@ export default function FinanceChatTool({ isOpen, onClose }: FinanceChatToolProp
     }
   };
 
-  const handleClose = () => {
-    onClose();
-    // Don't clear messages so user can resume the conversation
-  };
-
   const handleClear = () => {
     setMessages([]);
     setApiHistory([]);
   };
 
-  const toolStepsFor = (msg: ChatMsg) =>
-    (msg.steps || []).filter((s) => s.type === "tool_call");
+  const toolStepsFor = (msg: ChatMsg) => (msg.steps || []).filter((s) => s.type === "tool_call");
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-auto">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={handleClose} />
-
-      <div className="bg-[#1C1C1C] border border-white/10 rounded-2xl w-full max-w-2xl relative z-10 shadow-2xl flex flex-col h-[85vh]">
-        {/* Header */}
-        <div className="flex items-center justify-between p-5 border-b border-white/10 shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-blue-500/20 flex items-center justify-center">
-              <TrendingUp className="w-5 h-5 text-blue-400" />
+    <section
+      className={`flex h-full min-h-[640px] flex-col overflow-hidden bg-[#11151c] text-white ${className}`}
+      aria-label="Finance Agent Chat"
+    >
+      <div className="flex shrink-0 flex-col gap-4 border-b border-white/10 px-4 py-4 sm:px-5 lg:px-6">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-500/15 text-blue-300">
+              <TrendingUp className="h-5 w-5" />
             </div>
-            <div>
-              <h2 className="text-lg font-bold text-white tracking-tight">Finance Agent Chat</h2>
-              <p className="text-white/40 text-xs">ReAct Agent · Multi-turn · Tool Calling</p>
+            <div className="min-w-0">
+              <h2 className="truncate text-base font-black tracking-tight text-white sm:text-lg">{title}</h2>
+              <p className="mt-0.5 truncate text-xs font-medium text-white/45">{subtitle}</p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2">
             <button
               onClick={handleClear}
-              className="text-xs text-white/30 hover:text-white/60 transition-colors px-3 py-1 rounded-lg hover:bg-white/5"
+              className="rounded-lg px-3 py-2 text-xs font-bold text-white/45 transition-colors hover:bg-white/10 hover:text-white"
+              type="button"
             >
               Clear
             </button>
-            <button
-              onClick={handleClose}
-              className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-white/10 transition-colors"
-            >
-              <X className="w-4 h-4 text-white/50" />
-            </button>
+            {onClose && (
+              <button
+                onClick={onClose}
+                className="flex h-9 w-9 items-center justify-center rounded-lg text-white/50 transition-colors hover:bg-white/10 hover:text-white"
+                type="button"
+                aria-label="Close chat"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
           </div>
         </div>
 
-        {/* Messages */}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto p-5 space-y-4">
-          {/* Welcome message */}
-          {messages.length === 0 && (
-            <div className="flex flex-col items-center justify-center h-full text-center gap-4 opacity-60">
-              <Bot className="w-12 h-12 text-blue-400/50" />
-              <div>
-                <p className="text-white/60 text-sm mb-1">Ask me anything about stocks!</p>
-                <p className="text-white/30 text-xs">
-                  Try: "分析一下 AAPL 的走勢" or "NVDA 值得買嗎？"
-                </p>
-              </div>
+        <div className="grid gap-2 rounded-xl border border-white/10 bg-black/20 p-3 sm:grid-cols-[minmax(0,1fr)_minmax(190px,240px)] sm:items-center">
+          <div className="flex min-w-0 items-center gap-2">
+            <Cpu className="h-4 w-4 shrink-0 text-purple-300" />
+            <div className="min-w-0">
+              <p className="text-[10px] font-black uppercase tracking-[0.18em] text-white/35">Analysis Strategy</p>
+              <p className="truncate text-xs font-bold text-white">{selectedStrategyMeta.label}</p>
             </div>
-          )}
+          </div>
+          <label className="relative block">
+            <span className="sr-only">Analysis strategy</span>
+            <select
+              value={selectedStrategy}
+              onChange={(e) => setSelectedStrategy(e.target.value)}
+              className="h-10 w-full appearance-none rounded-lg border border-white/10 bg-[#1b2230] px-3 pr-9 text-xs font-bold text-white outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-500/30"
+            >
+              {STRATEGY_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label} - {option.hint}
+                </option>
+              ))}
+            </select>
+            <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-white/45" />
+          </label>
+        </div>
+      </div>
 
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-5 sm:px-5 lg:px-6">
+        {messages.length === 0 && (
+          <div className="flex h-full min-h-[360px] flex-col items-center justify-center gap-4 text-center">
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-500/10 text-blue-300">
+              <Bot className="h-8 w-8" />
+            </div>
+            <div>
+              <p className="text-sm font-bold text-white/75">Ask me anything about stocks.</p>
+              <p className="mt-1 text-xs font-medium text-white/35">
+                Try: "分析 MSFT" or "NVDA 值唔值得買?"
+              </p>
+            </div>
+          </div>
+        )}
+
+        <div className="space-y-5">
           {messages.map((msg, i) => (
-            <div key={i}>
+            <div key={`${msg.role}-${i}`} className={msg.role === "user" ? "flex justify-end" : "flex justify-start"}>
               {msg.role === "user" ? (
-                /* User bubble */
-                <div className="flex justify-end">
-                  <div className="flex items-start gap-2 max-w-[80%]">
-                    <div className="bg-blue-600/80 text-white px-4 py-2.5 rounded-2xl rounded-br-md text-sm leading-relaxed">
-                      {msg.content}
-                    </div>
-                    <div className="w-7 h-7 rounded-full bg-blue-600/30 flex items-center justify-center shrink-0 mt-0.5">
-                      <User className="w-3.5 h-3.5 text-blue-300" />
-                    </div>
+                <div className="flex max-w-[86%] items-start gap-2 lg:max-w-[74%]">
+                  <div className="rounded-2xl rounded-br-md bg-blue-600 px-4 py-2.5 text-sm font-medium leading-relaxed text-white">
+                    {msg.content}
+                  </div>
+                  <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-blue-500/20 text-blue-200">
+                    <User className="h-4 w-4" />
                   </div>
                 </div>
               ) : (
-                /* Assistant bubble */
-                <div className="flex justify-start">
-                  <div className="flex items-start gap-2 max-w-[85%]">
-                    <div className="w-7 h-7 rounded-full bg-green-500/20 flex items-center justify-center shrink-0 mt-0.5">
-                      <Bot className="w-3.5 h-3.5 text-green-400" />
-                    </div>
-                    <div className="space-y-2">
-                      {/* Memory Notification */}
-                      {msg.new_memories && msg.new_memories.length > 0 && (
-                        <div className="flex items-center gap-2 px-3 py-1.5 bg-blue-500/10 border border-blue-500/20 rounded-xl mb-1">
-                          <TrendingUp className="w-3 h-3 text-blue-400" />
-                          <p className="text-[10px] text-blue-300 font-medium">Agent 學習了新記憶: {msg.new_memories[0]}</p>
-                        </div>
-                      )}
-                      {/* Tool calls */}
-                      {toolStepsFor(msg).length > 0 && (
-                        <div className="space-y-1">
-                          {toolStepsFor(msg).map((s, j) => (
-                            <details key={j} className="group">
-                              <summary className="flex items-center gap-2 px-3 py-1.5 bg-black/30 border border-white/5 rounded-lg cursor-pointer hover:bg-black/50 transition-colors text-xs">
-                                <Wrench className="w-3 h-3 text-purple-400" />
-                                <code className="text-green-400 font-mono">{s.tool_name}</code>
-                                <span className="text-white/20 ml-auto">
-                                  {s.tool_args ? JSON.stringify(s.tool_args) : ""}
-                                </span>
-                              </summary>
-                              <pre className="mt-0.5 px-3 py-2 bg-black/20 border border-white/5 rounded-b-lg text-white/40 text-[10px] font-mono overflow-x-auto whitespace-pre-wrap max-h-32">
-                                {s.tool_result || "No result"}
-                              </pre>
-                            </details>
-                          ))}
-                        </div>
-                      )}
-                      {/* Reply text */}
-                      <div className="bg-white/5 border border-white/5 text-white/90 px-4 py-2.5 rounded-2xl rounded-bl-md text-sm leading-relaxed whitespace-pre-wrap">
-                        {msg.content}
+                <div className="flex w-full max-w-[95%] items-start gap-3 xl:max-w-[88%]">
+                  <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-300">
+                    <Bot className="h-4 w-4" />
+                  </div>
+                  <div className="min-w-0 flex-1 space-y-2">
+                    {msg.new_memories && msg.new_memories.length > 0 && (
+                      <div className="rounded-xl border border-blue-400/20 bg-blue-500/10 px-3 py-2 text-[11px] font-bold text-blue-200">
+                        Agent learned: {msg.new_memories[0]}
                       </div>
+                    )}
+
+                    {toolStepsFor(msg).length > 0 && (
+                      <div className="space-y-1.5">
+                        {toolStepsFor(msg).map((s, j) => (
+                          <details key={`${s.tool_name}-${j}`} className="group rounded-xl border border-white/10 bg-black/20">
+                            <summary className="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs">
+                              <Wrench className="h-3.5 w-3.5 shrink-0 text-purple-300" />
+                              <code className="min-w-0 truncate font-mono text-emerald-300">{s.tool_name}</code>
+                              <span className="ml-auto max-w-[42%] truncate text-[10px] text-white/35">
+                                {s.tool_args ? JSON.stringify(s.tool_args) : ""}
+                              </span>
+                            </summary>
+                            <pre className="max-h-56 overflow-auto border-t border-white/10 px-3 py-3 text-[11px] leading-relaxed text-white/55">
+                              {s.tool_result || "No result"}
+                            </pre>
+                          </details>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="whitespace-pre-wrap rounded-2xl rounded-bl-md border border-white/10 bg-white/[0.06] px-4 py-3 text-sm leading-relaxed text-white/90">
+                      {msg.content}
                     </div>
                   </div>
                 </div>
@@ -242,176 +291,50 @@ export default function FinanceChatTool({ isOpen, onClose }: FinanceChatToolProp
             </div>
           ))}
 
-          {/* Loading indicator */}
           {loading && (
             <div className="flex justify-start">
-              <div className="flex items-center gap-2 px-4 py-2.5 bg-white/5 border border-white/5 rounded-2xl rounded-bl-md">
-                <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
-                <span className="text-white/40 text-sm">Thinking & calling tools...</span>
+              <div className="flex items-center gap-2 rounded-2xl rounded-bl-md border border-white/10 bg-white/[0.06] px-4 py-2.5">
+                <Loader2 className="h-4 w-4 animate-spin text-blue-300" />
+                <span className="text-sm font-medium text-white/45">Thinking and calling tools...</span>
               </div>
             </div>
           )}
-
-        </div>
-
-        <div className="p-4 border-t border-white/10 shrink-0 bg-[#1C1C1C]">
-          {/* Strategy Selector */}
-          <div className="flex items-center gap-2 mb-3 overflow-x-auto pb-1 scrollbar-hide">
-            <Cpu className="w-3.5 h-3.5 text-purple-400 shrink-0 mr-1" />
-            <span className="text-xs text-white/40 shrink-0 font-medium tracking-wide">分析策略:</span>
-            
-            <button
-              onClick={() => setSelectedStrategy("default")}
-              className={`text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap transition-colors border ${
-                selectedStrategy === "default" 
-                  ? "bg-purple-500/20 text-purple-300 border-purple-500/30 font-medium" 
-                  : "bg-white/5 text-white/50 border-transparent hover:bg-white/10 hover:text-white/70"
-              }`}
-            >
-              🚀 AI 智能分析
-            </button>
-            <button
-              onClick={() => setSelectedStrategy("financial_expert")}
-              className={`text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap transition-colors border ${
-                selectedStrategy === "financial_expert" 
-                  ? "bg-purple-500/20 text-purple-300 border-purple-500/30 font-medium" 
-                  : "bg-white/5 text-white/50 border-transparent hover:bg-white/10 hover:text-white/70"
-              }`}
-            >
-              💎 進階財務分析
-            </button>
-            <button
-              onClick={() => setSelectedStrategy("bull_trend")}
-              className={`text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap transition-colors border ${
-                selectedStrategy === "bull_trend" 
-                  ? "bg-purple-500/20 text-purple-300 border-purple-500/30 font-medium" 
-                  : "bg-white/5 text-white/50 border-transparent hover:bg-white/10 hover:text-white/70"
-              }`}
-            >
-              📈 多頭趨勢 (嚴格量化)
-            </button>
-            <button
-              onClick={() => setSelectedStrategy("ma_golden_cross")}
-              className={`text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap transition-colors border ${
-                selectedStrategy === "ma_golden_cross" 
-                  ? "bg-purple-500/20 text-purple-300 border-purple-500/30 font-medium" 
-                  : "bg-white/5 text-white/50 border-transparent hover:bg-white/10 hover:text-white/70"
-              }`}
-            >
-              ⚔️ 均線金叉 (嚴格量化)
-            </button>
-            <button
-              onClick={() => setSelectedStrategy("shrink_pullback")}
-              className={`text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap transition-colors border ${
-                selectedStrategy === "shrink_pullback" 
-                  ? "bg-purple-500/20 text-purple-300 border-purple-500/30 font-medium" 
-                  : "bg-white/5 text-white/50 border-transparent hover:bg-white/10 hover:text-white/70"
-              }`}
-            >
-              📉 縮量回踩 (嚴格量化)
-            </button>
-            <button
-              onClick={() => setSelectedStrategy("box_oscillation")}
-              className={`text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap transition-colors border ${
-                selectedStrategy === "box_oscillation" 
-                  ? "bg-purple-500/20 text-purple-300 border-purple-500/30 font-medium" 
-                  : "bg-white/5 text-white/50 border-transparent hover:bg-white/10 hover:text-white/70"
-              }`}
-            >
-              📦 箱體震盪 (嚴格量化)
-            </button>
-            <button
-              onClick={() => setSelectedStrategy("volume_breakout")}
-              className={`text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap transition-colors border ${
-                selectedStrategy === "volume_breakout" 
-                  ? "bg-purple-500/20 text-purple-300 border-purple-500/30 font-medium" 
-                  : "bg-white/5 text-white/50 border-transparent hover:bg-white/10 hover:text-white/70"
-              }`}
-            >
-              🚀 放量突破 (嚴格量化)
-            </button>
-            <button
-              onClick={() => setSelectedStrategy("dragon_head")}
-              className={`text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap transition-colors border ${
-                selectedStrategy === "dragon_head" 
-                  ? "bg-purple-500/20 text-purple-300 border-purple-500/30 font-medium" 
-                  : "bg-white/5 text-white/50 border-transparent hover:bg-white/10 hover:text-white/70"
-              }`}
-            >
-              🐲 龍頭策略
-            </button>
-            <button
-              onClick={() => setSelectedStrategy("emotion_cycle")}
-              className={`text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap transition-colors border ${
-                selectedStrategy === "emotion_cycle" 
-                  ? "bg-purple-500/20 text-purple-300 border-purple-500/30 font-medium" 
-                  : "bg-white/5 text-white/50 border-transparent hover:bg-white/10 hover:text-white/70"
-              }`}
-            >
-              🎭 情緒週期
-            </button>
-            <button
-              onClick={() => setSelectedStrategy("chan_theory")}
-              className={`text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap transition-colors border ${
-                selectedStrategy === "chan_theory" 
-                  ? "bg-purple-500/20 text-purple-300 border-purple-500/30 font-medium" 
-                  : "bg-white/5 text-white/50 border-transparent hover:bg-white/10 hover:text-white/70"
-              }`}
-            >
-              🌀 纏論策略
-            </button>
-            <button
-              onClick={() => setSelectedStrategy("wave_theory")}
-              className={`text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap transition-colors border ${
-                selectedStrategy === "wave_theory" 
-                  ? "bg-purple-500/20 text-purple-300 border-purple-500/30 font-medium" 
-                  : "bg-white/5 text-white/50 border-transparent hover:bg-white/10 hover:text-white/70"
-              }`}
-            >
-              🌊 波浪理論
-            </button>
-            <button
-              onClick={() => setSelectedStrategy("one_yang_three_yin")}
-              className={`text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap transition-colors border ${
-                selectedStrategy === "one_yang_three_yin" 
-                  ? "bg-purple-500/20 text-purple-300 border-purple-500/30 font-medium" 
-                  : "bg-white/5 text-white/50 border-transparent hover:bg-white/10 hover:text-white/70"
-              }`}
-            >
-              🔥 一陽夾三陰
-            </button>
-            <button
-              onClick={() => setSelectedStrategy("bottom_volume")}
-              className={`text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap transition-colors border ${
-                selectedStrategy === "bottom_volume" 
-                  ? "bg-purple-500/20 text-purple-300 border-purple-500/30 font-medium" 
-                  : "bg-white/5 text-white/50 border-transparent hover:bg-white/10 hover:text-white/70"
-              }`}
-            >
-              📉 底部放量
-            </button>
-          </div>
-
-          <div className="flex gap-3">
-            <input
-              type="text"
-              placeholder="Type your question... (e.g. 分析 TSLA)"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              className="flex-1 bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-white/25 focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-sm"
-              onKeyDown={(e) => e.key === "Enter" && handleSend()}
-              disabled={loading}
-            />
-            <button
-              onClick={handleSend}
-              disabled={loading || !input.trim()}
-              className="bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white px-5 py-3 rounded-xl font-bold transition-colors flex items-center gap-2"
-            >
-              <Send className="w-4 h-4" />
-            </button>
-          </div>
         </div>
       </div>
+
+      <div className="shrink-0 border-t border-white/10 bg-[#11151c] px-4 py-4 sm:px-5 lg:px-6">
+        <div className="flex gap-3">
+          <input
+            type="text"
+            placeholder="Type your question... (e.g. 分析 MSFT)"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            className="min-w-0 flex-1 rounded-xl border border-white/10 bg-black/35 px-4 py-3 text-sm font-medium text-white outline-none transition placeholder:text-white/25 focus:border-blue-400 focus:ring-2 focus:ring-blue-500/30"
+            onKeyDown={(e) => e.key === "Enter" && handleSend()}
+            disabled={loading}
+          />
+          <button
+            onClick={handleSend}
+            disabled={loading || !input.trim()}
+            className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
+            type="button"
+            aria-label="Send message"
+          >
+            <Send className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export default function FinanceChatTool({ isOpen, onClose }: FinanceChatToolProps) {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+      <button className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} aria-label="Close chat" />
+      <FinanceChatPanel onClose={onClose} className="relative z-10 h-[88vh] w-full max-w-5xl rounded-2xl border border-white/10 shadow-2xl" />
     </div>
   );
 }

@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 import DemoOne from './components/demo-one'
 import Navbar from './components/navbar'
 import AICaptionTool from './components/ai-caption-tool'
-import FinanceChatTool from './components/finance-chat-tool'
 import { FinanceDashboard } from './components/finance-dashboard'
 import { TradingAgentDashboard } from './components/dashboard/trading-agent-dashboard'
 import { SPXRecapPage } from './components/spx-recap-page'
@@ -85,7 +84,10 @@ function App() {
           ) : currentView === 'settle-up' ? (
             <SettleUpPage onBackToWork={() => navigateToView('work-gallery')} />
           ) : currentView === 'finance-dashboard' ? (
-            <FinanceDashboard />
+            <FinanceDashboard
+              showChat={isFinanceChatOpen}
+              onCloseChat={() => setIsFinanceChatOpen(false)}
+            />
           ) : currentView === 'trading-agent-dashboard' ? (
             <TradingAgentDashboard />
           ) : currentView === 'spx-recap' ? (
@@ -101,7 +103,6 @@ function App() {
       </div>
 
       <AICaptionTool isOpen={isAIOpen} onClose={() => setIsAIOpen(false)} />
-      <FinanceChatTool isOpen={isFinanceChatOpen} onClose={() => setIsFinanceChatOpen(false)} />
 
       {currentView === 'home' && (
         <div className="fixed bottom-12 left-28 z-50 pointer-events-none">

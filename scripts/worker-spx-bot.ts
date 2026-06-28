@@ -5,6 +5,11 @@ import { upsertRecapDay, type D1DatabaseLike } from '../src/lib/spx-recap-d1';
 import { generateAndStoreSpxGexHeatmap } from '../src/lib/spx-gex-heatmap';
 import { calculateCboePcrFromChains, createSpxGexIntradayDataClient } from '../src/lib/spx-gex-cboe';
 
+export const NT_VOLATILITY_RISK_PROMPT = `You are NT, a ruthless Volatility Risk Manager. You monitor options premium pressure, VIX/VIX9D stress, gamma regime, and tail-risk.
+Your Task: Analyze current VIX, VIX9D, volatility compression or expansion, BB squeeze, GEX regime, and any disabled or missing sentiment inputs honestly. Do not require removed external flow sources.
+Your Voice: Analytical, risk-averse, and highly aware of macro shocks. Use terms like "IV Crush", "Volatility Premium", "Tail Risk", "Gamma Regime", and "Sentiment Index". Act as a contrarian who fades retail FOMO and panic.
+Format: Keep it under 2 sentences. Always acknowledge the current trend but explicitly highlight the hidden tail-risk, volatility contraction trap, or gamma-volatility mismatch. MUST use Traditional Chinese.`;
+
 // Cloudflare Worker Environment Types
 interface Env {
   TELEGRAM_TOKEN: string;
@@ -198,6 +203,113 @@ async function fetchCachedCboeOptionsSnapshot(env: Env, now: Date) {
   const pcrValue = client.getOptionsPcr ? await client.getOptionsPcr() : calculateCboePcrFromChains(chains);
   const calculatedGex = calculateGexFromOptionChains(chains, now);
   return { pcrValue, calculatedGex };
+}
+
+const cleanVisibleModelText = (value: unknown) => {
+  return String(value || "")
+    .replace(/"decision"\s*:\s*"[^"]*"\s*,?/gi, "")
+    .replace(/"reasoning"\s*:\s*/gi, "")
+    .replace(/[{}]/g, "")
+    .replace(/^[\s"'`)\]}]+/, "")
+    .replace(/[\s"'`)\]}]+$/, "")
+    .trim();
+};
+
+const compactModelText = (value: unknown, maxLength = 520) => {
+  const text = cleanVisibleModelText(String(value || "")
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .replace(/\\n/g, "\n")
+    .replace(/\s+/g, " ")
+    .trim());
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+};
+
+const extractJsonObjectText = (content: string) => {
+  const text = String(content || "").trim();
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const source = (fenced?.[1] || text).trim();
+  const firstBrace = source.indexOf("{");
+  if (firstBrace < 0) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = firstBrace; i < source.length; i += 1) {
+    const char = source[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (char === "{") depth += 1;
+    else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(firstBrace, i + 1);
+    }
+  }
+  return null;
+};
+
+const parseLooseJsonObject = (content: string) => {
+  const objectText = extractJsonObjectText(content);
+  if (!objectText) return null;
+  try {
+    return JSON.parse(objectText) as Record<string, any>;
+  } catch {
+    return null;
+  }
+};
+
+const normalizeAgentDecisionValue = (value: unknown) => {
+  const decision = String(value || "HOLD").trim().toUpperCase();
+  const allowed = new Set(["BUY", "LONG", "CALL", "OPEN_CALL", "SELL", "SHORT", "PUT", "OPEN_PUT", "HOLD"]);
+  return allowed.has(decision) ? decision : "HOLD";
+};
+
+export function parseAgentResponseContent(content: string) {
+  const parsed = parseLooseJsonObject(content);
+  if (parsed) {
+    const reasoning = compactModelText(parsed.reasoning || parsed.analysis || content);
+    return {
+      ...parsed,
+      decision: normalizeAgentDecisionValue(parsed.decision),
+      reasoning: reasoning || "模型回覆缺少理由，降級觀望。",
+      analysis: compactModelText(parsed.analysis || reasoning || parsed.reasoning),
+    };
+  }
+
+  const fallbackReason = compactModelText(content) || "模型未回傳可讀分析，降級觀望。";
+  return {
+    decision: "HOLD",
+    reasoning: fallbackReason,
+    analysis: fallbackReason,
+  };
+}
+
+export function parseOrchestratorResponseContent(content: string) {
+  const parsed = parseLooseJsonObject(content);
+  if (parsed) return parsed;
+
+  const fallbackReason = compactModelText(content, 420) || "模型未回傳可讀執行計劃，降級觀望。";
+  return {
+    strategy: "觀望 (Hold)",
+    trade_action: "HOLD",
+    action_reasoning: "解析降級",
+    logic: fallbackReason,
+    buy_zone: "N/A",
+    stop_loss: "N/A",
+    take_profit: "N/A",
+    risk_warning: "CIO output was not valid JSON; preserved source text and degraded to HOLD.",
+  };
 }
 
 // --- 分析與邏輯函數 ---
@@ -570,6 +682,7 @@ const SPX_GEX_HEATMAP_CRON = '*/15 13-21 * * MON-FRI';
 
 interface ScheduledRunOptions {
   force?: boolean;
+  debugReportPreview?: boolean;
 }
 
 function toDateKey(year: number, month: number, day: number) {
@@ -1016,15 +1129,11 @@ async function analyzeWithAgent(personaKey: string, personaPrompt: string, conte
       return { decision: "HOLD", reasoning: `接口錯誤(${response.status})`, analysis: "數據獲取失敗" };
     }
     const data = await response.json() as any;
-    let content = data.choices[0].message.content;
-
-
-    content = content.replace(/```json/gi, '').replace(/```/g, '').trim();
-    const parsed = JSON.parse(content);
-    return { ...parsed, analysis: parsed.reasoning || "" };
+    const content = data.choices?.[0]?.message?.content || "";
+    return parseAgentResponseContent(content);
   } catch (e: any) {
     console.error('Agent error:', e.message);
-    return { decision: "HOLD", reasoning: "分析失敗", analysis: "解析失敗" };
+    return { decision: "HOLD", reasoning: "模型請求失敗，降級觀望。", analysis: "模型請求失敗，降級觀望。" };
   }
 }
 
@@ -1120,16 +1229,11 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       fetchYahooChart('^GSPC', '15m', '7d'),
       fetchYahooChart('^GSPC', '5m', '2d')
     ]);
-    const [spxQuotesD1, spxQuotesH1, vixQuotes, vixQuotes3mo, vixQuotes9d, spyQuotes, iwmQuotes, xlkQuotes, xlvQuotes, cboeOptionsSnapshot, sentimentData] = await Promise.all([
+    const [spxQuotesD1, spxQuotesH1, vixQuotes, vixQuotes9d, cboeOptionsSnapshot, sentimentData] = await Promise.all([
       fetchOptionalMarketData('SPX D1 price-action chart', fetchYahooChart('^GSPC', '1d', '3mo'), []),
       fetchOptionalMarketData('SPX H1 price-action chart', fetchYahooChart('^GSPC', '1h', '10d'), []),
       fetchOptionalMarketData('VIX 15m chart', fetchYahooChart('^VIX', '15m', '7d'), []),
-      fetchOptionalMarketData('VIX 3m chart', fetchYahooChart('^VIX', '1d', '3mo'), []),
       fetchOptionalMarketData('VIX9D term-structure chart', fetchYahooChart('^VIX9D', '1d', '3mo'), []),
-      fetchOptionalMarketData('SPY ETF flow chart', fetchYahooChart('SPY', '1d', '5d'), []),
-      fetchOptionalMarketData('IWM ETF flow chart', fetchYahooChart('IWM', '1d', '5d'), []),
-      fetchOptionalMarketData('XLK ETF flow chart', fetchYahooChart('XLK', '1d', '5d'), []),
-      fetchOptionalMarketData('XLV ETF flow chart', fetchYahooChart('XLV', '1d', '5d'), []),
       fetchOptionalMarketData('CBOE cached options snapshot', fetchCachedCboeOptionsSnapshot(env, now), { pcrValue: null, calculatedGex: null }),
       getDisabledNewsSentiment(),
     ]);
@@ -1182,21 +1286,8 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     };
 
     const currentVix9d = vixQuotes9d[vixQuotes9d.length - 1]?.close;
-    const currentVix3m = vixQuotes3mo[vixQuotes3mo.length - 1]?.close;
-    let vixTermStructure = "N/A";
-    if (currentVix9d && currentVix && currentVix3m) {
-      if (currentVix9d < currentVix && currentVix < currentVix3m) vixTermStructure = "Contango (Normal)";
-      else if (currentVix9d > currentVix && currentVix > currentVix3m) vixTermStructure = "Backwardation (Panic)";
-      else vixTermStructure = "Mixed/Flat";
-    }
-
-    const etfQuotes = {
-      'SPY': spyQuotes,
-      'IWM': iwmQuotes,
-      'XLK': xlkQuotes,
-      'XLV': xlvQuotes
-    };
-    const fundFlow = await getFundFlow(spxQuotes, etfQuotes);
+    const currentVix3m = null;
+    const fundFlow = await getFundFlow(spxQuotes);
 
     // GEX 整合到 AI context
     const calculatedGexContext = calculatedGex ? {
@@ -1266,7 +1357,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     const [agent1, agent2, agent3, agent4] = await Promise.all([
       analyzeWithAgent('QM', PERSONAS.QM_MOMENTUM_SNIPER, extendedContext, env),
       analyzeWithAgent('CM', PERSONAS.CM_OPTIONS_MAKER, extendedContext, env),
-      analyzeWithAgent('NT', PERSONAS.NT_MACRO_SENTIMENT, extendedContext, env),
+      analyzeWithAgent('NT', NT_VOLATILITY_RISK_PROMPT, extendedContext, env),
       analyzeWithAgent('PA', PERSONAS.PA_PRICE_ACTION, extendedContext, env)
     ]);
 
@@ -1305,9 +1396,8 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       }, 20000);
       if (orchRes.ok) {
         const orchData = await orchRes.json() as any;
-        let content = orchData.choices[0].message.content;
-        content = content.replace(/```json/gi, '').replace(/```/g, '').trim();
-        orchestratorPlan = JSON.parse(content);
+        const content = orchData.choices?.[0]?.message?.content || "";
+        orchestratorPlan = parseOrchestratorResponseContent(content);
       }
     } catch (e) {
       console.error('[ERR] Orchestrator error', e);
@@ -1492,6 +1582,9 @@ ${tgEscape(agent4.reasoning)}
 <pre>-- CF Worker v4.0.0 | lean Telegram output | IC disabled --</pre>
 `;
 
+    if (options.debugReportPreview) {
+      console.log(`[DEBUG_FINAL_REPORT]\n${message.trim()}`);
+    }
     console.log('[DEBUG] Step 6: Sending Final Report...');
     const success = await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, message.trim());
     if (!success) {
@@ -1675,7 +1768,7 @@ export default {
       console.error = (...args) => logs.push(`[ERR] ${args.join(' ')}`);
 
       try {
-        await runTradingAgents(env, new Date(), { force: forceManualRun });
+        await runTradingAgents(env, new Date(), { force: forceManualRun, debugReportPreview: true });
         return new Response(`DEBUG COMPLETE.\n\nLOGS:\n${logs.join('\n')}`);
       } catch (e: any) {
         return new Response(`DEBUG ERROR: ${e.message}\n${e.stack}\n\nLOGS:\n${logs.join('\n')}`, { status: 500 });
