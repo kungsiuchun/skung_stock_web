@@ -275,6 +275,7 @@ export interface SpxGexDataClient {
   getOptions0Dte: () => Promise<string>;
   getOptionsGex: (expiry: string) => Promise<string>;
   getOptionsChain?: (expiry?: string) => Promise<SpxGexOptionChain>;
+  getOptionsPcr?: () => Promise<number | null>;
   getMarketContext?: () => Promise<SpxGexMarketContext>;
 }
 

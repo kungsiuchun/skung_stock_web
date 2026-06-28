@@ -33,6 +33,8 @@ import { SkillManager } from "../agent/skills/base";
 interface Env {
   OPENROUTER_API_KEY: string;
   OPENROUTER_MODEL: string;
+  ADANOS_API_KEY?: string;
+  FRED_API_KEY?: string;
 }
 
 const DASHBOARD_TOOL_ALLOWLIST = new Set([
@@ -89,6 +91,8 @@ ${message}`;
 
     // 1. Build Agent & Tools
     const registry = new ToolRegistry();
+    registry.setEnv(context.env);
+
     if (isFinanceDashboard) {
       registry.registerAll(onlyAllowedDashboardTools(ALL_STOCK_TOOLS));
       registry.registerAll(onlyAllowedDashboardTools(ALL_ANALYSIS_TOOLS));

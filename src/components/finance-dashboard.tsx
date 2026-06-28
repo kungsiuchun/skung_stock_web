@@ -16,6 +16,7 @@ import { TechnicalRadar } from "./dashboard/technical-radar";
 import { FinancialJuiceWidget } from "./dashboard/financial-juice-widget";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { FinanceChatPanel } from "./finance-chat-tool";
 import {
   FINANCE_ANALYZER_MODEL_CALL_BUDGETS,
   FINANCE_ANALYZER_SOURCE_MAP,
@@ -69,8 +70,12 @@ interface HistoryItem {
   fullData?: DashboardData;
 }
 
+interface FinanceDashboardProps {
+  showChat?: boolean;
+  onCloseChat?: () => void;
+}
 
-export function FinanceDashboard() {
+export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashboardProps) {
   const [valuationData, setValuationData] = useState<any>(null);
   const [technicalData, setTechnicalData] = useState<any>(null);
 
@@ -351,6 +356,40 @@ export function FinanceDashboard() {
       setLoading(false);
     }
   };
+
+  if (showChat) {
+    return (
+      <div className="h-full overflow-hidden bg-[#0f141b] p-3 text-[#1e2329] sm:p-4 lg:p-6">
+        <div className="mx-auto flex h-full max-w-[1600px] flex-col gap-4">
+          <div className="shrink-0 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 sm:px-5">
+            <p className="text-[10px] font-black uppercase tracking-[0.22em] text-cyan-300/70">Finance Analyzer</p>
+            <div className="mt-1 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <h1 className="text-2xl font-black tracking-tight text-white sm:text-3xl">Agent Chat Workspace</h1>
+                <p className="mt-1 text-xs font-semibold text-white/45">
+                  Full ReAct tool surface with source-backed data pulls.
+                </p>
+              </div>
+              {onCloseChat && (
+                <button
+                  type="button"
+                  onClick={onCloseChat}
+                  className="w-fit rounded-lg border border-cyan-400/20 bg-cyan-400/10 px-3 py-2 text-[11px] font-black uppercase tracking-wider text-cyan-200 transition hover:bg-cyan-400/15"
+                >
+                  Back to dashboard
+                </button>
+              )}
+            </div>
+          </div>
+
+          <FinanceChatPanel
+            className="min-h-0 flex-1 rounded-2xl border border-white/10 shadow-2xl"
+            subtitle="Full chat surface · ReAct tools · Env-backed data sources"
+          />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-full overflow-y-auto bg-[#f5f6f8] text-[#1e2329] p-4 lg:p-8 selection:bg-cyan-500/30">
