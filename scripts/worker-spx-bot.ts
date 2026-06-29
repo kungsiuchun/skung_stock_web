@@ -16,6 +16,8 @@ interface Env {
   TELEGRAM_CHAT_ID: string;
   OPENROUTER_API_KEY: string;
   OPENROUTER_MODEL?: string;
+  SPX_ENABLE_LLM_COUNCIL?: string;
+  SPX_ENABLE_LLM_CIO?: string;
   WEBHOOK_SECRET?: string; // 🔒 防護互聯網隨機觸發的安全金鑰
   SPX_MEMORY: any;
   SPX_RECAP_DB?: D1DatabaseLike;
@@ -143,10 +145,14 @@ const OPTIONAL_MARKET_DATA_TIMEOUT_MS = 6500;
 const AGENT_MODEL_TIMEOUT_MS = 12000;
 const CIO_MODEL_TIMEOUT_MS = 12000;
 const TELEGRAM_TIMEOUT_MS = 6000;
+const TRADING_RUN_LOCK_KEY = "spx_trading_run_lock";
+const TRADING_RUN_LOCK_TTL_SECONDS = 12 * 60;
 
 const LONG_DECISIONS = new Set(["BUY", "LONG", "CALL", "OPEN_CALL"]);
 const SHORT_DECISIONS = new Set(["SELL", "SHORT", "PUT", "OPEN_PUT"]);
 const ALLOWED_AGENT_DECISIONS = new Set([...LONG_DECISIONS, ...SHORT_DECISIONS, "HOLD"]);
+
+const truthyFlag = (value: unknown) => ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
 
 const toFiniteNumber = (value: unknown, fallback = 0) => {
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -282,12 +288,16 @@ async function fetchCachedCboeOptionsSnapshot(env: Env, now: Date) {
 }
 
 const cleanVisibleModelText = (value: unknown) => {
+  const jsonField =
+    /(?:^|[,{]\s*)"?(?:decision|trade_action|rating|confidence|confidence_score|evidence|evidence_bullets|blockingRisk|blocking_risk|neutralReason|neutral_reason|reasoning|analysis|modelStatus)"?\s*:\s*(?:"(?:\\.|[^"\\])*"|null|true|false|-?\d+(?:\.\d+)?|\[[\s\S]*?\]|\{[\s\S]*?\})\s*,?/gi;
   return String(value || "")
-    .replace(/"decision"\s*:\s*"[^"]*"\s*,?/gi, "")
-    .replace(/"reasoning"\s*:\s*/gi, "")
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .replace(jsonField, " ")
+    .replace(/"(?:decision|trade_action|rating|confidence|confidence_score|evidence|evidence_bullets|blockingRisk|blocking_risk|neutralReason|neutral_reason|reasoning|analysis|modelStatus)"\s*:\s*/gi, " ")
     .replace(/[{}]/g, "")
-    .replace(/^[\s"'`)\]}]+/, "")
-    .replace(/[\s"'`)\]}]+$/, "")
+    .replace(/^[\s,;:"'`)\]}]+/, "")
+    .replace(/[\s,;:"'`)\]}]+$/, "")
     .trim();
 };
 
@@ -299,6 +309,17 @@ const compactModelText = (value: unknown, maxLength = 520) => {
     .replace(/\s+/g, " ")
     .trim());
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+};
+
+const extractJsonStringField = (content: string, field: string) => {
+  const pattern = new RegExp(`"${field}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, "i");
+  const match = String(content || "").match(pattern);
+  if (!match) return "";
+  try {
+    return JSON.parse(`"${match[1]}"`);
+  } catch {
+    return match[1].replace(/\\"/g, '"').replace(/\\n/g, "\n");
+  }
 };
 
 const extractJsonObjectText = (content: string) => {
@@ -387,6 +408,36 @@ const normalizeAgentContract = (raw: Record<string, any>, fallbackReason: string
   };
 };
 
+const hasVisibleContractLeak = (value: unknown) =>
+  /"?(?:decision|trade_action|rating|confidence|confidence_score|evidence|evidence_bullets|blockingRisk|blocking_risk|neutralReason|neutral_reason|reasoning|analysis|modelStatus)"?\s*:/.test(String(value || ""));
+
+const safeVisibleAgentText = (value: unknown, fallback: string, maxLength = 180) => {
+  const cleaned = compactModelText(value, maxLength);
+  if (!cleaned || hasVisibleContractLeak(cleaned)) return fallback;
+  return cleaned;
+};
+
+export function formatAgentTelegramBrief(personaKey: string, agent: Partial<AgentDecisionContract>) {
+  const decision = normalizeAgentDecisionValue(agent.decision);
+  const confidence = clampConfidence(agent.confidence ?? agent.confidence_score, decision === "HOLD" ? 40 : 65);
+  const evidence = normalizeEvidenceList(agent.evidence, [agent.reasoning || agent.analysis || "資料不足，保持觀望。"])
+    .map((item) => safeVisibleAgentText(item, "", 110))
+    .filter(Boolean)
+    .slice(0, 2);
+  const risk = safeVisibleAgentText(agent.blockingRisk || agent.blocking_risk || "", "", 120);
+  const neutral = decision === "HOLD"
+    ? safeVisibleAgentText(agent.neutralReason || agent.neutral_reason || "", "", 120)
+    : "";
+  const proof = evidence.length > 0 ? evidence.join("；") : safeVisibleAgentText(agent.reasoning || agent.analysis, "資料不足，保持觀望。", 140);
+  const action = LONG_DECISIONS.has(decision)
+    ? "偏多"
+    : SHORT_DECISIONS.has(decision)
+      ? "偏空"
+      : "觀望";
+  const guard = risk || neutral;
+  return `${personaKey} ${action}，信心 ${confidence}/100。證據：${proof}${guard ? `。風險：${guard}` : ""}`;
+}
+
 export function parseAgentResponseContent(content: string) {
   const parsed = parseLooseJsonObject(content);
   if (parsed) {
@@ -399,7 +450,8 @@ export function parseAgentResponseContent(content: string) {
     }, "model_json_missing_reason");
   }
 
-  const fallbackReason = compactModelText(content) || "模型未回傳可讀分析，降級觀望。";
+  const extractedReason = extractJsonStringField(content, "reasoning") || extractJsonStringField(content, "analysis");
+  const fallbackReason = compactModelText(extractedReason || content) || "模型回覆格式錯誤；已改用數據規則降級。";
   return normalizeAgentContract({
     decision: "HOLD",
     reasoning: fallbackReason,
@@ -1480,6 +1532,50 @@ async function sendTelegramMessage(token: string, chatId: string, text: string) 
   }
 }
 
+export function hasActiveTradingRunLock(rawLock: string | null, nowMs = Date.now()) {
+  if (!rawLock) return false;
+  try {
+    const parsed = JSON.parse(rawLock);
+    return Number(parsed.expiresAtMs || 0) > nowMs;
+  } catch {
+    return false;
+  }
+}
+
+async function acquireTradingRunLock(env: Env, now: Date, options: ScheduledRunOptions) {
+  try {
+    const rawLock = await env.SPX_MEMORY.get(TRADING_RUN_LOCK_KEY);
+    if (!options.force && hasActiveTradingRunLock(rawLock, now.getTime())) {
+      console.log("[SCHEDULE] Skip trading run: active trading lock still valid");
+      return null;
+    }
+
+    const token = `${now.toISOString()}-${Math.random().toString(36).slice(2)}`;
+    await env.SPX_MEMORY.put(TRADING_RUN_LOCK_KEY, JSON.stringify({
+      token,
+      startedAt: now.toISOString(),
+      expiresAtMs: now.getTime() + TRADING_RUN_LOCK_TTL_SECONDS * 1000,
+    }), { expirationTtl: TRADING_RUN_LOCK_TTL_SECONDS });
+    return token;
+  } catch (error) {
+    console.error("[SCHEDULE] Trading lock unavailable; continuing without lock", error instanceof Error ? error.message : String(error));
+    return "lock_unavailable";
+  }
+}
+
+async function releaseTradingRunLock(env: Env, token: string | null) {
+  if (!token || token === "lock_unavailable") return;
+  try {
+    const rawLock = await env.SPX_MEMORY.get(TRADING_RUN_LOCK_KEY);
+    const parsed = rawLock ? JSON.parse(rawLock) : null;
+    if (parsed?.token === token) {
+      await env.SPX_MEMORY.delete(TRADING_RUN_LOCK_KEY);
+    }
+  } catch (error) {
+    console.error("[SCHEDULE] Trading lock release failed", error instanceof Error ? error.message : String(error));
+  }
+}
+
 function tgEscape(str: string): string {
   if (!str) return "";
   // 處理 AI 返回的字面 "\n" 符號，將其轉換為真實的換行
@@ -1510,6 +1606,7 @@ async function persistRecapDayToD1(env: Env, date: string, memory: DailyMemory, 
 }
 
 async function runTradingAgents(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}) {
+  let runLockToken: string | null = null;
   try {
     const marketStatus = getMarketScheduleStatus(now);
     if (!options.force && !marketStatus.isTradingWindow) {
@@ -1522,8 +1619,13 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       throw new Error(`環境變量缺失: TOKEN=${!!env.TELEGRAM_TOKEN}, CHAT=${!!env.TELEGRAM_CHAT_ID}`);
     }
 
-    console.log('[DEBUG] 💓 任務啟動：發送心跳...');
-    await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, "💓 <b>系統心跳：診斷任務已啟動...</b>\n正在獲取市場數據中...");
+    runLockToken = await acquireTradingRunLock(env, now, options);
+    if (!runLockToken) return;
+
+    if (options.force || options.debugReportPreview) {
+      console.log('[DEBUG] Manual diagnostic run started: sending heartbeat...');
+      await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, "💓 <b>系統心跳：手動診斷任務已啟動...</b>\n正在獲取市場數據中...");
+    }
 
     // Memory Fetch
     const etNow = marketStatus.etNow;
@@ -1668,13 +1770,18 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       }
     };
 
-    console.log('[DEBUG] Step 3: Triggering 4 AI Agents (QM/CM/NT/PA). IC disabled to reduce token spend...');
-    const [agent1, agent2, agent3, agent4] = await Promise.all([
-      analyzeWithAgent('QM', PERSONAS.QM_MOMENTUM_SNIPER, extendedContext, env),
-      analyzeWithAgent('CM', PERSONAS.CM_OPTIONS_MAKER, extendedContext, env),
-      analyzeWithAgent('NT', NT_VOLATILITY_RISK_PROMPT, extendedContext, env),
-      analyzeWithAgent('PA', PERSONAS.PA_PRICE_ACTION, extendedContext, env)
-    ]);
+    console.log('[DEBUG] Step 3: Building 4 data-backed agents (QM/CM/NT/PA). LLM council disabled unless explicitly enabled...');
+    let [agent1, agent2, agent3, agent4] = ['QM', 'CM', 'NT', 'PA'].map((key) =>
+      buildDataBackedAgentFallback(key, extendedContext, 'deterministic_rules')
+    );
+    if (truthyFlag(env.SPX_ENABLE_LLM_COUNCIL)) {
+      [agent1, agent2, agent3, agent4] = await Promise.all([
+        analyzeWithAgent('QM', PERSONAS.QM_MOMENTUM_SNIPER, extendedContext, env),
+        analyzeWithAgent('CM', PERSONAS.CM_OPTIONS_MAKER, extendedContext, env),
+        analyzeWithAgent('NT', NT_VOLATILITY_RISK_PROMPT, extendedContext, env),
+        analyzeWithAgent('PA', PERSONAS.PA_PRICE_ACTION, extendedContext, env)
+      ]);
+    }
 
     const normalizeDecision = (d: string) => d ? d.toString().trim().toUpperCase() : "HOLD";
     const d1 = normalizeDecision(agent1.decision);
@@ -1697,39 +1804,43 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     const fallbackOrchestratorPlan = buildDataBackedCioPlan(extendedContext, [agent1, agent2, agent3, agent4]);
     let orchestratorPlan: any = { strategy: '觀望 (Hold)', logic: '無法取得總結邏輯', risk_management: '嚴控風險。' };
     orchestratorPlan = fallbackOrchestratorPlan;
-    try {
-      if (!env.OPENROUTER_API_KEY) throw new Error('missing_openrouter_key');
-      const orchRes = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: env.OPENROUTER_MODEL || 'google/gemma-4-26b-a4b-it:free',
-          temperature: 0.1,
-          max_tokens: 360,
-          messages: [
-            { role: 'system', content: ORCHESTRATOR_PROMPT },
-            { role: 'user', content: `Market Context: ${JSON.stringify(extendedContext)}\nQM (Momentum): ${JSON.stringify(agent1)}\nCM (GEX): ${JSON.stringify(agent2)}\nNT (Sentiment): ${JSON.stringify(agent3)}\nPA (Price Action): ${JSON.stringify(agent4)}` }
-          ]
-        })
-      }, CIO_MODEL_TIMEOUT_MS);
-      if (orchRes.ok) {
-        const orchData = await orchRes.json() as any;
-        const content = orchData.choices?.[0]?.message?.content || "";
-        const parsedPlan = parseOrchestratorResponseContent(content);
-        orchestratorPlan = {
-          ...fallbackOrchestratorPlan,
-          ...parsedPlan,
-          trade_action: normalizeCioAction((parsedPlan as any).trade_action),
-          risk_warning: (parsedPlan as any).risk_warning || (fallbackOrchestratorPlan as any).risk_warning,
-        };
-      } else {
-        console.error(`[ERR] Orchestrator OpenRouter ${orchRes.status}`, await orchRes.text());
+    if (truthyFlag(env.SPX_ENABLE_LLM_CIO)) {
+      try {
+        if (!env.OPENROUTER_API_KEY) throw new Error('missing_openrouter_key');
+        const orchRes = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: env.OPENROUTER_MODEL || 'google/gemma-4-26b-a4b-it:free',
+            temperature: 0.1,
+            max_tokens: 360,
+            messages: [
+              { role: 'system', content: ORCHESTRATOR_PROMPT },
+              { role: 'user', content: `Market Context: ${JSON.stringify(extendedContext)}\nQM (Momentum): ${JSON.stringify(agent1)}\nCM (GEX): ${JSON.stringify(agent2)}\nNT (Sentiment): ${JSON.stringify(agent3)}\nPA (Price Action): ${JSON.stringify(agent4)}` }
+            ]
+          })
+        }, CIO_MODEL_TIMEOUT_MS);
+        if (orchRes.ok) {
+          const orchData = await orchRes.json() as any;
+          const content = orchData.choices?.[0]?.message?.content || "";
+          const parsedPlan = parseOrchestratorResponseContent(content);
+          orchestratorPlan = {
+            ...fallbackOrchestratorPlan,
+            ...parsedPlan,
+            trade_action: normalizeCioAction((parsedPlan as any).trade_action),
+            risk_warning: (parsedPlan as any).risk_warning || (fallbackOrchestratorPlan as any).risk_warning,
+          };
+        } else {
+          console.error(`[ERR] Orchestrator OpenRouter ${orchRes.status}`, await orchRes.text());
+        }
+      } catch (e) {
+        console.error('[ERR] Orchestrator error', e);
       }
-    } catch (e) {
-      console.error('[ERR] Orchestrator error', e);
+    } else {
+      console.log('[DEBUG] CIO LLM disabled; using deterministic data-backed plan.');
     }
 
     const callTargetGuide = intradayStructure.repeatedResistance
@@ -1890,16 +2001,16 @@ ${calculatedGex ? `來源：<code>Internal CBOE Options GEX Calculator</code>
 🗣️ <b>專家深度腦爆</b> (Expert Rapid-Fire)
 
 🦁 <b>QM: ${formatAgentDecision(d1)} (Momentum)</b>:
-${tgEscape(agent1.reasoning)}
+${tgEscape(formatAgentTelegramBrief('QM', agent1))}
 
 🌊 <b>CM: ${formatAgentDecision(d2)} (GEX Decision)</b>:
-${tgEscape(agent2.reasoning)}
+${tgEscape(formatAgentTelegramBrief('CM', agent2))}
 
 🦢 <b>NT: ${formatAgentDecision(d3)} (Sentiment)</b>:
-${tgEscape(agent3.reasoning)}
+${tgEscape(formatAgentTelegramBrief('NT', agent3))}
 
 🏛️ <b>PA: ${formatAgentDecision(d4)} (Price Action)</b>:
-${tgEscape(agent4.reasoning)}
+${tgEscape(formatAgentTelegramBrief('PA', agent4))}
 
 🛡️ <b>[雷霆一擊 · 終極執行]</b> (Thor Execution Plan)
 <b>操作：</b> <code>${tgEscape(finalDisplayAction)}</code>
@@ -1924,6 +2035,8 @@ ${tgEscape(agent4.reasoning)}
     console.error('CRITICAL BOT ERROR:', e.message);
     const errorMsg = `⚠️ <b>[系統預警] 專家分析中斷</b>\n市場數據仍可讀取。\nError: ${tgEscape(e.message)}`;
     await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, errorMsg);
+  } finally {
+    await releaseTradingRunLock(env, runLockToken);
   }
 }
 

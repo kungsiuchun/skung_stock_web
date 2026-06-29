@@ -58,6 +58,20 @@ SPX GEX Heatmap should show retained JSON snapshots as a live product surface, n
 
 SPX GEX Heatmap should treat seven trading days as the retention window, so weekends and NYSE full holidays do not consume retention slots.
 
+## SPX Telegram Trading Council
+
+SPX Telegram Trading Council is the scheduled SPX alert surface that converts live market data, option gamma context, 0DTE rules, and agent roles into one readable trading decision.
+
+SPX Telegram Trading Council should show professional, data-backed summaries. It should never expose raw model JSON, parser debris, tool payloads, or internal contract fields as user-facing analysis.
+
+SPX Telegram Trading Council treats neutral as a rule-backed no-trade decision. Neutral is not an acceptable fallback for malformed model output unless the visible reason names the missing or conflicting data.
+
+## SPX Data Agent
+
+SPX Data Agent is a role-specific evidence module inside the SPX Telegram Trading Council.
+
+An SPX Data Agent should contribute direction, confidence, evidence, and blocking risk. It is not a free-form transcript.
+
 ## CBOE Chain Cache
 
 CBOE Chain Cache is the 24-hour D1 cache of normalized SPX option chains from the CBOE delayed feed.

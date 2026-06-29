@@ -5,6 +5,8 @@ import {
   buildDataBackedAgentFallback,
   buildDataBackedCioPlan,
   countDirectionalVotes,
+  formatAgentTelegramBrief,
+  hasActiveTradingRunLock,
   parseAgentResponseContent,
   parseOrchestratorResponseContent,
 } from "../scripts/worker-spx-bot";
@@ -14,6 +16,10 @@ const forbiddenVisibleFragments = [
   "}",
   '"decision"',
   '"reasoning"',
+  "rating",
+  "confidence_score",
+  "evidence",
+  "neutral_reason",
   "```",
   "analysis failed",
   "parse failed",
@@ -76,6 +82,38 @@ test("agent output parser extracts clean reasoning from malformed JSON plus trai
   assert.equal(parsed.decision, "HOLD");
   assert.equal(parsed.reasoning, "BB Squeeze is active; wait for volume confirmation.");
   assertCleanVisibleReasoning(parsed.reasoning);
+});
+
+test("agent output parser strips screenshot-style raw contract fragments", () => {
+  const parsed = parseAgentResponseContent(
+    '"rating":"bullish","confidence_score":75,"evidence":["gammaStatus: positive_gamma","trendDayContext: BULL_TREND_DAY"],"neutral_reason":"Price is approaching resistance." Market is pinned near resistance; do not chase blindly.',
+  );
+
+  assert.equal(parsed.decision, "HOLD");
+  assertCleanVisibleReasoning(parsed.reasoning);
+  assert.equal(parsed.reasoning.includes("Market is pinned"), true);
+});
+
+test("telegram agent renderer never prints raw JSON contract fields", () => {
+  const line = formatAgentTelegramBrief("CM", {
+    decision: "HOLD",
+    confidence_score: 75,
+    evidence: ['"rating":"bullish","confidence_score":75,"evidence":["gammaStatus"]'],
+    reasoning: '"neutral_reason":"metadata leak" Price is pinned near 7440.',
+    neutral_reason: '"evidence":["raw"]',
+  } as any);
+
+  assert.match(line, /CM/);
+  assert.match(line, /75\/100/);
+  assertCleanVisibleReasoning(line);
+});
+
+test("trading run lock treats unexpired lock as active and expired lock as inactive", () => {
+  const now = Date.parse("2026-06-29T16:00:00.000Z");
+
+  assert.equal(hasActiveTradingRunLock(JSON.stringify({ expiresAtMs: now + 1000 }), now), true);
+  assert.equal(hasActiveTradingRunLock(JSON.stringify({ expiresAtMs: now - 1000 }), now), false);
+  assert.equal(hasActiveTradingRunLock("not json", now), false);
 });
 
 test("orchestrator output parser degrades without throwing on non-JSON text", () => {
