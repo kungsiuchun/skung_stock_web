@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildDataBackedAgentFallback,
+  buildDataBackedCioPlan,
+  countDirectionalVotes,
   parseAgentResponseContent,
   parseOrchestratorResponseContent,
 } from "../scripts/worker-spx-bot";
@@ -32,6 +35,15 @@ test("agent output parser preserves prose instead of showing analysis failure", 
   assert.notEqual(parsed.reasoning.toLowerCase(), "analysis failed");
   assert.notEqual(parsed.analysis.toLowerCase(), "parse failed");
   assertCleanVisibleReasoning(parsed.reasoning);
+});
+
+test("directional vote counter treats option-style agent decisions as real votes", () => {
+  const votes = countDirectionalVotes(["OPEN_CALL", "CALL", "OPEN_PUT", "PUT"]);
+
+  assert.equal(votes.buyVotes, 2);
+  assert.equal(votes.sellVotes, 2);
+  assert.equal(votes.holdVotes, 0);
+  assert.equal(votes.consensusVote, "NEUTRAL");
 });
 
 test("agent output parser accepts valid JSON", () => {
@@ -72,4 +84,141 @@ test("orchestrator output parser degrades without throwing on non-JSON text", ()
   assert.equal(parsed.trade_action, "HOLD");
   assert.equal(parsed.action_reasoning, "解析降級");
   assert.match(parsed.logic, /volume confirmation/);
+});
+
+test("agent output parser normalizes the decision contract fields", () => {
+  const parsed = parseAgentResponseContent(
+    JSON.stringify({
+      decision: "OPEN_PUT",
+      confidence_score: 82,
+      evidence: ["below VWAP", "negative gamma"],
+      blocking_risk: "VIX expansion",
+      reasoning: "Below VWAP with negative gamma; short side has control.",
+    }),
+  );
+
+  assert.equal(parsed.decision, "OPEN_PUT");
+  assert.equal(parsed.rating, "bearish");
+  assert.equal(parsed.confidence, 82);
+  assert.deepEqual(parsed.evidence, ["below VWAP", "negative gamma"]);
+  assert.equal(parsed.blockingRisk, "VIX expansion");
+  assert.equal(parsed.neutralReason, null);
+});
+
+test("data-backed fallback agents and CIO are directional for bullish and bearish fixtures", () => {
+  const bullishContext = {
+    currentPrice: "7420",
+    currentVWAP: "7398",
+    ema9: "7410",
+    currentVix: "13.8",
+    m5Analysis: { volumeSurge: "1.70x" },
+    trendDayContext: {
+      regime: "BULL_TREND_DAY",
+      directionalBias: "CALL",
+      confidence: 78,
+      aboveVWAP: true,
+      aboveEMA9: true,
+      aboveGammaFlip: true,
+      rationale: "Price is above VWAP/EMA9 with trend-day breadth.",
+    },
+    calculatedGEX: {
+      gammaStatus: "positive_gamma",
+      gammaFlipLevel: 7400,
+      mostLongGammaStrike: "7450 (12.0M)",
+      mostShortGammaStrike: "7350 (-8.0M)",
+    },
+    zeroDteRuleEngine: {
+      verdict: "TRADE_ALLOWED",
+      hardRuleTriggered: false,
+      signalScore: 76,
+      directionalBias: "CALL",
+      hardBlocks: [],
+      activeRisks: [],
+    },
+    TODAYS_MEMORY: { currentPosition: "NONE" },
+  };
+
+  const bearishContext = {
+    ...bullishContext,
+    currentPrice: "7368",
+    currentVWAP: "7395",
+    ema9: "7388",
+    m5Analysis: { volumeSurge: "1.60x" },
+    trendDayContext: {
+      regime: "BEAR_TREND_DAY",
+      directionalBias: "PUT",
+      confidence: 80,
+      aboveVWAP: false,
+      aboveEMA9: false,
+      aboveGammaFlip: false,
+      rationale: "Price is below VWAP/EMA9 with downside trend-day tape.",
+    },
+    calculatedGEX: {
+      gammaStatus: "negative_gamma",
+      gammaFlipLevel: 7400,
+      mostLongGammaStrike: "7450 (12.0M)",
+      mostShortGammaStrike: "7350 (-8.0M)",
+    },
+    zeroDteRuleEngine: {
+      verdict: "TRADE_ALLOWED",
+      hardRuleTriggered: false,
+      signalScore: 78,
+      directionalBias: "PUT",
+      hardBlocks: [],
+      activeRisks: [],
+    },
+  };
+
+  const bullishAgents = ["QM", "CM", "NT", "PA"].map((key) =>
+    buildDataBackedAgentFallback(key, bullishContext, "model_timeout"),
+  );
+  const bearishAgents = ["QM", "CM", "NT", "PA"].map((key) =>
+    buildDataBackedAgentFallback(key, bearishContext, "model_timeout"),
+  );
+
+  assert.ok(bullishAgents.some((agent) => agent.rating === "bullish"));
+  assert.ok(bearishAgents.some((agent) => agent.rating === "bearish"));
+  assert.equal(buildDataBackedCioPlan(bullishContext, bullishAgents).trade_action, "OPEN_CALL");
+  assert.equal(buildDataBackedCioPlan(bearishContext, bearishAgents).trade_action, "OPEN_PUT");
+});
+
+test("data-backed CIO stays neutral only when fixture signals are mixed or hard-blocked", () => {
+  const mixedContext = {
+    currentPrice: "7405",
+    currentVWAP: "7404",
+    ema9: "7406",
+    m5Analysis: { volumeSurge: "0.90x" },
+    trendDayContext: {
+      regime: "RANGE_OR_MIXED",
+      directionalBias: "NONE",
+      confidence: 35,
+      aboveVWAP: true,
+      aboveEMA9: false,
+      aboveGammaFlip: true,
+      rationale: "Range tape with no clean trigger.",
+    },
+    calculatedGEX: {
+      gammaStatus: "positive_gamma",
+      gammaFlipLevel: 7400,
+      mostLongGammaStrike: "7450 (12.0M)",
+      mostShortGammaStrike: "7350 (-8.0M)",
+    },
+    zeroDteRuleEngine: {
+      verdict: "WAIT_AND_OBSERVE",
+      hardRuleTriggered: false,
+      signalScore: 42,
+      directionalBias: "NONE",
+      hardBlocks: [],
+      activeRisks: ["volume_not_confirmed"],
+    },
+    TODAYS_MEMORY: { currentPosition: "NONE" },
+  };
+
+  const agents = ["QM", "CM", "NT", "PA"].map((key) =>
+    buildDataBackedAgentFallback(key, mixedContext, "model_timeout"),
+  );
+  const plan = buildDataBackedCioPlan(mixedContext, agents);
+
+  assert.equal(plan.trade_action, "HOLD");
+  assert.match(plan.risk_warning, /volume_not_confirmed|mixed/i);
 });

@@ -121,6 +121,82 @@ interface ZeroDteRuleEngineResult {
   liquidityRisk: "UNKNOWN";
 }
 
+type AgentRating = "bullish" | "bearish" | "neutral";
+
+interface AgentDecisionContract {
+  decision: string;
+  rating: AgentRating;
+  confidence: number;
+  confidence_score: number;
+  evidence: string[];
+  blockingRisk: string | null;
+  blocking_risk: string | null;
+  neutralReason: string | null;
+  neutral_reason: string | null;
+  reasoning: string;
+  analysis: string;
+  modelStatus?: string;
+}
+
+const YAHOO_CHART_TIMEOUT_MS = 6500;
+const OPTIONAL_MARKET_DATA_TIMEOUT_MS = 6500;
+const AGENT_MODEL_TIMEOUT_MS = 12000;
+const CIO_MODEL_TIMEOUT_MS = 12000;
+const TELEGRAM_TIMEOUT_MS = 6000;
+
+const LONG_DECISIONS = new Set(["BUY", "LONG", "CALL", "OPEN_CALL"]);
+const SHORT_DECISIONS = new Set(["SELL", "SHORT", "PUT", "OPEN_PUT"]);
+const ALLOWED_AGENT_DECISIONS = new Set([...LONG_DECISIONS, ...SHORT_DECISIONS, "HOLD"]);
+
+const toFiniteNumber = (value: unknown, fallback = 0) => {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const parsed = Number.parseFloat(String(value ?? "").replace(/[^0-9.+-]/g, ""));
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const clampConfidence = (value: unknown, fallback = 45) =>
+  Math.max(0, Math.min(100, Math.round(toFiniteNumber(value, fallback))));
+
+const getDecisionRating = (decision: unknown): AgentRating => {
+  const normalized = normalizeAgentDecisionValue(decision);
+  if (LONG_DECISIONS.has(normalized)) return "bullish";
+  if (SHORT_DECISIONS.has(normalized)) return "bearish";
+  return "neutral";
+};
+
+export function countDirectionalVotes(decisions: unknown[]) {
+  const normalized = decisions.map((decision) => normalizeAgentDecisionValue(decision));
+  const buyVotes = normalized.filter((decision) => LONG_DECISIONS.has(decision)).length;
+  const sellVotes = normalized.filter((decision) => SHORT_DECISIONS.has(decision)).length;
+  const holdVotes = normalized.length - buyVotes - sellVotes;
+  const consensusVote = buyVotes > sellVotes ? "LONG" : sellVotes > buyVotes ? "SHORT" : "NEUTRAL";
+  return { buyVotes, sellVotes, holdVotes, consensusVote };
+}
+
+async function withPromiseTimeout<T>(label: string, task: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([task, timeout]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+async function timedStep<T>(label: string, task: () => Promise<T>): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    const result = await task();
+    console.log(`[TIMING] ${label} completed in ${Date.now() - startedAt}ms`);
+    return result;
+  } catch (error) {
+    console.error(`[TIMING] ${label} failed after ${Date.now() - startedAt}ms`, error instanceof Error ? error.message : String(error));
+    throw error;
+  }
+}
+
 // --- Helper: Fetch with Timeout ---
 async function fetchWithTimeout(url: string, options: any, timeoutMs: number = 15000) {
   const controller = new AbortController();
@@ -149,7 +225,7 @@ async function fetchYahooChart(symbol: string, interval: string, range: string) 
           'User-Agent': 'Mozilla/5.0',
           'Accept': 'application/json'
         }
-      }, 10000);
+      }, YAHOO_CHART_TIMEOUT_MS);
       const text = await response.text();
 
       if (!response.ok) {
@@ -184,7 +260,7 @@ async function fetchYahooChart(symbol: string, interval: string, range: string) 
 
 async function fetchOptionalMarketData<T>(label: string, task: Promise<T>, fallback: T): Promise<T> {
   try {
-    return await task;
+    return await timedStep(label, () => task);
   } catch (error) {
     console.error(`[DATA] Optional market data failed: ${label}`, error instanceof Error ? error.message : String(error));
     return fallback;
@@ -271,28 +347,65 @@ const parseLooseJsonObject = (content: string) => {
 
 const normalizeAgentDecisionValue = (value: unknown) => {
   const decision = String(value || "HOLD").trim().toUpperCase();
-  const allowed = new Set(["BUY", "LONG", "CALL", "OPEN_CALL", "SELL", "SHORT", "PUT", "OPEN_PUT", "HOLD"]);
-  return allowed.has(decision) ? decision : "HOLD";
+  return ALLOWED_AGENT_DECISIONS.has(decision) ? decision : "HOLD";
+};
+
+const normalizeEvidenceList = (value: unknown, fallback: string[]) => {
+  const source = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[;|]/) : [];
+  const cleaned = source
+    .map((item) => compactModelText(item, 120))
+    .filter(Boolean)
+    .slice(0, 4);
+  return cleaned.length > 0 ? cleaned : fallback.slice(0, 4);
+};
+
+const normalizeAgentContract = (raw: Record<string, any>, fallbackReason: string): AgentDecisionContract => {
+  const decision = normalizeAgentDecisionValue(raw.decision || raw.trade_action);
+  const rating = (raw.rating === "bullish" || raw.rating === "bearish" || raw.rating === "neutral")
+    ? raw.rating
+    : getDecisionRating(decision);
+  const confidence = clampConfidence(raw.confidence ?? raw.confidence_score, decision === "HOLD" ? 40 : 65);
+  const neutralReason = rating === "neutral"
+    ? compactModelText(raw.neutralReason || raw.neutral_reason || raw.reasoning || fallbackReason, 180)
+    : null;
+  const blockingRisk = compactModelText(raw.blockingRisk || raw.blocking_risk || "", 160) || null;
+  const reasoning = compactModelText(raw.reasoning || raw.analysis || fallbackReason) || fallbackReason;
+  const evidence = normalizeEvidenceList(raw.evidence || raw.evidence_bullets, [reasoning]);
+  return {
+    ...raw,
+    decision,
+    rating,
+    confidence,
+    confidence_score: confidence,
+    evidence,
+    blockingRisk,
+    blocking_risk: blockingRisk,
+    neutralReason,
+    neutral_reason: neutralReason,
+    reasoning,
+    analysis: compactModelText(raw.analysis || reasoning),
+  };
 };
 
 export function parseAgentResponseContent(content: string) {
   const parsed = parseLooseJsonObject(content);
   if (parsed) {
     const reasoning = compactModelText(parsed.reasoning || parsed.analysis || content);
-    return {
+    return normalizeAgentContract({
       ...parsed,
       decision: normalizeAgentDecisionValue(parsed.decision),
       reasoning: reasoning || "模型回覆缺少理由，降級觀望。",
       analysis: compactModelText(parsed.analysis || reasoning || parsed.reasoning),
-    };
+    }, "model_json_missing_reason");
   }
 
   const fallbackReason = compactModelText(content) || "模型未回傳可讀分析，降級觀望。";
-  return {
+  return normalizeAgentContract({
     decision: "HOLD",
     reasoning: fallbackReason,
     analysis: fallbackReason,
-  };
+    neutral_reason: "model_output_not_json",
+  }, fallbackReason);
 }
 
 export function parseOrchestratorResponseContent(content: string) {
@@ -309,6 +422,205 @@ export function parseOrchestratorResponseContent(content: string) {
     stop_loss: "N/A",
     take_profit: "N/A",
     risk_warning: "CIO output was not valid JSON; preserved source text and degraded to HOLD.",
+  };
+}
+
+const decisionFromBias = (bias: unknown) => {
+  const normalized = String(bias || "").toUpperCase();
+  if (normalized === "CALL" || normalized === "BULLISH" || normalized === "LONG") return "BUY";
+  if (normalized === "PUT" || normalized === "BEARISH" || normalized === "SHORT") return "SELL";
+  return "HOLD";
+};
+
+const actionFromDecision = (decision: unknown) => {
+  const normalized = normalizeAgentDecisionValue(decision);
+  if (LONG_DECISIONS.has(normalized)) return "OPEN_CALL";
+  if (SHORT_DECISIONS.has(normalized)) return "OPEN_PUT";
+  return "HOLD";
+};
+
+const hasHardNewSignalBlock = (contextData: any) => {
+  const rule = contextData?.zeroDteRuleEngine || {};
+  const position = contextData?.TODAYS_MEMORY?.currentPosition || "NONE";
+  return position === "NONE" && (
+    rule.hardRuleTriggered === true ||
+    rule.verdict === "FREEZE_NEW_SIGNALS" ||
+    (rule.verdict === "NO_TRADE" && toFiniteNumber(rule.signalScore, 0) < 45)
+  );
+};
+
+export function buildDataBackedAgentFallback(personaKey: string, contextData: any, failureReason = "model_unavailable") {
+  const key = String(personaKey || "").toUpperCase();
+  const trend = contextData?.trendDayContext || {};
+  const gex = contextData?.calculatedGEX || contextData?.calculatedGex || {};
+  const rule = contextData?.zeroDteRuleEngine || {};
+  const price = toFiniteNumber(contextData?.currentPrice);
+  const vwap = toFiniteNumber(contextData?.currentVWAP);
+  const ema9 = toFiniteNumber(contextData?.ema9);
+  const vix = toFiniteNumber(contextData?.currentVix);
+  const volumeSurge = toFiniteNumber(contextData?.m5Analysis?.volumeSurge, 1);
+  const trendBiasDecision = decisionFromBias(trend.directionalBias);
+  const baseEvidence = [
+    `fallback=${failureReason}`,
+    `price=${price || "n/a"} vwap=${vwap || "n/a"} ema9=${ema9 || "n/a"}`,
+    `trend=${trend.regime || "UNKNOWN"} score=${trend.confidence ?? "n/a"}`,
+    `0dte=${rule.verdict || "UNKNOWN"} score=${rule.signalScore ?? "n/a"}`,
+  ];
+
+  let decision = "HOLD";
+  let confidence = 38;
+  let blockingRisk = "";
+  let neutralReason = "Signals are mixed or missing; neutral is data-backed.";
+  const evidence = [...baseEvidence];
+
+  if (hasHardNewSignalBlock(contextData)) {
+    blockingRisk = `hard_block=${rule.verdict || "UNKNOWN"} ${(rule.hardBlocks || []).join(",")}`;
+  } else if (key === "QM") {
+    if (trend.regime === "BULL_TREND_DAY" && trend.aboveVWAP && trend.aboveEMA9 && volumeSurge >= 1.2) {
+      decision = "BUY";
+      confidence = clampConfidence(toFiniteNumber(trend.confidence, 70) + 4);
+      evidence.push(`M5 volume surge ${volumeSurge.toFixed(2)}x confirms upside tape`);
+    } else if (trend.regime === "BEAR_TREND_DAY" && !trend.aboveVWAP && !trend.aboveEMA9 && volumeSurge >= 1.2) {
+      decision = "SELL";
+      confidence = clampConfidence(toFiniteNumber(trend.confidence, 70) + 4);
+      evidence.push(`M5 volume surge ${volumeSurge.toFixed(2)}x confirms downside tape`);
+    } else {
+      evidence.push(`volume surge ${volumeSurge.toFixed(2)}x or VWAP/EMA9 alignment is not decisive`);
+    }
+  } else if (key === "CM") {
+    const gammaStatus = String(gex.gammaStatus || "").toLowerCase();
+    const aboveGammaFlip = trend.aboveGammaFlip;
+    if (gammaStatus.includes("negative") && aboveGammaFlip === true) {
+      decision = "BUY";
+      confidence = 72;
+      evidence.push("negative gamma above gamma flip favors upside acceleration");
+    } else if (gammaStatus.includes("negative") && aboveGammaFlip === false) {
+      decision = "SELL";
+      confidence = 72;
+      evidence.push("negative gamma below gamma flip favors downside acceleration");
+    } else if (gammaStatus.includes("positive") && trend.regime === "BULL_TREND_DAY" && trend.aboveVWAP) {
+      decision = "BUY";
+      confidence = 68;
+      evidence.push("positive gamma plus bull trend day supports controlled pin higher");
+    } else if (gammaStatus.includes("positive") && trend.regime === "BEAR_TREND_DAY" && !trend.aboveVWAP) {
+      decision = "SELL";
+      confidence = 68;
+      evidence.push("positive gamma plus bear trend day supports controlled pin lower");
+    } else {
+      evidence.push(`gamma=${gammaStatus || "missing"} does not produce a clean directional edge`);
+    }
+  } else if (key === "NT") {
+    if (vix >= 24) {
+      blockingRisk = `VIX ${vix.toFixed(2)} tail-risk regime`;
+      evidence.push("volatility is too elevated for a clean new 0DTE entry");
+    } else if (trendBiasDecision !== "HOLD" && rule.directionalBias !== "NONE") {
+      decision = trendBiasDecision;
+      confidence = 60;
+      evidence.push(`VIX ${vix || "n/a"} does not veto ${trend.directionalBias} bias`);
+    } else {
+      evidence.push("volatility context does not confirm a directional edge");
+    }
+  } else if (key === "PA") {
+    if (trend.regime === "BULL_TREND_DAY" && trend.aboveVWAP && trend.aboveEMA9) {
+      decision = "BUY";
+      confidence = clampConfidence(trend.confidence, 66);
+      evidence.push("price structure is above VWAP and EMA9 on bull trend day");
+    } else if (trend.regime === "BEAR_TREND_DAY" && !trend.aboveVWAP && !trend.aboveEMA9) {
+      decision = "SELL";
+      confidence = clampConfidence(trend.confidence, 66);
+      evidence.push("price structure is below VWAP and EMA9 on bear trend day");
+    } else {
+      evidence.push("price structure lacks VWAP/EMA9 alignment");
+    }
+  }
+
+  if (decision !== "HOLD") {
+    neutralReason = null as any;
+  }
+
+  return normalizeAgentContract({
+    decision,
+    confidence,
+    evidence,
+    blocking_risk: blockingRisk || null,
+    neutral_reason: neutralReason,
+    reasoning: decision === "HOLD"
+      ? `${key || "AGENT"} fallback HOLD: ${blockingRisk || neutralReason}`
+      : `${key || "AGENT"} fallback ${decision}: ${evidence[evidence.length - 1]}`,
+    analysis: `${key || "AGENT"} data-backed fallback after ${failureReason}.`,
+    modelStatus: failureReason,
+  }, failureReason);
+}
+
+const normalizeCioAction = (value: unknown) => {
+  const action = String(value || "HOLD").trim().toUpperCase();
+  return ["OPEN_CALL", "OPEN_PUT", "CLOSE", "HOLD"].includes(action) ? action : "HOLD";
+};
+
+export function buildDataBackedCioPlan(contextData: any, agents: any[]) {
+  const rule = contextData?.zeroDteRuleEngine || {};
+  const trend = contextData?.trendDayContext || {};
+  const position = contextData?.TODAYS_MEMORY?.currentPosition || "NONE";
+  const votes = countDirectionalVotes(agents.map((agent) => agent?.decision));
+  const weightedScore = agents.reduce((score, agent) => {
+    const confidence = clampConfidence(agent?.confidence ?? agent?.confidence_score, 45);
+    const decision = normalizeAgentDecisionValue(agent?.decision);
+    if (LONG_DECISIONS.has(decision)) return score + confidence;
+    if (SHORT_DECISIONS.has(decision)) return score - confidence;
+    return score;
+  }, 0);
+  const signalScore = toFiniteNumber(rule.signalScore, 0);
+  const hardBlocked = hasHardNewSignalBlock(contextData);
+  let tradeAction = "HOLD";
+  let actionReasoning = "data_fallback_hold";
+
+  if (rule.verdict === "CLOSE_OR_REDUCE_SUGGESTED" && position !== "NONE") {
+    tradeAction = "CLOSE";
+    actionReasoning = "0dte_risk_close";
+  } else if (!hardBlocked && weightedScore >= 120 && signalScore >= 45) {
+    tradeAction = "OPEN_CALL";
+    actionReasoning = "bullish_evidence";
+  } else if (!hardBlocked && weightedScore <= -120 && signalScore >= 45) {
+    tradeAction = "OPEN_PUT";
+    actionReasoning = "bearish_evidence";
+  } else if (!hardBlocked && trend.regime === "BULL_TREND_DAY" && toFiniteNumber(trend.confidence, 0) >= 70) {
+    tradeAction = "OPEN_CALL";
+    actionReasoning = "trend_day_override";
+  } else if (!hardBlocked && trend.regime === "BEAR_TREND_DAY" && toFiniteNumber(trend.confidence, 0) >= 70) {
+    tradeAction = "OPEN_PUT";
+    actionReasoning = "trend_day_override";
+  }
+
+  const riskParts = [
+    hardBlocked ? `hard_block=${rule.verdict || "UNKNOWN"}` : null,
+    ...(rule.hardBlocks || []),
+    ...(rule.activeRisks || []),
+    tradeAction === "HOLD" ? `mixed score=${weightedScore}` : null,
+  ].filter(Boolean);
+
+  return {
+    strategy: tradeAction === "HOLD" ? "Hold" : tradeAction,
+    trade_action: tradeAction,
+    action_reasoning: actionReasoning,
+    logic: `Data fallback CIO: votes ${votes.buyVotes}/${votes.sellVotes}/${votes.holdVotes}, weighted=${weightedScore}, trend=${trend.regime || "UNKNOWN"}.`,
+    buy_zone: tradeAction === "OPEN_CALL" || tradeAction === "OPEN_PUT"
+      ? `Follow only while price respects VWAP ${contextData?.currentVWAP || "N/A"} / EMA9 ${contextData?.ema9 || "N/A"}`
+      : "N/A",
+    stop_loss: tradeAction === "OPEN_CALL"
+      ? `Lose VWAP ${contextData?.currentVWAP || "N/A"} and EMA9 ${contextData?.ema9 || "N/A"}`
+      : tradeAction === "OPEN_PUT"
+        ? `Reclaim VWAP ${contextData?.currentVWAP || "N/A"} and EMA9 ${contextData?.ema9 || "N/A"}`
+        : "N/A",
+    take_profit: tradeAction === "OPEN_CALL"
+      ? `Scale before long gamma wall ${contextData?.calculatedGEX?.mostLongGammaStrike || "N/A"}`
+      : tradeAction === "OPEN_PUT"
+        ? `Scale before short gamma pocket ${contextData?.calculatedGEX?.mostShortGammaStrike || "N/A"}`
+        : "N/A",
+    risk_warning: riskParts.length > 0 ? riskParts.join("; ") : "No hard block; manage 0DTE theta and VWAP invalidation.",
+    rule_engine_verdict: rule.verdict || "UNKNOWN",
+    hard_rule_triggered: rule.hardRuleTriggered === true,
+    confidence_score: Math.min(95, Math.max(25, Math.round(Math.abs(weightedScore) / Math.max(1, agents.length)))),
+    agent_vote_summary: votes,
   };
 }
 
@@ -1106,6 +1418,9 @@ async function analyzeWithAgent(personaKey: string, personaPrompt: string, conte
   const systemPrompt = `You are an elite stock trader. Your persona is: ${personaPrompt}. \n${SYSTEM_PROMPT_PREFIX}`;
 
   try {
+    if (!env.OPENROUTER_API_KEY) {
+      return buildDataBackedAgentFallback(personaKey, contextData, "missing_openrouter_key");
+    }
     const response = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -1116,31 +1431,33 @@ async function analyzeWithAgent(personaKey: string, personaPrompt: string, conte
       },
       body: JSON.stringify({
         model: env.OPENROUTER_MODEL || 'google/gemma-4-26b-a4b-it:free',
+        temperature: 0.15,
+        max_tokens: 260,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: `Market Data Context: ${JSON.stringify(contextData)}` }
         ]
       })
-    }, 15000);
+    }, AGENT_MODEL_TIMEOUT_MS);
 
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`OpenRouter Error ${response.status}:`, errorText);
-      return { decision: "HOLD", reasoning: `接口錯誤(${response.status})`, analysis: "數據獲取失敗" };
+      return buildDataBackedAgentFallback(personaKey, contextData, `openrouter_${response.status}`);
     }
     const data = await response.json() as any;
     const content = data.choices?.[0]?.message?.content || "";
     return parseAgentResponseContent(content);
   } catch (e: any) {
     console.error('Agent error:', e.message);
-    return { decision: "HOLD", reasoning: "模型請求失敗，降級觀望。", analysis: "模型請求失敗，降級觀望。" };
+    return buildDataBackedAgentFallback(personaKey, contextData, e?.name === "AbortError" ? "model_timeout" : "model_request_failed");
   }
 }
 
 async function sendTelegramMessage(token: string, chatId: string, text: string) {
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
   try {
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1149,7 +1466,7 @@ async function sendTelegramMessage(token: string, chatId: string, text: string) 
         parse_mode: 'HTML',
         disable_web_page_preview: true
       })
-    });
+    }, TELEGRAM_TIMEOUT_MS);
     const resData = await res.json() as any;
     if (!res.ok) {
       console.error(`Telegram Error: ${res.status}`, JSON.stringify(resData));
@@ -1225,16 +1542,14 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     if (!dailyMemory.icPosition) { dailyMemory.icPosition = 'NONE'; dailyMemory.icDeployTime = null; dailyMemory.icAction = null; }
 
     console.log('[DEBUG] Step 1: Fetching core SPX data, optional market context, CBOE PCR & GEX...');
-    const [spxQuotes, spxQuotesM5] = await Promise.all([
-      fetchYahooChart('^GSPC', '15m', '7d'),
-      fetchYahooChart('^GSPC', '5m', '2d')
-    ]);
+    const spxQuotes = await timedStep('SPX 15m core chart', () => fetchYahooChart('^GSPC', '15m', '7d'));
+    const spxQuotesM5 = await fetchOptionalMarketData('SPX M5 trigger chart', fetchYahooChart('^GSPC', '5m', '2d'), spxQuotes);
     const [spxQuotesD1, spxQuotesH1, vixQuotes, vixQuotes9d, cboeOptionsSnapshot, sentimentData] = await Promise.all([
       fetchOptionalMarketData('SPX D1 price-action chart', fetchYahooChart('^GSPC', '1d', '3mo'), []),
       fetchOptionalMarketData('SPX H1 price-action chart', fetchYahooChart('^GSPC', '1h', '10d'), []),
       fetchOptionalMarketData('VIX 15m chart', fetchYahooChart('^VIX', '15m', '7d'), []),
       fetchOptionalMarketData('VIX9D term-structure chart', fetchYahooChart('^VIX9D', '1d', '3mo'), []),
-      fetchOptionalMarketData('CBOE cached options snapshot', fetchCachedCboeOptionsSnapshot(env, now), { pcrValue: null, calculatedGex: null }),
+      fetchOptionalMarketData('CBOE cached options snapshot', withPromiseTimeout('CBOE cached options snapshot', fetchCachedCboeOptionsSnapshot(env, now), OPTIONAL_MARKET_DATA_TIMEOUT_MS), { pcrValue: null, calculatedGex: null }),
       getDisabledNewsSentiment(),
     ]);
     const pcrValue = cboeOptionsSnapshot.pcrValue;
@@ -1372,14 +1687,18 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       return '⚪ [觀望]';
     };
 
-    const buyVotes = [d1, d2, d3, d4].filter(d => d === 'BUY' || d === 'LONG').length;
-    const sellVotes = [d1, d2, d3, d4].filter(d => d === 'SELL' || d === 'SHORT' || d === 'PUT').length;
-    const holdVotes = 4 - buyVotes - sellVotes;
+    const voteSummary = countDirectionalVotes([d1, d2, d3, d4]);
+    const buyVotes = voteSummary.buyVotes;
+    const sellVotes = voteSummary.sellVotes;
+    const holdVotes = voteSummary.holdVotes;
     let consensusVote = buyVotes > sellVotes ? 'LONG 📈' : sellVotes > buyVotes ? 'SHORT 📉' : 'NEUTRAL ⚖️';
 
     console.log('[DEBUG] Step 4: Triggering Orchestrator...');
-    let orchestratorPlan = { strategy: '觀望 (Hold)', logic: '無法取得總結邏輯', risk_management: '嚴控風險。' };
+    const fallbackOrchestratorPlan = buildDataBackedCioPlan(extendedContext, [agent1, agent2, agent3, agent4]);
+    let orchestratorPlan: any = { strategy: '觀望 (Hold)', logic: '無法取得總結邏輯', risk_management: '嚴控風險。' };
+    orchestratorPlan = fallbackOrchestratorPlan;
     try {
+      if (!env.OPENROUTER_API_KEY) throw new Error('missing_openrouter_key');
       const orchRes = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -1388,16 +1707,26 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
         },
         body: JSON.stringify({
           model: env.OPENROUTER_MODEL || 'google/gemma-4-26b-a4b-it:free',
+          temperature: 0.1,
+          max_tokens: 360,
           messages: [
             { role: 'system', content: ORCHESTRATOR_PROMPT },
             { role: 'user', content: `Market Context: ${JSON.stringify(extendedContext)}\nQM (Momentum): ${JSON.stringify(agent1)}\nCM (GEX): ${JSON.stringify(agent2)}\nNT (Sentiment): ${JSON.stringify(agent3)}\nPA (Price Action): ${JSON.stringify(agent4)}` }
           ]
         })
-      }, 20000);
+      }, CIO_MODEL_TIMEOUT_MS);
       if (orchRes.ok) {
         const orchData = await orchRes.json() as any;
         const content = orchData.choices?.[0]?.message?.content || "";
-        orchestratorPlan = parseOrchestratorResponseContent(content);
+        const parsedPlan = parseOrchestratorResponseContent(content);
+        orchestratorPlan = {
+          ...fallbackOrchestratorPlan,
+          ...parsedPlan,
+          trade_action: normalizeCioAction((parsedPlan as any).trade_action),
+          risk_warning: (parsedPlan as any).risk_warning || (fallbackOrchestratorPlan as any).risk_warning,
+        };
+      } else {
+        console.error(`[ERR] Orchestrator OpenRouter ${orchRes.status}`, await orchRes.text());
       }
     } catch (e) {
       console.error('[ERR] Orchestrator error', e);
