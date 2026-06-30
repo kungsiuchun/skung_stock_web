@@ -210,8 +210,12 @@ const normalizeBill = (bill: Partial<BillState>): BillState | null => {
 
 const calculateBalances = ({ expenses, participants }: SplitEvent) => {
   const balances = new Map<string, number>();
+  const pennyBalances = new Map<string, number>();
 
-  participants.forEach((participant) => balances.set(participant.id, 0));
+  participants.forEach((participant) => {
+    balances.set(participant.id, 0);
+    pennyBalances.set(participant.id, 0);
+  });
 
   expenses.forEach((expense) => {
     const selectedIds = participants
@@ -227,8 +231,17 @@ const calculateBalances = ({ expenses, participants }: SplitEvent) => {
     const baseShare = Math.floor(expense.amountCents / selectedIds.length);
     const remainder = expense.amountCents % selectedIds.length;
 
-    selectedIds.forEach((participantId, index) => {
-      const share = baseShare + (index < remainder ? 1 : 0);
+    // Distribute remaining pennies to those who have received the least extra pennies so far
+    const sortedIds = [...selectedIds].sort((a, b) => (pennyBalances.get(a) ?? 0) - (pennyBalances.get(b) ?? 0));
+
+    selectedIds.forEach((participantId) => {
+      const getsPenny = sortedIds.indexOf(participantId) < remainder;
+      const share = baseShare + (getsPenny ? 1 : 0);
+      
+      if (getsPenny) {
+        pennyBalances.set(participantId, (pennyBalances.get(participantId) ?? 0) + 1);
+      }
+      
       balances.set(participantId, (balances.get(participantId) ?? 0) - share);
     });
   });
@@ -383,6 +396,22 @@ export function SettleUpPage({ onBackToWork }: SettleUpPageProps) {
       ...event,
       name,
     }));
+  };
+
+  const removeEvent = (eventId: string) => {
+    setShareStatus("idle");
+    setBill((current) => {
+      const remainingEvents = current.events.filter((event) => event.id !== eventId);
+      
+      if (remainingEvents.length === 0) {
+        return createBlankBill();
+      }
+      
+      return {
+        events: remainingEvents,
+        activeEventId: current.activeEventId === eventId ? remainingEvents[0].id : current.activeEventId,
+      };
+    });
   };
 
   const addEvent = () => {
@@ -592,7 +621,15 @@ export function SettleUpPage({ onBackToWork }: SettleUpPageProps) {
             <div className="rounded-2xl border border-white/10 bg-white/[0.035] p-4">
               <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
                 <div className="min-w-0 flex-1">
-                  <label className="text-xs font-bold uppercase tracking-[0.16em] text-white/45">Current event</label>
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold uppercase tracking-[0.16em] text-white/45">Current event</label>
+                    <button
+                      onClick={() => removeEvent(activeEvent.id)}
+                      className="text-xs font-bold uppercase tracking-[0.16em] text-rose-400/70 transition-colors hover:text-rose-300"
+                    >
+                      Remove
+                    </button>
+                  </div>
                   <input
                     value={activeEvent.name}
                     onChange={(event) => renameActiveEvent(event.target.value)}
@@ -808,6 +845,25 @@ interface ExpenseEditorProps {
 }
 
 const ExpenseEditor = ({ expense, participants, onChange, onToggleParticipant, onRemove }: ExpenseEditorProps) => {
+  const [amountStr, setAmountStr] = useState(() => amountInputValue(expense.amountCents));
+
+  useEffect(() => {
+    const newVal = amountInputValue(expense.amountCents);
+    if (parseAmountCents(amountStr) !== expense.amountCents) {
+      setAmountStr(newVal);
+    }
+  }, [expense.amountCents, amountStr]);
+
+  const handleAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setAmountStr(val);
+    onChange(expense.id, { amountCents: parseAmountCents(val) });
+  };
+
+  const handleAmountBlur = () => {
+    setAmountStr(amountInputValue(expense.amountCents));
+  };
+
   return (
     <article className="rounded-2xl border border-white/10 bg-[#101214]/90 p-4 shadow-xl backdrop-blur-md">
       <div className="grid gap-3 lg:grid-cols-[minmax(12rem,1.4fr)_8rem_10rem_auto] lg:items-center">
@@ -820,8 +876,9 @@ const ExpenseEditor = ({ expense, participants, onChange, onToggleParticipant, o
           type="number"
           min="0"
           step="0.01"
-          value={amountInputValue(expense.amountCents)}
-          onChange={(event) => onChange(expense.id, { amountCents: parseAmountCents(event.target.value) })}
+          value={amountStr}
+          onChange={handleAmountChange}
+          onBlur={handleAmountBlur}
           className="rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm font-bold text-white outline-none transition-colors focus:border-emerald-200/50"
           aria-label={`${expense.description} amount`}
         />
