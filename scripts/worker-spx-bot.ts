@@ -142,8 +142,8 @@ interface AgentDecisionContract {
 
 const YAHOO_CHART_TIMEOUT_MS = 6500;
 const OPTIONAL_MARKET_DATA_TIMEOUT_MS = 6500;
-const AGENT_MODEL_TIMEOUT_MS = 12000;
-const CIO_MODEL_TIMEOUT_MS = 12000;
+const AGENT_MODEL_TIMEOUT_MS = 8000;
+const CIO_MODEL_TIMEOUT_MS = 8000;
 const TELEGRAM_TIMEOUT_MS = 6000;
 const TRADING_RUN_LOCK_KEY = "spx_trading_run_lock";
 const TRADING_RUN_LOCK_TTL_SECONDS = 12 * 60;
@@ -153,6 +153,9 @@ const SHORT_DECISIONS = new Set(["SELL", "SHORT", "PUT", "OPEN_PUT"]);
 const ALLOWED_AGENT_DECISIONS = new Set([...LONG_DECISIONS, ...SHORT_DECISIONS, "HOLD"]);
 
 const truthyFlag = (value: unknown) => ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
+const falseyFlag = (value: unknown) => ["0", "false", "no", "off"].includes(String(value || "").trim().toLowerCase());
+export const shouldRunLlmCouncil = (value: unknown) => !falseyFlag(value);
+export const shouldRunLlmCio = (value: unknown) => !falseyFlag(value);
 
 const toFiniteNumber = (value: unknown, fallback = 0) => {
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -1770,17 +1773,19 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       }
     };
 
-    console.log('[DEBUG] Step 3: Building 4 data-backed agents (QM/CM/NT/PA). LLM council disabled unless explicitly enabled...');
+    console.log('[DEBUG] Step 3: Triggering 4 AI council agents (QM/CM/NT/PA). Per-agent deterministic fallback enabled...');
     let [agent1, agent2, agent3, agent4] = ['QM', 'CM', 'NT', 'PA'].map((key) =>
       buildDataBackedAgentFallback(key, extendedContext, 'deterministic_rules')
     );
-    if (truthyFlag(env.SPX_ENABLE_LLM_COUNCIL)) {
+    if (shouldRunLlmCouncil(env.SPX_ENABLE_LLM_COUNCIL)) {
       [agent1, agent2, agent3, agent4] = await Promise.all([
         analyzeWithAgent('QM', PERSONAS.QM_MOMENTUM_SNIPER, extendedContext, env),
         analyzeWithAgent('CM', PERSONAS.CM_OPTIONS_MAKER, extendedContext, env),
         analyzeWithAgent('NT', NT_VOLATILITY_RISK_PROMPT, extendedContext, env),
         analyzeWithAgent('PA', PERSONAS.PA_PRICE_ACTION, extendedContext, env)
       ]);
+    } else {
+      console.log('[DEBUG] AI council explicitly disabled by SPX_ENABLE_LLM_COUNCIL; using deterministic fallback agents.');
     }
 
     const normalizeDecision = (d: string) => d ? d.toString().trim().toUpperCase() : "HOLD";
@@ -1804,7 +1809,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     const fallbackOrchestratorPlan = buildDataBackedCioPlan(extendedContext, [agent1, agent2, agent3, agent4]);
     let orchestratorPlan: any = { strategy: '觀望 (Hold)', logic: '無法取得總結邏輯', risk_management: '嚴控風險。' };
     orchestratorPlan = fallbackOrchestratorPlan;
-    if (truthyFlag(env.SPX_ENABLE_LLM_CIO)) {
+    if (shouldRunLlmCio(env.SPX_ENABLE_LLM_CIO)) {
       try {
         if (!env.OPENROUTER_API_KEY) throw new Error('missing_openrouter_key');
         const orchRes = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
@@ -1840,7 +1845,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
         console.error('[ERR] Orchestrator error', e);
       }
     } else {
-      console.log('[DEBUG] CIO LLM disabled; using deterministic data-backed plan.');
+      console.log('[DEBUG] CIO AI agent explicitly disabled by SPX_ENABLE_LLM_CIO; using deterministic data-backed plan.');
     }
 
     const callTargetGuide = intradayStructure.repeatedResistance
@@ -1978,8 +1983,12 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     else if (tradeAction === 'CLOSE') displayAction = '平倉了結';
     else if (tradeAction === 'HOLD') displayAction = dailyMemory.currentPosition !== 'NONE' ? '持倉續抱' : '觀望空倉';
 
-    const actionReasoning = (orchestratorPlan as any).action_reasoning || "策略執行";
+    const actionReasoning = safeVisibleAgentText((orchestratorPlan as any).action_reasoning, "策略執行", 40);
     const finalDisplayAction = `${displayAction} (${actionReasoning})`;
+    const displayBuyZone = safeVisibleAgentText((orchestratorPlan as any).buy_zone, "N/A", 240) || "N/A";
+    const displayStopLoss = safeVisibleAgentText((orchestratorPlan as any).stop_loss, "N/A", 240) || "N/A";
+    const displayTakeProfit = safeVisibleAgentText((orchestratorPlan as any).take_profit, "N/A", 260) || "N/A";
+    const displayRiskWarning = safeVisibleAgentText((orchestratorPlan as any).risk_warning, "N/A", 260) || "N/A";
 
     // IC summary for display
     const icDisplay = ``;
@@ -2014,10 +2023,10 @@ ${tgEscape(formatAgentTelegramBrief('PA', agent4))}
 
 🛡️ <b>[雷霆一擊 · 終極執行]</b> (Thor Execution Plan)
 <b>操作：</b> <code>${tgEscape(finalDisplayAction)}</code>
-<b>買點：</b> ${tgEscape((orchestratorPlan as any).buy_zone || "N/A")}
-<b>止損：</b> ${tgEscape((orchestratorPlan as any).stop_loss || "N/A")}
-<b>止盈：</b> ${tgEscape((orchestratorPlan as any).take_profit || "N/A")}
-<b>風控：</b> ${tgEscape((orchestratorPlan as any).risk_warning || "N/A")}
+<b>買點：</b> ${tgEscape(displayBuyZone)}
+<b>止損：</b> ${tgEscape(displayStopLoss)}
+<b>止盈：</b> ${tgEscape(displayTakeProfit)}
+<b>風控：</b> ${tgEscape(displayRiskWarning)}
 
 <pre>-- CF Worker v4.0.0 | lean Telegram output | IC disabled --</pre>
 `;

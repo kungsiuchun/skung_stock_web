@@ -9,6 +9,8 @@ import {
   hasActiveTradingRunLock,
   parseAgentResponseContent,
   parseOrchestratorResponseContent,
+  shouldRunLlmCio,
+  shouldRunLlmCouncil,
 } from "../scripts/worker-spx-bot";
 
 const forbiddenVisibleFragments = [
@@ -114,6 +116,20 @@ test("trading run lock treats unexpired lock as active and expired lock as inact
   assert.equal(hasActiveTradingRunLock(JSON.stringify({ expiresAtMs: now + 1000 }), now), true);
   assert.equal(hasActiveTradingRunLock(JSON.stringify({ expiresAtMs: now - 1000 }), now), false);
   assert.equal(hasActiveTradingRunLock("not json", now), false);
+});
+
+test("AI council and CIO are enabled by default and only falsey flags disable them", () => {
+  assert.equal(shouldRunLlmCouncil(undefined), true);
+  assert.equal(shouldRunLlmCouncil(""), true);
+  assert.equal(shouldRunLlmCouncil("true"), true);
+  assert.equal(shouldRunLlmCouncil("0"), false);
+  assert.equal(shouldRunLlmCouncil("false"), false);
+
+  assert.equal(shouldRunLlmCio(undefined), true);
+  assert.equal(shouldRunLlmCio(""), true);
+  assert.equal(shouldRunLlmCio("yes"), true);
+  assert.equal(shouldRunLlmCio("off"), false);
+  assert.equal(shouldRunLlmCio("no"), false);
 });
 
 test("orchestrator output parser degrades without throwing on non-JSON text", () => {
