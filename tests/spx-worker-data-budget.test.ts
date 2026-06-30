@@ -24,6 +24,13 @@ test("Telegram trading run does not fetch fake VIX 3-month context from ^VIX dai
   assert.equal(workerSource.includes("currentVix3m = vixQuotes3mo"), false);
 });
 
+test("market data quality call uses fetched SPX structure variables", () => {
+  assert.equal(workerSource.includes("spxD1Quotes,"), false);
+  assert.equal(workerSource.includes("spxH1Quotes,"), false);
+  assert.match(workerSource, /spxD1Quotes:\s*spxQuotesD1/);
+  assert.match(workerSource, /spxH1Quotes:\s*spxQuotesH1/);
+});
+
 test("NT sentiment persona does not require removed ETF flow or fake VIX3M inputs", () => {
   assert.equal(/ETF|SPY|IWM|XLK|XLV|XLY|XLI|XLP|XLU/.test(NT_VOLATILITY_RISK_PROMPT), false);
   assert.equal(/3m|3-month|VIX3M/i.test(NT_VOLATILITY_RISK_PROMPT), false);

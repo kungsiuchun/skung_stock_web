@@ -1890,8 +1890,8 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     const marketDataQuality = assessMarketDataQuality({
       spxQuotes,
       spxM5Quotes: m5QuotesValid,
-      spxD1Quotes,
-      spxH1Quotes,
+      spxD1Quotes: spxQuotesD1,
+      spxH1Quotes: spxQuotesH1,
       currentVix,
       currentVix9d,
       pcrValue,
