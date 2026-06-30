@@ -35,6 +35,7 @@ dist-ssr
 scratch/
 .tmp/
 uat_screenshots/
+.superpowers/
 .claude/
 .mcp.json
 .opencode.json
