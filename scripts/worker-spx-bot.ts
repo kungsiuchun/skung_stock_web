@@ -1,8 +1,8 @@
 import { RSI, BollingerBands, SMA, MACD, EMA } from 'technicalindicators';
 import { PERSONAS, ORCHESTRATOR_PROMPT, SYSTEM_PROMPT_PREFIX, AUDIT_AGENT_PROMPT } from './prompts';
 import { calculateGexFromOptionChains } from './gex-calculator';
-import { upsertRecapDay, type D1DatabaseLike } from '../src/lib/spx-recap-d1';
-import { generateAndStoreSpxGexHeatmap } from '../src/lib/spx-gex-heatmap';
+import { readAgentCalibrationWeights, readPendingAgentSignalOutcomes, updateAgentSignalOutcomeResults, upsertAgentSignalOutcome, upsertRecapDay, type D1DatabaseLike } from '../src/lib/spx-recap-d1';
+import { generateAndStoreSpxGexHeatmap, type SpxGexOptionChain } from '../src/lib/spx-gex-heatmap';
 import { calculateCboePcrFromChains, createSpxGexIntradayDataClient } from '../src/lib/spx-gex-cboe';
 
 export const NT_VOLATILITY_RISK_PROMPT = `You are NT, a ruthless Volatility Risk Manager. You monitor options premium pressure, VIX/VIX9D stress, gamma regime, and tail-risk.
@@ -35,6 +35,10 @@ interface ActionLogItem {
   riskWarning?: string;
   ruleEngineVerdict?: string;
   signalScore?: number;
+  runId?: string;
+  dataQuality?: MarketDataQualitySummary;
+  agentVotes?: Record<string, unknown>;
+  cioConfidence?: number;
 }
 interface DailyMemory {
   currentPosition: "NONE" | "CALL" | "PUT";
@@ -87,6 +91,22 @@ interface GexData {
   parsedAt?: string;
 }
 
+type MarketDataQualityStatus = "OK" | "STALE" | "MISSING" | "FALLBACK";
+type MarketDataQualityOverall = "OK" | "WARN" | "BLOCK";
+
+interface MarketDataQualityItem {
+  status: MarketDataQualityStatus;
+  required: boolean;
+  detail: string;
+}
+
+interface MarketDataQualitySummary {
+  overallStatus: MarketDataQualityOverall;
+  items: Record<string, MarketDataQualityItem>;
+  hardBlocks: string[];
+  warnings: string[];
+}
+
 interface IntradayKeyLevel {
   level: number;
   touches: number;
@@ -115,6 +135,8 @@ interface ZeroDteRuleEngineResult {
   marketRegime: "TREND" | "CHOP" | "GAMMA_PIN" | "UNKNOWN";
   signalScore: number;
   hardBlocks: string[];
+  softWarnings: string[];
+  advisoryNotes: string[];
   activeRisks: string[];
   allowNewSignal: boolean;
   hardRuleTriggered: boolean;
@@ -163,8 +185,65 @@ const toFiniteNumber = (value: unknown, fallback = 0) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const toNullableFiniteNumber = (value: unknown) => {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number.parseFloat(String(value).replace(/[^0-9.+-]/g, ""));
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
 const clampConfidence = (value: unknown, fallback = 45) =>
   Math.max(0, Math.min(100, Math.round(toFiniteNumber(value, fallback))));
+
+const qualityItem = (status: MarketDataQualityStatus, required: boolean, detail: string): MarketDataQualityItem => ({
+  status,
+  required,
+  detail,
+});
+
+export function assessMarketDataQuality(input: {
+  spxQuotes?: unknown[];
+  spxM5Quotes?: unknown[];
+  spxD1Quotes?: unknown[];
+  spxH1Quotes?: unknown[];
+  currentVix?: unknown;
+  currentVix9d?: unknown;
+  pcrValue?: unknown;
+  calculatedGex?: unknown;
+}): MarketDataQualitySummary {
+  const items: Record<string, MarketDataQualityItem> = {
+    spx15m: qualityItem(Array.isArray(input.spxQuotes) && input.spxQuotes.length > 0 ? "OK" : "MISSING", true, "SPX 15m core chart"),
+    spx5m: qualityItem(Array.isArray(input.spxM5Quotes) && input.spxM5Quotes.length > 0 ? "OK" : "MISSING", true, "SPX 5m trigger chart"),
+    spxD1: qualityItem(Array.isArray(input.spxD1Quotes) && input.spxD1Quotes.length > 0 ? "OK" : "MISSING", false, "SPX D1 structure chart"),
+    spxH1: qualityItem(Array.isArray(input.spxH1Quotes) && input.spxH1Quotes.length > 0 ? "OK" : "MISSING", false, "SPX H1 structure chart"),
+    vix: qualityItem(toNullableFiniteNumber(input.currentVix) !== null ? "OK" : "MISSING", false, "VIX 15m"),
+    vix9d: qualityItem(toNullableFiniteNumber(input.currentVix9d) !== null ? "OK" : "MISSING", false, "VIX9D term structure"),
+    pcr: qualityItem(toNullableFiniteNumber(input.pcrValue) !== null ? "OK" : "MISSING", false, "CBOE put/call ratio"),
+    cboeGex: qualityItem(input.calculatedGex ? "OK" : "MISSING", false, "CBOE GEX snapshot"),
+  };
+  const hardBlocks = Object.entries(items)
+    .filter(([, item]) => item.required && item.status === "MISSING")
+    .map(([key]) => ({
+      spx15m: "spx_15m_missing",
+      spx5m: "spx_5m_missing",
+    }[key] || `${key}_missing`));
+  const warnings = Object.entries(items)
+    .filter(([, item]) => !item.required && item.status !== "OK")
+    .map(([key]) => ({
+      spxD1: "spx_d1",
+      spxH1: "spx_h1",
+      vix: "vix",
+      vix9d: "vix9d",
+      pcr: "pcr",
+      cboeGex: "cboe_gex",
+    }[key] || key) + `_${items[key].status.toLowerCase()}`);
+  return {
+    overallStatus: hardBlocks.length > 0 ? "BLOCK" : warnings.length > 0 ? "WARN" : "OK",
+    items,
+    hardBlocks,
+    warnings,
+  };
+}
 
 const getDecisionRating = (decision: unknown): AgentRating => {
   const normalized = normalizeAgentDecisionValue(decision);
@@ -280,14 +359,14 @@ async function fetchCachedCboeOptionsSnapshot(env: Env, now: Date) {
     db: env.SPX_RECAP_DB,
     now,
   });
-  if (!client.getOptionsChain) return { pcrValue: null, calculatedGex: null };
+  if (!client.getOptionsChain) return { pcrValue: null, calculatedGex: null, chains: [] as SpxGexOptionChain[] };
 
   const front = await client.getOptionsChain();
   const selectedExpiries = front.expiries.slice(0, 5);
   const chains = await Promise.all(selectedExpiries.map((expiry) => client.getOptionsChain!(expiry)));
   const pcrValue = client.getOptionsPcr ? await client.getOptionsPcr() : calculateCboePcrFromChains(chains);
   const calculatedGex = calculateGexFromOptionChains(chains, now);
-  return { pcrValue, calculatedGex };
+  return { pcrValue, calculatedGex, chains };
 }
 
 const cleanVisibleModelText = (value: unknown) => {
@@ -616,40 +695,46 @@ export function buildDataBackedCioPlan(contextData: any, agents: any[]) {
   const rule = contextData?.zeroDteRuleEngine || {};
   const trend = contextData?.trendDayContext || {};
   const position = contextData?.TODAYS_MEMORY?.currentPosition || "NONE";
+  const calibrationWeights = contextData?.agentCalibrationWeights || {};
+  const agentKeys = ["QM", "CM", "NT", "PA"];
   const votes = countDirectionalVotes(agents.map((agent) => agent?.decision));
-  const weightedScore = agents.reduce((score, agent) => {
+  const weightedScore = agents.reduce((score, agent, index) => {
     const confidence = clampConfidence(agent?.confidence ?? agent?.confidence_score, 45);
     const decision = normalizeAgentDecisionValue(agent?.decision);
-    if (LONG_DECISIONS.has(decision)) return score + confidence;
-    if (SHORT_DECISIONS.has(decision)) return score - confidence;
+    const weight = toFiniteNumber(calibrationWeights?.[agentKeys[index]]?.weight, 1);
+    if (LONG_DECISIONS.has(decision)) return score + confidence * weight;
+    if (SHORT_DECISIONS.has(decision)) return score - confidence * weight;
     return score;
   }, 0);
   const signalScore = toFiniteNumber(rule.signalScore, 0);
   const hardBlocked = hasHardNewSignalBlock(contextData);
+  const dataQualityBlocked = contextData?.marketDataQuality?.overallStatus === "BLOCK";
   let tradeAction = "HOLD";
   let actionReasoning = "data_fallback_hold";
 
   if (rule.verdict === "CLOSE_OR_REDUCE_SUGGESTED" && position !== "NONE") {
     tradeAction = "CLOSE";
     actionReasoning = "0dte_risk_close";
-  } else if (!hardBlocked && weightedScore >= 120 && signalScore >= 45) {
+  } else if (!hardBlocked && !dataQualityBlocked && weightedScore >= 120 && signalScore >= 45) {
     tradeAction = "OPEN_CALL";
     actionReasoning = "bullish_evidence";
-  } else if (!hardBlocked && weightedScore <= -120 && signalScore >= 45) {
+  } else if (!hardBlocked && !dataQualityBlocked && weightedScore <= -120 && signalScore >= 45) {
     tradeAction = "OPEN_PUT";
     actionReasoning = "bearish_evidence";
-  } else if (!hardBlocked && trend.regime === "BULL_TREND_DAY" && toFiniteNumber(trend.confidence, 0) >= 70) {
+  } else if (!hardBlocked && !dataQualityBlocked && trend.regime === "BULL_TREND_DAY" && toFiniteNumber(trend.confidence, 0) >= 70) {
     tradeAction = "OPEN_CALL";
     actionReasoning = "trend_day_override";
-  } else if (!hardBlocked && trend.regime === "BEAR_TREND_DAY" && toFiniteNumber(trend.confidence, 0) >= 70) {
+  } else if (!hardBlocked && !dataQualityBlocked && trend.regime === "BEAR_TREND_DAY" && toFiniteNumber(trend.confidence, 0) >= 70) {
     tradeAction = "OPEN_PUT";
     actionReasoning = "trend_day_override";
   }
 
   const riskParts = [
     hardBlocked ? `hard_block=${rule.verdict || "UNKNOWN"}` : null,
+    dataQualityBlocked ? `data_quality_block=${(contextData?.marketDataQuality?.hardBlocks || []).join(",")}` : null,
     ...(rule.hardBlocks || []),
-    ...(rule.activeRisks || []),
+    ...(rule.softWarnings || rule.activeRisks || []),
+    ...(rule.advisoryNotes || []),
     tradeAction === "HOLD" ? `mixed score=${weightedScore}` : null,
   ].filter(Boolean);
 
@@ -657,7 +742,7 @@ export function buildDataBackedCioPlan(contextData: any, agents: any[]) {
     strategy: tradeAction === "HOLD" ? "Hold" : tradeAction,
     trade_action: tradeAction,
     action_reasoning: actionReasoning,
-    logic: `Data fallback CIO: votes ${votes.buyVotes}/${votes.sellVotes}/${votes.holdVotes}, weighted=${weightedScore}, trend=${trend.regime || "UNKNOWN"}.`,
+    logic: `Data fallback CIO: votes ${votes.buyVotes}/${votes.sellVotes}/${votes.holdVotes}, weighted=${Number(weightedScore.toFixed(1))}, trend=${trend.regime || "UNKNOWN"}.`,
     buy_zone: tradeAction === "OPEN_CALL" || tradeAction === "OPEN_PUT"
       ? `Follow only while price respects VWAP ${contextData?.currentVWAP || "N/A"} / EMA9 ${contextData?.ema9 || "N/A"}`
       : "N/A",
@@ -676,6 +761,7 @@ export function buildDataBackedCioPlan(contextData: any, agents: any[]) {
     hard_rule_triggered: rule.hardRuleTriggered === true,
     confidence_score: Math.min(95, Math.max(25, Math.round(Math.abs(weightedScore) / Math.max(1, agents.length)))),
     agent_vote_summary: votes,
+    calibration_weights: calibrationWeights,
   };
 }
 
@@ -1264,7 +1350,17 @@ function computeIntradayStructureContext(m5Quotes: any[], currentPrice: number):
   };
 }
 
-function appendPlanSnapshot(logItem: ActionLogItem, plan: any, ruleEngine: ZeroDteRuleEngineResult): ActionLogItem {
+function appendPlanSnapshot(
+  logItem: ActionLogItem,
+  plan: any,
+  ruleEngine: ZeroDteRuleEngineResult,
+  meta: {
+    runId?: string;
+    dataQuality?: MarketDataQualitySummary;
+    agentVotes?: Record<string, unknown>;
+    cioConfidence?: number;
+  } = {},
+): ActionLogItem {
   return {
     ...logItem,
     buyZone: plan?.buy_zone,
@@ -1272,7 +1368,11 @@ function appendPlanSnapshot(logItem: ActionLogItem, plan: any, ruleEngine: ZeroD
     takeProfit: plan?.take_profit,
     riskWarning: plan?.risk_warning,
     ruleEngineVerdict: ruleEngine.verdict,
-    signalScore: ruleEngine.signalScore
+    signalScore: ruleEngine.signalScore,
+    runId: meta.runId,
+    dataQuality: meta.dataQuality,
+    agentVotes: meta.agentVotes,
+    cioConfidence: meta.cioConfidence,
   };
 }
 
@@ -1290,6 +1390,7 @@ function analyzeZeroDteRules(args: {
   dailyMemory: DailyMemory;
   sentimentData: any;
   priceActionContext: any;
+  marketDataQuality?: MarketDataQualitySummary;
 }): ZeroDteRuleEngineResult {
   const {
     etNow,
@@ -1304,11 +1405,13 @@ function analyzeZeroDteRules(args: {
     intradayStructure,
     dailyMemory,
     sentimentData,
-    priceActionContext
+    priceActionContext,
+    marketDataQuality
   } = args;
 
   const hardBlocks: string[] = [];
-  const activeRisks: string[] = [];
+  const softWarnings: string[] = [];
+  const advisoryNotes: string[] = [];
   let score = 45;
 
   const currentPrice = Number(spxInd.currentClose);
@@ -1363,54 +1466,54 @@ function analyzeZeroDteRules(args: {
   if (volumeReliable && volumeSurge >= 1.25) score += 8;
   else if (!volumeReliable && isTrendDay) {
     score += 4;
-    activeRisks.push("index_volume_unavailable_using_price_trend");
+    softWarnings.push("index_volume_unavailable_using_price_trend");
   }
   else {
     score -= 8;
-    activeRisks.push("volume_follow_through_weak");
+    softWarnings.push("volume_follow_through_weak");
   }
   if (calculatedGex) score += 8;
   else {
     score -= 12;
-    activeRisks.push("gex_missing");
+    softWarnings.push("gex_missing");
   }
   if (currentVix && currentVix9d && currentVix3m) score += 6;
   else {
     score -= 10;
-    activeRisks.push("vix_term_structure_missing");
+    softWarnings.push("vix_term_structure_missing");
   }
   if (pcrValue != null) score += 4;
   else {
     score -= 5;
-    activeRisks.push("pcr_missing");
+    softWarnings.push("pcr_missing");
   }
   if (gammaPinningDetected) {
     score -= 12;
-    activeRisks.push("gamma_pinning_detected");
+    advisoryNotes.push("gamma_pinning_detected");
   }
   if (thetaDecayRiskHigh) {
     score -= 10;
-    activeRisks.push("theta_decay_risk_high");
+    softWarnings.push("theta_decay_risk_high");
   }
   if (macroEventRisk && isTrendDay && directionalBias !== "NONE") {
     score += 6;
-    activeRisks.push("macro_event_is_catalyst_verify_calendar");
+    advisoryNotes.push("macro_event_is_catalyst_verify_calendar");
   } else if (macroEventRisk) {
     score -= 10;
-    activeRisks.push("macro_event_risk_unverified");
+    softWarnings.push("macro_event_risk_unverified");
   }
   if (directionalBias === "NONE") {
     score -= 12;
-    activeRisks.push("signal_conflict");
+    softWarnings.push("signal_conflict");
   }
 
   if (directionalBias === "PUT" && intradayStructure.repeatedSupport && intradayStructure.repeatedSupport.distance <= 12) {
     score -= 6;
-    activeRisks.push(`put_target_near_repeated_support_${intradayStructure.repeatedSupport.level}`);
+    advisoryNotes.push(`put_target_near_repeated_support_${intradayStructure.repeatedSupport.level}`);
   }
   if (directionalBias === "CALL" && intradayStructure.repeatedResistance && intradayStructure.repeatedResistance.distance <= 12) {
     score -= 6;
-    activeRisks.push(`call_target_near_repeated_resistance_${intradayStructure.repeatedResistance.level}`);
+    advisoryNotes.push(`call_target_near_repeated_resistance_${intradayStructure.repeatedResistance.level}`);
   }
 
   const minutesNow = getEtMinutes(etNow);
@@ -1422,6 +1525,9 @@ function analyzeZeroDteRules(args: {
   const dailyPnlPoints = getDailyPnlPoints(dailyMemory.actionLog);
   if (consecutiveLosses >= 3 || dailyPnlPoints <= -30) {
     hardBlocks.push("daily_circuit_breaker");
+  }
+  if (marketDataQuality?.overallStatus === "BLOCK") {
+    hardBlocks.push(...marketDataQuality.hardBlocks);
   }
 
   let positionTimedOut = false;
@@ -1460,7 +1566,9 @@ function analyzeZeroDteRules(args: {
     marketRegime,
     signalScore: score,
     hardBlocks,
-    activeRisks,
+    softWarnings,
+    advisoryNotes,
+    activeRisks: [...softWarnings, ...advisoryNotes],
     allowNewSignal: verdict === "TRADE_ALLOWED",
     hardRuleTriggered: hardBlocks.length > 0,
     thetaDecayRiskHigh,
@@ -1608,6 +1716,75 @@ async function persistRecapDayToD1(env: Env, date: string, memory: DailyMemory, 
   }
 }
 
+const minutesBetweenEtTimes = (from: string, to: string) => {
+  const fromDate = parseEtTimestamp(from);
+  const toDate = parseEtTimestamp(to);
+  if (!fromDate || !toDate) return null;
+  return (toDate.getTime() - fromDate.getTime()) / 60000;
+};
+
+const directionalOutcomePoints = (decision: string, entrySpx: number, currentSpx: number) => {
+  const normalized = normalizeAgentDecisionValue(decision);
+  if (LONG_DECISIONS.has(normalized)) return currentSpx - entrySpx;
+  if (SHORT_DECISIONS.has(normalized)) return entrySpx - currentSpx;
+  return null;
+};
+
+async function refreshPendingAgentSignalOutcomes(env: Env, date: string, etTime: string, currentSpx: number) {
+  if (!env.SPX_RECAP_DB) return;
+  try {
+    const pending = await readPendingAgentSignalOutcomes(env.SPX_RECAP_DB, date);
+    await Promise.all(pending.map(async (item) => {
+      const elapsed = minutesBetweenEtTimes(item.timeEt, etTime);
+      const points = directionalOutcomePoints(item.decision, item.entrySpx, currentSpx);
+      if (elapsed === null || points === null || elapsed < 15) return;
+      await updateAgentSignalOutcomeResults(env.SPX_RECAP_DB!, item.runId, {
+        outcome15m: Number(points.toFixed(2)),
+        success15m: points > 0,
+        outcome30m: elapsed >= 30 ? Number(points.toFixed(2)) : null,
+      });
+    }));
+  } catch (err: any) {
+    console.error('[D1] Agent outcome refresh failed', err?.message || err);
+  }
+}
+
+async function persistAgentSignalJournal(env: Env, args: {
+  runId: string;
+  date: string;
+  etTime: string;
+  currentSpx: number;
+  ruleVerdict: string;
+  dataQuality: MarketDataQualitySummary;
+  agents: Record<"QM" | "CM" | "NT" | "PA", AgentDecisionContract>;
+}) {
+  if (!env.SPX_RECAP_DB) return;
+  try {
+    await Promise.all((["QM", "CM", "NT", "PA"] as const).map(async (agentKey) => {
+      const agent = args.agents[agentKey];
+      const decision = normalizeAgentDecisionValue(agent.decision);
+      if (!LONG_DECISIONS.has(decision) && !SHORT_DECISIONS.has(decision)) return;
+      await upsertAgentSignalOutcome(env.SPX_RECAP_DB!, {
+        runId: `${args.runId}-${agentKey}`,
+        date: args.date,
+        timeEt: args.etTime,
+        agentKey,
+        decision,
+        confidence: clampConfidence(agent.confidence ?? agent.confidence_score, 45),
+        ruleVerdict: args.ruleVerdict,
+        dataQuality: args.dataQuality,
+        entrySpx: args.currentSpx,
+        outcome5m: null,
+        outcome15m: null,
+        outcome30m: null,
+        success15m: null,
+      });
+    }));
+  } catch (err: any) {
+    console.error('[D1] Agent signal journal persist failed', err?.message || err);
+  }
+}
+
 async function runTradingAgents(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}) {
   let runLockToken: string | null = null;
   try {
@@ -1639,6 +1816,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
     }).format(now);
+    const runId = `${etDateStr}-${now.getTime()}`;
 
     // 並行讀取日內記憶
     const rawMemory = await env.SPX_MEMORY.get(memoryKey);
@@ -1654,11 +1832,12 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       fetchOptionalMarketData('SPX H1 price-action chart', fetchYahooChart('^GSPC', '1h', '10d'), []),
       fetchOptionalMarketData('VIX 15m chart', fetchYahooChart('^VIX', '15m', '7d'), []),
       fetchOptionalMarketData('VIX9D term-structure chart', fetchYahooChart('^VIX9D', '1d', '3mo'), []),
-      fetchOptionalMarketData('CBOE cached options snapshot', withPromiseTimeout('CBOE cached options snapshot', fetchCachedCboeOptionsSnapshot(env, now), OPTIONAL_MARKET_DATA_TIMEOUT_MS), { pcrValue: null, calculatedGex: null }),
+      fetchOptionalMarketData('CBOE cached options snapshot', withPromiseTimeout('CBOE cached options snapshot', fetchCachedCboeOptionsSnapshot(env, now), OPTIONAL_MARKET_DATA_TIMEOUT_MS), { pcrValue: null, calculatedGex: null, chains: [] as SpxGexOptionChain[] }),
       getDisabledNewsSentiment(),
     ]);
     const pcrValue = cboeOptionsSnapshot.pcrValue;
     const calculatedGex = cboeOptionsSnapshot.calculatedGex;
+    const cboeOptionChains = Array.isArray(cboeOptionsSnapshot.chains) ? cboeOptionsSnapshot.chains : [];
 
     console.log('[DEBUG] Step 2: Calculating Indicators...');
     const spxInd = await calculateIndicators(spxQuotes);
@@ -1667,6 +1846,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     if (!spxInd) {
       throw new Error('無法計算技術指標');
     }
+    await refreshPendingAgentSignalOutcomes(env, etDateStr, etTime, spxInd.currentClose);
 
     const m5QuotesValid = spxQuotesM5.filter((q: any) => q.close !== null);
     const m5QuotesWithVol = m5QuotesValid.filter((q: any) => (q.volume || 0) > 0);
@@ -1707,6 +1887,16 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
 
     const currentVix9d = vixQuotes9d[vixQuotes9d.length - 1]?.close;
     const currentVix3m = null;
+    const marketDataQuality = assessMarketDataQuality({
+      spxQuotes,
+      spxM5Quotes: m5QuotesValid,
+      spxD1Quotes,
+      spxH1Quotes,
+      currentVix,
+      currentVix9d,
+      pcrValue,
+      calculatedGex,
+    });
     const fundFlow = await getFundFlow(spxQuotes);
 
     // GEX 整合到 AI context
@@ -1722,6 +1912,11 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       mostShortGammaStrike: `${calculatedGex.mostShortStrike} (${calculatedGex.mostShortGex})`,
       longGammaWalls: calculatedGex.longWalls?.map((w: any) => `${w.strike}(${w.gex})`).join(' > '),
       shortGammaPockets: calculatedGex.shortPockets?.map((p: any) => `${p.strike}(${p.gex})`).join(' > '),
+      chainSnapshot: cboeOptionChains[0] ? {
+        expiry: cboeOptionChains[0].selectedExpiry,
+        source: cboeOptionChains[0].source?.label || 'unknown',
+        contracts: (cboeOptionChains[0].calls?.length || 0) + (cboeOptionChains[0].puts?.length || 0),
+      } : null,
     } : null;
     const trendDayContext = computeTrendDayContext(m5QuotesValid, spxInd, calculatedGex);
     const priceActionContext = calculatePriceActionContext(spxQuotesD1, spxQuotesH1);
@@ -1739,11 +1934,18 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       intradayStructure,
       dailyMemory,
       sentimentData,
-      priceActionContext
+      priceActionContext,
+      marketDataQuality
     });
 
     const rawWisdom = await env.SPX_MEMORY.get('SPX_WISDOM_BOOK');
     const learnedRules = rawWisdom ? JSON.parse(rawWisdom) : [];
+    const agentCalibrationWeights = env.SPX_RECAP_DB
+      ? await readAgentCalibrationWeights(env.SPX_RECAP_DB).catch((error) => {
+        console.error('[D1] Agent calibration read failed', error instanceof Error ? error.message : String(error));
+        return null;
+      })
+      : null;
 
     const extendedContext = {
       currentTime: etTime,
@@ -1764,6 +1966,8 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       trendDayContext,
       intradayStructure,
       zeroDteRuleEngine,
+      marketDataQuality,
+      agentCalibrationWeights,
       calculatedGEX: calculatedGexContext,
       priceActionContext,
       TODAYS_MEMORY: {
@@ -1793,6 +1997,15 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     const d2 = normalizeDecision(agent2.decision);
     const d3 = normalizeDecision(agent3.decision);
     const d4 = normalizeDecision(agent4.decision);
+    await persistAgentSignalJournal(env, {
+      runId,
+      date: etDateStr,
+      etTime,
+      currentSpx: spxInd.currentClose,
+      ruleVerdict: zeroDteRuleEngine.verdict,
+      dataQuality: marketDataQuality,
+      agents: { QM: agent1, CM: agent2, NT: agent3, PA: agent4 },
+    });
     const formatAgentDecision = (decision: string) => {
       if (['BUY', 'LONG', 'CALL', 'OPEN_CALL'].includes(decision)) return '🟢 [做多]';
       if (['SELL', 'SHORT', 'PUT', 'OPEN_PUT'].includes(decision)) return '🔴 [做空]';
@@ -1941,17 +2154,28 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     // Update Memory based on Action
     const tradeAction = (orchestratorPlan as any).trade_action || "HOLD";
     const currentPriceStr = spxInd.currentClose;
+    const planSnapshotMeta = {
+      runId,
+      dataQuality: marketDataQuality,
+      agentVotes: {
+        QM: { decision: d1, confidence: agent1.confidence },
+        CM: { decision: d2, confidence: agent2.confidence },
+        NT: { decision: d3, confidence: agent3.confidence },
+        PA: { decision: d4, confidence: agent4.confidence },
+      },
+      cioConfidence: clampConfidence((orchestratorPlan as any).confidence_score, 45),
+    };
 
     if (tradeAction === 'OPEN_CALL' && dailyMemory.currentPosition === 'NONE') {
       dailyMemory.currentPosition = 'CALL';
       dailyMemory.entryPrice = currentPriceStr;
       dailyMemory.entryTime = etTime;
-      dailyMemory.actionLog.push(appendPlanSnapshot({ time: etTime, price: currentPriceStr, action: '買入 Call', reasoning: planReason(orchestratorPlan) }, orchestratorPlan, zeroDteRuleEngine));
+      dailyMemory.actionLog.push(appendPlanSnapshot({ time: etTime, price: currentPriceStr, action: '買入 Call', reasoning: planReason(orchestratorPlan) }, orchestratorPlan, zeroDteRuleEngine, planSnapshotMeta));
     } else if (tradeAction === 'OPEN_PUT' && dailyMemory.currentPosition === 'NONE') {
       dailyMemory.currentPosition = 'PUT';
       dailyMemory.entryPrice = currentPriceStr;
       dailyMemory.entryTime = etTime;
-      dailyMemory.actionLog.push(appendPlanSnapshot({ time: etTime, price: currentPriceStr, action: '買入 Put', reasoning: planReason(orchestratorPlan) }, orchestratorPlan, zeroDteRuleEngine));
+      dailyMemory.actionLog.push(appendPlanSnapshot({ time: etTime, price: currentPriceStr, action: '買入 Put', reasoning: planReason(orchestratorPlan) }, orchestratorPlan, zeroDteRuleEngine, planSnapshotMeta));
     } else if (tradeAction === 'CLOSE' && dailyMemory.currentPosition !== 'NONE') {
       const pnlRaw = dailyMemory.currentPosition === 'CALL'
         ? (currentPriceStr - dailyMemory.entryPrice!)
@@ -1962,12 +2186,12 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
         action: `平倉 ${dailyMemory.currentPosition}`,
         reasoning: planReason(orchestratorPlan),
         pnl: parseFloat(pnlRaw.toFixed(2))
-      }, orchestratorPlan, zeroDteRuleEngine));
+      }, orchestratorPlan, zeroDteRuleEngine, planSnapshotMeta));
       dailyMemory.currentPosition = 'NONE';
       dailyMemory.entryPrice = null;
       dailyMemory.entryTime = null;
     } else if (tradeAction === 'HOLD' && dailyMemory.currentPosition === 'NONE') {
-      dailyMemory.actionLog.push(appendPlanSnapshot({ time: etTime, price: currentPriceStr, action: '觀望防守', reasoning: planReason(orchestratorPlan) }, orchestratorPlan, zeroDteRuleEngine));
+      dailyMemory.actionLog.push(appendPlanSnapshot({ time: etTime, price: currentPriceStr, action: '觀望防守', reasoning: planReason(orchestratorPlan) }, orchestratorPlan, zeroDteRuleEngine, planSnapshotMeta));
     }
 
     // Save Memory
@@ -1989,6 +2213,17 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     const displayStopLoss = safeVisibleAgentText((orchestratorPlan as any).stop_loss, "N/A", 240) || "N/A";
     const displayTakeProfit = safeVisibleAgentText((orchestratorPlan as any).take_profit, "N/A", 260) || "N/A";
     const displayRiskWarning = safeVisibleAgentText((orchestratorPlan as any).risk_warning, "N/A", 260) || "N/A";
+    const dataQualitySummary = [
+      `狀態=${marketDataQuality.overallStatus}`,
+      marketDataQuality.hardBlocks.length ? `Hard=${marketDataQuality.hardBlocks.join(',')}` : null,
+      marketDataQuality.warnings.length ? `Warn=${marketDataQuality.warnings.slice(0, 4).join(',')}` : null,
+    ].filter(Boolean).join(' | ');
+    const cioDecisionSummary = [
+      `Action=${tradeAction}`,
+      `Confidence=${clampConfidence((orchestratorPlan as any).confidence_score, 45)}/100`,
+      `Rule=${zeroDteRuleEngine.verdict}`,
+      zeroDteRuleEngine.softWarnings.length ? `Soft=${zeroDteRuleEngine.softWarnings.slice(0, 3).join(',')}` : null,
+    ].filter(Boolean).join(' | ');
 
     // IC summary for display
     const icDisplay = ``;
@@ -2005,6 +2240,9 @@ ${calculatedGex ? `來源：<code>Internal CBOE Options GEX Calculator</code>
 📊 Long Walls：${calculatedGex.longWalls?.slice(0, 3).map((w: any) => `${w.strike}(${w.gex})`).join(' ► ') || 'N/A'}
 📉 Short Pockets：${calculatedGex.shortPockets?.slice(0, 3).map((p: any) => `${p.strike}(${p.gex})`).join(' ► ') || 'N/A'}` : '⚠️ 數據抓取失敗'}
 
+🧪 <b>[Data Quality]</b>
+<code>${tgEscape(dataQualitySummary)}</code>
+
 ⚖️ <b>[理事會決議 · 專家辯論]</b> (4 directional agents)
 🟢 <code>${buyVotes}</code> | 🔴 <code>${sellVotes}</code> | ⚪ <code>${holdVotes}</code> [🔥 核心共識: <b>${consensusVote}</b>]
 🗣️ <b>專家深度腦爆</b> (Expert Rapid-Fire)
@@ -2020,6 +2258,9 @@ ${tgEscape(formatAgentTelegramBrief('NT', agent3))}
 
 🏛️ <b>PA: ${formatAgentDecision(d4)} (Price Action)</b>:
 ${tgEscape(formatAgentTelegramBrief('PA', agent4))}
+
+🧠 <b>[CIO Decision]</b>
+<code>${tgEscape(cioDecisionSummary)}</code>
 
 🛡️ <b>[雷霆一擊 · 終極執行]</b> (Thor Execution Plan)
 <b>操作：</b> <code>${tgEscape(finalDisplayAction)}</code>

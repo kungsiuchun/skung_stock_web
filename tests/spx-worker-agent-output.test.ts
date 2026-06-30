@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  assessMarketDataQuality,
   buildDataBackedAgentFallback,
   buildDataBackedCioPlan,
   countDirectionalVotes,
@@ -275,4 +276,74 @@ test("data-backed CIO stays neutral only when fixture signals are mixed or hard-
 
   assert.equal(plan.trade_action, "HOLD");
   assert.match(plan.risk_warning, /volume_not_confirmed|mixed/i);
+});
+
+test("market data quality blocks only required missing feeds and warns on optional feeds", () => {
+  const degraded = assessMarketDataQuality({
+    spxQuotes: [],
+    spxM5Quotes: [{ close: 7400 }],
+    spxD1Quotes: [],
+    spxH1Quotes: [],
+    currentVix: null,
+    currentVix9d: null,
+    pcrValue: null,
+    calculatedGex: null,
+  });
+
+  assert.equal(degraded.overallStatus, "BLOCK");
+  assert.deepEqual(degraded.hardBlocks, ["spx_15m_missing"]);
+  assert.equal(degraded.items.cboeGex.status, "MISSING");
+  assert.equal(degraded.items.cboeGex.required, false);
+
+  const usable = assessMarketDataQuality({
+    spxQuotes: [{ close: 7400 }],
+    spxM5Quotes: [{ close: 7401 }],
+    spxD1Quotes: [],
+    spxH1Quotes: [],
+    currentVix: null,
+    currentVix9d: null,
+    pcrValue: null,
+    calculatedGex: null,
+  });
+
+  assert.equal(usable.overallStatus, "WARN");
+  assert.deepEqual(usable.hardBlocks, []);
+  assert.ok(usable.warnings.includes("cboe_gex_missing"));
+});
+
+test("CIO does not treat soft warnings as hard vetoes but blocks required data failure", () => {
+  const context = {
+    currentPrice: "7420",
+    currentVWAP: "7398",
+    ema9: "7410",
+    m5Analysis: { volumeSurge: "1.70x" },
+    trendDayContext: {
+      regime: "BULL_TREND_DAY",
+      directionalBias: "CALL",
+      confidence: 78,
+      aboveVWAP: true,
+      aboveEMA9: true,
+      aboveGammaFlip: true,
+    },
+    calculatedGEX: { gammaStatus: "positive_gamma", mostLongGammaStrike: "7450 (12.0M)" },
+    zeroDteRuleEngine: {
+      verdict: "WAIT_AND_OBSERVE",
+      hardRuleTriggered: false,
+      signalScore: 63,
+      directionalBias: "CALL",
+      hardBlocks: [],
+      activeRisks: ["legacy_warning"],
+      softWarnings: ["volume_follow_through_weak"],
+      advisoryNotes: ["gamma_pinning_detected"],
+    },
+    marketDataQuality: { overallStatus: "WARN", hardBlocks: [] },
+    TODAYS_MEMORY: { currentPosition: "NONE" },
+  };
+  const agents = ["QM", "CM", "NT", "PA"].map((key) => buildDataBackedAgentFallback(key, context, "model_timeout"));
+
+  assert.equal(buildDataBackedCioPlan(context, agents).trade_action, "OPEN_CALL");
+  assert.equal(
+    buildDataBackedCioPlan({ ...context, marketDataQuality: { overallStatus: "BLOCK", hardBlocks: ["spx_15m_missing"] } }, agents).trade_action,
+    "HOLD",
+  );
 });

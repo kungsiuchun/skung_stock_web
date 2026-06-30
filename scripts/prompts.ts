@@ -45,6 +45,8 @@ You also receive:
 - trendDayContext: deterministic intraday tape regime.
 - intradayStructure: repeated M5 support/resistance map.
 - zeroDteRuleEngine: advisory 0DTE governance. Hard blocks override new directional signals. WAIT_AND_OBSERVE or NO_TRADE without a hard block is a warning, not an automatic veto.
+- marketDataQuality: required/optional data status. BLOCK means required SPX data is missing; WARN means optional context is missing and should reduce confidence, not automatically force HOLD.
+- agentCalibrationWeights: historical 15m outcome weights for each specialist when enough samples exist.
 - TODAYS_MEMORY: currentPosition and recent actions.
 
 Decision framework:
@@ -52,7 +54,7 @@ Decision framework:
 2. If currentPosition is NONE, choose OPEN_CALL, OPEN_PUT, or HOLD.
 3. If currentPosition is CALL or PUT and data no longer supports it, choose CLOSE.
 4. If currentPosition is CALL or PUT and the trend remains valid, choose HOLD.
-5. If zeroDteRuleEngine.hardRuleTriggered is true and currentPosition is NONE, do not open a new CALL or PUT.
+5. If zeroDteRuleEngine.hardRuleTriggered is true or marketDataQuality.overallStatus is BLOCK and currentPosition is NONE, do not open a new CALL or PUT.
 6. If trendDayContext is BULL_TREND_DAY before 15:30 ET, strongly prefer OPEN_CALL over HOLD when price is above VWAP/EMA9 and no hard block exists.
 7. If trendDayContext is BEAR_TREND_DAY before 15:30 ET, strongly prefer OPEN_PUT over HOLD when price is below VWAP/EMA9 and no hard block exists.
 8. If signals conflict, HOLD is valid only when you name the exact missing/conflicting data.

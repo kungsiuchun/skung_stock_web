@@ -67,6 +67,38 @@ export interface D1RecapPayload {
   audit: AuditPayload | null;
 }
 
+export interface AgentSignalOutcome {
+  runId: string;
+  date: string;
+  timeEt: string;
+  agentKey: string;
+  decision: string;
+  confidence: number;
+  ruleVerdict: string;
+  dataQuality: unknown;
+  entrySpx: number;
+  outcome5m?: number | null;
+  outcome15m?: number | null;
+  outcome30m?: number | null;
+  success15m?: boolean | null;
+}
+
+export interface PendingAgentSignalOutcome {
+  runId: string;
+  date: string;
+  timeEt: string;
+  agentKey: string;
+  decision: string;
+  entrySpx: number;
+}
+
+export interface AgentCalibrationWeight {
+  sampleCount: number;
+  successCount: number;
+  hitRate: number | null;
+  weight: number;
+}
+
 const nowIso = () => new Date().toISOString();
 
 const asNumber = (value: unknown) => Number(value || 0);
@@ -270,6 +302,136 @@ export const upsertRecapDay = async (
 
 export const upsertRecapAudit = async (db: D1DatabaseLike, audit: AuditPayload) => {
   await runStatements(db, buildAuditStatements(db, audit, nowIso()));
+};
+
+export const upsertAgentSignalOutcome = async (db: D1DatabaseLike, outcome: AgentSignalOutcome) => {
+  const updatedAt = nowIso();
+  await db.prepare(`
+    INSERT INTO spx_agent_signal_outcomes (
+      run_id, date, time_et, agent_key, decision, confidence, rule_verdict,
+      data_quality_json, entry_spx,
+      outcome_5m, outcome_15m, outcome_30m, success_15m,
+      created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(run_id) DO UPDATE SET
+      decision = excluded.decision,
+      confidence = excluded.confidence,
+      rule_verdict = excluded.rule_verdict,
+      data_quality_json = excluded.data_quality_json,
+      entry_spx = excluded.entry_spx,
+      outcome_5m = excluded.outcome_5m,
+      outcome_15m = excluded.outcome_15m,
+      outcome_30m = excluded.outcome_30m,
+      success_15m = excluded.success_15m,
+      updated_at = excluded.updated_at
+  `).bind(
+    outcome.runId,
+    outcome.date,
+    outcome.timeEt,
+    outcome.agentKey,
+    outcome.decision,
+    outcome.confidence,
+    outcome.ruleVerdict,
+    JSON.stringify(outcome.dataQuality ?? null),
+    outcome.entrySpx,
+    outcome.outcome5m ?? null,
+    outcome.outcome15m ?? null,
+    outcome.outcome30m ?? null,
+    outcome.success15m == null ? null : outcome.success15m ? 1 : 0,
+    updatedAt,
+    updatedAt,
+  ).run();
+};
+
+export const readPendingAgentSignalOutcomes = async (db: D1DatabaseLike, date: string) => {
+  const result = await db.prepare(`
+    SELECT run_id, date, time_et, agent_key, decision, entry_spx
+    FROM spx_agent_signal_outcomes
+    WHERE date = ? AND success_15m IS NULL
+    ORDER BY time_et ASC
+  `).bind(date).all<{
+    run_id: string;
+    date: string;
+    time_et: string;
+    agent_key: string;
+    decision: string;
+    entry_spx: number;
+  }>();
+  return (result.results || []).map((row): PendingAgentSignalOutcome => ({
+    runId: row.run_id,
+    date: row.date,
+    timeEt: row.time_et,
+    agentKey: row.agent_key,
+    decision: row.decision,
+    entrySpx: Number(row.entry_spx),
+  }));
+};
+
+export const updateAgentSignalOutcomeResults = async (
+  db: D1DatabaseLike,
+  runId: string,
+  outcome: { outcome5m?: number | null; outcome15m?: number | null; outcome30m?: number | null; success15m?: boolean | null },
+) => {
+  await db.prepare(`
+    UPDATE spx_agent_signal_outcomes
+    SET outcome_5m = COALESCE(?, outcome_5m),
+        outcome_15m = COALESCE(?, outcome_15m),
+        outcome_30m = COALESCE(?, outcome_30m),
+        success_15m = COALESCE(?, success_15m),
+        updated_at = ?
+    WHERE run_id = ?
+  `).bind(
+    outcome.outcome5m ?? null,
+    outcome.outcome15m ?? null,
+    outcome.outcome30m ?? null,
+    outcome.success15m == null ? null : outcome.success15m ? 1 : 0,
+    nowIso(),
+    runId,
+  ).run();
+};
+
+const defaultAgentWeight = (): AgentCalibrationWeight => ({
+  sampleCount: 0,
+  successCount: 0,
+  hitRate: null,
+  weight: 1,
+});
+
+const calibrationWeightFromHitRate = (sampleCount: number, successCount: number): AgentCalibrationWeight => {
+  if (sampleCount < 20) {
+    return {
+      sampleCount,
+      successCount,
+      hitRate: sampleCount > 0 ? Number((successCount / sampleCount).toFixed(2)) : null,
+      weight: 1,
+    };
+  }
+  const hitRate = Number((successCount / sampleCount).toFixed(2));
+  const weight = Math.max(0.7, Math.min(1.3, Number((1 + (hitRate - 0.5)).toFixed(2))));
+  return { sampleCount, successCount, hitRate, weight };
+};
+
+export const readAgentCalibrationWeights = async (db: D1DatabaseLike) => {
+  const result = await db.prepare(`
+    SELECT agent_key, COUNT(*) AS sample_count, SUM(success_15m) AS success_count
+    FROM spx_agent_signal_outcomes
+    WHERE success_15m IS NOT NULL
+    GROUP BY agent_key
+  `).all<{ agent_key: string; sample_count: number; success_count: number | null }>();
+  const weights: Record<"QM" | "CM" | "NT" | "PA", AgentCalibrationWeight> = {
+    QM: defaultAgentWeight(),
+    CM: defaultAgentWeight(),
+    NT: defaultAgentWeight(),
+    PA: defaultAgentWeight(),
+  };
+  for (const row of result.results || []) {
+    const key = String(row.agent_key || "").toUpperCase();
+    if (key === "QM" || key === "CM" || key === "NT" || key === "PA") {
+      weights[key] = calibrationWeightFromHitRate(Number(row.sample_count || 0), Number(row.success_count || 0));
+    }
+  }
+  return weights;
 };
 
 export const listD1AvailableDates = async (db: D1DatabaseLike) => {

@@ -66,11 +66,35 @@ SPX Telegram Trading Council should show professional, data-backed summaries. It
 
 SPX Telegram Trading Council treats neutral as a rule-backed no-trade decision. Neutral is not an acceptable fallback for malformed model output unless the visible reason names the missing or conflicting data.
 
+## CIO AI Agent
+
+CIO AI Agent is the final SPX Telegram Trading Council decision maker that synthesizes market data, four SPX Data Agents, and 0DTE governance into one SPX level advisory.
+
+CIO AI Agent decides from SPX price levels and market context. It does not select option contracts, route broker orders, or apply bid/ask execution gates.
+
 ## SPX Data Agent
 
 SPX Data Agent is a role-specific evidence module inside the SPX Telegram Trading Council.
 
 An SPX Data Agent should contribute direction, confidence, evidence, and blocking risk. It is not a free-form transcript.
+
+## 0DTE Rule Engine
+
+0DTE Rule Engine is the SPX Telegram Trading Council governance layer that separates hard blocks from soft warnings and advisory notes.
+
+0DTE Rule Engine hard blocks prevent new directional SPX advisories. Soft warnings reduce confidence or change risk language, but they are not automatic HOLD decisions.
+
+## SPX Market Data Quality
+
+SPX Market Data Quality is the per-run freshness and completeness summary for the SPX Telegram Trading Council.
+
+Required SPX price feeds can block a new advisory when missing. Optional context such as CBOE GEX, PCR, VIX, D1, or H1 can warn and reduce confidence without automatically forcing HOLD.
+
+## Agent Calibration
+
+Agent Calibration is the historical 15-minute outcome weighting for SPX Data Agents.
+
+Agent Calibration starts every agent at equal weight and only adjusts after enough SPX outcome samples exist. It calibrates the council; it does not replace the CIO AI Agent.
 
 ## CBOE Chain Cache
 
