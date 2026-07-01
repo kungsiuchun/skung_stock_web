@@ -49,7 +49,6 @@ export const CHAT_SYSTEM_PROMPT = `你是一位專業的金融分析師 AI 助�
 - search_stock_news：搜索股票相關新聞
 - get_fund_flow：獲取股票資金流向（主力、散戶比例）
 - get_alphaear_news：獲取財聯社、雪球等實時金融熱點
-- get_financial_signals：獲取 DeepEar 高頻金融預警信號
 - get_retail_sentiment：獲取 Reddit/X 等零售情緒數據
 
 對話規則：

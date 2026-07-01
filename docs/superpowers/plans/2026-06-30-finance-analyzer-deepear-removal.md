@@ -17,6 +17,8 @@
 - Modify: `functions/api/agent/executor.ts`
 - Modify: `src/lib/finance-analyzer-contract.ts`
 - Modify: `src/components/finance-dashboard.tsx`
+- Delete: `src/components/dashboard/deepear-signals.tsx`
+- Delete if unused: `src/components/dashboard/signal-list.tsx`
 - Leave unchanged: `functions/api/agent/tools/alphaear-tools.ts`
 
 - [ ] **Step 1: Remove dashboard allowlist access**
