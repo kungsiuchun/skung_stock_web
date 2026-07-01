@@ -1,7 +1,7 @@
 /**
  * Agent Framework — AlphaEar Tools (TS Native Port)
  * 
- * Provides high-frequency financial signals, fund flow data, and unified community news.
+ * Provides fund flow data, market headlines, and legacy high-frequency financial signals.
  * Ports logic from the AlphaEar Python skills to TS for direct execution.
  */
 
@@ -113,25 +113,46 @@ async function handleGetFundFlow(args: Record<string, any>): Promise<Record<stri
 
 // ── Tool 2: get_alphaear_news ────────────────────────────────
 
+const YAHOO_NEWS_SOURCE_QUERIES: Record<string, string> = {
+  cls: "China stock market",
+  wallstreetcn: "global markets China",
+  xueqiu: "China A shares market",
+  weibo: "China market retail investors",
+  global: "global market news",
+  us: "US stock market",
+  hk: "Hong Kong stock market",
+};
+
 async function handleGetAlphaearNews(args: Record<string, any>): Promise<Record<string, any>> {
-  const source = args.source || "cls";
-  const count = args.count || 10;
+  const source = String(args.source || "global").trim().toLowerCase();
+  const count = Math.min(Math.max(Number(args.count || 10), 1), 20);
+  const query = String(args.query || YAHOO_NEWS_SOURCE_QUERIES[source] || source || "global market news").trim();
 
   try {
-    const url = `https://newsnow.busiyi.world/api/s?id=${source}`;
+    const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&newsCount=${count}`;
     const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
     
-    if (!res.ok) throw new Error(`NewsNow returned ${res.status}`);
+    if (!res.ok) throw new Error(`Yahoo Finance search returned ${res.status}`);
     const data = await res.json() as any;
     
-    const items = (data.items || []).slice(0, count).map((n: any, i: number) => ({
+    const items = (data.news || []).slice(0, count).map((n: any, i: number) => ({
       rank: i + 1,
-      title: n.title,
-      url: n.url,
-      time: n.publish_time
+      title: n.title || "Untitled market headline",
+      url: n.link || n.url || "",
+      publisher: n.publisher || "Yahoo Finance",
+      time: n.providerPublishTime
+        ? new Date(Number(n.providerPublishTime) * 1000).toISOString()
+        : n.publish_time || null,
     }));
 
-    return { source, count: items.length, items };
+    return {
+      source,
+      query,
+      source_type: "yahoo_finance_search",
+      source_note: "Yahoo Finance search headline aggregator; use item.publisher and item.url for the original outlet.",
+      count: items.length,
+      items,
+    };
   } catch (err: any) {
     return { error: err.message };
   }
@@ -207,9 +228,10 @@ export const ALL_ALPHAEAR_TOOLS: ToolDefinition[] = [
   },
   {
     name: "get_alphaear_news",
-    description: "獲取全網實時熱點新聞。支持來源：cls (財聯社), wallstreetcn (華爾街見聞), xueqiu (雪球), weibo (微博)。",
+    description: "使用 Yahoo Finance search 獲取免費市場新聞標題，並保留 publisher/link 方便追溯原始媒體。",
     parameters: [
-      { name: "source", type: "string", description: "新聞源 (cls, xueqiu, weibo)", default: "cls" },
+      { name: "source", type: "string", description: "可選 preset：global, us, hk, cls, wallstreetcn, xueqiu, weibo", default: "global" },
+      { name: "query", type: "string", description: "可選：覆蓋 preset 的 Yahoo Finance search query" },
       { name: "count", type: "integer", description: "獲取條數", default: 10 }
     ],
     handler: handleGetAlphaearNews,
