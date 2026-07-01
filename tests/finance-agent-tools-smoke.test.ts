@@ -165,7 +165,10 @@ const smokeCases: Array<{
     args: { source: "cls", count: 3 },
     assertResult: (result) => {
       assertNoToolError("get_alphaear_news", result);
-      assert.ok(Array.isArray(result.items) && result.items.length > 0, "AlphaEar news should not be empty");
+      assert.equal(result.source_type, "yahoo_finance_search");
+      assert.ok(Array.isArray(result.items) && result.items.length > 0, "Yahoo Finance headlines should not be empty");
+      assert.ok(result.items[0].publisher, "headline should include a publisher");
+      assert.ok(result.items[0].url, "headline should include a source URL");
     },
   },
   {

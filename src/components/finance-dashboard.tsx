@@ -10,10 +10,10 @@ import { NewsFeed, type NewsItem as SubNewsItem } from "./dashboard/news-feed";
 import { OptionsFlowCard } from "./dashboard/options-flow-card";
 import { PriceVolumeChart } from "./dashboard/price-volume-chart";
 import { FearIndexCard } from "./dashboard/fear-index-card";
-import { DeepEarSignalsCard } from "./dashboard/deepear-signals";
 import { ValuationWidget } from "./dashboard/valuation-widget";
 import { TechnicalRadar } from "./dashboard/technical-radar";
 import { FinancialJuiceWidget } from "./dashboard/financial-juice-widget";
+import { TraderRiskSnapshotCard } from "./dashboard/trader-risk-snapshot-card";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { FinanceChatPanel } from "./finance-chat-tool";
@@ -48,7 +48,7 @@ interface DashboardData {
     takeProfit: number;
   };
   news: NewsItem[];
-  chartData: { date: string; price: number; volume: number }[];
+  chartData: { date: string; date_iso?: string; price: number; open?: number; high?: number; low?: number; volume: number }[];
   optionsFlow?: {
     totalCallOI: number;
     totalPutOI: number;
@@ -59,7 +59,6 @@ interface DashboardData {
     error?: string;
   };
   quantStrategies?: { name: string; score: number }[];
-  financialSignals?: any[];
   finalAnalysis?: string;
 }
 
@@ -74,6 +73,28 @@ interface FinanceDashboardProps {
   showChat?: boolean;
   onCloseChat?: () => void;
 }
+
+const LEGACY_DEEPEAR_PATTERN = /DeepEar|高頻|get_financial_signals/i;
+
+const hasLegacyDeepEarData = (data: unknown) => {
+  if (!data || typeof data !== "object") return false;
+  const value = data as { financialSignals?: unknown; finalAnalysis?: unknown };
+  return Boolean(
+    value.financialSignals ||
+    (typeof value.finalAnalysis === "string" && LEGACY_DEEPEAR_PATTERN.test(value.finalAnalysis))
+  );
+};
+
+const sanitizeHistory = (items: unknown): HistoryItem[] => {
+  if (!Array.isArray(items)) return [];
+  return items
+    .filter((item): item is HistoryItem => Boolean(item && typeof item === "object" && "symbol" in item))
+    .map((item) => (
+      hasLegacyDeepEarData(item.fullData)
+        ? { ...item, fullData: undefined }
+        : item
+    ));
+};
 
 export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashboardProps) {
   const [valuationData, setValuationData] = useState<any>(null);
@@ -93,7 +114,9 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
     const savedHistory = localStorage.getItem("finance_dashboard_history");
     if (savedHistory) {
       try {
-        setHistory(JSON.parse(savedHistory));
+        const sanitizedHistory = sanitizeHistory(JSON.parse(savedHistory));
+        setHistory(sanitizedHistory);
+        localStorage.setItem("finance_dashboard_history", JSON.stringify(sanitizedHistory));
       } catch (e) {
         console.error("Failed to parse history", e);
       }
@@ -102,7 +125,12 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
     const savedActiveData = localStorage.getItem("finance_dashboard_active_data");
     if (savedActiveData) {
       try {
-        setActiveData(JSON.parse(savedActiveData));
+        const parsedActiveData = JSON.parse(savedActiveData);
+        if (hasLegacyDeepEarData(parsedActiveData)) {
+          localStorage.removeItem("finance_dashboard_active_data");
+        } else {
+          setActiveData(parsedActiveData);
+        }
       } catch (e) {
         console.error("Failed to parse active data", e);
       }
@@ -142,9 +170,8 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
           message: `分析 ${symbol.toUpperCase()}。
 1. 先使用 get_realtime_quote 取得最新價格。
 2. 使用 get_options_chain 取得股票期權鏈；如果 Yahoo 沒有資料，明確說沒有期權鏈資料。
-3. 使用 get_financial_signals 取得 DeepEar 訊號；如果來源為空，回傳空訊號，不要創作 demo 訊號。
-4. 使用 run_algorithmic_strategy，strategy_name 必須是 "all"，由 deterministic strategy engine 回傳策略分數。
-5. 最終回覆使用繁體中文，綜合工具結果做精簡 narrative；缺資料要標示，不要用假資料補洞。`,
+3. 使用 run_algorithmic_strategy，strategy_name 必須是 "all"，由 deterministic strategy engine 回傳策略分數。
+4. 最終回覆使用繁體中文，綜合工具結果做精簡 narrative；缺資料要標示，不要用假資料補洞。`,
           history: [],
         }),
       });
@@ -190,7 +217,6 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
       }));
       let chartDataArray: any[] = [];
       let optionsFlowData: any = null;
-      let financialSignalsArray: any[] = [];
       let quantStrategiesResult: any[] = [];
 
       if (data.steps && Array.isArray(data.steps)) {
@@ -284,11 +310,6 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
                 }
               }
 
-              
-              if (step.tool_name === "get_financial_signals" && resJson.signals && Array.isArray(resJson.signals)) {
-                financialSignalsArray = resJson.signals;
-              }
-
               if (step.tool_name === "run_algorithmic_strategy" && Array.isArray(resJson.signals)) {
                 const topSignal = resJson.signals[0];
                 if (topSignal) {
@@ -336,7 +357,6 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
           error: "未找到期權鏈數據"
         },
         quantStrategies: quantStrategiesResult,
-        financialSignals: financialSignalsArray,
         finalAnalysis: data.reply || data.summary || "AI 代理尚未生成最終分析總結。"
       };
 
@@ -626,23 +646,6 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
                      stopLoss={activeData?.strategyPoints.stopLoss}
                      takeProfit={activeData?.strategyPoints.takeProfit}
                   />
-                  
-                  {activeData?.financialSignals && activeData.financialSignals.length > 0 && (
-                     <div className="mt-8 bg-blue-50/50 border border-blue-100 rounded-3xl p-6">
-                        <div className="text-blue-600 font-bold mb-3 flex items-center gap-2">
-                           <Activity className="w-5 h-5"/>
-                           AI DeepEar Signals
-                        </div>
-                        <ul className="space-y-2">
-                          {activeData.financialSignals.map((sig, idx) => (
-                             <li key={idx} className="flex gap-3 text-sm text-gray-700">
-                                <span className={`w-2 h-2 mt-1.5 rounded-full ${sig.signal === 'BULLISH' ? 'bg-green-500' : sig.signal === 'BEARISH' ? 'bg-red-500' : 'bg-gray-400'}`} />
-                                <span className="flex-1">{sig.reasoning.substring(0, 100)}...</span>
-                             </li>
-                          ))}
-                        </ul>
-                     </div>
-                  )}
                 </div>
                 
                 <div className="lg:col-span-4 space-y-8">
@@ -725,7 +728,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
                   />
                   <FearIndexCard data={vixData} />
                   <FinancialJuiceWidget />
-                  <DeepEarSignalsCard signals={activeData?.financialSignals || []} />
+                  <TraderRiskSnapshotCard data={activeData?.chartData || []} />
                   <NewsFeed news={(activeData?.news || []) as SubNewsItem[]} />
                 </div>
               </div>

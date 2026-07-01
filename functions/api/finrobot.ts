@@ -155,7 +155,7 @@ Core method:
 
 Tool protocol:
 - Use search_market_news for themes, sectors, supply-chain terms, and mixed target searches.
-- Use get_alphaear_news when broad China/HK/A-share hot-news context is relevant.
+- Use get_alphaear_news when broad market headline context is relevant; treat it as Yahoo Finance search aggregation and cite publisher/link rather than claiming first-party news access.
 - If the target looks like a ticker, use get_realtime_quote, get_daily_history, get_company_overview, get_income_statement, get_balance_sheet, search_stock_news, and analysis tools when useful.
 - If the target is only a theme, do not force ticker-only tools. Build the value-chain map from market/news evidence and clearly mark company-specific claims that still need filing checks.
 - Current first-hand filing crawlers are not available in this endpoint. Therefore, never claim that you checked SEC, HKEX, SSE/SZSE filings, annual reports, exchange questions, patents, capacity approvals, tenders, or customer contracts unless a tool result actually provides that source. Mark those checks as Needs checking.

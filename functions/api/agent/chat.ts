@@ -41,7 +41,6 @@ const DASHBOARD_TOOL_ALLOWLIST = new Set([
   "get_realtime_quote",
   "get_options_chain",
   "run_algorithmic_strategy",
-  "get_financial_signals",
 ]);
 
 const onlyAllowedDashboardTools = (tools: any[]) =>

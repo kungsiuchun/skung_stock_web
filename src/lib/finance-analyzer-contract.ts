@@ -4,7 +4,6 @@ export const DASHBOARD_AGENT_TOOL_NAMES = [
   "get_realtime_quote",
   "get_options_chain",
   "run_algorithmic_strategy",
-  "get_financial_signals",
 ] as const;
 
 export const FINANCE_ANALYZER_MODEL_CALL_BUDGETS: Record<
