@@ -72,18 +72,20 @@ Output ONLY valid JSON:
   "take_profit": "target zone based on walls or structure",
   "risk_warning": "biggest trap right now",
   "rule_engine_verdict": "copy zeroDteRuleEngine.verdict exactly",
-  "hard_rule_triggered": true,
-  "confidence_score": 0
+  "hard_rule_triggered": false,
+  "confidence_score": 65
 }
 
 Keep logic concise and high-impact. ${OUTPUT_LANGUAGE_RULE}
+hard_rule_triggered must copy zeroDteRuleEngine.hardRuleTriggered exactly as a boolean.
+confidence_score must be 1-100 based on evidence; use 0 only when no model judgment is available.
 Use literal \\n for newlines inside JSON strings. Never use actual multiline line breaks inside JSON strings.`;
 
 export const SYSTEM_PROMPT_PREFIX = `Based on the following market data, output ONLY valid JSON:
 {
   "decision": "BUY" | "SELL" | "HOLD" | "CALL" | "PUT" | "OPEN_CALL" | "OPEN_PUT",
   "rating": "bullish" | "bearish" | "neutral",
-  "confidence_score": 0,
+  "confidence_score": 65,
   "evidence": ["concrete data field 1", "concrete data field 2"],
   "blocking_risk": null,
   "neutral_reason": null,
@@ -98,6 +100,7 @@ Rules:
 5. If rating is neutral, neutral_reason must name the exact missing/conflicting data.
 6. If there is a blocking risk, put it in blocking_risk.
 7. evidence must cite concrete context fields, not vibes.
+8. confidence_score must be 1-100 based on evidence; use 0 only when no model judgment is available.
 
 GEX guide:
 - positive_gamma: dealers absorb volatility; price tends to mean-revert or pin near gammaFlipLevel.

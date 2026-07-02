@@ -279,6 +279,31 @@ export interface SpxGexDataClient {
   getMarketContext?: () => Promise<SpxGexMarketContext>;
 }
 
+export interface SpxGexTelegramSummary {
+  spot?: number;
+  gammaFlipLevel?: number;
+  gammaStatus?: string;
+  broadGammaStatus?: string;
+  zeroDteGammaStatus?: string;
+  totalNetGex?: number;
+  zeroDteNetGex?: number;
+  mostLongStrike?: number;
+  mostLongGex?: string;
+  mostShortStrike?: number;
+  mostShortGex?: string;
+  longWalls?: { strike: number; gex: string }[];
+  shortPockets?: { strike: number; gex: string }[];
+  netFlowUpper?: { strike: number; gex: string };
+  netFlowLower?: { strike: number; gex: string };
+  putCallIvSkew?: number;
+  generatedAt?: string;
+  parsedAt?: string;
+  source?: string;
+  snapshotTimeEt?: string;
+  collectedTimeEt?: string;
+  selectedExpiry?: string;
+}
+
 export type SpxGexGenerationResult =
   | { status: "generated"; date: string; snapshotMinuteEt: number; snapshotTimeEt: string; collectedMinuteEt: number; collectedTimeEt: string }
   | { status: "skipped_existing"; date: string; snapshotMinuteEt: number; snapshotTimeEt: string; collectedMinuteEt: number; collectedTimeEt: string }
@@ -535,6 +560,55 @@ export const formatSpxGexCompactExposure = (
   if (abs >= 1_000_000) return `${sign}${(abs / 1_000_000).toFixed(2)}M`;
   if (abs >= 1_000) return `${sign}${(abs / 1_000).toFixed(1)}K`;
   return `${sign}${abs.toFixed(0)}`;
+};
+
+const finiteNumberOrUndefined = (value: number | null | undefined) =>
+  typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+const telegramWallFromProfile = (profile: SpxGexStrikeProfile | null | undefined) =>
+  profile ? { strike: profile.strike, gex: formatSpxGexCompactExposure(profile.netGex, { signed: true }) } : undefined;
+
+export const toTelegramGexSummary = (heatmap: SpxGexHeatmapModel): SpxGexTelegramSummary | null => {
+  const profiles = [...(heatmap.strikeProfiles || [])].filter((row) =>
+    Number.isFinite(row.strike) && Number.isFinite(row.netGex)
+  );
+  if (profiles.length === 0) return null;
+
+  const totalNetGex = sumPresentOrNull(heatmap.totals.map((total) => total.netGex));
+  const zeroDteNetGex = finiteNumberOrUndefined(heatmap.zeroDte.netGex);
+  const sortedLong = [...profiles].sort((a, b) => b.netGex - a.netGex);
+  const sortedShort = [...profiles].sort((a, b) => a.netGex - b.netGex);
+  const aboveSpot = profiles.filter((row) => row.strike >= heatmap.quote.last).sort((a, b) => b.netGex - a.netGex);
+  const belowSpot = profiles.filter((row) => row.strike <= heatmap.quote.last).sort((a, b) => a.netGex - b.netGex);
+  const mostLong = sortedLong[0];
+  const mostShort = sortedShort[0];
+  const sessionText = heatmap.session
+    ? `${heatmap.session.snapshotTimeEt} ET snapshot / collected ${heatmap.session.collectedTimeEt} ET`
+    : heatmap.generatedAt;
+
+  return {
+    spot: heatmap.quote.last,
+    gammaFlipLevel: finiteNumberOrUndefined(heatmap.zeroDte.gammaFlip),
+    gammaStatus: (totalNetGex ?? 0) >= 0 ? "positive_gamma" : "negative_gamma",
+    broadGammaStatus: (totalNetGex ?? 0) >= 0 ? "positive_gamma" : "negative_gamma",
+    zeroDteGammaStatus: (zeroDteNetGex ?? 0) >= 0 ? "positive_gamma" : "negative_gamma",
+    totalNetGex: finiteNumberOrUndefined(totalNetGex),
+    zeroDteNetGex,
+    mostLongStrike: mostLong?.strike,
+    mostLongGex: mostLong ? formatSpxGexCompactExposure(mostLong.netGex, { signed: true }) : undefined,
+    mostShortStrike: mostShort?.strike,
+    mostShortGex: mostShort ? formatSpxGexCompactExposure(mostShort.netGex, { signed: true }) : undefined,
+    longWalls: sortedLong.slice(0, 3).map((row) => ({ strike: row.strike, gex: formatSpxGexCompactExposure(row.netGex, { signed: true }) })),
+    shortPockets: sortedShort.slice(0, 3).map((row) => ({ strike: row.strike, gex: formatSpxGexCompactExposure(row.netGex, { signed: true }) })),
+    netFlowUpper: telegramWallFromProfile(aboveSpot[0]),
+    netFlowLower: telegramWallFromProfile(belowSpot[0]),
+    generatedAt: sessionText,
+    parsedAt: heatmap.generatedAt,
+    source: `Canonical D1 SPX GEX heatmap (${heatmap.source.gexTool})`,
+    snapshotTimeEt: heatmap.session?.snapshotTimeEt,
+    collectedTimeEt: heatmap.session?.collectedTimeEt,
+    selectedExpiry: heatmap.zeroDte.expiry,
+  };
 };
 
 const formatStoredLevel = (value: number) => `$${value.toFixed(0)}`;

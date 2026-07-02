@@ -12,6 +12,7 @@ import {
   listSpxGexHeatmapDates,
   listSpxGexHeatmapSessions,
   readSpxGexHeatmap,
+  toTelegramGexSummary,
   upsertSpxGexHeatmap,
   type SpxGexDataClient,
   type SpxGexHeatmapModel,
@@ -27,7 +28,7 @@ import {
   parseCboeOptionSymbol,
   parseCboeSpxOptionsPayload,
 } from "../src/lib/spx-gex-cboe";
-import { calculateGexFromOptionChains } from "../scripts/gex-calculator";
+import { loadCanonicalSpxGexForTelegram } from "../scripts/worker-spx-bot";
 import { onRequest as getSpxGexHeatmapApi } from "../functions/api/spx-gex-heatmap";
 
 describe("SPX GEX intraday generation gate", () => {
@@ -502,7 +503,7 @@ describe("SPX GEX Cboe delayed source adapter", () => {
     assert.equal(db.cboeCache.size, 0);
   });
 
-  it("derives Telegram PCR and GEX summary from the same cached chains", async () => {
+  it("keeps Cboe D1 cache as ingestion cache, not Telegram GEX truth", async () => {
     const db = new MemoryD1();
     const client = createSpxGexIntradayDataClient({
       db,
@@ -512,12 +513,16 @@ describe("SPX GEX Cboe delayed source adapter", () => {
     const front = await client.getOptionsChain();
     const chains = await Promise.all(front.expiries.slice(0, 5).map((expiry) => client.getOptionsChain!(expiry)));
     const pcrValue = await client.getOptionsPcr?.();
-    const gex = calculateGexFromOptionChains(chains, new Date("2026-06-24T14:00:00Z"));
+    const canonicalOnly = await loadCanonicalSpxGexForTelegram(
+      { SPX_RECAP_DB: db },
+      new Date("2026-06-24T13:30:00Z"),
+      { dataClient: { ...client, getOptionsChain: async (expiry?: string) => chains.find((chain) => chain.selectedExpiry === (expiry || front.selectedExpiry)) || front } },
+    );
 
     assert.equal(db.cboeCache.size, 1);
     assert.equal(pcrValue, 0.9);
-    assert.equal(gex?.gammaStatus, "negative_gamma");
-    assert.ok(gex?.generatedAt.includes("CBOE Delayed"));
+    assert.equal(canonicalOnly.heatmap, null);
+    assert.equal(canonicalOnly.calculatedGex, null);
   });
 
   it("continues with live Cboe data when the D1 cache table is unavailable", async () => {
@@ -953,6 +958,26 @@ describe("SPX GEX exposure board model", () => {
     assert.equal(atTheMoneyCell.netGex, Number(atTheMoneyCell.callGex || 0) + Number(atTheMoneyCell.putGex || 0));
   });
 
+  it("derives Telegram GEX summary from canonical heatmap totals and strike profiles", () => {
+    const heatmap = buildStructuredHeatmap();
+    const summary = toTelegramGexSummary(heatmap);
+    const totalNetGex = heatmap.totals.reduce((sum, total) => sum + total.netGex, 0);
+    const mostLong = [...heatmap.strikeProfiles].sort((a, b) => b.netGex - a.netGex)[0];
+    const mostShort = [...heatmap.strikeProfiles].sort((a, b) => a.netGex - b.netGex)[0];
+
+    assert.ok(summary);
+    assert.equal(summary.source, "Canonical D1 SPX GEX heatmap (black_scholes_exposure_engine)");
+    assert.equal(summary.spot, heatmap.quote.last);
+    assert.equal(summary.totalNetGex, totalNetGex);
+    assert.equal(summary.zeroDteNetGex, heatmap.zeroDte.netGex);
+    assert.equal(summary.gammaFlipLevel, heatmap.zeroDte.gammaFlip);
+    assert.equal(summary.mostLongStrike, mostLong.strike);
+    assert.equal(summary.mostShortStrike, mostShort.strike);
+    assert.equal(summary.longWalls?.[0]?.strike, mostLong.strike);
+    assert.equal(summary.shortPockets?.[0]?.strike, mostShort.strike);
+    assert.equal(summary.generatedAt, "09:30 ET snapshot / collected 09:45 ET");
+  });
+
   it("keeps dense SPX strike coverage near spot instead of collapsing to a sparse mock-table", () => {
     const denseStrikes = Array.from({ length: 121 }, (_, index) => 5700 + index * 5);
     const denseChains = expiries.map((expiry) => ({
@@ -1091,6 +1116,7 @@ class MemoryD1Statement {
     if (this.query.includes("FROM spx_cboe_option_chain_cache") && this.query.includes("trading_date = ?")) {
       const rows = [...this.db.cboeCache.values()]
         .filter((row) => row.trading_date === this.values[0])
+        .filter((row) => !this.query.includes("collected_minute_et = ?") || row.collected_minute_et === this.values[1])
         .sort((a, b) => Number(b.collected_minute_et) - Number(a.collected_minute_et) || String(b.created_at).localeCompare(String(a.created_at)));
       return (rows[0] || null) as T | null;
     }
@@ -1409,6 +1435,48 @@ describe("SPX GEX intraday automation runner", () => {
     assert.equal((await listSpxGexHeatmapSessions(db, "2026-05-27")).length, 2);
     assert.equal(calls.filter((call) => call === "get_quotes").length, 2);
     assert.equal(calls.filter((call) => call.startsWith("get_options_chain")).length, 12);
+  });
+
+  it("generates and stores the canonical heatmap before building Telegram GEX when cache is newer but snapshot is missing", async () => {
+    const db = new MemoryD1();
+    const { client, calls } = createFakeDataClient();
+    const cache = new CboeD1Cache(db, { now: () => new Date("2026-05-27T14:00:00Z") });
+    await cache.write({
+      cacheKey: "SPX:CBOE_DELAYED:2026-05-27:600",
+      tradingDate: "2026-05-27",
+      collectedMinuteEt: 600,
+      sourceTimestamp: "2026-05-27 14:00:00",
+      spot: 6000,
+      chains: expiries.map((expiry) => buildOptionChain(expiry)),
+      pcrValue: 1.23,
+    });
+    await cache.write({
+      cacheKey: "SPX:CBOE_DELAYED:2026-05-27:615",
+      tradingDate: "2026-05-27",
+      collectedMinuteEt: 615,
+      sourceTimestamp: "2026-05-27 14:15:00",
+      spot: 6005,
+      chains: expiries.map((expiry) => buildOptionChain(expiry, 6005)),
+      pcrValue: 1.34,
+    });
+
+    const result = await loadCanonicalSpxGexForTelegram(
+      { SPX_RECAP_DB: db },
+      new Date("2026-05-27T14:00:00Z"),
+      { dataClient: client },
+    );
+    const stored = await readSpxGexHeatmap(db, "2026-05-27", 585);
+
+    assert.ok(stored);
+    assert.ok(result.heatmap);
+    assert.ok(result.calculatedGex);
+    assert.equal(result.heatmap.session?.snapshotMinuteEt, 585);
+    assert.equal(result.heatmap.session?.collectedMinuteEt, 600);
+    assert.equal(result.pcrValue, 1.23);
+    assert.equal(result.calculatedGex.source, "Canonical D1 SPX GEX heatmap (black_scholes_exposure_engine)");
+    assert.equal(result.calculatedGex.totalNetGex, stored?.totals.reduce((sum, total) => sum + total.netGex, 0));
+    assert.equal(calls.includes("get_quotes"), true);
+    assert.equal(calls.some((call) => call.startsWith("get_options_chain")), true);
   });
 
   it("does not call the data client when the market is closed", async () => {

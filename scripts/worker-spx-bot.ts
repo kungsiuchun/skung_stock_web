@@ -1,9 +1,8 @@
 import { RSI, BollingerBands, SMA, MACD, EMA } from 'technicalindicators';
 import { PERSONAS, ORCHESTRATOR_PROMPT, SYSTEM_PROMPT_PREFIX, AUDIT_AGENT_PROMPT } from './prompts';
-import { calculateGexFromOptionChains } from './gex-calculator';
 import { readAgentCalibrationWeights, readPendingAgentSignalOutcomes, updateAgentSignalOutcomeResults, upsertAgentSignalOutcome, upsertRecapDay, type D1DatabaseLike } from '../src/lib/spx-recap-d1';
-import { generateAndStoreSpxGexHeatmap, type SpxGexOptionChain } from '../src/lib/spx-gex-heatmap';
-import { calculateCboePcrFromChains, createSpxGexIntradayDataClient } from '../src/lib/spx-gex-cboe';
+import { generateAndStoreSpxGexHeatmap, getSpxGexGenerationStatus, readSpxGexHeatmap, toTelegramGexSummary, type SpxGexDataClient, type SpxGexHeatmapModel, type SpxGexTelegramSummary } from '../src/lib/spx-gex-heatmap';
+import { createSpxGexIntradayDataClient } from '../src/lib/spx-gex-cboe';
 
 export const NT_VOLATILITY_RISK_PROMPT = `You are NT, a ruthless Volatility Risk Manager. You monitor options premium pressure, VIX/VIX9D stress, gamma regime, and tail-risk.
 Your Task: Analyze current VIX, VIX9D, volatility compression or expansion, BB squeeze, GEX regime, and any disabled or missing sentiment inputs honestly. Do not require removed external flow sources.
@@ -70,26 +69,7 @@ interface TrendDayContext {
   nearestExpiryGammaStatus: string | null;
   rationale: string;
 }
-interface GexData {
-  spot?: number;
-  gammaFlipLevel?: number;
-  gammaStatus?: string;
-  broadGammaStatus?: string;
-  zeroDteGammaStatus?: string;
-  totalNetGex?: number;
-  zeroDteNetGex?: number;
-  mostLongStrike?: number;
-  mostLongGex?: string;
-  mostShortStrike?: number;
-  mostShortGex?: string;
-  longWalls?: { strike: number; gex: string }[];
-  shortPockets?: { strike: number; gex: string }[];
-  netFlowUpper?: { strike: number; gex: string };
-  netFlowLower?: { strike: number; gex: string };
-  putCallIvSkew?: number;
-  generatedAt?: string;
-  parsedAt?: string;
-}
+type GexData = SpxGexTelegramSummary;
 
 type MarketDataQualityStatus = "OK" | "STALE" | "MISSING" | "FALLBACK";
 type MarketDataQualityOverall = "OK" | "WARN" | "BLOCK";
@@ -354,19 +334,97 @@ async function fetchOptionalMarketData<T>(label: string, task: Promise<T>, fallb
     return fallback;
   }
 }
-async function fetchCachedCboeOptionsSnapshot(env: Env, now: Date) {
-  const client = createSpxGexIntradayDataClient({
-    db: env.SPX_RECAP_DB,
-    now,
-  });
-  if (!client.getOptionsChain) return { pcrValue: null, calculatedGex: null, chains: [] as SpxGexOptionChain[] };
+const readCanonicalSnapshotPcrValue = async (db: D1DatabaseLike, heatmap: SpxGexHeatmapModel | null) => {
+  if (!heatmap?.session) return null;
+  try {
+    const row = await db
+      .prepare(`
+        SELECT pcr_value
+        FROM spx_cboe_option_chain_cache
+        WHERE trading_date = ? AND collected_minute_et = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+      `)
+      .bind(heatmap.session.tradingDate, heatmap.session.collectedMinuteEt)
+      .first<{ pcr_value: number | null }>();
+    const value = Number(row?.pcr_value);
+    return Number.isFinite(value) ? value : null;
+  } catch (error) {
+    console.error('[SPX_GEX_CANONICAL] PCR metadata read failed', error instanceof Error ? error.message : String(error));
+    return null;
+  }
+};
 
-  const front = await client.getOptionsChain();
-  const selectedExpiries = front.expiries.slice(0, 5);
-  const chains = await Promise.all(selectedExpiries.map((expiry) => client.getOptionsChain!(expiry)));
-  const pcrValue = client.getOptionsPcr ? await client.getOptionsPcr() : calculateCboePcrFromChains(chains);
-  const calculatedGex = calculateGexFromOptionChains(chains, now);
-  return { pcrValue, calculatedGex, chains };
+const readLatestCboeCacheMinuteEt = async (db: D1DatabaseLike, tradingDate: string) => {
+  try {
+    const row = await db
+      .prepare(`
+        SELECT collected_minute_et
+        FROM spx_cboe_option_chain_cache
+        WHERE trading_date = ?
+        ORDER BY collected_minute_et DESC, created_at DESC
+        LIMIT 1
+      `)
+      .bind(tradingDate)
+      .first<{ collected_minute_et: number | null }>();
+    const value = Number(row?.collected_minute_et);
+    return Number.isFinite(value) ? value : null;
+  } catch (error) {
+    console.error('[SPX_GEX_CANONICAL] CBOE cache freshness read failed', error instanceof Error ? error.message : String(error));
+    return null;
+  }
+};
+
+const logCanonicalGexFreshness = async (db: D1DatabaseLike, tradingDate: string, heatmap: SpxGexHeatmapModel | null) => {
+  const latestCacheMinuteEt = await readLatestCboeCacheMinuteEt(db, tradingDate);
+  const latestSnapshotCollectedMinuteEt = heatmap?.session?.collectedMinuteEt ?? null;
+  if (
+    latestCacheMinuteEt !== null
+    && latestSnapshotCollectedMinuteEt !== null
+    && latestCacheMinuteEt > latestSnapshotCollectedMinuteEt
+  ) {
+    console.error(`[SPX_GEX_CANONICAL] cache_latest > snapshot_latest tradingDate=${tradingDate} cacheCollected=${latestCacheMinuteEt} snapshotCollected=${latestSnapshotCollectedMinuteEt}`);
+  }
+};
+
+export interface CanonicalSpxGexForTelegram {
+  pcrValue: number | null;
+  calculatedGex: SpxGexTelegramSummary | null;
+  heatmap: SpxGexHeatmapModel | null;
+}
+
+export async function loadCanonicalSpxGexForTelegram(
+  env: { SPX_RECAP_DB?: D1DatabaseLike },
+  now: Date = new Date(),
+  options: { dataClient?: SpxGexDataClient } = {},
+): Promise<CanonicalSpxGexForTelegram> {
+  const db = env.SPX_RECAP_DB;
+  if (!db) return { pcrValue: null, calculatedGex: null, heatmap: null };
+
+  const generationStatus = getSpxGexGenerationStatus(now);
+  const tradingDate = generationStatus.etDateKey;
+  let heatmap = await readSpxGexHeatmap(db, tradingDate, generationStatus.snapshotMinuteEt);
+
+  if (!heatmap && generationStatus.isGenerationWindow) {
+    const result = await generateAndStoreSpxGexHeatmap({
+      db,
+      dataClient: options.dataClient || createSpxGexIntradayDataClient({ db, now }),
+      now,
+    });
+    console.log(`[SPX_GEX_CANONICAL] ensure ${result.status} ${result.date}${'reason' in result ? ` ${result.reason}` : ` snapshot=${result.snapshotTimeEt} collected=${result.collectedTimeEt}`}`);
+    heatmap = await readSpxGexHeatmap(db, tradingDate, generationStatus.snapshotMinuteEt);
+  }
+
+  if (!heatmap) {
+    heatmap = await readSpxGexHeatmap(db, tradingDate);
+  }
+
+  await logCanonicalGexFreshness(db, tradingDate, heatmap);
+  return {
+    pcrValue: await readCanonicalSnapshotPcrValue(db, heatmap),
+    calculatedGex: heatmap ? toTelegramGexSummary(heatmap) : null,
+    heatmap,
+  };
 }
 
 const cleanVisibleModelText = (value: unknown) => {
@@ -462,6 +520,15 @@ const normalizeEvidenceList = (value: unknown, fallback: string[]) => {
   return cleaned.length > 0 ? cleaned : fallback.slice(0, 4);
 };
 
+const isPlaceholderAgentText = (value: unknown) => {
+  const text = compactModelText(value, 160).toLowerCase();
+  return !text
+    || text === "null"
+    || text === "n/a"
+    || text === "short analysis"
+    || text.includes("concrete data field");
+};
+
 const normalizeAgentContract = (raw: Record<string, any>, fallbackReason: string): AgentDecisionContract => {
   const decision = normalizeAgentDecisionValue(raw.decision || raw.trade_action);
   const rating = (raw.rating === "bullish" || raw.rating === "bearish" || raw.rating === "neutral")
@@ -490,6 +557,22 @@ const normalizeAgentContract = (raw: Record<string, any>, fallbackReason: string
   };
 };
 
+export function isLikelyCopiedAgentSchema(agent: Partial<AgentDecisionContract>) {
+  const decision = normalizeAgentDecisionValue(agent.decision);
+  const confidence = clampConfidence(agent.confidence ?? agent.confidence_score, decision === "HOLD" ? 40 : 65);
+  if (decision !== "HOLD" || confidence > 5) return false;
+
+  const evidence = Array.isArray(agent.evidence) ? agent.evidence : [];
+  const fields = [
+    agent.neutralReason,
+    agent.neutral_reason,
+    agent.reasoning,
+    agent.analysis,
+    ...evidence,
+  ].filter((value) => value !== null && value !== undefined);
+  return fields.length === 0 || fields.every(isPlaceholderAgentText);
+}
+
 const hasVisibleContractLeak = (value: unknown) =>
   /"?(?:decision|trade_action|rating|confidence|confidence_score|evidence|evidence_bullets|blockingRisk|blocking_risk|neutralReason|neutral_reason|reasoning|analysis|modelStatus)"?\s*:/.test(String(value || ""));
 
@@ -499,7 +582,13 @@ const safeVisibleAgentText = (value: unknown, fallback: string, maxLength = 180)
   return cleaned;
 };
 
+const formatAgentModelSource = (agent: Partial<AgentDecisionContract>) => {
+  const status = safeVisibleAgentText(agent.modelStatus || "", "", 64);
+  return status ? `fallback:${status}` : "AI";
+};
+
 export function formatAgentTelegramBrief(personaKey: string, agent: Partial<AgentDecisionContract>) {
+  personaKey = `${personaKey} [${formatAgentModelSource(agent)}]`;
   const decision = normalizeAgentDecisionValue(agent.decision);
   const confidence = clampConfidence(agent.confidence ?? agent.confidence_score, decision === "HOLD" ? 40 : 65);
   const evidence = normalizeEvidenceList(agent.evidence, [agent.reasoning || agent.analysis || "資料不足，保持觀望。"])
@@ -539,7 +628,15 @@ export function parseAgentResponseContent(content: string) {
     reasoning: fallbackReason,
     analysis: fallbackReason,
     neutral_reason: "model_output_not_json",
+    modelStatus: "model_output_not_json",
   }, fallbackReason);
+}
+
+export function parseAgentResponseWithDataFallback(personaKey: string, content: string, contextData: any) {
+  const parsed = parseAgentResponseContent(content);
+  return isLikelyCopiedAgentSchema(parsed)
+    ? buildDataBackedAgentFallback(personaKey, contextData, "model_copied_schema_zero_confidence")
+    : parsed;
 }
 
 export function parseOrchestratorResponseContent(content: string) {
@@ -1610,7 +1707,7 @@ async function analyzeWithAgent(personaKey: string, personaPrompt: string, conte
     }
     const data = await response.json() as any;
     const content = data.choices?.[0]?.message?.content || "";
-    return parseAgentResponseContent(content);
+    return parseAgentResponseWithDataFallback(personaKey, content, contextData);
   } catch (e: any) {
     console.error('Agent error:', e.message);
     return buildDataBackedAgentFallback(personaKey, contextData, e?.name === "AbortError" ? "model_timeout" : "model_request_failed");
@@ -1824,20 +1921,20 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     // Ensure IC fields exist for legacy memory
     if (!dailyMemory.icPosition) { dailyMemory.icPosition = 'NONE'; dailyMemory.icDeployTime = null; dailyMemory.icAction = null; }
 
-    console.log('[DEBUG] Step 1: Fetching core SPX data, optional market context, CBOE PCR & GEX...');
+    console.log('[DEBUG] Step 1: Fetching core SPX data, optional market context, canonical SPX GEX...');
     const spxQuotes = await timedStep('SPX 15m core chart', () => fetchYahooChart('^GSPC', '15m', '7d'));
     const spxQuotesM5 = await fetchOptionalMarketData('SPX M5 trigger chart', fetchYahooChart('^GSPC', '5m', '2d'), spxQuotes);
-    const [spxQuotesD1, spxQuotesH1, vixQuotes, vixQuotes9d, cboeOptionsSnapshot, sentimentData] = await Promise.all([
+    const [spxQuotesD1, spxQuotesH1, vixQuotes, vixQuotes9d, canonicalGexSnapshot, sentimentData] = await Promise.all([
       fetchOptionalMarketData('SPX D1 price-action chart', fetchYahooChart('^GSPC', '1d', '3mo'), []),
       fetchOptionalMarketData('SPX H1 price-action chart', fetchYahooChart('^GSPC', '1h', '10d'), []),
       fetchOptionalMarketData('VIX 15m chart', fetchYahooChart('^VIX', '15m', '7d'), []),
       fetchOptionalMarketData('VIX9D term-structure chart', fetchYahooChart('^VIX9D', '1d', '3mo'), []),
-      fetchOptionalMarketData('CBOE cached options snapshot', withPromiseTimeout('CBOE cached options snapshot', fetchCachedCboeOptionsSnapshot(env, now), OPTIONAL_MARKET_DATA_TIMEOUT_MS), { pcrValue: null, calculatedGex: null, chains: [] as SpxGexOptionChain[] }),
+      fetchOptionalMarketData('Canonical SPX GEX heatmap snapshot', withPromiseTimeout('Canonical SPX GEX heatmap snapshot', loadCanonicalSpxGexForTelegram(env, now), OPTIONAL_MARKET_DATA_TIMEOUT_MS), { pcrValue: null, calculatedGex: null, heatmap: null }),
       getDisabledNewsSentiment(),
     ]);
-    const pcrValue = cboeOptionsSnapshot.pcrValue;
-    const calculatedGex = cboeOptionsSnapshot.calculatedGex;
-    const cboeOptionChains = Array.isArray(cboeOptionsSnapshot.chains) ? cboeOptionsSnapshot.chains : [];
+    const pcrValue = canonicalGexSnapshot.pcrValue;
+    const calculatedGex = canonicalGexSnapshot.calculatedGex;
+    const canonicalHeatmap = canonicalGexSnapshot.heatmap;
 
     console.log('[DEBUG] Step 2: Calculating Indicators...');
     const spxInd = await calculateIndicators(spxQuotes);
@@ -1901,7 +1998,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
 
     // GEX 整合到 AI context
     const calculatedGexContext = calculatedGex ? {
-      source: `Internal CBOE Options GEX Calculator (${calculatedGex.generatedAt})`,
+      source: `${calculatedGex.source || 'Canonical D1 SPX GEX heatmap'} (${calculatedGex.generatedAt})`,
       gammaFlipLevel: calculatedGex.gammaFlipLevel,
       gammaStatus: calculatedGex.gammaStatus,
       broadGammaStatus: calculatedGex.broadGammaStatus,
@@ -1912,10 +2009,12 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       mostShortGammaStrike: `${calculatedGex.mostShortStrike} (${calculatedGex.mostShortGex})`,
       longGammaWalls: calculatedGex.longWalls?.map((w: any) => `${w.strike}(${w.gex})`).join(' > '),
       shortGammaPockets: calculatedGex.shortPockets?.map((p: any) => `${p.strike}(${p.gex})`).join(' > '),
-      chainSnapshot: cboeOptionChains[0] ? {
-        expiry: cboeOptionChains[0].selectedExpiry,
-        source: cboeOptionChains[0].source?.label || 'unknown',
-        contracts: (cboeOptionChains[0].calls?.length || 0) + (cboeOptionChains[0].puts?.length || 0),
+      chainSnapshot: canonicalHeatmap?.session ? {
+        expiry: calculatedGex.selectedExpiry || canonicalHeatmap.zeroDte.expiry,
+        source: calculatedGex.source || 'canonical_heatmap',
+        snapshotTimeEt: canonicalHeatmap.session.snapshotTimeEt,
+        collectedTimeEt: canonicalHeatmap.session.collectedTimeEt,
+        cells: canonicalHeatmap.cells.length,
       } : null,
     } : null;
     const trendDayContext = computeTrendDayContext(m5QuotesValid, spxInd, calculatedGex);
@@ -2158,10 +2257,10 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       runId,
       dataQuality: marketDataQuality,
       agentVotes: {
-        QM: { decision: d1, confidence: agent1.confidence },
-        CM: { decision: d2, confidence: agent2.confidence },
-        NT: { decision: d3, confidence: agent3.confidence },
-        PA: { decision: d4, confidence: agent4.confidence },
+        QM: { decision: d1, confidence: agent1.confidence, modelStatus: agent1.modelStatus || "AI", neutralReason: agent1.neutralReason },
+        CM: { decision: d2, confidence: agent2.confidence, modelStatus: agent2.modelStatus || "AI", neutralReason: agent2.neutralReason },
+        NT: { decision: d3, confidence: agent3.confidence, modelStatus: agent3.modelStatus || "AI", neutralReason: agent3.neutralReason },
+        PA: { decision: d4, confidence: agent4.confidence, modelStatus: agent4.modelStatus || "AI", neutralReason: agent4.neutralReason },
       },
       cioConfidence: clampConfidence((orchestratorPlan as any).confidence_score, 45),
     };
@@ -2233,7 +2332,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
 ⏱️ <b>美東時間：${etTime} ET</b> | <b>標的：SPX</b>
 
 📡 <b>[期權 GEX 訊號]</b>${calculatedGex ? ` (${calculatedGex.generatedAt})` : ' 數據缺失'}
-${calculatedGex ? `來源：<code>Internal CBOE Options GEX Calculator</code>
+${calculatedGex ? `來源：<code>${calculatedGex.source || 'Canonical D1 SPX GEX heatmap'}</code>
 系統態勢：<b>${calculatedGex.gammaStatus === 'positive_gamma' ? '✅ Positive Gamma — 橡皮筋模式（做市商吸收波動）' : '⚠️ Negative Gamma — 滑滑梯模式（波動放大）'}</b>
 🔄 Gamma Flip (ZG)：<code>${calculatedGex.gammaFlipLevel}</code> (${(spxInd.currentClose > (calculatedGex.gammaFlipLevel || 0)) ? '在 Flip 之上↑ 多方有利' : '在 Flip 之下↓ 空方佔優'})
 🟢 最強多方 (SG_High)：<code>${calculatedGex.mostLongStrike}</code> (${calculatedGex.mostLongGex}) | 🔴 最強空方 (SG_Low)：<code>${calculatedGex.mostShortStrike}</code> (${calculatedGex.mostShortGex})

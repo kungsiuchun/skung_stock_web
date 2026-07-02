@@ -8,11 +8,13 @@ import {
   countDirectionalVotes,
   formatAgentTelegramBrief,
   hasActiveTradingRunLock,
+  parseAgentResponseWithDataFallback,
   parseAgentResponseContent,
   parseOrchestratorResponseContent,
   shouldRunLlmCio,
   shouldRunLlmCouncil,
 } from "../scripts/worker-spx-bot";
+import { ORCHESTRATOR_PROMPT, SYSTEM_PROMPT_PREFIX } from "../scripts/prompts";
 
 const forbiddenVisibleFragments = [
   "{",
@@ -97,6 +99,63 @@ test("agent output parser strips screenshot-style raw contract fragments", () =>
   assert.equal(parsed.reasoning.includes("Market is pinned"), true);
 });
 
+test("copied zero-confidence agent schema falls back to data-backed direction", () => {
+  const bullishContext = {
+    currentPrice: "7420",
+    currentVWAP: "7398",
+    ema9: "7410",
+    currentVix: "13.8",
+    m5Analysis: { volumeSurge: "1.70x" },
+    trendDayContext: {
+      regime: "BULL_TREND_DAY",
+      directionalBias: "CALL",
+      confidence: 78,
+      aboveVWAP: true,
+      aboveEMA9: true,
+      aboveGammaFlip: true,
+    },
+    calculatedGEX: { gammaStatus: "positive_gamma", gammaFlipLevel: 7400 },
+    zeroDteRuleEngine: {
+      verdict: "TRADE_ALLOWED",
+      hardRuleTriggered: false,
+      signalScore: 76,
+      directionalBias: "CALL",
+      hardBlocks: [],
+      activeRisks: [],
+    },
+    TODAYS_MEMORY: { currentPosition: "NONE" },
+  };
+  const parsed = parseAgentResponseWithDataFallback("QM", JSON.stringify({
+    decision: "HOLD",
+    rating: "neutral",
+    confidence_score: 0,
+    evidence: ["concrete data field 1", "concrete data field 2"],
+    neutral_reason: null,
+    reasoning: "short analysis",
+  }), bullishContext);
+
+  assert.equal(parsed.decision, "BUY");
+  assert.equal(parsed.rating, "bullish");
+  assert.equal(parsed.modelStatus, "model_copied_schema_zero_confidence");
+});
+
+test("specific nonzero neutral agent output stays neutral", () => {
+  const parsed = parseAgentResponseWithDataFallback("QM", JSON.stringify({
+    decision: "HOLD",
+    rating: "neutral",
+    confidence_score: 37,
+    evidence: ["trendDayContext RANGE_OR_MIXED", "volumeSurge 0.90x"],
+    neutral_reason: "VWAP and EMA9 conflict",
+    reasoning: "Trend and trigger fields conflict; stand down.",
+  }), {});
+
+  assert.equal(parsed.decision, "HOLD");
+  assert.equal(parsed.rating, "neutral");
+  assert.equal(parsed.confidence, 37);
+  assert.equal(parsed.modelStatus, undefined);
+  assert.match(parsed.neutralReason || "", /VWAP/);
+});
+
 test("telegram agent renderer never prints raw JSON contract fields", () => {
   const line = formatAgentTelegramBrief("CM", {
     decision: "HOLD",
@@ -104,11 +163,20 @@ test("telegram agent renderer never prints raw JSON contract fields", () => {
     evidence: ['"rating":"bullish","confidence_score":75,"evidence":["gammaStatus"]'],
     reasoning: '"neutral_reason":"metadata leak" Price is pinned near 7440.',
     neutral_reason: '"evidence":["raw"]',
+    modelStatus: "model_timeout",
   } as any);
 
   assert.match(line, /CM/);
+  assert.match(line, /fallback:model_timeout/);
   assert.match(line, /75\/100/);
   assertCleanVisibleReasoning(line);
+});
+
+test("prompt examples do not teach the model to copy zero confidence or hard-block true", () => {
+  assert.equal(SYSTEM_PROMPT_PREFIX.includes('"confidence_score": 0'), false);
+  assert.equal(ORCHESTRATOR_PROMPT.includes('"confidence_score": 0'), false);
+  assert.equal(ORCHESTRATOR_PROMPT.includes('"hard_rule_triggered": true'), false);
+  assert.match(ORCHESTRATOR_PROMPT, /copy zeroDteRuleEngine\.hardRuleTriggered/);
 });
 
 test("trading run lock treats unexpired lock as active and expired lock as inactive", () => {
