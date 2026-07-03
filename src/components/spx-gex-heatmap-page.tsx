@@ -137,6 +137,26 @@ const dataQualityText = (heatmap: SpxGexHeatmapModel) => {
   return `priced ${summary.priced} · repaired ${summary.repaired} · partial ${summary.partial} · unpriced ${summary.unpriced} · excluded ${summary.excluded}`;
 };
 
+const parseHeatmapResponse = async (response: Response, requestUrl: string) => {
+  const contentType = response.headers.get("content-type") || "";
+  const text = await response.text();
+
+  if (!contentType.toLowerCase().includes("application/json")) {
+    const prefix = text.trim().slice(0, 80).replace(/\s+/g, " ");
+    throw new Error(
+      `SPX GEX API returned ${contentType || "unknown content"} (HTTP ${response.status}) for ${requestUrl}; expected JSON. Response starts: ${prefix || "empty"}`,
+    );
+  }
+
+  try {
+    return JSON.parse(text) as SpxGexHeatmapResponse & { error?: string };
+  } catch (error) {
+    throw new Error(
+      `SPX GEX API returned invalid JSON (HTTP ${response.status}) for ${requestUrl}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+};
+
 export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const [data, setData] = useState<SpxGexHeatmapResponse>(emptyPayload);
   const [selectedDate, setSelectedDate] = useState("");
@@ -159,11 +179,9 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
       if (date) params.set("date", date);
       if (snapshotMinute !== null && snapshotMinute !== undefined) params.set("snapshot", String(snapshotMinute));
       if (options.bypassCache) params.set("_", String(Date.now()));
-      const response = await fetch(
-        `/api/spx-gex-heatmap${params.toString() ? `?${params.toString()}` : ""}`,
-        options.bypassCache ? { cache: "no-store" } : undefined,
-      );
-      const payload = (await response.json()) as SpxGexHeatmapResponse & { error?: string };
+      const requestUrl = `/api/spx-gex-heatmap${params.toString() ? `?${params.toString()}` : ""}`;
+      const response = await fetch(requestUrl, options.bypassCache ? { cache: "no-store" } : undefined);
+      const payload = await parseHeatmapResponse(response, requestUrl);
       if (!response.ok) throw new Error(payload.error || "SPX GEX heatmap API failed");
       setData(payload);
       setSelectedDate(payload.selectedDate || "");

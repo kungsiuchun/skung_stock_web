@@ -2,15 +2,16 @@ import { useEffect, useState } from 'react'
 import DemoOne from './components/demo-one'
 import Navbar from './components/navbar'
 import AICaptionTool from './components/ai-caption-tool'
+import { HomeLandingPage } from './components/home-landing-page'
 import { FinanceDashboard } from './components/finance-dashboard'
 import { TradingAgentDashboard } from './components/dashboard/trading-agent-dashboard'
 import { SPXRecapPage } from './components/spx-recap-page'
 import { SPXGexHeatmapPage } from './components/spx-gex-heatmap-page'
 import { StocksIntelligenceWatcherPage } from './components/stocks-intelligence-watcher-page'
 import { AboutPage } from './components/about-page'
+import { ContactPage } from './components/contact-page'
 import { WorkGallery } from './components/work-gallery'
 import { SettleUpPage } from './components/settle-up-page'
-import { portfolioConfig } from '@/config/portfolio'
 import { getHashForView, getViewFromHash, type ViewState } from '@/lib/app-routes'
 import { Home, LineChart } from 'lucide-react'
 
@@ -43,13 +44,15 @@ function App() {
   return (
     <main className="w-full h-screen relative bg-[#141414] overflow-hidden">
       <Navbar 
-        onWork={() => navigateToView('work-gallery')}
+        onMarketLab={() => navigateToView('work-gallery')}
+        onPhotography={() => navigateToView('photography')}
         onHome={() => navigateToView('home')}
         onAbout={() => navigateToView('about')}
+        onContact={() => navigateToView('contact')}
         currentView={currentView}
       />
       
-      <div className="w-full h-full flex pt-20">
+      <div className={`w-full h-full flex ${currentView === 'home' || currentView === 'contact' ? '' : 'pt-20'}`}>
         
         {/* Left App Navigation Component - ONLY active during Finance Dashboard */}
         {currentView === 'finance-dashboard' && (
@@ -68,9 +71,16 @@ function App() {
 
         <div className="flex-1 h-full overflow-hidden">
           {currentView === 'home' ? (
+            <HomeLandingPage
+              onOpenMarketLab={() => navigateToView('work-gallery')}
+              onOpenPhotography={() => navigateToView('photography')}
+            />
+          ) : currentView === 'photography' ? (
             <DemoOne />
           ) : currentView === 'about' ? (
             <AboutPage />
+          ) : currentView === 'contact' ? (
+            <ContactPage />
           ) : currentView === 'work-gallery' ? (
             <WorkGallery
               onOpenSettleUp={() => navigateToView('settle-up')}
@@ -97,30 +107,20 @@ function App() {
           ) : currentView === 'stocks-intelligence-watcher' ? (
             <StocksIntelligenceWatcherPage onBackToWork={() => navigateToView('work-gallery')} />
           ) : (
-            <DemoOne />
+            <HomeLandingPage
+              onOpenMarketLab={() => navigateToView('work-gallery')}
+              onOpenPhotography={() => navigateToView('photography')}
+            />
           )}
         </div>
       </div>
 
       <AICaptionTool isOpen={isAIOpen} onClose={() => setIsAIOpen(false)} />
 
-      {currentView === 'home' && (
-        <div className="fixed bottom-12 left-28 z-50 pointer-events-none">
-        <h1 className="text-6xl font-black text-white/95 tracking-tighter leading-none mix-blend-difference">
-          {portfolioConfig.ownerName.toUpperCase()}'S<br/>
-          <span className="text-white/40">PORTFOLIO</span>
-        </h1>
-        <div className="flex items-center gap-4 mt-6">
-          <div className="w-12 h-[1px] bg-white/30" />
-          <p className="text-white/40 text-xs font-mono uppercase tracking-[0.3em]">
-            Curated Visual Experience
-          </p>
-        </div>
-      </div>
-      )}
-
       {/* Grid Pattern Overlay */}
-      <div className="fixed inset-0 pointer-events-none opacity-[0.03] bg-[radial-gradient(#ffffff_1px,transparent_1px)] [background-size:40px_40px]" />
+      {currentView !== 'home' && currentView !== 'contact' && (
+        <div className="fixed inset-0 pointer-events-none opacity-[0.03] bg-[radial-gradient(#ffffff_1px,transparent_1px)] [background-size:40px_40px]" />
+      )}
     </main>
   )
 }

@@ -1,6 +1,8 @@
 export type ViewState =
   | "home"
   | "about"
+  | "contact"
+  | "photography"
   | "work-gallery"
   | "settle-up"
   | "finance-dashboard"
@@ -12,7 +14,9 @@ export type ViewState =
 const VIEW_HASHES: Record<ViewState, string> = {
   home: "#/",
   about: "#/about",
-  "work-gallery": "#/work",
+  contact: "#/contact",
+  photography: "#/photography",
+  "work-gallery": "#/market-lab",
   "settle-up": "#/work/settle-up",
   "finance-dashboard": "#/work/finance-analyzer",
   "trading-agent-dashboard": "#/work/trading-agent-dashboard",
@@ -30,6 +34,14 @@ export const getViewFromHash = (hash: string): ViewState => {
 
   if (hash.startsWith("#/about")) {
     return "about";
+  }
+
+  if (hash.startsWith("#/contact")) {
+    return "contact";
+  }
+
+  if (hash.startsWith("#/photography")) {
+    return "photography";
   }
 
   if (hash.startsWith("#/work/settle-up")) {
@@ -56,7 +68,12 @@ export const getViewFromHash = (hash: string): ViewState => {
     return "stocks-intelligence-watcher";
   }
 
-  if (hash === "#/work" || hash.startsWith("#/work?")) {
+  if (
+    hash === "#/market-lab" ||
+    hash.startsWith("#/market-lab?") ||
+    hash === "#/work" ||
+    hash.startsWith("#/work?")
+  ) {
     return "work-gallery";
   }
 
