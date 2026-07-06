@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, ArrowLeft, CalendarDays, Gauge, Pause, Play, RefreshCw, Waves } from "lucide-react";
 import { formatSpxGexCompactExposure, type SpxGexHeatmapCell, type SpxGexHeatmapModel, type SpxGexSessionSummary, type SpxGexStrikeProfile } from "@/lib/spx-gex-heatmap";
+import { SpxPriceActionCompass } from "./spx-price-action-compass";
 
 interface SpxGexHeatmapResponse {
   availableDates: string[];
@@ -273,7 +274,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
               Work gallery
             </button>
             <div className="flex flex-wrap items-center gap-3">
-              <h1 className="text-2xl font-black tracking-normal text-white sm:text-4xl">SPX Intraday GEX Board</h1>
+              <h1 className="text-2xl font-black tracking-normal text-white sm:text-4xl">SPX Market Structure Board</h1>
               {heatmap && (
                 <span className="border border-cyan-300/25 bg-cyan-300/10 px-2 py-1 font-mono text-xs font-black text-cyan-100">
                   Spot ${heatmap.quote.last.toFixed(2)}
@@ -281,7 +282,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
               )}
             </div>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-zinc-500">
-              Strike-by-expiry GEX matrix with deterministic structure labels and DEX/VEX/CEX exposure lanes.
+              Source-backed price action, signal structure, and intraday GEX exposure in one board.
             </p>
           </div>
 
@@ -325,12 +326,26 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
         {error && <Notice tone="red" text={error} />}
         {data.warnings.length > 0 && <Notice tone="amber" text={data.warnings.join(" ")} />}
 
+        <SpxPriceActionCompass />
+
         {loading && !heatmap ? (
           <div className="flex h-72 items-center justify-center border border-white/10 bg-white/[0.03] text-sm uppercase tracking-[0.2em] text-zinc-500">
             Loading SPX GEX
           </div>
         ) : heatmap ? (
           <>
+            <section className="border border-[#123142] bg-[#04101a] p-3">
+              <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <div className="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200/70">Exposure board</div>
+                  <h2 className="mt-1 text-xl font-black tracking-normal text-white">SPX Intraday GEX Board</h2>
+                </div>
+                <p className="max-w-2xl text-sm leading-6 text-zinc-500">
+                  Strike-by-expiry GEX matrix with deterministic structure labels and DEX/VEX/CEX exposure lanes.
+                </p>
+              </div>
+            </section>
+
             <section className="border border-[#123142] bg-[#06111a] p-3">
               <div
                 className="mb-4 flex snap-x snap-mandatory gap-2 overflow-x-auto overscroll-x-contain pb-2 [scrollbar-width:thin] sm:mb-3 sm:grid sm:grid-cols-2 sm:overflow-visible sm:pb-0 lg:grid-cols-5"
@@ -391,7 +406,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
               </div>
             </section>
 
-            <section className="overflow-x-auto border border-[#123142] bg-[#030910]">
+            <section className="overflow-x-auto border border-[#123142] bg-[#030910]" data-spx-gex-heatmap-board="true">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#123142] bg-[#06111a] px-3 py-2">
                 <div className="flex flex-wrap items-center gap-3 font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200/70">
                   <span>{visibleStrikes.length} / {heatmap.strikes.length} strikes</span>

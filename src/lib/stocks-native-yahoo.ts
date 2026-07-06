@@ -42,7 +42,7 @@ interface QuoteRow {
   asOf: string | null;
 }
 
-interface HistoryRow {
+export interface NativeYahooHistoryRow {
   date: string;
   open: number;
   high: number;
@@ -252,7 +252,7 @@ const fetchQuote = async (symbol: string): Promise<QuoteRow> => {
   };
 };
 
-const fetchHistory = async (symbol: string, range = "1y", interval = "1d"): Promise<HistoryRow[]> => {
+const fetchHistory = async (symbol: string, range = "1y", interval = "1d"): Promise<NativeYahooHistoryRow[]> => {
   const chart = await fetchChart(symbol, range, interval);
   const timestamps: number[] = chart.timestamp || [];
   const quote = chart.indicators?.quote?.[0] || {};
@@ -273,6 +273,9 @@ const fetchHistory = async (symbol: string, range = "1y", interval = "1d"): Prom
     }))
     .filter((row) => row.close > 0);
 };
+
+export const fetchNativeYahooHistory = (symbol: string, range = "1y", interval = "1d") =>
+  fetchHistory(symbol, range, interval);
 
 const fetchQuoteSummary = async (symbol: string) => {
   const { yahooSymbol } = resolveStocksWatcherYahooSymbol(symbol);
@@ -490,7 +493,7 @@ const markdownQuoteTable = (quotes: QuoteRow[]) => [
   ...quotes.map((quote) => `| ${quote.symbol} | ${quote.name} | ${fmtMoney(quote.price)} | ${fmtSigned(quote.change)} | ${fmtPct(quote.changePercent)} | ${compact(quote.volume)} |`),
 ].join("\n");
 
-const markdownHistory = (rows: HistoryRow[], limit = 60) => [
+const markdownHistory = (rows: NativeYahooHistoryRow[], limit = 60) => [
   "| Date | Open | High | Low | Close | Volume |",
   "| --- | ---: | ---: | ---: | ---: | ---: |",
   ...rows.slice(-limit).map((row) => `| ${row.date} | ${row.open} | ${row.high} | ${row.low} | ${row.close} | ${row.volume} |`),
@@ -558,7 +561,7 @@ const toolResult = (text: string, raw: unknown): StocksNativeToolResult => ({
   raw: { source: "native_yahoo", ...((raw && typeof raw === "object" && !Array.isArray(raw)) ? raw as Record<string, unknown> : { value: raw }) },
 });
 
-const htmlChart = (ticker: string, rows: HistoryRow[]) => {
+const htmlChart = (ticker: string, rows: NativeYahooHistoryRow[]) => {
   const points = rows.slice(-90);
   const labels = points.map((row) => row.date);
   const values = points.map((row) => row.close);

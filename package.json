@@ -12,6 +12,7 @@
     "spx:backfill:dry": "tsx scripts/backfill-spx-recap.ts --dry-run",
     "spx:backfill": "tsx scripts/backfill-spx-recap.ts --apply",
     "test:spx-gex": "node --import tsx --test tests/spx-gex-heatmap.test.ts",
+    "test:spx-pa": "node --import tsx --test tests/spx-price-action-compass.test.ts",
     "test:finance-agent-tools-smoke": "node --import tsx --test tests/finance-agent-tools-smoke.test.ts",
     "test:stocks-watcher": "node --import tsx --test tests/stocks-intelligence-watcher.test.ts",
     "test:stocks-watcher:uat": "node tests/stocks-intelligence-watcher.uat.cjs",
