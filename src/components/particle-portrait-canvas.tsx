@@ -89,6 +89,10 @@ export function ParticlePortraitCanvas({ src, alt, className = "" }: ParticlePor
     let disposed = false;
     let cssWidth = 0;
     let cssHeight = 0;
+    let imageLeft = 0;
+    let imageTop = 0;
+    let imageWidth = 0;
+    let imageHeight = 0;
     let dpr = 1;
     let resizeTimer: number | undefined;
 
@@ -102,6 +106,21 @@ export function ParticlePortraitCanvas({ src, alt, className = "" }: ParticlePor
       canvas.style.width = `${cssWidth}px`;
       canvas.style.height = `${cssHeight}px`;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      const imageRatio = image.naturalWidth / image.naturalHeight;
+      const boxRatio = cssWidth / cssHeight;
+
+      if (boxRatio > imageRatio) {
+        imageHeight = cssHeight;
+        imageWidth = imageHeight * imageRatio;
+        imageLeft = (cssWidth - imageWidth) / 2;
+        imageTop = 0;
+      } else {
+        imageWidth = cssWidth;
+        imageHeight = imageWidth / imageRatio;
+        imageLeft = 0;
+        imageTop = (cssHeight - imageHeight) / 2;
+      }
     };
 
     const buildParticles = () => {
@@ -111,8 +130,9 @@ export function ParticlePortraitCanvas({ src, alt, className = "" }: ParticlePor
 
       measure();
 
-      const sampleWidth = window.innerWidth < 720 ? 280 : 440;
-      const sampleHeight = Math.max(1, Math.round(sampleWidth * (cssHeight / cssWidth)));
+      const imageRatio = image.naturalWidth / image.naturalHeight;
+      const sampleWidth = window.innerWidth < 720 ? 260 : 420;
+      const sampleHeight = Math.max(1, Math.round(sampleWidth / imageRatio));
       const offscreen = document.createElement("canvas");
       offscreen.width = sampleWidth;
       offscreen.height = sampleHeight;
@@ -122,32 +142,7 @@ export function ParticlePortraitCanvas({ src, alt, className = "" }: ParticlePor
         return;
       }
 
-      const sourceRatio = image.naturalWidth / image.naturalHeight;
-      const targetRatio = sampleWidth / sampleHeight;
-      let sourceX = 0;
-      let sourceY = 0;
-      let sourceWidth = image.naturalWidth;
-      let sourceHeight = image.naturalHeight;
-
-      if (sourceRatio > targetRatio) {
-        sourceWidth = image.naturalHeight * targetRatio;
-        sourceX = (image.naturalWidth - sourceWidth) / 2;
-      } else {
-        sourceHeight = image.naturalWidth / targetRatio;
-        sourceY = (image.naturalHeight - sourceHeight) / 2;
-      }
-
-      offscreenCtx.drawImage(
-        image,
-        sourceX,
-        sourceY,
-        sourceWidth,
-        sourceHeight,
-        0,
-        0,
-        sampleWidth,
-        sampleHeight,
-      );
+      offscreenCtx.drawImage(image, 0, 0, sampleWidth, sampleHeight);
 
       const pixels = offscreenCtx.getImageData(0, 0, sampleWidth, sampleHeight).data;
       let subjectPixels = 0;
@@ -161,7 +156,7 @@ export function ParticlePortraitCanvas({ src, alt, className = "" }: ParticlePor
       const targetCount = window.innerWidth < 720 ? 9000 : 26000;
       const step = Math.max(2, Math.round(Math.sqrt(subjectPixels / targetCount)));
       const nextParticles: Particle[] = [];
-      const entryOffset = cssWidth * 0.52;
+      const entryOffset = imageWidth * 0.52;
 
       for (let y = 0; y < sampleHeight; y += step) {
         for (let x = 0; x < sampleWidth; x += step) {
@@ -178,8 +173,8 @@ export function ParticlePortraitCanvas({ src, alt, className = "" }: ParticlePor
           const color = colorForPixel(r, g, b);
           const nx = x / sampleWidth;
           const ny = y / sampleHeight;
-          const tx = nx * cssWidth;
-          const ty = ny * cssHeight;
+          const tx = imageLeft + nx * imageWidth;
+          const ty = imageTop + ny * imageHeight;
 
           nextParticles.push({
             x: tx - entryOffset * (0.4 + Math.random() * 0.55),
@@ -232,7 +227,7 @@ export function ParticlePortraitCanvas({ src, alt, className = "" }: ParticlePor
             const dx = x - mouse.x;
             const dy = y - mouse.y;
             const distanceSquared = dx * dx + dy * dy;
-            const radius = Math.max(120, Math.min(190, cssWidth * 0.22));
+            const radius = Math.max(100, Math.min(170, imageWidth * 0.2));
 
             if (distanceSquared < radius * radius) {
               const distance = Math.sqrt(distanceSquared) || 1;
@@ -325,7 +320,7 @@ export function ParticlePortraitCanvas({ src, alt, className = "" }: ParticlePor
       <img
         src={src}
         alt={alt}
-        className="absolute inset-0 h-full w-full object-cover opacity-[0.68] mix-blend-multiply contrast-[1.18] saturate-[1.08]"
+        className="absolute inset-0 h-full w-full object-contain opacity-[0.68] mix-blend-multiply contrast-[1.18] saturate-[1.08]"
         draggable={false}
       />
       <canvas ref={canvasRef} className="absolute inset-0 z-10" aria-hidden="true" />
