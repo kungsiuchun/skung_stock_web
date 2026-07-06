@@ -198,6 +198,31 @@ export interface SpxGexPremarketInterpretation {
   warnings: string[];
 }
 
+export type SpxGexHeatmapReadingTone = "bullish" | "bearish" | "neutral" | "watch";
+
+export interface SpxGexHeatmapReadingRule {
+  label: string;
+  value: string;
+  tone: SpxGexHeatmapReadingTone;
+  detail: string;
+}
+
+export interface SpxGexHeatmapReadingStructure {
+  strike: number;
+  label: string;
+  severity: SpxGexStructureTag["severity"];
+  detail: string;
+}
+
+export interface SpxGexHeatmapReadingContext {
+  headline: string;
+  regime: string;
+  rules: SpxGexHeatmapReadingRule[];
+  playbook: string[];
+  riskNotes: string[];
+  nearbyStructures: SpxGexHeatmapReadingStructure[];
+}
+
 export interface SpxGexHeatmapModel {
   generatedAt: string;
   ticker: "SPX";
@@ -1351,6 +1376,193 @@ const buildMarketContextSentence = (context: SpxGexMarketContext | null | undefi
   if (context.flow) parts.push(`largest flow proxy ${context.flow.topTicker} ${compactExposure(context.flow.proxyFlow)}`);
   if (context.latestHeadline) parts.push(`latest headline: ${context.latestHeadline}`);
   return parts.length > 0 ? parts.join("; ") : null;
+};
+
+const isFiniteNumber = (value: number | null | undefined): value is number =>
+  typeof value === "number" && Number.isFinite(value);
+
+const formatReadLevel = (value: number | null | undefined) =>
+  isFiniteNumber(value) ? value.toLocaleString("en-US", { maximumFractionDigits: 0 }) : "n/a";
+
+const formatReadPrice = (value: number | null | undefined) =>
+  isFiniteNumber(value) ? value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "n/a";
+
+const formatLevelDistance = (spot: number, level: number | null | undefined) => {
+  if (!isFiniteNumber(level)) return "n/a";
+  const points = spot - level;
+  const percent = (points / Math.max(1, spot)) * 100;
+  return `${points >= 0 ? "+" : ""}${points.toFixed(1)} pts / ${points >= 0 ? "+" : ""}${percent.toFixed(2)}%`;
+};
+
+const proximityLabel = (spot: number, level: number | null | undefined) => {
+  if (!isFiniteNumber(level)) return "unavailable";
+  const percent = Math.abs(spot - level) / Math.max(1, spot);
+  if (percent <= 0.0015) return "at level";
+  if (percent <= 0.003) return "near";
+  if (spot > level) return "above";
+  return "below";
+};
+
+const signedExposureText = (value: number | null | undefined) =>
+  formatSpxGexCompactExposure(value, { signed: true, missingLabel: "n/a" });
+
+const exposureTone = (
+  value: number | null | undefined,
+  positiveTone: SpxGexHeatmapReadingTone,
+  negativeTone: SpxGexHeatmapReadingTone,
+  neutralTone: SpxGexHeatmapReadingTone = "neutral",
+) => {
+  if (!isFiniteNumber(value) || Math.abs(value) < 1) return neutralTone;
+  return value > 0 ? positiveTone : negativeTone;
+};
+
+const strongestStructureRows = (heatmap: Pick<SpxGexHeatmapModel, "quote" | "strikeProfiles">): SpxGexHeatmapReadingStructure[] =>
+  [...(heatmap.strikeProfiles || [])]
+    .filter((row) => (row.tags || []).length > 0)
+    .sort((a, b) => Math.abs(a.strike - heatmap.quote.last) - Math.abs(b.strike - heatmap.quote.last))
+    .slice(0, 4)
+    .map((row) => {
+      const tag = row.tags[0];
+      return {
+        strike: row.strike,
+        label: tag.label,
+        severity: tag.severity,
+        detail: `${formatReadLevel(row.strike)}: ${tag.source}; NetGEX ${signedExposureText(row.netGex)}, DEX ${signedExposureText(row.netDex)}, VEX ${signedExposureText(row.netVex)}, CEX ${signedExposureText(row.netCex)}.`,
+      };
+    });
+
+export const buildSpxGexHeatmapReadingContext = (heatmap: SpxGexHeatmapModel): SpxGexHeatmapReadingContext => {
+  const spot = heatmap.quote.last;
+  const flip = heatmap.zeroDte.gammaFlip;
+  const pin = heatmap.zeroDte.pinLevel;
+  const callWall = heatmap.zeroDte.topCallWallLevel;
+  const putWall = heatmap.zeroDte.topPutWallLevel;
+  const flipProximity = proximityLabel(spot, flip);
+  const gammaExposure = heatmap.zeroDte.netGex;
+  const gammaRegime = !isFiniteNumber(gammaExposure)
+    ? "Gamma exposure unavailable"
+    : gammaExposure < 0
+      ? "Short-gamma tape"
+      : gammaExposure > 0
+        ? "Long-gamma/pinning tape"
+        : "Flat gamma tape";
+  const flipBias = !isFiniteNumber(flip)
+    ? "without a usable gamma flip"
+    : flipProximity === "near" || flipProximity === "at level"
+      ? `inside the flip decision band around ${formatReadLevel(flip)}`
+      : `${flipProximity} the ${formatReadLevel(flip)} gamma flip`;
+  const wallsCollapsed = isFiniteNumber(putWall) && isFiniteNumber(callWall) && Math.abs(putWall - callWall) < 1;
+  const primaryRange = wallsCollapsed
+    ? `${formatReadLevel(callWall)} wall cluster${isFiniteNumber(pin) ? ` / pin ${formatReadLevel(pin)}` : ""}`
+    : isFiniteNumber(putWall) && isFiniteNumber(callWall)
+      ? `${formatReadLevel(putWall)} -> ${formatReadLevel(callWall)}`
+    : isFiniteNumber(pin)
+      ? `around pin ${formatReadLevel(pin)}`
+      : "from visible GEX shelves";
+  const nearbyStructures = strongestStructureRows(heatmap);
+  const structureValue = nearbyStructures.length
+    ? nearbyStructures.map((item) => `${formatReadLevel(item.strike)} ${item.label}`).join(" / ")
+    : "No nearby structure tags";
+  const dataQuality = heatmap.dataQuality;
+  const qualityWarnings = dataQuality ? dataQuality.repaired + dataQuality.partial + dataQuality.unpriced + dataQuality.excluded : 0;
+
+  const rules: SpxGexHeatmapReadingRule[] = [
+    {
+      label: "Spot vs flip",
+      value: isFiniteNumber(flip) ? `${flipProximity} flip (${formatLevelDistance(spot, flip)})` : "flip unavailable",
+      tone: !isFiniteNumber(flip) ? "neutral" : (flipProximity === "near" || flipProximity === "at level") ? "watch" : spot > flip ? "bullish" : "bearish",
+      detail: !isFiniteNumber(flip)
+        ? "Gamma flip is missing, so the board leans on pin, walls, and exposure lanes."
+        : (flipProximity === "near" || flipProximity === "at level")
+          ? "Decision band: a small reclaim or rejection can change the dealer-gamma read. Wait for acceptance, not first touch."
+          : spot > flip
+            ? "Above flip: pullbacks into flip/pin are the acceptance test; failed acceptance turns the board back into a range read."
+            : "Below flip: rallies into flip/pin are resistance tests; reclaim is needed before treating upside walls as magnets.",
+    },
+    {
+      label: "0DTE gamma",
+      value: signedExposureText(gammaExposure),
+      tone: !isFiniteNumber(gammaExposure) ? "neutral" : gammaExposure < 0 ? "watch" : gammaExposure > 0 ? "neutral" : "neutral",
+      detail: !isFiniteNumber(gammaExposure)
+        ? "0DTE NetGEX is unavailable for this snapshot."
+        : gammaExposure < 0
+          ? "Short gamma: moves can extend faster after a wall breaks. Fade trades need a reclaim back inside the band."
+          : gammaExposure > 0
+            ? "Long gamma: pinning and mean reversion have more weight until price accepts outside the wall band."
+            : "Flat gamma: walls and delta flow carry more signal than the aggregate gamma number.",
+    },
+    {
+      label: "Pin / walls",
+      value: `Pin ${formatReadLevel(pin)} / C ${formatReadLevel(callWall)} / P ${formatReadLevel(putWall)}`,
+      tone: proximityLabel(spot, pin) === "near" || proximityLabel(spot, pin) === "at level" ? "watch" : "neutral",
+      detail: wallsCollapsed
+        ? "Call and put walls collapse into one decision cluster; treat it as acceptance/rejection level, not a clean range."
+        : "Call wall is the upside supply shelf, put wall is downside support/air-pocket edge, and pin works only while spot keeps accepting near it.",
+    },
+    {
+      label: "DEX pressure",
+      value: signedExposureText(heatmap.zeroDte.netDex),
+      tone: exposureTone(heatmap.zeroDte.netDex, "bullish", "bearish"),
+      detail: isFiniteNumber(heatmap.zeroDte.netDex) && heatmap.zeroDte.netDex < 0
+        ? "Negative delta exposure can add sell-hedging pressure on weakness; upside needs absorption through the nearest shelf."
+        : "Positive delta exposure is supportive on reclaims; failed upside acceptance still hands control back to the wall band.",
+    },
+    {
+      label: "VEX / vol lane",
+      value: signedExposureText(heatmap.zeroDte.netVex),
+      tone: exposureTone(heatmap.zeroDte.netVex, "bullish", "watch"),
+      detail: isFiniteNumber(heatmap.zeroDte.netVex) && heatmap.zeroDte.netVex < 0
+        ? "Negative vanna read: volatility shifts can drag the tape away from clean pinning, so breakouts need confirmation."
+        : "Positive vanna read: upside acceptance can get cleaner if volatility does not expand against the move.",
+    },
+    {
+      label: "CEX / charm lane",
+      value: signedExposureText(heatmap.zeroDte.netCex),
+      tone: exposureTone(heatmap.zeroDte.netCex, "neutral", "watch"),
+      detail: isFiniteNumber(heatmap.zeroDte.netCex) && heatmap.zeroDte.netCex < 0
+        ? "Negative charm can loosen the pin into expiry; do not over-trust magnet levels without price confirmation."
+        : "Positive charm favors time-decay compression around accepted levels, especially when gamma is not strongly short.",
+    },
+    {
+      label: "Structure map",
+      value: structureValue,
+      tone: nearbyStructures.some((item) => item.severity === "major") ? "watch" : "neutral",
+      detail: "These are ranked from deterministic strike-profile tags: NOW, pin, call wall, shelf, resistance zone, and air gap.",
+    },
+    {
+      label: "Data quality",
+      value: dataQuality
+        ? `${dataQuality.priced}/${dataQuality.total} priced; ${qualityWarnings} flagged`
+        : "quality unavailable",
+      tone: qualityWarnings > 0 ? "watch" : "neutral",
+      detail: dataQuality
+        ? "Repaired, partial, unpriced, and excluded cells reduce confidence in individual strikes but keep the board honest."
+        : "This snapshot has no quality summary, so confidence should be lower.",
+    },
+  ];
+
+  return {
+    headline: `${gammaRegime}: spot ${formatReadPrice(spot)} is ${flipBias}; primary trade band ${primaryRange}.`,
+    regime: gammaRegime,
+    rules,
+    nearbyStructures,
+    playbook: [
+      `Base case: trade acceptance around ${primaryRange}; do not chase mid-range between the main walls.`,
+      isFiniteNumber(callWall)
+        ? `Upside trigger: acceptance above ${formatReadLevel(callWall)} turns the call wall from resistance into a back-test level.`
+        : "Upside trigger: use the nearest positive GEX shelf because a call wall is unavailable.",
+      isFiniteNumber(putWall)
+        ? `Downside trigger: loss of ${formatReadLevel(putWall)} with negative gamma/DEX opens faster downside continuation risk.`
+        : "Downside trigger: use the nearest lower shelf or air gap because a put wall is unavailable.",
+    ],
+    riskNotes: [
+      "Read walls as reaction zones, not guaranteed reversal points; price acceptance is the final filter.",
+      "DEX/VEX/CEX are Black-Scholes pressure lanes from the same option-chain model, not a separate source.",
+      dataQuality
+        ? `Quality gate: ${dataQuality.repaired} repaired, ${dataQuality.partial} partial, ${dataQuality.unpriced} unpriced, ${dataQuality.excluded} excluded.`
+        : "Quality gate unavailable for this snapshot.",
+    ],
+  };
 };
 
 export const buildSpxGexPremarketInterpretation = (

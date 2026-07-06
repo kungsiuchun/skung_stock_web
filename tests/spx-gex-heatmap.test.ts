@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  buildSpxGexHeatmapReadingContext,
   buildSpxGexHeatmapFromOptionChains,
   buildSpxGexHeatmapFromToolText,
   calculateBlackScholesExposures,
@@ -956,6 +957,42 @@ describe("SPX GEX exposure board model", () => {
     assert.equal(Number.isFinite(atTheMoneyCell.yearsToExpiry), true);
     assert.equal(Number.isFinite(atTheMoneyCell.dteHours), true);
     assert.equal(atTheMoneyCell.netGex, Number(atTheMoneyCell.callGex || 0) + Number(atTheMoneyCell.putGex || 0));
+  });
+
+  it("derives a deterministic professional heatmap reading context from the canonical model", () => {
+    const heatmap = buildStructuredHeatmap();
+    const context = buildSpxGexHeatmapReadingContext(heatmap);
+    const ruleLabels = context.rules.map((rule) => rule.label);
+
+    assert.match(context.headline, /spot 6,000.00/);
+    assert.ok(context.regime.includes("gamma"));
+    assert.deepEqual(ruleLabels, [
+      "Spot vs flip",
+      "0DTE gamma",
+      "Pin / walls",
+      "DEX pressure",
+      "VEX / vol lane",
+      "CEX / charm lane",
+      "Structure map",
+      "Data quality",
+    ]);
+    assert.ok(context.rules.every((rule) => rule.value.length > 0 && rule.detail.length > 0));
+    assert.ok(context.rules.some((rule) => rule.label === "Spot vs flip" && rule.detail.includes("acceptance")));
+    assert.ok(context.rules.some((rule) => rule.label === "Data quality" && rule.value.includes("priced")));
+    assert.ok(context.nearbyStructures.length > 0);
+    assert.ok(context.playbook.length >= 3);
+    assert.ok(context.riskNotes.some((note) => note.includes("Black-Scholes pressure lanes")));
+
+    const collapsedContext = buildSpxGexHeatmapReadingContext({
+      ...heatmap,
+      zeroDte: {
+        ...heatmap.zeroDte,
+        topCallWallLevel: 6000,
+        topPutWallLevel: 6000,
+      },
+    });
+    assert.ok(collapsedContext.headline.includes("wall cluster"));
+    assert.equal(collapsedContext.headline.includes("6,000 -> 6,000"), false);
   });
 
   it("derives Telegram GEX summary from canonical heatmap totals and strike profiles", () => {

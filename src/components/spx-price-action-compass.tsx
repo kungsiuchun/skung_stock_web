@@ -241,7 +241,6 @@ export function SpxPriceActionCompass() {
   const patternById = useMemo(() => new Map(data.patterns.map((pattern) => [pattern.id, pattern])), [data.patterns]);
   const topPatterns = filteredPatterns.slice(0, 8);
   const latest = data.summary;
-  const priceClass = (latest.latestChange || 0) >= 0 ? "text-emerald-200" : "text-red-200";
 
   return (
     <section
@@ -261,11 +260,6 @@ export function SpxPriceActionCompass() {
                 Source-backed
               </span>
               <h2 className="text-xl font-black tracking-normal text-white sm:text-2xl">SPX Price Action Compass</h2>
-              {latest.latestClose !== null && (
-                <span className={`border border-white/10 bg-white/[0.04] px-2 py-1 font-mono text-xs font-black ${priceClass}`}>
-                  {formatPrice(latest.latestClose)} {formatSigned(latest.latestChange)} / {formatSigned(latest.latestChangePercent, "%")}
-                </span>
-              )}
             </div>
             <p className="mt-1 text-xs leading-5 text-zinc-500">
               Yahoo OHLCV + deterministic price-action structure, rendered before the GEX board.

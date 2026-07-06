@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, ArrowLeft, CalendarDays, Gauge, Pause, Play, RefreshCw, Waves } from "lucide-react";
-import { formatSpxGexCompactExposure, type SpxGexHeatmapCell, type SpxGexHeatmapModel, type SpxGexSessionSummary, type SpxGexStrikeProfile } from "@/lib/spx-gex-heatmap";
+import { buildSpxGexHeatmapReadingContext, formatSpxGexCompactExposure, type SpxGexHeatmapCell, type SpxGexHeatmapModel, type SpxGexHeatmapReadingRule, type SpxGexSessionSummary, type SpxGexStrikeProfile } from "@/lib/spx-gex-heatmap";
 import { SpxPriceActionCompass } from "./spx-price-action-compass";
 
 interface SpxGexHeatmapResponse {
@@ -257,6 +257,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     selectedSession.collectedMinuteEt !== undefined &&
     selectedSession.collectedMinuteEt !== selectedSession.snapshotMinuteEt,
   );
+  const readingContext = useMemo(() => heatmap ? buildSpxGexHeatmapReadingContext(heatmap) : null, [heatmap]);
   const sourceText = heatmap
     ? `${isDelayedSnapshot ? `15-min delayed snapshot · collected ${selectedSession?.collectedTimeEt} ET. ` : ""}${heatmap.source.note}`
     : "";
@@ -516,7 +517,31 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
             </section>
 
             <section className="grid gap-3 text-xs text-zinc-400 lg:grid-cols-[1fr_360px]">
-              <div className="border border-[#123142] bg-[#050c14] p-3 leading-6">{heatmap.premarketInterpretation.paragraph}</div>
+              {readingContext && (
+                <div className="border border-[#123142] bg-[#050c14] p-3" data-gex-reading-context="true">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200">
+                      Professional read
+                    </div>
+                    <span className="border border-yellow-300/30 bg-yellow-300/10 px-2 py-1 font-mono text-[10px] font-black uppercase text-yellow-100">
+                      {readingContext.regime}
+                    </span>
+                  </div>
+                  <div className="mt-2 text-sm font-black leading-6 text-white">{readingContext.headline}</div>
+                  <div className="mt-1 leading-6 text-zinc-400">{heatmap.premarketInterpretation.paragraph}</div>
+
+                  <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                    {readingContext.rules.map((rule) => (
+                      <GexReadingRuleCard key={rule.label} rule={rule} />
+                    ))}
+                  </div>
+
+                  <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                    <GexReadingList title="Playbook" items={readingContext.playbook} />
+                    <GexReadingList title="Risk checks" items={readingContext.riskNotes} />
+                  </div>
+                </div>
+              )}
               <div className="border border-[#123142] bg-[#050c14] p-3">
                 <div className="mb-2 flex items-center gap-2 font-black uppercase tracking-[0.16em] text-cyan-200">
                   <Gauge className="h-4 w-4" />
@@ -548,6 +573,35 @@ const Metric = ({ label, value }: { label: string; value: string }) => (
   <div className="w-[42vw] min-w-[150px] max-w-[190px] shrink-0 snap-start border border-[#123142] bg-black/20 px-3 py-2 sm:w-auto sm:min-w-0 sm:max-w-none sm:shrink">
     <div className="text-[10px] font-black uppercase tracking-[0.16em] text-zinc-500">{label}</div>
     <div className="mt-1 truncate font-mono text-lg font-black text-white">{value}</div>
+  </div>
+);
+
+const readingRuleClass = (tone: SpxGexHeatmapReadingRule["tone"]) => {
+  if (tone === "bullish") return "border-emerald-300/25 bg-emerald-300/10 text-emerald-100";
+  if (tone === "bearish") return "border-red-300/25 bg-red-400/10 text-red-100";
+  if (tone === "watch") return "border-yellow-300/30 bg-yellow-300/10 text-yellow-100";
+  return "border-cyan-300/20 bg-cyan-300/5 text-cyan-100";
+};
+
+const GexReadingRuleCard = ({ rule }: { rule: SpxGexHeatmapReadingRule }) => (
+  <div className={`border p-2 ${readingRuleClass(rule.tone)}`} data-gex-reading-rule={rule.label}>
+    <div className="font-mono text-[9px] font-black uppercase tracking-[0.14em] opacity-80">{rule.label}</div>
+    <div className="mt-1 font-mono text-[11px] font-black text-white">{rule.value}</div>
+    <div className="mt-1 leading-5 text-zinc-300">{rule.detail}</div>
+  </div>
+);
+
+const GexReadingList = ({ title, items }: { title: string; items: string[] }) => (
+  <div className="border border-[#123142] bg-black/20 p-2">
+    <div className="font-mono text-[9px] font-black uppercase tracking-[0.14em] text-cyan-200/80">{title}</div>
+    <div className="mt-2 grid gap-1.5">
+      {items.map((item) => (
+        <div key={item} className="grid grid-cols-[10px_1fr] gap-2 leading-5 text-zinc-300">
+          <span className="mt-2 h-1.5 w-1.5 bg-cyan-300/70" />
+          <span>{item}</span>
+        </div>
+      ))}
+    </div>
   </div>
 );
 
