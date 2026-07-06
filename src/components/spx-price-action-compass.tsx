@@ -78,6 +78,39 @@ const formatSigned = (value: number | null | undefined, suffix = "") => {
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}${suffix}`;
 };
 
+const resolveTimestamp = (value: number | string | null | undefined) => {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const formatEtTime = (value: number | string | null | undefined, includeSeconds = false) => {
+  const timestamp = resolveTimestamp(value);
+  if (timestamp === null) return "time n/a";
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: includeSeconds ? "2-digit" : undefined,
+    hourCycle: "h23",
+  }).formatToParts(new Date(timestamp)).reduce<Record<string, string>>((acc, part) => {
+    acc[part.type] = part.value;
+    return acc;
+  }, {});
+  const seconds = includeSeconds ? `:${parts.second}` : "";
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}${seconds} ET`;
+};
+
+const formatUtcTime = (value: number | string | null | undefined, includeSeconds = false) => {
+  const timestamp = resolveTimestamp(value);
+  if (timestamp === null) return "time n/a";
+  return `${new Date(timestamp).toISOString().slice(0, includeSeconds ? 19 : 16).replace("T", " ")} UTC`;
+};
+
 const timeframeLabel = (timeframe: SpxPriceActionTimeframe) => timeframe.toUpperCase();
 
 const isBullishPattern = (pattern: SpxPriceActionPattern | null | undefined) => pattern?.direction === "bullish";
@@ -789,9 +822,9 @@ function PriceActionChartCanvas({
             <line x1={axisLeft} y1={crosshair.y} x2={width} y2={crosshair.y} stroke="#d4d4d8" strokeDasharray="3 3" strokeOpacity={0.7} />
             <rect x={2} y={Math.max(2, crosshair.y - 9)} width={52} height={18} fill="#f8fafc" />
             <text x={28} y={Math.max(14, crosshair.y + 3)} textAnchor="middle" className="fill-black font-mono text-[9px] font-black">{crosshair.price.toFixed(1)}</text>
-            <rect x={Math.max(axisLeft, Math.min(width - 138, crosshair.x - 64))} y={height - 19} width={136} height={17} fill="#f8fafc" />
-            <text x={Math.max(axisLeft, Math.min(width - 138, crosshair.x - 64)) + 68} y={height - 7} textAnchor="middle" className="fill-black font-mono text-[8px] font-black">
-              {new Date(candles[crosshair.index]?.time || 0).toISOString().slice(0, 16).replace("T", " ")}
+            <rect x={Math.max(axisLeft, Math.min(width - 168, crosshair.x - 78))} y={height - 19} width={166} height={17} fill="#f8fafc" />
+            <text x={Math.max(axisLeft, Math.min(width - 168, crosshair.x - 78)) + 83} y={height - 7} textAnchor="middle" className="fill-black font-mono text-[8px] font-black">
+              {formatEtTime(candles[crosshair.index]?.time)}
             </text>
           </g>
         )}
@@ -845,7 +878,7 @@ const SelectedSignalCard = ({
             <span>Price ${formatPrice(pattern.price)}</span>
             <span>Confidence {Math.round(pattern.confidence * 100)}%</span>
             <span>Window {pattern.fromIndex}-{pattern.toIndex}</span>
-            <span>{candle ? new Date(candle.time).toISOString().slice(0, 16).replace("T", " ") : "time n/a"}</span>
+            <span>{candle ? formatEtTime(candle.time) : "time n/a"}</span>
           </div>
         </div>
         <button
@@ -865,7 +898,10 @@ const SourcePanel = ({ data }: { data: SpxPriceActionCompassResponse }) => (
   <section className="border border-[#123142] bg-black/20 p-3 text-xs leading-5 text-zinc-400" data-pa-source-panel="true">
     <div className="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200">Source</div>
     <div className="mt-2">{data.source.label} / {data.source.interval} / {data.source.range}</div>
-    <div className="font-mono text-[10px] text-zinc-600">{data.source.fetchedAt || "n/a"}</div>
+    <div className="font-mono text-[10px] text-zinc-500">Candle time: America/New_York (ET)</div>
+    <div className="font-mono text-[10px] text-zinc-600">
+      Fetched {formatEtTime(data.source.fetchedAt, true)} / {formatUtcTime(data.source.fetchedAt, true)}
+    </div>
   </section>
 );
 
