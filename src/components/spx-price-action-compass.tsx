@@ -522,7 +522,9 @@ function PriceActionChartCanvas({
   const [dragStart, setDragStart] = useState<number | null>(null);
   const [crosshair, setCrosshair] = useState<{ x: number; y: number; price: number; index: number } | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
-  const height = 620;
+  const [expanded, setExpanded] = useState(false);
+  const [viewportHeight, setViewportHeight] = useState(760);
+  const height = expanded ? Math.max(520, viewportHeight - 116) : 620;
   const axisLeft = 58;
   const axisBottom = 22;
   const volumeHeight = showVolume ? 58 : 0;
@@ -544,6 +546,27 @@ function PriceActionChartCanvas({
     observer.observe(containerRef.current);
     return () => observer.disconnect();
   }, []);
+
+  useEffect(() => {
+    const syncViewport = () => setViewportHeight(window.innerHeight || 760);
+    syncViewport();
+    window.addEventListener("resize", syncViewport);
+    return () => window.removeEventListener("resize", syncViewport);
+  }, []);
+
+  useEffect(() => {
+    if (!expanded) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setExpanded(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [expanded]);
 
   useEffect(() => {
     if (!selectedPattern || candles.length === 0) return;
@@ -612,7 +635,13 @@ function PriceActionChartCanvas({
   }
 
   return (
-    <div className="overflow-hidden border border-[#123142] bg-[#02070d]" ref={containerRef}>
+    <div
+      className={`overflow-hidden border border-[#123142] bg-[#02070d] ${
+        expanded ? "fixed inset-3 z-[1100] shadow-2xl shadow-black/80 md:inset-6" : ""
+      }`}
+      ref={containerRef}
+      data-pa-chart-expanded={expanded ? "true" : "false"}
+    >
       <div className="flex items-center justify-between border-b border-[#123142] bg-black/30 px-3 py-2">
         <div className="flex items-center gap-3 font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200/75">
           <span>{candles.length} candles</span>
@@ -637,8 +666,19 @@ function PriceActionChartCanvas({
           >
             <Filter className="mx-auto h-3.5 w-3.5" />
           </button>
-          <button type="button" className="h-7 w-7 border border-white/10 text-zinc-300 hover:bg-white/10" onClick={() => setStartIndex(Math.max(0, candles.length - zoom))} title="Latest">
-            <Maximize2 className="mx-auto h-3.5 w-3.5" />
+          <button
+            type="button"
+            className={`h-7 w-7 border text-zinc-300 hover:bg-white/10 ${expanded ? "border-cyan-200 bg-cyan-200 text-[#03111a]" : "border-white/10"}`}
+            onClick={() => {
+              setFilterOpen(false);
+              setExpanded((value) => !value);
+            }}
+            title={expanded ? "Exit full screen" : "Full screen chart"}
+            aria-label={expanded ? "Exit full screen chart" : "Full screen chart"}
+            aria-pressed={expanded}
+            data-pa-chart-fullscreen-button="true"
+          >
+            {expanded ? <X className="mx-auto h-3.5 w-3.5" /> : <Maximize2 className="mx-auto h-3.5 w-3.5" />}
           </button>
           {filterOpen && (
             <div className="absolute right-0 top-9 z-20 w-72 border border-[#123142] bg-[#02070d] p-3 shadow-2xl" data-pa-filter-popover="true">
