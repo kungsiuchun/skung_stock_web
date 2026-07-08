@@ -261,6 +261,43 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const sourceText = heatmap
     ? `${isDelayedSnapshot ? `15-min delayed snapshot · collected ${selectedSession?.collectedTimeEt} ET. ` : ""}${heatmap.source.note}`
     : "";
+  const snapshotControls = (
+    <div data-spx-gex-snapshot-controls="true" className="flex flex-wrap items-center gap-2">
+      <label className="inline-flex h-10 items-center gap-2 border border-white/10 bg-white/[0.04] px-3 text-sm text-zinc-300">
+        <CalendarDays className="h-4 w-4 text-cyan-200" />
+        <select
+          value={selectedDate}
+          onChange={(event) => {
+            setPlaying(false);
+            void loadHeatmap(event.target.value, null);
+          }}
+          className="bg-transparent text-sm font-bold text-white outline-none"
+        >
+          {data.availableDates.length === 0 ? (
+            <option value="">No snapshots</option>
+          ) : (
+            data.availableDates.map((date) => (
+              <option key={date} value={date} className="bg-[#111827] text-white">
+                {date}
+              </option>
+            ))
+          )}
+        </select>
+      </label>
+      <button
+        onClick={() => {
+          setPlaying(false);
+          void loadHeatmap(undefined, null, { bypassCache: true });
+        }}
+        disabled={loading}
+        className="inline-flex h-10 w-10 items-center justify-center border border-cyan-300/20 bg-cyan-300/10 text-cyan-100 transition-colors hover:bg-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-50"
+        title="Refresh latest DB snapshot"
+        aria-label="Refresh latest DB snapshot"
+      >
+        <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+      </button>
+    </div>
+  );
 
   return (
     <section className="h-full w-full overflow-y-auto bg-[#02070d] px-3 pb-8 pt-4 text-white sm:px-5 lg:px-7">
@@ -287,41 +324,6 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="inline-flex h-10 items-center gap-2 border border-white/10 bg-white/[0.04] px-3 text-sm text-zinc-300">
-              <CalendarDays className="h-4 w-4 text-cyan-200" />
-              <select
-                value={selectedDate}
-                onChange={(event) => {
-                  setPlaying(false);
-                  void loadHeatmap(event.target.value, null);
-                }}
-                className="bg-transparent text-sm font-bold text-white outline-none"
-              >
-                {data.availableDates.length === 0 ? (
-                  <option value="">No snapshots</option>
-                ) : (
-                  data.availableDates.map((date) => (
-                    <option key={date} value={date} className="bg-[#111827] text-white">
-                      {date}
-                    </option>
-                  ))
-                )}
-              </select>
-            </label>
-            <button
-              onClick={() => {
-                setPlaying(false);
-                void loadHeatmap(undefined, null, { bypassCache: true });
-              }}
-              disabled={loading}
-              className="inline-flex h-10 w-10 items-center justify-center border border-cyan-300/20 bg-cyan-300/10 text-cyan-100 transition-colors hover:bg-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-50"
-              title="Refresh latest DB snapshot"
-              aria-label="Refresh latest DB snapshot"
-            >
-              <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-            </button>
-          </div>
         </header>
 
         {error && <Notice tone="red" text={error} />}
@@ -336,14 +338,15 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
         ) : heatmap ? (
           <>
             <section className="border border-[#123142] bg-[#04101a] p-3">
-              <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-                <div>
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+                <div className="max-w-2xl">
                   <div className="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200/70">Exposure board</div>
                   <h2 className="mt-1 text-xl font-black tracking-normal text-white">SPX Intraday GEX Board</h2>
+                  <p className="mt-2 text-sm leading-6 text-zinc-500">
+                    Strike-by-expiry GEX matrix with deterministic structure labels and DEX/VEX/CEX exposure lanes.
+                  </p>
                 </div>
-                <p className="max-w-2xl text-sm leading-6 text-zinc-500">
-                  Strike-by-expiry GEX matrix with deterministic structure labels and DEX/VEX/CEX exposure lanes.
-                </p>
+                <div className="shrink-0 sm:self-end">{snapshotControls}</div>
               </div>
             </section>
 
