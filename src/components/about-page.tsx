@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Aperture, Code2, Cpu, Focus, Gauge, Layers, ScanLine, Zap } from 'lucide-react';
 import { portfolioConfig } from '@/config/portfolio';
+import { AboutResumeTerminal } from './about-resume-terminal';
 
 const specs = [
   {
@@ -157,21 +158,9 @@ export const AboutPage = () => {
           </div>
 
           <div className="grid gap-4 lg:justify-items-end">
-            <figure className="relative w-full max-w-[430px] overflow-hidden border border-white/10 bg-[#151515] p-3 shadow-[0_28px_70px_rgba(0,0,0,0.38)]">
-              <img
-                src="/image/profile-siu-about.jpg"
-                alt="Siu black-and-white portrait with crossed arms"
-                width={960}
-                height={1200}
-                fetchPriority="high"
-                decoding="async"
-                className="relative z-10 aspect-[4/5] w-full object-cover object-center"
-              />
-              <div className="pointer-events-none absolute inset-3 z-20 border border-white/18 md:inset-4" />
-              <div className="pointer-events-none absolute inset-3 z-20 bg-[linear-gradient(180deg,rgba(17,17,17,0)_58%,rgba(17,17,17,0.34))] md:inset-4" />
-            </figure>
+            <AboutResumeTerminal />
 
-            <div className="grid w-full gap-3 sm:grid-cols-3 lg:max-w-[430px] lg:grid-cols-1">
+            <div className="grid w-full gap-3 sm:grid-cols-3 lg:max-w-[500px] lg:grid-cols-1">
               {[
                 ['Creative Developer', 'Usable tools, not empty demos.'],
                 ['Visual Thinker', 'Composition, timing, and restraint.'],
