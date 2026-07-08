@@ -604,6 +604,35 @@ function PriceActionChartCanvas({
   const getX = (visibleIndex: number) => axisLeft + visibleIndex * candleWidth + candleWidth / 2;
   const getY = (price: number) => 12 + (chartHeight - 28) - ((price - low) / priceRange) * (chartHeight - 40);
   const getVolY = (volume: number) => chartHeight + volumeHeight - Math.max(2, (volume / maxVolume) * Math.max(10, volumeHeight - 8));
+  const zoneRows = (() => {
+    if (!showZones) return [];
+    const rows = zones
+      .filter((zone) => zone.maxPrice >= low && zone.minPrice <= high)
+      .map((zone) => {
+        const y = getY(zone.price);
+        const y1 = getY(zone.maxPrice);
+        const y2 = getY(zone.minPrice);
+        const color = zone.type === "support" ? "#22c55e" : zone.type === "resistance" ? "#ef4444" : "#facc15";
+        const fill = zone.type === "support" ? "#052816" : zone.type === "resistance" ? "#2a0f10" : "#2a2107";
+        const label = `${zone.type === "support" ? "Support" : zone.type === "resistance" ? "Resistance" : "Flip"} ${formatPrice(zone.price)}`;
+        const bandHeight = Math.max(10, Math.min(24, Math.abs(y2 - y1)));
+        return { zone, y, color, fill, label, bandHeight };
+      })
+      .sort((a, b) => b.zone.strength - a.zone.strength || Math.abs(a.zone.distanceToLastPercent) - Math.abs(b.zone.distanceToLastPercent))
+      .slice(0, 6)
+      .sort((a, b) => a.y - b.y);
+
+    let labelY = 0;
+    let spaced = rows.map((row) => {
+      labelY = Math.max(row.y, labelY + 20, 18);
+      return { ...row, labelY: Math.min(chartHeight - 16, labelY) };
+    });
+    const overflow = spaced.length ? spaced[spaced.length - 1].labelY - (chartHeight - 16) : 0;
+    if (overflow > 0) {
+      spaced = spaced.map((row) => ({ ...row, labelY: Math.max(18, row.labelY - overflow) }));
+    }
+    return spaced;
+  })();
 
   const updateCrosshair = (clientX: number, clientY: number) => {
     const rect = containerRef.current?.getBoundingClientRect();
@@ -717,6 +746,7 @@ function PriceActionChartCanvas({
       </div>
       <svg
         data-pa-chart-surface="true"
+        data-pa-visible-zone-count={zoneRows.length}
         width="100%"
         height={height}
         viewBox={`0 0 ${width} ${height}`}
@@ -759,19 +789,23 @@ function PriceActionChartCanvas({
           );
         })}
 
-        {showZones && zones.map((zone) => {
-          if (zone.maxPrice < low || zone.minPrice > high) return null;
-          const y1 = getY(zone.maxPrice);
-          const y2 = getY(zone.minPrice);
-          const y = getY(zone.price);
-          const color = zone.type === "support" ? "#22c55e" : zone.type === "resistance" ? "#ef4444" : "#facc15";
+        {zoneRows.map(({ zone, y, color, fill, label, bandHeight, labelY }) => {
+          const bandY = Math.max(0, Math.min(chartHeight - bandHeight, y - bandHeight / 2));
+          const labelWidth = Math.min(190, Math.max(122, label.length * 6.2 + 18));
+          const labelX = Math.max(axisLeft + 8, width - labelWidth - 10);
           return (
             <g key={zone.id} data-pa-zone-band="true">
-              <rect x={axisLeft} y={Math.min(y1, y2)} width={plotWidth} height={Math.max(4, Math.abs(y2 - y1))} fill={color} opacity={0.1} />
-              <line x1={axisLeft} y1={y} x2={width} y2={y} stroke={color} strokeOpacity={0.5} strokeDasharray="5 3" />
-              <text x={width - 8} y={y - 4} textAnchor="end" className="fill-zinc-200 font-mono text-[10px]">
-                {zone.type} {formatPrice(zone.price)}
-              </text>
+              <rect x={axisLeft} y={bandY} width={plotWidth} height={bandHeight} fill={fill} opacity={0.72} />
+              <line x1={axisLeft} y1={y} x2={width} y2={y} stroke={color} strokeOpacity={0.9} strokeDasharray="7 5" strokeWidth={1.25} />
+              <g data-pa-zone-label="true" transform={`translate(${labelX} ${labelY - 9})`}>
+                <rect width={labelWidth} height={18} fill="#02070d" stroke={color} strokeOpacity={0.85} />
+                <text x={8} y={12} className="fill-zinc-100 font-mono text-[10px] font-black">
+                  {label}
+                </text>
+                <text x={labelWidth - 8} y={12} textAnchor="end" className="fill-zinc-400 font-mono text-[9px]">
+                  {zone.strength}x
+                </text>
+              </g>
             </g>
           );
         })}
@@ -822,7 +856,7 @@ function PriceActionChartCanvas({
           const selected = selectedPattern?.id === pattern.id;
           return (
             <g key={pattern.id} onClick={() => onSelectPattern(pattern)} className="cursor-pointer" data-pa-pattern-badge="true" data-pa-selected-pattern={selected ? "true" : undefined}>
-              <rect x={x1} y={yTop} width={Math.max(16, x2 - x1)} height={Math.max(18, yBottom - yTop)} fill={color} opacity={selected ? 0.24 : 0.06} stroke={color} strokeWidth={selected ? 3 : 1} strokeDasharray={selected ? "" : "3 2"} filter={selected ? "url(#pa-selected-glow)" : undefined} />
+              <rect x={x1} y={yTop} width={Math.max(16, x2 - x1)} height={Math.max(18, yBottom - yTop)} fill={color} opacity={selected ? 0.12 : 0.035} stroke={color} strokeWidth={selected ? 2 : 1} strokeDasharray={selected ? "" : "3 2"} filter={selected ? "url(#pa-selected-glow)" : undefined} />
               <rect x={x1} y={Math.max(0, yTop - 16)} width={Math.min(170, Math.max(82, pattern.label.length * 6.2))} height={15} fill={selected ? color : "#02070d"} stroke={color} />
               <text x={x1 + 5} y={Math.max(11, yTop - 5)} className="fill-white font-mono text-[9px] font-black">
                 {pattern.label}
