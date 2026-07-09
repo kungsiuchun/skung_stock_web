@@ -15,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { AreaSeries, BarSeries, CandlestickSeries, ColorType, HistogramSeries, LineSeries, createChart } from "lightweight-charts";
+import "./stocks-intelligence-watcher-page.css";
 import type {
   StocksWatcherChartMode,
   StocksWatcherExpiryRow,
@@ -66,6 +67,7 @@ const FAVORITES_MEMORY_KEY = "stocks-intelligence-favorites";
 const CUSTOM_STOCKS_STORAGE_KEY = "stocks-intelligence-custom-stocks";
 
 const TOP_TABS = [
+  "Overview",
   "Chart",
   "Fundamentals",
   "Stats",
@@ -91,6 +93,12 @@ const OPTIONS_SUB_TABS = [
 
 const BASE_SECTOR_OPTIONS = ["All Sectors", ...getStocksWatcherUniverseSectors()];
 const BASE_TYPE_OPTIONS = ["All Types", ...getStocksWatcherUniverseTypes()];
+
+const MARKET_INDEX_DEFINITIONS: MarketIndexDefinition[] = [
+  { symbol: "SPX", yahooSymbol: "^GSPC", label: "S&P 500" },
+  { symbol: "NDX", yahooSymbol: "^NDX", label: "NASDAQ 100" },
+  { symbol: "DJI", yahooSymbol: "^DJI", label: "DOW JONES" },
+];
 
 type TopTab = (typeof TOP_TABS)[number];
 type OptionsSubTab = (typeof OPTIONS_SUB_TABS)[number];
@@ -139,11 +147,27 @@ type ModalState =
   | { type: null; data?: null }
   | { type: "runTool"; data: { toolName: string; paramsText: string; result?: NativeToolResult; loading?: boolean; error?: string | null } };
 
+interface MarketIndexDefinition {
+  symbol: string;
+  yahooSymbol: string;
+  label: string;
+}
+
+interface MarketIndexCard {
+  symbol: string;
+  label: string;
+  value: number;
+  change: number;
+  changePercent: number;
+  history: RawHistoryPoint[];
+}
+
 interface MarketContextState {
   loading: boolean;
   error: string | null;
   regime: NativeToolResult | null;
   breadth: NativeToolResult | null;
+  indices: MarketIndexCard[];
 }
 
 interface RawOptionLeg {
@@ -215,6 +239,9 @@ const formatNumber = (value: number) => {
 
 const currency = (value: number) =>
   `$${value.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}`;
+
+const formatIndexValue = (value: number) =>
+  value > 0 ? value.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 }) : "--";
 
 const formatQuoteAsOf = (asOf: string | null | undefined) => {
   if (!asOf) return "loading";
@@ -420,6 +447,32 @@ const historyFromResult = (result: NativeToolResult | undefined): RawHistoryPoin
       volume: rawNumber(item.volume),
     }))
     .filter((row) => row.close && row.high && row.low);
+};
+
+const emptyMarketIndexCards = (): MarketIndexCard[] =>
+  MARKET_INDEX_DEFINITIONS.map((definition) => ({
+    symbol: definition.symbol,
+    label: definition.label,
+    value: 0,
+    change: 0,
+    changePercent: 0,
+    history: [],
+  }));
+
+const parseMarketIndexCard = (definition: MarketIndexDefinition, result: NativeToolResult): MarketIndexCard => {
+  const history = historyFromResult(result).slice(-45);
+  const latest = history[history.length - 1]?.close || 0;
+  const previous = history[Math.max(0, history.length - 2)]?.close || latest;
+  const change = latest - previous;
+  const changePercent = previous > 0 ? (change / previous) * 100 : 0;
+  return {
+    symbol: definition.symbol,
+    label: definition.label,
+    value: latest,
+    change,
+    changePercent,
+    history,
+  };
 };
 
 const quotesFromResult = (result: NativeToolResult | undefined): RawQuoteRow[] => {
@@ -1022,6 +1075,88 @@ const ToolResultBlock = ({ result }: { result: NativeToolResult }) => {
   return <ToolTextSummary result={result} />;
 };
 
+const BrandMark = () => (
+  <div className="siw-brand-mark" aria-hidden="true">
+    <span />
+    <span />
+    <span />
+  </div>
+);
+
+const TickerLogo = ({ symbol, large = false }: { symbol: string; large?: boolean }) => {
+  const normalized = normalizeSymbol(symbol || "?");
+  const palette = [
+    "siw-logo-lime",
+    "siw-logo-white",
+    "siw-logo-blue",
+    "siw-logo-red",
+    "siw-logo-orange",
+    "siw-logo-cyan",
+  ];
+  const className = palette[normalized.charCodeAt(0) % palette.length];
+
+  return (
+    <span className={`siw-ticker-logo ${className} ${large ? "siw-ticker-logo-large" : ""}`} data-ticker-logo={normalized} aria-hidden="true">
+      {normalized.slice(0, normalized === "BRK-B" ? 3 : 1)}
+    </span>
+  );
+};
+
+const MiniSparkline = ({
+  points,
+  positive = true,
+  className = "",
+  dataRole,
+}: {
+  points: number[];
+  positive?: boolean;
+  className?: string;
+  dataRole?: "hero" | "index";
+}) => {
+  const cleanPoints = points.filter((point) => Number.isFinite(point));
+  const values = cleanPoints.length >= 2 ? cleanPoints : [1, 1.03, 1.01, 1.05, 1.08, 1.07];
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const path = values
+    .map((value, index) => {
+      const x = (index / Math.max(1, values.length - 1)) * 100;
+      const y = 34 - ((value - min) / range) * 28;
+      return `${index === 0 ? "M" : "L"}${x.toFixed(2)} ${y.toFixed(2)}`;
+    })
+    .join(" ");
+
+  return (
+    <svg
+      className={`siw-sparkline ${positive ? "siw-positive" : "siw-negative"} ${className}`}
+      viewBox="0 0 100 40"
+      role="img"
+      aria-label="Price sparkline"
+      data-hero-sparkline={dataRole === "hero" ? "true" : undefined}
+      data-index-sparkline={dataRole === "index" ? "true" : undefined}
+    >
+      <path className="siw-sparkline-fill" d={`${path} L100 40 L0 40 Z`} />
+      <path className="siw-sparkline-line" d={path} />
+      <line x1="0" x2="100" y1="34" y2="34" />
+    </svg>
+  );
+};
+
+const MetricTile = ({
+  label,
+  value,
+  tone = "neutral",
+}: {
+  label: string;
+  value: string;
+  tone?: "neutral" | "positive" | "negative" | "blue" | "yellow";
+}) => (
+  <div className={`siw-metric-tile siw-tone-${tone}`}>
+    <span>{label}</span>
+    <strong>{value}</strong>
+  </div>
+);
+
 export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligenceWatcherPageProps) {
   const [selectedSymbol, setSelectedSymbol] = useState(() =>
     typeof window === "undefined"
@@ -1032,6 +1167,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [mode, setMode] = useState<StocksWatcherChartMode>("volume");
   const [strikeWindowSize, setStrikeWindowSize] = useState(29);
   const [watchlistCollapsed, setWatchlistCollapsed] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [mobilePanel, setMobilePanel] = useState<"home" | "markets" | "watcher" | "portfolio" | "more">("watcher");
   const [snapshot, setSnapshot] = useState<StocksWatcherSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingSymbol, setLoadingSymbol] = useState<string | null>(null);
@@ -1053,7 +1191,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [sectorFilter, setSectorFilter] = useState("All Sectors");
   const [typeFilter, setTypeFilter] = useState("All Types");
   const [sectorState, setSectorState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
-  const [activeTab, setActiveTab] = useState<TopTab>("Options");
+  const [activeTab, setActiveTab] = useState<TopTab>("Overview");
   const [activeSubTab, setActiveSubTab] = useState<OptionsSubTab>("Overview");
   const tabDataCache = useRef<Map<string, TabCacheEntry>>(new Map());
   const [tabPanelState, setTabPanelState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
@@ -1065,7 +1203,13 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [toolRunLog, setToolRunLog] = useState<ToolRunLogEntry[]>([]);
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
   const [modalState, setModalState] = useState<ModalState>({ type: null });
-  const [marketContext, setMarketContext] = useState<MarketContextState>({ loading: false, error: null, regime: null, breadth: null });
+  const [marketContext, setMarketContext] = useState<MarketContextState>({
+    loading: false,
+    error: null,
+    regime: null,
+    breadth: null,
+    indices: emptyMarketIndexCards(),
+  });
   const [toolSearch, setToolSearch] = useState("");
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [now, setNow] = useState(Date.now());
@@ -1264,7 +1408,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   }, [callNativeTool]);
 
   const loadTopTab = useCallback(async (tab: TopTab, force = false) => {
-    if (tab === "Options") return;
+    if (tab === "Options" || tab === "Overview") return;
     const symbol = normalizeSymbol(selectedSymbol);
     const cacheKey = getStocksWatcherTopTabCacheKey(symbol, tab);
     const cached = force ? null : tabDataCache.current.get(cacheKey);
@@ -1339,7 +1483,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   }, [currentExpiry, runToolBundle, selectedSymbol]);
 
   useEffect(() => {
-    if (activeTab !== "Options") void loadTopTab(activeTab);
+    if (activeTab !== "Options" && activeTab !== "Overview") void loadTopTab(activeTab);
   }, [activeTab, loadTopTab]);
 
   useEffect(() => {
@@ -1353,17 +1497,38 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const loadMarketContext = useCallback(async () => {
     setMarketContext((current) => ({ ...current, loading: true, error: null }));
     try {
-      const [regime, breadth] = await Promise.all([
+      const loadIndexCard = async (definition: MarketIndexDefinition) => {
+        try {
+          const result = await callNativeTool("get_stock_history", {
+            ticker: definition.yahooSymbol,
+            range: "3mo",
+            interval: "1d",
+          });
+          return parseMarketIndexCard(definition, result);
+        } catch {
+          return emptyMarketIndexCards().find((card) => card.symbol === definition.symbol) || {
+            symbol: definition.symbol,
+            label: definition.label,
+            value: 0,
+            change: 0,
+            changePercent: 0,
+            history: [],
+          };
+        }
+      };
+      const [regime, breadth, indices] = await Promise.all([
         callNativeTool("get_macro_regime", {}),
         callNativeTool("market_breadth", { market: "US" }),
+        Promise.all(MARKET_INDEX_DEFINITIONS.map(loadIndexCard)),
       ]);
-      setMarketContext({ loading: false, error: null, regime, breadth });
+      setMarketContext({ loading: false, error: null, regime, breadth, indices });
     } catch (requestError) {
       setMarketContext({
         loading: false,
         error: requestError instanceof Error ? requestError.message : String(requestError),
         regime: null,
         breadth: null,
+        indices: emptyMarketIndexCards(),
       });
     }
   }, [callNativeTool]);
@@ -1432,7 +1597,13 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     const exact = allStocks.find((stock) => stock.symbol === requestedSymbol);
     const looksLikeTicker = /^[A-Z0-9.^-]{1,12}$/.test(requestedSymbol);
     const nextSymbol = exact?.symbol || (looksLikeTicker ? requestedSymbol : watchlist[0]?.symbol);
-    if (nextSymbol) void loadSnapshot(nextSymbol);
+    if (nextSymbol) {
+      setQuery("");
+      setSectorFilter("All Sectors");
+      setTypeFilter("All Types");
+      setWatchlistSource("all");
+      void loadSnapshot(nextSymbol);
+    }
   };
 
   const toggleFavorite = (symbol: string) => {
@@ -1617,6 +1788,20 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const flipStrike = gammaFlipLevel === null ? null : getNearestSpotStrike(chartRows, gammaFlipLevel);
   const updatedSecondsAgo = lastUpdatedAt ? Math.max(0, Math.floor((now - lastUpdatedAt) / 1_000)) : null;
   const visibleRows = focusedRows.length > 0 ? focusedRows : chartRows;
+  const latestPrice = snapshot?.quote.price || 0;
+  const historyPrices = (snapshot?.history || [])
+    .map((point) => point.price)
+    .filter((price) => Number.isFinite(price) && (!latestPrice || (price > latestPrice * 0.25 && price < latestPrice * 4)));
+  const previousClose = snapshot ? snapshot.quote.price - snapshot.quote.change : 0;
+  const sessionOpen = historyPrices[0] || previousClose || latestPrice;
+  const sessionHigh = historyPrices.length > 0 ? Math.max(...historyPrices, latestPrice) : Math.max(latestPrice, previousClose);
+  const sessionLow = historyPrices.length > 0 ? Math.min(...historyPrices, latestPrice) : Math.min(latestPrice, previousClose);
+  const totalCallGex = chartRows.reduce((sum, row) => sum + Math.max(0, row.callGex), 0);
+  const totalPutGex = chartRows.reduce((sum, row) => sum + Math.min(0, row.putGex), 0);
+  const netPositiveGexPct = totalCallGex + Math.abs(totalPutGex) > 0
+    ? (totalCallGex / (totalCallGex + Math.abs(totalPutGex))) * 100
+    : 0;
+  const negativeGexPct = Math.max(0, 100 - netPositiveGexPct);
   const axisTicks = mode === "gex"
     ? [
         { value: maxValue, position: 0 },
@@ -1654,7 +1839,6 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     () => aiSummaryPayload ? buildStocksWatcherDeterministicSummary(aiSummaryPayload) : null,
     [aiSummaryPayload],
   );
-
   const renderAiSummaryPanel = () => {
     if (activeTab !== "Options") return null;
     if (!aiSummary) return null;
@@ -1665,48 +1849,36 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       { title: "What it tells us", items: aiSummary.whatItTellsUs },
       { title: "Why it matters", items: aiSummary.whyItMatters },
       { title: "How to act", items: aiSummary.howToAct },
+      { title: "Caveats", items: aiSummary.caveats.length > 0 ? aiSummary.caveats : ["Yahoo delayed (15-20 min)", "No tape-level flow", "Not financial advice"] },
     ];
 
     return (
-      <section data-ai-summary-panel className="rounded-md border border-blue-400/25 bg-[#08111d] p-4 shadow-[inset_0_1px_0_rgba(96,165,250,0.12)]">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 text-sm font-black text-blue-100">
-              <Sparkles className="h-4 w-4 text-blue-300" />
-              AI Summary
-            </div>
-            <p className="mt-1 text-xs leading-5 text-slate-500">
-              Deterministic rules readout from the visible watcher payload. No OpenRouter call, no outside market data, no buy/sell call.
-            </p>
+      <section data-ai-summary-panel className="siw-panel siw-ai-panel">
+        <div className="siw-ai-head">
+          <div className="siw-ai-title">
+            <Sparkles className="h-5 w-5" />
+            <span>AI Summary (deterministic-rules)</span>
+            <b>No OpenRouter call</b>
+            <b className="siw-yellow-tag">Yahoo delayed</b>
           </div>
-          <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
-            <span className="rounded border border-blue-400/25 bg-blue-400/10 px-2 py-1 text-blue-100">{aiSummary.model}</span>
-            {generatedAt && <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-400">snapshot {generatedAt}</span>}
+          <div className="siw-ai-meta">
+            {generatedAt && <span>Generated: {generatedAt} ET</span>}
+            <span>Model: {aiSummary.model}</span>
+            <span>Confidence: High</span>
           </div>
         </div>
-
-        <p className="mt-4 text-xl font-black text-white">{aiSummary.headline}</p>
-        <div className="mt-4 grid gap-3 lg:grid-cols-3">
+        <div className="siw-ai-grid">
           {sections.map((section) => (
-            <div key={section.title} className="rounded-md border border-slate-800 bg-slate-950/60 p-3">
-              <p className="text-xs font-black uppercase tracking-[0.14em] text-blue-300">{section.title}</p>
-              <ul className="mt-3 space-y-2 text-xs leading-5 text-slate-300">
-                {section.items.map((item) => (
-                  <li key={item} className="border-l border-slate-700 pl-3">{item}</li>
+            <div key={section.title} className="siw-ai-column">
+              <p>{section.title}</p>
+              <ul>
+                {section.items.slice(0, 4).map((item) => (
+                  <li key={item}>{item}</li>
                 ))}
               </ul>
             </div>
           ))}
         </div>
-        {aiSummary.caveats.length > 0 && (
-          <div className="mt-3 flex flex-wrap gap-2">
-            {aiSummary.caveats.map((caveat) => (
-              <span key={caveat} className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[0.68rem] font-bold text-slate-400">
-                {caveat}
-              </span>
-            ))}
-          </div>
-        )}
       </section>
     );
   };
@@ -2186,6 +2358,292 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     return <ToolResultBlock result={result} />;
   };
 
+  const renderStatsReferencePanel = () => {
+    const statsRaw = rawRecord(tabPanelState.data?.get_stock_stats?.raw) || {};
+    const betaRaw = rawRecord(tabPanelState.data?.get_beta?.raw) || {};
+    const fromRaw = (keys: string[]) => {
+      for (const key of keys) {
+        const value = statsRaw[key] ?? betaRaw[key];
+        if (typeof value === "string" && value.trim()) return value;
+        if (typeof value === "number" && Number.isFinite(value)) return value;
+      }
+      return null;
+    };
+    const display = (keys: string[], fallback = "n/a", mode: "plain" | "money" | "percent" = "plain") => {
+      const value = fromRaw(keys);
+      if (typeof value === "string") return value;
+      if (typeof value === "number") {
+        if (mode === "money") return `$${formatNumber(value)}`;
+        if (mode === "percent") return `${value.toFixed(2)}%`;
+        return Math.abs(value) >= 1000 ? formatNumber(value) : value.toFixed(2).replace(/\.00$/, "");
+      }
+      return fallback;
+    };
+    const quote = snapshot?.quote;
+    const beta = display(["beta", "beta3Year", "fiveYearAvgBeta"]);
+    const targetMean = display(["targetMeanPrice", "meanTargetPrice"], "Needs checking", "money");
+    const marketCap = display(["marketCap"], "Needs checking", "money");
+    const enterpriseValue = display(["enterpriseValue"], "Needs checking", "money");
+    const sector = String(fromRaw(["sector"]) || getStocksWatcherUniverseStock(selectedSymbol)?.sector || "Needs checking");
+    const industry = String(fromRaw(["industry"]) || "Needs checking");
+    const rows = [
+      ["Exchange", String(fromRaw(["exchange", "fullExchangeName"]) || "Needs checking")],
+      ["Market State", quote ? "OPEN" : "Needs checking"],
+      ["Sector", sector],
+      ["Industry", industry],
+      ["Market Cap", marketCap],
+      ["Enterprise Value", enterpriseValue],
+      ["Forward P/E", display(["forwardPE", "forwardPe"])],
+      ["Trailing P/E", display(["trailingPE", "trailingPe"])],
+      ["Dividend Yield", display(["dividendYield"], "n/a", "percent")],
+      ["Target Mean", targetMean],
+    ];
+    const financialRows = [
+      ["Price", quote ? currency(quote.price) : "n/a", quote ? `${quote.changePercent.toFixed(2)}%` : "n/a"],
+      ["Forward P/E", display(["forwardPE", "forwardPe"]), "Yahoo"],
+      ["Trailing P/E", display(["trailingPE", "trailingPe"]), "Yahoo"],
+      ["Beta", beta, "5Y proxy"],
+      ["52W High", display(["fiftyTwoWeekHigh"], "n/a", "money"), "Yahoo"],
+      ["52W Low", display(["fiftyTwoWeekLow"], "n/a", "money"), "Yahoo"],
+    ];
+
+    return (
+      <section className="siw-stats-board" data-primary-tab-panel="Stats">
+        <div className="siw-stats-left siw-panel">
+          <div className="siw-panel-title">
+            <span>Native Yahoo Stats</span>
+            <b>{tabPanelState.loading ? "Loading" : "Yahoo"}</b>
+          </div>
+          <div className="siw-stat-columns">
+            <div>
+              <h3>Profile</h3>
+              <table className="siw-stat-table">
+                <tbody>
+                  {rows.slice(0, 6).map(([label, value]) => (
+                    <tr key={label}>
+                      <th>{label}</th>
+                      <td>{value}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div>
+              <h3>Valuation Summary</h3>
+              <table className="siw-stat-table">
+                <tbody>
+                  {rows.slice(6).map(([label, value]) => (
+                    <tr key={label}>
+                      <th>{label}</th>
+                      <td>{value}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <p>Source: Yahoo native tools. Missing fields stay as n/a, not backfilled.</p>
+        </div>
+
+        <div className="siw-stats-side">
+          <div className="siw-panel siw-stat-card">
+            <span>Beta and Volatility</span>
+            <strong>{beta}</strong>
+            <em>vs benchmark proxy</em>
+            <div className="siw-meter"><i style={{ width: `${Math.min(95, Math.max(8, rawNumber(fromRaw(["beta", "beta3Year"])) * 42))}%` }} /></div>
+          </div>
+          <div className="siw-panel siw-stat-card">
+            <span>Mean Target and Analysts</span>
+            <strong>{targetMean}</strong>
+            <em>Needs checking before investment use</em>
+            <div className="siw-meter"><i style={{ width: "62%" }} /></div>
+          </div>
+          <div className="siw-panel siw-stat-card">
+            <span>Earnings and Price Context</span>
+            <strong>{display(["earningsDate"], "Needs checking")}</strong>
+            <em>Not financial advice</em>
+          </div>
+        </div>
+
+        <div className="siw-panel siw-financial-summary">
+          <div className="siw-panel-title">
+            <span>Financial Summary</span>
+            <b>TTM / latest available</b>
+          </div>
+          <table className="siw-stat-table">
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th>Value</th>
+                <th>Context</th>
+              </tr>
+            </thead>
+            <tbody>
+              {financialRows.map(([label, value, context]) => (
+                <tr key={label}>
+                  <th>{label}</th>
+                  <td>{value}</td>
+                  <td>{context}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="siw-panel siw-cashflow-panel">
+          <div className="siw-panel-title">
+            <span>Cash Flow Highlights</span>
+            <b>Yahoo</b>
+          </div>
+          <table className="siw-stat-table">
+            <tbody>
+              {[
+                ["Operating Cash Flow", display(["operatingCashflow"], "n/a", "money")],
+                ["Free Cash Flow", display(["freeCashflow"], "n/a", "money")],
+                ["Debt to Equity", display(["debtToEquity"])],
+                ["Gross Margins", display(["grossMargins"], "n/a", "percent")],
+              ].map(([label, value]) => (
+                <tr key={label}>
+                  <th>{label}</th>
+                  <td>{value}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    );
+  };
+
+  const renderGreeksReferencePanel = (data: Record<string, NativeToolResult>) => {
+    const greekResult = data.get_options_greeks || Object.values(data).find((result) => optionExposuresFromResult(result).length > 0);
+    const rawGreekRows = optionExposuresFromResult(greekResult);
+    const fallbackGreekRows: RawOptionExposure[] = chartRows.map((row) => ({
+        strike: row.strike,
+        callOpenInterest: row.callOpenInterest,
+        putOpenInterest: row.putOpenInterest,
+        callVolume: row.callVolume,
+        putVolume: row.putVolume,
+        netGex: row.netGex,
+        netDex: row.netGex * 0.08,
+        callGex: row.callGex,
+        putGex: row.putGex,
+        avgIv: 0,
+      }));
+    const greekRows: RawOptionExposure[] = (rawGreekRows.length > 0 ? rawGreekRows : fallbackGreekRows).slice(0, 12);
+    const callOiTotal = greekRows.reduce((sum, row) => sum + effectiveLegOpenInterest(row.call, row.callEffectiveOpenInterest ?? row.callOpenInterest), 0);
+    const putOiTotal = greekRows.reduce((sum, row) => sum + effectiveLegOpenInterest(row.put, row.putEffectiveOpenInterest ?? row.putOpenInterest), 0);
+    const callVolTotal = greekRows.reduce((sum, row) => sum + optionLegNumber(row.callVolume ?? row.call?.volume), 0);
+    const putVolTotal = greekRows.reduce((sum, row) => sum + optionLegNumber(row.putVolume ?? row.put?.volume), 0);
+    const pcOi = callOiTotal ? putOiTotal / callOiTotal : 0;
+    const pcVol = callVolTotal ? putVolTotal / callVolTotal : 0;
+    const avgIv = greekRows.length
+      ? greekRows.reduce((sum, row) => sum + effectiveExposureIv(row), 0) / greekRows.length
+      : 0;
+
+    return (
+      <div className="siw-greeks-board">
+        <div className="siw-panel siw-greek-table-panel">
+          <div className="siw-panel-title">
+            <span>Greeks by Strike</span>
+            <b>{formatExpiryDate(currentExpiry, "short")}</b>
+          </div>
+          <table className="siw-greek-table">
+            <thead>
+              <tr>
+                <th>Strike</th>
+                <th>Call OI</th>
+                <th>Put OI</th>
+                <th>Net GEX</th>
+                <th>Net DEX</th>
+                <th>Avg IV</th>
+              </tr>
+            </thead>
+            <tbody>
+              {greekRows.map((row) => {
+                const strike = optionLegNumber(row.strike);
+                const netGexValue = optionLegNumber(row.netGex);
+                const netDexValue = optionLegNumber(row.netDex);
+                return (
+                  <tr key={`greek-${strike}`}>
+                    <th>{strike}</th>
+                    <td className="siw-up">{formatNumber(effectiveLegOpenInterest(row.call, row.callEffectiveOpenInterest ?? row.callOpenInterest))}</td>
+                    <td className="siw-down">{formatNumber(effectiveLegOpenInterest(row.put, row.putEffectiveOpenInterest ?? row.putOpenInterest))}</td>
+                    <td className={netGexValue >= 0 ? "siw-up" : "siw-down"}>{formatNumber(netGexValue)}</td>
+                    <td className={netDexValue >= 0 ? "siw-up" : "siw-down"}>{formatNumber(netDexValue)}</td>
+                    <td>{effectiveExposureIv(row).toFixed(1)}%</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="siw-panel siw-iv-panel">
+          <div className="siw-panel-title">
+            <span>Average IV by Strike (%)</span>
+            <b>bar</b>
+          </div>
+          <div className="siw-iv-bars">
+            {greekRows.map((row) => {
+              const iv = effectiveExposureIv(row);
+              return (
+                <span key={`iv-${row.strike}`} title={`${row.strike}: ${iv.toFixed(1)}%`}>
+                  <i style={{ height: `${Math.max(8, Math.min(96, iv * 1.4))}%` }} />
+                  <em>{optionLegNumber(row.strike)}</em>
+                </span>
+              );
+            })}
+          </div>
+          <div className="siw-chart-controls">
+            <button type="button">Chart Type: Bar</button>
+            <button type="button">View: Avg IV</button>
+          </div>
+        </div>
+
+        <div className="siw-panel siw-chain-preview">
+          <div className="siw-panel-title">
+            <span>Option Chain Preview</span>
+            <b>Calls / Puts</b>
+          </div>
+          <table className="siw-greek-table">
+            <thead>
+              <tr>
+                <th>Call OI</th>
+                <th>Call Vol</th>
+                <th>Strike</th>
+                <th>Put Vol</th>
+                <th>Put OI</th>
+              </tr>
+            </thead>
+            <tbody>
+              {greekRows.slice(0, 6).map((row) => (
+                <tr key={`chain-${row.strike}`}>
+                  <td className="siw-up">{formatNumber(effectiveLegOpenInterest(row.call, row.callEffectiveOpenInterest ?? row.callOpenInterest))}</td>
+                  <td>{formatNumber(optionLegNumber(row.callVolume ?? row.call?.volume))}</td>
+                  <th>{optionLegNumber(row.strike)}</th>
+                  <td>{formatNumber(optionLegNumber(row.putVolume ?? row.put?.volume))}</td>
+                  <td className="siw-down">{formatNumber(effectiveLegOpenInterest(row.put, row.putEffectiveOpenInterest ?? row.putOpenInterest))}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="siw-panel siw-pc-metrics">
+          <div className="siw-panel-title">
+            <span>Put / Call Metrics</span>
+            <b>derived</b>
+          </div>
+          <MetricTile label="P/C OI" value={pcOi.toFixed(2)} tone={pcOi > 1 ? "negative" : "positive"} />
+          <MetricTile label="P/C Volume" value={pcVol.toFixed(2)} tone={pcVol > 1 ? "negative" : "positive"} />
+          <MetricTile label="Avg IV" value={`${avgIv.toFixed(1)}%`} tone="blue" />
+          <MetricTile label="Rows" value={`${greekRows.length}`} tone="blue" />
+        </div>
+      </div>
+    );
+  };
+
   const renderOptionsSubTab = () => {
     if (activeSubTab === "Overview") return renderOptionsOverview();
     return (
@@ -2201,7 +2659,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           <OptionsEmptyState expiry={currentExpiry} onRetry={() => void loadOptionsSubTab(activeSubTab, true)} />
         )}
         {subTabPanelState.data && (
-          activeSubTab === "Chain" && subTabPanelState.data.get_options
+          activeSubTab === "Greeks"
+            ? renderGreeksReferencePanel(subTabPanelState.data)
+            : activeSubTab === "Chain" && subTabPanelState.data.get_options
             ? renderChainPanel(subTabPanelState.data.get_options)
             : (
               <div className="grid min-w-0 gap-4 xl:grid-cols-2">
@@ -2218,9 +2678,645 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     );
   };
 
+  const renderOverviewPanel = () => {
+    const sectorRows = Array.from(
+      watchlist.reduce<Map<string, { sector: string; total: number; count: number }>>((groups, stock) => {
+        const current = groups.get(stock.sector) || { sector: stock.sector, total: 0, count: 0 };
+        const quote = stock.symbol === snapshot?.symbol
+          ? snapshot.quote
+          : getFreshStocksWatcherCacheEntry(snapshotCacheRef.current, stock.symbol)?.snapshot.quote;
+        current.total += quote?.changePercent ?? stock.fallbackChangePercent;
+        current.count += 1;
+        groups.set(stock.sector, current);
+        return groups;
+      }, new Map()).values(),
+    )
+      .map((row) => ({ ...row, value: row.count ? row.total / row.count : 0 }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 9);
+    const advancers = watchlist.filter((stock) => {
+      const quote = stock.symbol === snapshot?.symbol
+        ? snapshot.quote
+        : getFreshStocksWatcherCacheEntry(snapshotCacheRef.current, stock.symbol)?.snapshot.quote;
+      return (quote?.changePercent ?? stock.fallbackChangePercent) >= 0;
+    }).length;
+    const decliners = Math.max(0, watchlist.length - advancers);
+    const unchanged = 0;
+    const breadthTotal = Math.max(1, advancers + decliners + unchanged);
+    const marketIndexCards = marketContext.indices.length === MARKET_INDEX_DEFINITIONS.length
+      ? marketContext.indices
+      : emptyMarketIndexCards();
+
+    return (
+      <section className="siw-overview-grid" data-primary-tab-panel="Overview">
+        <div className="siw-panel siw-market-overview">
+          <div className="siw-overview-head">
+            <h2>Market Overview</h2>
+            <span>US equities</span>
+          </div>
+          <div className="siw-index-cards">
+            {marketIndexCards.map((card) => {
+              const positive = card.change >= 0;
+              const points = card.history
+                .map((point) => point.close)
+                .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
+              return (
+              <div key={card.symbol} data-market-index-card={card.symbol}>
+                <span data-market-index-label>{card.label}</span>
+                <strong>{formatIndexValue(card.value)}</strong>
+                <em className={positive ? "siw-up" : "siw-down"}>
+                  {card.value > 0 ? `${positive ? "+" : ""}${card.change.toFixed(2)}  ${positive ? "+" : ""}${card.changePercent.toFixed(2)}%` : "--"}
+                </em>
+                <MiniSparkline points={points} positive={positive} dataRole="index" />
+              </div>
+              );
+            })}
+          </div>
+          <div className="siw-market-breadth">
+            <div>
+              <span>Market Breadth (watchlist)</span>
+              <em>As of {new Date(snapshot?.generatedAt || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} ET</em>
+            </div>
+            <div className="siw-breadth-rail">
+              <b style={{ width: `${(advancers / breadthTotal) * 100}%` }} />
+              <i style={{ width: `${(unchanged / breadthTotal) * 100}%` }} />
+              <strong style={{ width: `${(decliners / breadthTotal) * 100}%` }} />
+            </div>
+            <div className="siw-breadth-counts">
+              <span className="siw-up">Advancers <b>{advancers}</b></span>
+              <span>Unchanged <b>{unchanged}</b></span>
+              <span className="siw-down">Decliners <b>{decliners}</b></span>
+            </div>
+          </div>
+        </div>
+
+        <div className="siw-panel siw-sector-panel">
+          <div className="siw-overview-head">
+            <h2>Sector Performance</h2>
+            <span>Watcher universe</span>
+          </div>
+          <div className="siw-sector-list">
+            {sectorRows.map((row) => (
+              <div key={row.sector}>
+                <span>{row.sector}</span>
+                <b>
+                  <i style={{ width: `${Math.min(100, Math.max(8, Math.abs(row.value) * 18))}%` }} className={row.value >= 0 ? "siw-sector-up" : "siw-sector-down"} />
+                </b>
+                <em className={row.value >= 0 ? "siw-up" : "siw-down"}>{row.value >= 0 ? "+" : ""}{row.value.toFixed(2)}%</em>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="siw-overview-tertiary" data-overview-tertiary>
+          <div className="siw-panel siw-news-panel" data-overview-tertiary-panel="news">
+            <div className="siw-overview-head">
+              <h2>Recent News</h2>
+            </div>
+            <div className="siw-link-list">
+              <button type="button" onClick={() => setActiveTab("News")}>Open Yahoo news tool output</button>
+              <span>Native news is loaded in the News tab to avoid stale headlines.</span>
+              <span>{snapshot?.quote.companyName || selectedSymbol} selected.</span>
+            </div>
+          </div>
+
+          <div className="siw-panel siw-earnings-panel" data-overview-tertiary-panel="earnings">
+            <div className="siw-overview-head">
+              <h2>Earnings Calendar</h2>
+            </div>
+            <div className="siw-link-list">
+              <button type="button" onClick={() => setActiveTab("Earnings")}>View earnings tools</button>
+              <span>Needs checking from Yahoo native event tools.</span>
+              <span>Not financial advice.</span>
+            </div>
+          </div>
+
+          <div className="siw-panel siw-key-metrics-panel" data-overview-tertiary-panel="metrics">
+            <div className="siw-overview-head">
+              <h2>Key Metrics</h2>
+            </div>
+            <div className="siw-key-grid">
+              <MetricTile label="Spot" value={latestPrice ? currency(latestPrice) : "--"} tone="blue" />
+              <MetricTile label="Call GEX" value={formatNumber(totalCallGex)} tone="positive" />
+              <MetricTile label="Put GEX" value={formatNumber(totalPutGex)} tone="negative" />
+              <MetricTile label="P/C OI" value={(snapshot?.putCallOpenInterest || 0).toFixed(2)} tone="neutral" />
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  };
+
+  const renderPrimaryPanel = () => {
+    if (activeTab === "Overview") return renderOverviewPanel();
+
+    if (activeTab !== "Options") {
+      if (activeTab === "Stats") return renderStatsReferencePanel();
+      return (
+        <section className={`siw-panel siw-primary-panel siw-${activeTab.toLowerCase().replace(/\s+/g, "-")}-panel`} data-primary-tab-panel={activeTab}>
+          {renderGenericPanel(tabPanelState, () => void loadTopTab(activeTab, true))}
+        </section>
+      );
+    }
+
+    return (
+      <section className="siw-options-stage" data-primary-tab-panel="Options">
+        <aside className="siw-expiry-rail" data-options-expiry-selector>
+          <div className="siw-expiry-head">
+            <span>Expiry</span>
+            <span>OI</span>
+            <span>Str</span>
+            <span>Volume</span>
+            <span>Type</span>
+          </div>
+          <div className="siw-expiry-list">
+            {expiryRows.map((row) => {
+              const normalizedExpiry = normalizeExpiryDate(row.expiry);
+              const active = normalizeExpiryDate(currentExpiry) === normalizedExpiry;
+              return (
+                <button
+                  key={normalizedExpiry}
+                  type="button"
+                  data-expiry-row={normalizedExpiry}
+                  className={`siw-expiry-row ${active ? "is-active" : ""}`}
+                  onClick={() => {
+                    setSelectedExpiry(normalizedExpiry);
+                    setChartTooltip(null);
+                    if (activeSubTab === "Overview") {
+                      void loadExpiryOverview(normalizedExpiry);
+                    } else {
+                      setSubTabPanelState({ loading: true, error: null, data: null });
+                    }
+                  }}
+                >
+                  <span>{formatExpiryDate(row.expiry, "compact")}</span>
+                  <span>{formatNumber(row.openInterest)}</span>
+                  <span>{row.primaryStrike || row.strike}</span>
+                  <span>{formatNumber(row.volume)}</span>
+                  <span className={row.dominantType === "C" ? "siw-up" : "siw-down"}>{row.dominantType}</span>
+                </button>
+              );
+            })}
+          </div>
+          <button type="button" className="siw-view-all" onClick={() => setSelectedExpiry(snapshot?.availableExpiries?.[0] || currentExpiry || null)}>
+            View all expiries
+          </button>
+        </aside>
+
+        <div className="siw-options-main">
+          <div className="siw-options-kpis" data-options-summary>
+            <MetricTile label="GEX Pinning" value={maxCallWall ? maxCallWall.strike.toFixed(2) : "--"} tone="positive" />
+            <MetricTile label="P/C" value={(snapshot?.putCallOpenInterest || 0).toFixed(2)} tone={(snapshot?.putCallOpenInterest || 0) > 1 ? "negative" : "negative"} />
+            <MetricTile label="0 Sweeps" value={snapshot?.sweeps ? `${snapshot.sweeps}` : "Today"} tone="blue" />
+            <div className="siw-strike-zoom">
+              <span>Strike Zoom</span>
+              <button type="button" onClick={() => setStrikeWindowSize((value) => Math.max(9, value - 2))}>-</button>
+              <input
+                aria-label="Strike zoom"
+                type="range"
+                min={9}
+                max={Math.max(9, Math.min(80, chartRows.length || 29))}
+                step={2}
+                value={Math.min(strikeWindowSize, Math.max(9, Math.min(80, chartRows.length || 29)))}
+                onChange={(event) => setStrikeWindowSize(Number(event.target.value))}
+              />
+              <button type="button" onClick={() => setStrikeWindowSize((value) => Math.min(Math.max(9, Math.min(80, chartRows.length || 29)), value + 2))}>+</button>
+              <b>x1.0</b>
+              <button type="button" className="siw-config-button" onClick={() => setSettingsOpen((value) => !value)}>Config</button>
+            </div>
+          </div>
+
+          <div className="siw-options-subtabs">
+            {(["oi", "volume", "gex"] as StocksWatcherChartMode[]).map((item) => (
+              <button
+                key={item}
+                type="button"
+                onClick={() => {
+                  setMode(item);
+                  setActiveSubTab("Overview");
+                }}
+                className={activeSubTab === "Overview" && mode === item ? "is-active" : ""}
+              >
+                {item === "oi" ? "OI" : item === "volume" ? "Vol" : "GEX"}
+              </button>
+            ))}
+            {OPTIONS_SUB_TABS.filter((item) => item !== "Overview").map((item) => (
+              <button
+                key={item}
+                type="button"
+                onClick={() => setActiveSubTab(item)}
+                className={activeSubTab === item ? "is-active" : ""}
+              >
+                {item}
+              </button>
+            ))}
+          </div>
+          <div className="siw-options-content">
+            {renderOptionsSubTab()}
+          </div>
+        </div>
+      </section>
+    );
+  };
+
   return (
-    <section className="h-full min-h-full w-full overflow-x-hidden overflow-y-auto bg-[#080d14] text-slate-100 lg:overflow-hidden">
-      <div className={`grid min-h-full grid-cols-1 pt-2 lg:h-full ${watchlistCollapsed ? "lg:grid-cols-[4.5rem_minmax(0,1fr)]" : "lg:grid-cols-[28rem_minmax(0,1fr)]"}`}>
+    <section className="siw-app h-full min-h-full w-full overflow-hidden text-slate-100" data-stocks-watcher-root>
+      <div className={`siw-replica-shell ${watchlistCollapsed ? "is-rail-collapsed" : ""}`} data-watcher-replica>
+        <aside className="siw-sidebar">
+          <div className="siw-sidebar-head">
+            <button type="button" className="siw-back-button" onClick={onBackToWork} aria-label="Back to work">
+              <ArrowLeft className="h-4 w-4" />
+            </button>
+            <div className="siw-brand">
+              <BrandMark />
+              <div>
+                <span>Stocks Intelligence</span>
+                <strong>Watcher</strong>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="siw-icon-button"
+              onClick={() => setWatchlistCollapsed((value) => !value)}
+              aria-label={watchlistCollapsed ? "Expand watchlist" : "Collapse watchlist"}
+            >
+              {watchlistCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+            </button>
+          </div>
+
+          {!watchlistCollapsed && (
+            <>
+              <div className="siw-search-row">
+                <label>
+                  <Search className="h-4 w-4" />
+                  <input
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") submitSearch();
+                    }}
+                    name="stock-search"
+                    autoComplete="off"
+                    placeholder="Search ticker or name..."
+                  />
+                  <kbd>/</kbd>
+                </label>
+                <button type="button" onClick={submitSearch} className="siw-load-button">
+                  <span>⌁</span>
+                  LOAD
+                </button>
+              </div>
+
+              <div className={`siw-filter-row ${filtersOpen ? "is-open" : ""}`}>
+                <label>
+                  <select aria-label="Sector filter" value={sectorFilter} onChange={(event) => runSectorFilter(event.target.value)}>
+                    {sectorOptions.map((sector) => <option key={sector}>{sector}</option>)}
+                  </select>
+                  <ChevronDown className="h-4 w-4" />
+                </label>
+                <label>
+                  <select aria-label="Type filter" value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
+                    {typeOptions.map((type) => <option key={type}>{type}</option>)}
+                  </select>
+                  <ChevronDown className="h-4 w-4" />
+                </label>
+                <button type="button" className="siw-icon-button" onClick={() => setFiltersOpen((value) => !value)} aria-label="Toggle filters">
+                  <span className="siw-filter-glyph">⌯</span>
+                </button>
+              </div>
+              {filtersOpen && (
+                <div className="siw-filter-state" data-filter-panel>
+                  <span>{sectorFilter}</span>
+                  <span>{typeFilter}</span>
+                  <button type="button" onClick={() => {
+                    setSectorFilter("All Sectors");
+                    setTypeFilter("All Types");
+                  }}>
+                    Reset
+                  </button>
+                </div>
+              )}
+
+              <div className="siw-watchlist-tabs">
+                <button type="button" onClick={() => {
+                  setWatchlistSource("all");
+                  void loadNativeWatchlist();
+                }} className={watchlistSource === "all" ? "is-active" : ""}>
+                  All Stocks
+                </button>
+                <button type="button" onClick={() => {
+                  setWatchlistSource("favorites");
+                  loadFavoritesFromLocal();
+                }} className={watchlistSource === "favorites" ? "is-active" : ""}>
+                  <Star className="h-3.5 w-3.5" />
+                  FAV
+                </button>
+              </div>
+
+              <div className="siw-watchlist-head">
+                <span>Ticker</span>
+                <span>Price</span>
+                <span>Change</span>
+              </div>
+
+              <div className="siw-watchlist" data-watchlist-scope>
+                {watchlist.map((stock) => {
+                  const symbol = stock.symbol;
+                  const selected = symbol === selectedSymbol;
+                  const cachedRowQuote = getFreshStocksWatcherCacheEntry(snapshotCacheRef.current, symbol)?.snapshot.quote ?? null;
+                  const rowQuote = selected && snapshot?.symbol === symbol ? snapshot.quote : cachedRowQuote;
+                  const change = rowQuote?.change ?? stock.fallbackChange;
+                  const rowPositive = change >= 0;
+                  const isRowLoading = loadingSymbol === symbol;
+                  const isFavorite = favorites.includes(symbol);
+                  const price = rowQuote?.price ?? stock.fallbackPrice;
+                  const pct = rowQuote?.changePercent ?? stock.fallbackChangePercent;
+
+                  return (
+                    <div
+                      key={symbol}
+                      data-watchlist-row={symbol}
+                      data-stock-sector={stock.sector}
+                      data-stock-type={stock.type}
+                      role="button"
+                      tabIndex={0}
+                      title={`${stock.symbol} - ${stock.companyName}`}
+                      onClick={() => selectWatchlistSymbol(symbol)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          selectWatchlistSymbol(symbol);
+                        }
+                      }}
+                      className={`siw-watch-row ${selected ? "is-selected" : ""}`}
+                    >
+                      <input
+                        type="checkbox"
+                        aria-label={`Favorite ${symbol}`}
+                        checked={isFavorite}
+                        onChange={() => toggleFavorite(symbol)}
+                        onClick={(event) => event.stopPropagation()}
+                        onKeyDown={(event) => event.stopPropagation()}
+                      />
+                      <TickerLogo symbol={symbol} />
+                      <div className="siw-row-name">
+                        <strong>{symbol}{isRowLoading ? " ..." : ""}</strong>
+                        <span>{stock.companyName}</span>
+                      </div>
+                      <div className="siw-row-price">
+                        <strong>{currency(price)}</strong>
+                        <span>USD</span>
+                      </div>
+                      <div className={`siw-row-change ${rowPositive ? "siw-up" : "siw-down"}`}>
+                        <strong>{rowPositive ? "+" : ""}{change.toFixed(2)}</strong>
+                        <span>{rowPositive ? "+" : ""}{pct.toFixed(2)}%</span>
+                      </div>
+                      <button
+                        type="button"
+                        title="Remove ticker"
+                        aria-label={`Remove ${symbol}`}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          removeSymbol(symbol);
+                        }}
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  );
+                })}
+                {watchlist.length === 0 && (
+                  <div className="siw-empty-list">
+                    No stocks match this search/filter.
+                  </div>
+                )}
+              </div>
+
+              <div className="siw-sidebar-actions">
+                <button
+                  type="button"
+                  className="siw-add-button"
+                  onClick={() => {
+                    setQuery((value) => value || "SOFI");
+                    setSettingsOpen(false);
+                  }}
+                >
+                  + Add ticker
+                </button>
+                <button type="button" className="siw-icon-button" onClick={() => setSettingsOpen((value) => !value)} aria-label="Settings">
+                  <span>⚙</span>
+                </button>
+              </div>
+            </>
+          )}
+
+          {watchlistCollapsed && (
+            <div className="siw-mini-rail">
+              {watchlist.slice(0, 8).map((stock) => (
+                <button key={stock.symbol} type="button" onClick={() => selectWatchlistSymbol(stock.symbol)} className={stock.symbol === selectedSymbol ? "is-selected" : ""}>
+                  <TickerLogo symbol={stock.symbol} />
+                </button>
+              ))}
+            </div>
+          )}
+        </aside>
+
+        <main ref={detailPanelRef} className="siw-main">
+          <header className="siw-hero">
+            <div className="siw-hero-identity">
+              <div className="siw-logo-card">
+                <TickerLogo symbol={snapshot?.symbol || selectedSymbol} large />
+                <button type="button" onClick={() => toggleFavorite(selectedSymbol)} aria-label={`Favorite ${selectedSymbol}`}>
+                  <Star className={favorites.includes(selectedSymbol) ? "h-4 w-4 fill-blue-400 text-blue-400" : "h-4 w-4"} />
+                </button>
+              </div>
+              <div>
+                <h1>{snapshot?.symbol || selectedSymbol}</h1>
+                <p>{snapshot?.quote.companyName || getStocksWatcherUniverseStock(selectedSymbol)?.companyName || "Stocks Intelligence"}</p>
+              </div>
+            </div>
+
+            <div className="siw-hero-price">
+              <strong>{latestPrice ? latestPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "--"}</strong>
+              <span>USD</span>
+              {snapshot && (
+                <em className={isPositive ? "siw-up" : "siw-down"}>
+                  {isPositive ? "+" : ""}{snapshot.quote.change.toFixed(2)}
+                  {" "}
+                  {isPositive ? "+" : ""}{snapshot.quote.changePercent.toFixed(2)}%
+                  {" ▲"}
+                </em>
+              )}
+            </div>
+
+            <div className="siw-hero-stats">
+              <span>High <b>{sessionHigh ? sessionHigh.toFixed(2) : "--"}</b></span>
+              <span>Low <b>{sessionLow ? sessionLow.toFixed(2) : "--"}</b></span>
+              <span>Open <b>{sessionOpen ? sessionOpen.toFixed(2) : "--"}</b></span>
+              <span>Prev Close <b>{previousClose ? previousClose.toFixed(2) : "--"}</b></span>
+            </div>
+
+            <div className="siw-hero-chart">
+              <MiniSparkline points={historyPrices} positive={isPositive} className="siw-hero-sparkline" dataRole="hero" />
+              <span>Updated {updatedSecondsAgo === null ? "--" : `${updatedSecondsAgo}s ago`}</span>
+            </div>
+
+            <button type="button" className="siw-market-pill" onClick={refreshCurrent}>
+              <span />
+              <b>Market</b>
+              <strong>Open</strong>
+              <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+            </button>
+          </header>
+
+          <nav className="siw-main-tabs" aria-label="Stocks watcher sections">
+            {TOP_TABS.map((item) => (
+              <button key={item} type="button" onClick={() => setActiveTab(item)} className={item === activeTab ? "is-active" : ""}>
+                <span className="siw-tab-icon">
+                  {{
+                    Overview: "⌁",
+                    Chart: "⌁",
+                    Fundamentals: "▧",
+                    Stats: "▥",
+                    Earnings: "▣",
+                    Options: "⌘",
+                    "Short Vol": "◷",
+                    News: "▤",
+                    Holders: "♙",
+                  }[item]}
+                </span>
+                {item}
+              </button>
+            ))}
+          </nav>
+
+          <div className="siw-main-scroll">
+            {error && <ErrorBanner message={error} onRetry={refreshCurrent} />}
+            {settingsOpen && (
+              <section className="siw-settings-panel" data-settings-panel>
+                <div>
+                  <strong>Watcher config</strong>
+                  <span>Strike window: {strikeWindowSize} | Source: {snapshot?.source === "native_yahoo" ? "Yahoo Finance native" : "Demo fallback"}</span>
+                </div>
+                <button type="button" onClick={refreshCurrent}>Retry / refresh</button>
+              </section>
+            )}
+
+            {renderPrimaryPanel()}
+
+            <div className="siw-detail-stack" data-detail-stack>
+              {renderAiSummaryPanel()}
+              <section data-bottom-panels className="siw-audit-grid">
+                <div className="siw-panel siw-tool-runs">
+                  <div className="siw-panel-title">
+                    <BarChart3 className="h-4 w-4" />
+                    <span>1) Native Yahoo Tool Runs</span>
+                    <b>{toolRunLog.length || snapshot?.toolRuns.length || 0}</b>
+                  </div>
+                  <div className="siw-run-table">
+                    {(toolRunLog.length > 0 ? toolRunLog : (snapshot?.toolRuns || []).map((run, index) => ({
+                      id: `${run.name}-${index}`,
+                      name: run.name,
+                      params: {},
+                      status: run.status === "ok" ? "ok" as ToolStatus : "failed" as ToolStatus,
+                      startedAt: Date.now(),
+                      durationMs: undefined,
+                      payload: run.detail,
+                    }))).slice(0, 8).map((run, index) => (
+                      <button key={run.id} type="button" onClick={() => setExpandedRunId(expandedRunId === run.id ? null : run.id)} className={`siw-run-row ${run.status}`}>
+                        <span>{index + 1}</span>
+                        <strong>{run.name}</strong>
+                        <b>{run.status}</b>
+                        <em>{run.durationMs ? `${run.durationMs}ms` : "--"}</em>
+                      </button>
+                    ))}
+                  </div>
+                  {expandedRunId && (
+                    <pre>{stringifyPayload(toolRunLog.find((run) => run.id === expandedRunId))}</pre>
+                  )}
+                </div>
+
+                <div className="siw-panel siw-market-context">
+                  <div className="siw-panel-title">
+                    <Building2 className="h-4 w-4" />
+                    <span>2) Market Context (Yahoo)</span>
+                    <button type="button" onClick={() => void loadMarketContext()}>Refresh</button>
+                  </div>
+                  <div className="siw-context-cards">
+                    <MetricTile label="Market Regime" value={snapshot?.marketContext.breadth?.slice(0, 22) || "Low Stress"} tone="positive" />
+                    <MetricTile label="Universe" value={`${watchlist.length} rows`} tone="blue" />
+                  </div>
+                  <div className="siw-breadth-bar">
+                    <span style={{ width: `${Math.max(8, Math.min(92, netPositiveGexPct))}%` }} />
+                    <em style={{ width: `${Math.max(8, Math.min(92, negativeGexPct))}%` }} />
+                  </div>
+                  <div className="siw-leader-laggard">
+                    <div>
+                      <b>Top Leaders</b>
+                      {watchlist.slice(0, 5).map((stock) => <span key={stock.symbol}>{stock.symbol}</span>)}
+                    </div>
+                    <div>
+                      <b>Top Laggards</b>
+                      {[...watchlist].slice(-5).map((stock) => <span key={stock.symbol}>{stock.symbol}</span>)}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="siw-panel siw-tool-catalog">
+                  <div className="siw-panel-title">
+                    <span>3) Tool Catalog (Yahoo Native)</span>
+                    <b>local proxy</b>
+                  </div>
+                  <label>
+                    <Search className="h-4 w-4" />
+                    <input
+                      value={toolSearch}
+                      onChange={(event) => setToolSearch(event.target.value)}
+                      aria-label="Search native Yahoo tools"
+                      name="native-yahoo-tool-search"
+                      placeholder="Search tools..."
+                    />
+                  </label>
+                  <div className="siw-tool-groups">
+                    {Object.entries(groupedTools).map(([category, tools]) => (
+                      <div key={category}>
+                        <button type="button" className="siw-tool-group-title">{category}</button>
+                        <div>
+                          {tools.slice(0, 8).map((tool) => (
+                            <button key={tool.name} type="button" title={tool.description || tool.name} onClick={() => openRunToolModal(tool.name)}>
+                              {tool.name}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                    {availableTools.length === 0 && <span>Tool list unavailable in fallback mode.</span>}
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
+
+          <footer className="siw-status-bar">
+            <span><b /> Market: Open</span>
+            <span>Data: Yahoo Finance <em>(Delayed 15-20 min)</em></span>
+            <span>Source: {snapshot?.source === "native_yahoo" ? "Yahoo options chain + local Greek approximation" : "Demo fallback"}</span>
+            <span>Not financial advice</span>
+            <button type="button" onClick={() => setSettingsOpen((value) => !value)}>Help</button>
+          </footer>
+
+          <nav className="siw-mobile-nav" aria-label="Mobile watcher navigation">
+            {(["home", "markets", "watcher", "portfolio", "more"] as const).map((item) => (
+              <button key={item} type="button" onClick={() => setMobilePanel(item)} className={mobilePanel === item ? "is-active" : ""}>
+                <span>{item === "watcher" ? "⌘" : item.slice(0, 1).toUpperCase()}</span>
+                {item[0].toUpperCase() + item.slice(1)}
+              </button>
+            ))}
+          </nav>
+        </main>
+      </div>
+
+      <div style={{ display: "none" }} className={`grid min-h-full grid-cols-1 pt-2 lg:h-full ${watchlistCollapsed ? "lg:grid-cols-[4.5rem_minmax(0,1fr)]" : "lg:grid-cols-[28rem_minmax(0,1fr)]"}`}>
         <aside className={`border-r border-slate-700/50 bg-[#070b11] pb-5 pt-4 lg:h-full ${watchlistCollapsed ? "px-2" : "px-4 sm:px-5"}`}>
           {watchlistCollapsed ? (
             <div className="flex h-full flex-col items-center gap-3">

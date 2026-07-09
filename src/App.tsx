@@ -21,6 +21,7 @@ function App() {
   const [currentView, setCurrentView] = useState<ViewState>(() =>
     typeof window === 'undefined' ? 'home' : getViewFromHash(window.location.hash)
   );
+  const isFullScreenLabView = currentView === 'stocks-intelligence-watcher';
 
   useEffect(() => {
     const syncViewFromHash = () => {
@@ -43,16 +44,18 @@ function App() {
 
   return (
     <main className="w-full h-screen relative bg-[#141414] overflow-hidden">
-      <Navbar 
-        onMarketLab={() => navigateToView('work-gallery')}
-        onPhotography={() => navigateToView('photography')}
-        onHome={() => navigateToView('home')}
-        onAbout={() => navigateToView('about')}
-        onContact={() => navigateToView('contact')}
-        currentView={currentView}
-      />
+      {!isFullScreenLabView && (
+        <Navbar
+          onMarketLab={() => navigateToView('work-gallery')}
+          onPhotography={() => navigateToView('photography')}
+          onHome={() => navigateToView('home')}
+          onAbout={() => navigateToView('about')}
+          onContact={() => navigateToView('contact')}
+          currentView={currentView}
+        />
+      )}
       
-      <div className={`w-full h-full flex ${currentView === 'home' || currentView === 'contact' ? '' : 'pt-20'}`}>
+      <div className={`w-full h-full flex ${currentView === 'home' || currentView === 'contact' || isFullScreenLabView ? '' : 'pt-20'}`}>
         
         {/* Left App Navigation Component - ONLY active during Finance Dashboard */}
         {currentView === 'finance-dashboard' && (
@@ -118,7 +121,7 @@ function App() {
       <AICaptionTool isOpen={isAIOpen} onClose={() => setIsAIOpen(false)} />
 
       {/* Grid Pattern Overlay */}
-      {currentView !== 'home' && currentView !== 'contact' && (
+      {currentView !== 'home' && currentView !== 'contact' && !isFullScreenLabView && (
         <div className="fixed inset-0 pointer-events-none opacity-[0.03] bg-[radial-gradient(#ffffff_1px,transparent_1px)] [background-size:40px_40px]" />
       )}
     </main>

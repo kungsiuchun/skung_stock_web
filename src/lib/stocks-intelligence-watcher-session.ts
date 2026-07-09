@@ -5,6 +5,7 @@ import type {
 import type { StocksWatcherUniverseStock } from "./stocks-watcher-universe";
 
 export type StocksWatcherTopTab =
+  | "Overview"
   | "Chart"
   | "Fundamentals"
   | "Stats"
@@ -60,6 +61,7 @@ export const getStocksWatcherTopTabToolPlan = (
   symbol: string,
 ): StocksWatcherToolCallPlan[] => {
   const ticker = normalizeSessionSymbol(symbol);
+  if (tab === "Overview") return [];
   if (tab === "Chart") return [{ name: "get_intraday", params: { ticker } }];
   if (tab === "Fundamentals") return [{ name: "get_stock_stats", params: { ticker } }];
   if (tab === "Stats") return [

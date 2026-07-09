@@ -654,10 +654,25 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     },
   ),
   tool(
-    { name: "get_stock_history", description: "Get daily OHLCV history from Yahoo chart API.", inputSchema: { properties: { ticker: { type: "string" } }, required: ["ticker"] } },
-    async ({ ticker }) => {
-      const history = await fetchHistory(ticker, "5y", "1d");
-      return toolResult(markdownHistory(history, 120), { ticker, history });
+    {
+      name: "get_stock_history",
+      description: "Get OHLCV history from Yahoo chart API.",
+      inputSchema: {
+        properties: {
+          ticker: { type: "string" },
+          range: { type: "string" },
+          interval: { type: "string" },
+        },
+        required: ["ticker"],
+      },
+    },
+    async ({ ticker, params }) => {
+      const requestedRange = typeof params.range === "string" ? params.range.trim() : "5y";
+      const requestedInterval = typeof params.interval === "string" ? params.interval.trim() : "1d";
+      const range = /^(\d+(d|mo|y)|ytd|max)$/.test(requestedRange) ? requestedRange : "5y";
+      const interval = /^(1d|1wk|1mo)$/.test(requestedInterval) ? requestedInterval : "1d";
+      const history = (await fetchHistory(ticker, range, interval)).slice(-120);
+      return toolResult(markdownHistory(history, 120), { ticker, range, interval, history });
     },
   ),
   tool(
