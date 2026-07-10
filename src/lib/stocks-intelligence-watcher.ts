@@ -9,9 +9,41 @@ export interface StocksWatcherQuote {
   symbol: string;
   companyName: string;
   price: number;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  previousClose: number | null;
   change: number;
   changePercent: number;
   asOf: string | null;
+}
+
+export interface StocksWatcherNewsItem {
+  title: string;
+  publisher: string;
+  link: string;
+  publishedAt: string | null;
+}
+
+export interface StocksWatcherEarningsSnapshot {
+  source: string;
+  nextEarningsDate: string | null;
+  nextEpsEstimate: number | null;
+  nextRevenueEstimate: string | null;
+  lastEarningsDate: string | null;
+  lastReportedQuarter: string | null;
+  epsActual: number | null;
+  epsEstimate: number | null;
+  epsDifference: number | null;
+  surprisePercent: number | null;
+  result: "beat" | "miss" | null;
+  priceMove: {
+    eventTradingDate: string;
+    previousClose: number;
+    close: number;
+    changePercent: number;
+    basis: string;
+  } | null;
 }
 
 export interface StocksWatcherExpiryRow {
@@ -37,6 +69,7 @@ export interface StocksWatcherStrikeRow {
 
 export interface StocksWatcherHistoryPoint {
   label: string;
+  date?: string;
   price: number;
 }
 
@@ -63,6 +96,8 @@ export interface StocksWatcherSnapshot {
   expiries: StocksWatcherExpiryRow[];
   strikes: StocksWatcherStrikeRow[];
   history: StocksWatcherHistoryPoint[];
+  recentNews: StocksWatcherNewsItem[];
+  earnings: StocksWatcherEarningsSnapshot;
   marketContext: {
     breadth: string;
     relativeStrength: string;
@@ -85,6 +120,25 @@ export const STOCKS_WATCHER_CACHE_TTL_MS = 60_000;
 export interface StocksWatcherSnapshotCacheEntry {
   snapshot: StocksWatcherSnapshot;
   fetchedAt: number;
+}
+
+export interface StocksWatcherRowQuote {
+  symbol: string;
+  companyName?: string;
+  price: number;
+  previousClose?: number | null;
+  change: number;
+  changePercent: number;
+  asOf: string | null;
+  fetchedAt: number;
+  source: "yahoo_quote";
+}
+
+export interface StocksWatcherRefreshBatchResult<T> {
+  symbol: string;
+  status: "fulfilled" | "rejected";
+  value?: T;
+  reason?: unknown;
 }
 
 export interface StocksWatcherRemovalState {
@@ -223,6 +277,34 @@ export const getFreshStocksWatcherCacheEntry = (
   return now - entry.fetchedAt <= ttlMs ? entry : null;
 };
 
+export const refreshStocksWatcherSymbolsBatch = async <T>(
+  symbols: string[],
+  refreshSymbol: (symbol: string) => Promise<T>,
+  options: { concurrency?: number } = {},
+): Promise<StocksWatcherRefreshBatchResult<T>[]> => {
+  const queue = uniqueSymbols(symbols);
+  const concurrency = Math.max(1, Math.min(options.concurrency || 4, queue.length || 1));
+  const results: StocksWatcherRefreshBatchResult<T>[] = [];
+  let cursor = 0;
+
+  const worker = async () => {
+    while (cursor < queue.length) {
+      const symbol = queue[cursor];
+      cursor += 1;
+      if (!symbol) continue;
+      try {
+        const value = await refreshSymbol(symbol);
+        results.push({ symbol, status: "fulfilled", value });
+      } catch (reason) {
+        results.push({ symbol, status: "rejected", reason });
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  return results;
+};
+
 const parseTableCells = (line: string) =>
   line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.replace(/\*\*/g, "").trim());
 
@@ -237,11 +319,13 @@ const parseNumber = (value: string) => {
 };
 
 const parseDateLike = (value: string) => {
-  const match = value.match(/\b(\d{2,4}[-/]\d{1,2}[-/]\d{1,2})\b/);
+  const match = value.match(/\b(\d{2,4}[-/]\d{1,2}[-/]\d{1,2})(?:[ T](\d{1,2}:\d{2})(?::\d{2})?)?\b/);
   if (!match) return null;
   const [first, second, third] = match[1].split(/[-/]/);
-  if (first.length === 2) return `20${first}-${second.padStart(2, "0")}-${third.padStart(2, "0")}`;
-  return `${first}-${second.padStart(2, "0")}-${third.padStart(2, "0")}`;
+  const date = first.length === 2
+    ? `20${first}-${second.padStart(2, "0")}-${third.padStart(2, "0")}`
+    : `${first}-${second.padStart(2, "0")}-${third.padStart(2, "0")}`;
+  return match[2] ? `${date} ${match[2]}` : date;
 };
 
 const parseQuoteText = (symbol: string, text: string): Partial<StocksWatcherQuote> => {
@@ -335,17 +419,44 @@ const parseGexRows = (text: string, spot: number): Partial<StocksWatcherStrikeRo
 
 const parseHistory = (text: string): StocksWatcherHistoryPoint[] => {
   const points: StocksWatcherHistoryPoint[] = [];
+  let headerCells: string[] = [];
 
   for (const line of text.split("\n")) {
     if (!line.trim().startsWith("|")) continue;
     const cells = parseTableCells(line);
+    if (cells.some((cell) => /date|time/i.test(cell)) && cells.some((cell) => /close|price|last/i.test(cell))) {
+      headerCells = cells.map((cell) => cell.toLowerCase());
+      continue;
+    }
+    if (cells.every((cell) => /^-+$/.test(cell.replace(/:/g, "").trim()))) continue;
     const date = cells.map(parseDateLike).find(Boolean);
+    if (!date) continue;
+    const closeIndex = headerCells.findIndex((cell) => /close|price|last/.test(cell));
+    const close = closeIndex >= 0 ? parseNumber(cells[closeIndex] || "") : null;
     const numbers = cells.map(parseNumber).filter((value): value is number => value !== null);
-    if (!date || numbers.length === 0) continue;
-    points.push({ label: date.slice(5), price: numbers[numbers.length - 1] });
+    const price = close ?? numbers[numbers.length - 1];
+    if (typeof price !== "number" || !Number.isFinite(price)) continue;
+    points.push({ date, label: date.slice(5), price });
   }
 
   return points.slice(-40);
+};
+
+const historyFromRawResult = (raw: unknown): StocksWatcherHistoryPoint[] => {
+  const rawRecord = recordFromUnknown(raw);
+  const history = Array.isArray(rawRecord?.history) ? rawRecord.history : [];
+  return history
+    .map(recordFromUnknown)
+    .filter((row): row is Record<string, unknown> => Boolean(row))
+    .map((row): StocksWatcherHistoryPoint | null => {
+      const date = typeof row.date === "string" ? row.date : "";
+      const close = numberFromUnknown(row.close);
+      return date && typeof close === "number"
+        ? { date, label: date.includes("T") ? date.slice(11, 16) : date.slice(5), price: close }
+        : null;
+    })
+    .filter((row): row is StocksWatcherHistoryPoint => Boolean(row))
+    .slice(-40);
 };
 
 const seeded = (symbol: string) =>
@@ -530,6 +641,10 @@ export const buildDemoStocksWatcherSnapshot = (symbol: string, warning: string):
       symbol: upperSymbol,
       companyName: universeStock?.companyName || `${upperSymbol} demo asset`,
       price: base,
+      open: round(base - change * 0.55),
+      high: round(base * 1.012),
+      low: round(base * 0.986),
+      previousClose: round(base - change),
       change,
       changePercent: universeStock?.fallbackChangePercent ?? round((change / base) * 100, 2),
       asOf: "05/28, 04:00 PM",
@@ -547,6 +662,8 @@ export const buildDemoStocksWatcherSnapshot = (symbol: string, warning: string):
     expiries: syntheticExpiryRows,
     strikes,
     history: buildSyntheticHistory(upperSymbol, base),
+    recentNews: [],
+    earnings: emptyEarningsSnapshot("Demo fallback has no Yahoo earningsHistory."),
     marketContext: {
       breadth: "Demo breadth context. Live mode uses native Yahoo data.",
       relativeStrength: `Demo relative strength for ${upperSymbol} versus ${DEFAULT_WATCHLIST.filter((item) => item !== upperSymbol).join(", ")}.`,
@@ -612,6 +729,43 @@ const recordFromUnknown = (value: unknown): Record<string, unknown> | null =>
 const numberFromUnknown = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
 
+export const getStocksWatcherRowQuotesFromRawResult = (raw: unknown, fetchedAt = Date.now()): StocksWatcherRowQuote[] => {
+  const rawRecord = recordFromUnknown(raw);
+  const quotes = Array.isArray(rawRecord?.quotes) ? rawRecord.quotes : [];
+  return quotes
+    .map(recordFromUnknown)
+    .filter((quote): quote is Record<string, unknown> => Boolean(quote))
+    .map((quote) => {
+      const symbol = typeof quote.symbol === "string" ? normalizeStocksWatcherSymbol(quote.symbol) : "";
+      const price = numberFromUnknown(quote.price);
+      if (!symbol || typeof price !== "number") return null;
+      const rowQuote: StocksWatcherRowQuote = {
+        symbol,
+        price,
+        previousClose: numberFromUnknown(quote.previousClose) ?? null,
+        change: numberFromUnknown(quote.change) ?? 0,
+        changePercent: numberFromUnknown(quote.changePercent) ?? 0,
+        asOf: typeof quote.asOf === "string" ? quote.asOf : null,
+        fetchedAt,
+        source: "yahoo_quote" as const,
+      };
+      if (typeof quote.name === "string") rowQuote.companyName = quote.name;
+      return rowQuote;
+    })
+    .filter((quote): quote is StocksWatcherRowQuote => Boolean(quote));
+};
+
+export const mergeStocksWatcherRowQuoteMap = (
+  current: Record<string, StocksWatcherRowQuote>,
+  quotes: StocksWatcherRowQuote[],
+) => {
+  const next = { ...current };
+  for (const quote of quotes) {
+    next[quote.symbol] = quote;
+  }
+  return next;
+};
+
 const quoteFromRawResult = (symbol: string, raw: unknown): Partial<StocksWatcherQuote> => {
   const rawRecord = recordFromUnknown(raw);
   const quotes = Array.isArray(rawRecord?.quotes) ? rawRecord.quotes : [];
@@ -624,9 +778,73 @@ const quoteFromRawResult = (symbol: string, raw: unknown): Partial<StocksWatcher
     symbol,
     companyName: typeof quote.name === "string" ? quote.name : undefined,
     price: numberFromUnknown(quote.price),
+    open: numberFromUnknown(quote.open) ?? null,
+    high: numberFromUnknown(quote.high) ?? null,
+    low: numberFromUnknown(quote.low) ?? null,
+    previousClose: numberFromUnknown(quote.previousClose) ?? null,
     change: numberFromUnknown(quote.change),
     changePercent: numberFromUnknown(quote.changePercent),
     asOf: typeof quote.asOf === "string" ? quote.asOf : undefined,
+  };
+};
+
+const emptyEarningsSnapshot = (source = "Yahoo earnings data unavailable"): StocksWatcherEarningsSnapshot => ({
+  source,
+  nextEarningsDate: null,
+  nextEpsEstimate: null,
+  nextRevenueEstimate: null,
+  lastEarningsDate: null,
+  lastReportedQuarter: null,
+  epsActual: null,
+  epsEstimate: null,
+  epsDifference: null,
+  surprisePercent: null,
+  result: null,
+  priceMove: null,
+});
+
+const newsFromRawResult = (raw: unknown): StocksWatcherNewsItem[] => {
+  const rawRecord = recordFromUnknown(raw);
+  const news = Array.isArray(rawRecord?.news) ? rawRecord.news : [];
+  return news
+    .map(recordFromUnknown)
+    .filter((item): item is Record<string, unknown> => Boolean(item))
+    .map((item) => ({
+      title: typeof item.title === "string" ? item.title.trim() : "",
+      publisher: typeof item.publisher === "string" ? item.publisher.trim() : "Yahoo Finance",
+      link: typeof item.link === "string" ? item.link.trim() : "",
+      publishedAt: typeof item.publishedAt === "string" ? item.publishedAt : null,
+    }))
+    .filter((item) => item.title)
+    .slice(0, 3);
+};
+
+const earningsFromRawResult = (raw: unknown): StocksWatcherEarningsSnapshot => {
+  const rawRecord = recordFromUnknown(raw);
+  const earnings = recordFromUnknown(rawRecord?.earnings);
+  if (!earnings) return emptyEarningsSnapshot();
+  const priceMove = recordFromUnknown(earnings.priceMove);
+  return {
+    source: typeof earnings.source === "string" ? earnings.source : "Yahoo quoteSummary calendarEvents + earningsHistory",
+    nextEarningsDate: typeof earnings.nextEarningsDate === "string" ? earnings.nextEarningsDate : null,
+    nextEpsEstimate: numberFromUnknown(earnings.nextEpsEstimate) ?? null,
+    nextRevenueEstimate: typeof earnings.nextRevenueEstimate === "string" ? earnings.nextRevenueEstimate : null,
+    lastEarningsDate: typeof earnings.lastEarningsDate === "string" ? earnings.lastEarningsDate : null,
+    lastReportedQuarter: typeof earnings.lastReportedQuarter === "string" ? earnings.lastReportedQuarter : null,
+    epsActual: numberFromUnknown(earnings.epsActual) ?? null,
+    epsEstimate: numberFromUnknown(earnings.epsEstimate) ?? null,
+    epsDifference: numberFromUnknown(earnings.epsDifference) ?? null,
+    surprisePercent: numberFromUnknown(earnings.surprisePercent) ?? null,
+    result: earnings.result === "beat" || earnings.result === "miss" ? earnings.result : null,
+    priceMove: priceMove
+      ? {
+        eventTradingDate: typeof priceMove.eventTradingDate === "string" ? priceMove.eventTradingDate : "",
+        previousClose: numberFromUnknown(priceMove.previousClose) ?? 0,
+        close: numberFromUnknown(priceMove.close) ?? 0,
+        changePercent: numberFromUnknown(priceMove.changePercent) ?? 0,
+        basis: typeof priceMove.basis === "string" ? priceMove.basis : "close_to_close",
+      }
+      : null,
   };
 };
 
@@ -709,12 +927,14 @@ export const buildStocksWatcherSnapshotFromNative = async (
   const zeroDteText = await callToolWithVariants(client, "get_options_0dte", [
     { ticker: upperSymbol },
   ], toolRuns);
-  const intradayText = await callToolWithVariants(client, "get_intraday", [
+  const intradayResult = await callToolStructuredWithVariants(client, "get_intraday", [
     { ticker: upperSymbol },
   ], toolRuns);
-  const historyText = await callToolWithVariants(client, "get_stock_history", [
+  const historyResult = await callToolStructuredWithVariants(client, "get_stock_history", [
     { ticker: upperSymbol },
   ], toolRuns);
+  const intradayText = intradayResult.text;
+  const historyText = historyResult.text;
   const breadthText = await callToolWithVariants(client, "market_breadth", [
     {},
     { market: "US" },
@@ -722,11 +942,25 @@ export const buildStocksWatcherSnapshotFromNative = async (
   const relativeStrengthText = await callToolWithVariants(client, "basket_relative_strength", [
     {},
   ], toolRuns);
+  const newsResult = await callToolStructuredWithVariants(client, "pre_event_brief", [
+    { ticker: upperSymbol, intent: "overview news" },
+  ], toolRuns);
+  const earningsResult = await callToolStructuredWithVariants(client, "earnings_vol_crush", [
+    { ticker: upperSymbol },
+  ], toolRuns);
 
   const parsedExpiries = parseOptionRows(optionsText, price);
   const expiryRows = buildExpirySummaryRows(expiries, [...rawOptions.rows, ...parsedExpiries], demoBase.expiryRows);
   const strikes = completeRows(upperSymbol, price, parseGexRows(`${gexText}\n${zeroDteText}`, price));
-  const history = parseHistory(intradayText).length > 3 ? parseHistory(intradayText) : parseHistory(historyText);
+  const rawIntradayHistory = historyFromRawResult(intradayResult.raw);
+  const rawDailyHistory = historyFromRawResult(historyResult.raw);
+  const history = rawIntradayHistory.length > 3
+    ? rawIntradayHistory
+    : rawDailyHistory.length > 3
+      ? rawDailyHistory
+    : parseHistory(intradayText).length > 3
+      ? parseHistory(intradayText)
+      : parseHistory(historyText);
   const callOi = strikes.reduce((sum, row) => sum + row.callOpenInterest, 0);
   const putOi = strikes.reduce((sum, row) => sum + row.putOpenInterest, 0);
   const callVol = strikes.reduce((sum, row) => sum + row.callVolume, 0);
@@ -742,6 +976,10 @@ export const buildStocksWatcherSnapshotFromNative = async (
       price,
       change: partialQuote.change ?? demoBase.quote.change,
       changePercent: partialQuote.changePercent ?? demoBase.quote.changePercent,
+      open: partialQuote.open ?? demoBase.quote.open,
+      high: partialQuote.high ?? demoBase.quote.high,
+      low: partialQuote.low ?? demoBase.quote.low,
+      previousClose: partialQuote.previousClose ?? demoBase.quote.previousClose,
       asOf: partialQuote.asOf || demoBase.quote.asOf,
     },
     spot: price,
@@ -757,6 +995,8 @@ export const buildStocksWatcherSnapshotFromNative = async (
     expiries: expiryRows,
     strikes,
     history: history.length > 3 ? history : demoBase.history,
+    recentNews: newsFromRawResult(newsResult.raw),
+    earnings: earningsFromRawResult(earningsResult.raw),
     marketContext: {
       breadth: summariseTool("market_breadth", breadthText),
       relativeStrength: summariseTool("basket_relative_strength", relativeStrengthText),

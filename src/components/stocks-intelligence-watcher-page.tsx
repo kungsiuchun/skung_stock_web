@@ -1,17 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { MouseEvent as ReactMouseEvent } from "react";
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import {
+  Activity,
   ArrowLeft,
   BarChart3,
   Building2,
+  CalendarDays,
   ChevronDown,
+  LineChart,
   Loader2,
+  Newspaper,
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
   Search,
   Sparkles,
   Star,
+  Users,
   X,
 } from "lucide-react";
 import { AreaSeries, BarSeries, CandlestickSeries, ColorType, HistogramSeries, LineSeries, createChart } from "lightweight-charts";
@@ -19,6 +24,7 @@ import "./stocks-intelligence-watcher-page.css";
 import type {
   StocksWatcherChartMode,
   StocksWatcherExpiryRow,
+  StocksWatcherRowQuote,
   StocksWatcherSnapshotCacheEntry,
   StocksWatcherSnapshot,
   StocksWatcherStrikeRow,
@@ -28,7 +34,9 @@ import {
   getFreshStocksWatcherCacheEntry,
   getGammaFlipLevel,
   getNearestSpotStrike,
+  getStocksWatcherRowQuotesFromRawResult,
   getStocksWatcherVisibleSymbols,
+  mergeStocksWatcherRowQuoteMap,
 } from "@/lib/stocks-intelligence-watcher";
 import {
   buildStocksWatcherAiSummaryPayload,
@@ -65,6 +73,7 @@ const HIDDEN_SYMBOLS_STORAGE_KEY = "stocks-intelligence-hidden-symbols";
 const FAVORITES_STORAGE_KEY = "stocks-intelligence-favorites";
 const FAVORITES_MEMORY_KEY = "stocks-intelligence-favorites";
 const CUSTOM_STOCKS_STORAGE_KEY = "stocks-intelligence-custom-stocks";
+const ROW_QUOTE_REFRESH_CHUNK_SIZE = 20;
 
 const TOP_TABS = [
   "Overview",
@@ -103,6 +112,18 @@ const MARKET_INDEX_DEFINITIONS: MarketIndexDefinition[] = [
 type TopTab = (typeof TOP_TABS)[number];
 type OptionsSubTab = (typeof OPTIONS_SUB_TABS)[number];
 type ToolStatus = "ok" | "failed" | "running";
+
+const TOP_TAB_ICONS: Record<TopTab, typeof Sparkles> = {
+  Overview: Sparkles,
+  Chart: LineChart,
+  Fundamentals: Building2,
+  Stats: BarChart3,
+  Earnings: CalendarDays,
+  Options: Activity,
+  "Short Vol": Activity,
+  News: Newspaper,
+  Holders: Users,
+};
 
 interface NativeToolResult {
   tool: string;
@@ -155,10 +176,14 @@ interface MarketIndexDefinition {
 
 interface MarketIndexCard {
   symbol: string;
+  sourceSymbol: string;
   label: string;
+  status: "ok" | "unavailable";
   value: number;
   change: number;
   changePercent: number;
+  historyPointCount: number;
+  error?: string;
   history: RawHistoryPoint[];
 }
 
@@ -220,6 +245,21 @@ interface RawHistoryPoint {
   volume?: number;
 }
 
+interface SparklinePoint {
+  label: string;
+  dateTimeLabel?: string;
+  rangeLabel?: string;
+  granularityLabel?: string;
+  value: number;
+  source?: string;
+}
+
+interface SparklineTooltipPosition {
+  left: number;
+  top: number;
+  alignRight: boolean;
+}
+
 interface RawQuoteRow {
   symbol?: string;
   name?: string;
@@ -240,8 +280,69 @@ const formatNumber = (value: number) => {
 const currency = (value: number) =>
   `$${value.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}`;
 
+const quoteDirection = (change: number | null | undefined, changePercent: number | null | undefined) => {
+  if (typeof change === "number" && Number.isFinite(change) && change !== 0) return change > 0 ? 1 : -1;
+  if (typeof changePercent === "number" && Number.isFinite(changePercent) && changePercent !== 0) return changePercent > 0 ? 1 : -1;
+  return 0;
+};
+
+const signedNumberText = (value: number) => `${value > 0 ? "+" : ""}${value.toFixed(2)}`;
+const directionArrow = (direction: number) => direction > 0 ? "▲" : direction < 0 ? "▼" : "";
+
+const formatOptionalPrice = (value: number | null | undefined) =>
+  typeof value === "number" && Number.isFinite(value)
+    ? value.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })
+    : "N/A";
+
+const formatSignedPercent = (value: number | null | undefined) =>
+  typeof value === "number" && Number.isFinite(value)
+    ? `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`
+    : "N/A";
+
+const formatOptionalNumber = (value: number | null | undefined, digits = 2) =>
+  typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "N/A";
+
+const formatNewsTimestamp = (value: string | null | undefined) => {
+  if (!value) return "Yahoo";
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return value;
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "America/New_York",
+  }).format(new Date(parsed));
+};
+
 const formatIndexValue = (value: number) =>
   value > 0 ? value.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 }) : "--";
+
+const formatSparklineDateTime = (value: string | undefined, fallback: string, mode: "date" | "dateTime" = "date") => {
+  if (!value) return fallback;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return value;
+  const options: Intl.DateTimeFormatOptions = mode === "dateTime"
+    ? { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZone: "America/New_York" }
+    : { month: "short", day: "numeric", year: "numeric", timeZone: "America/New_York" };
+  return `${new Intl.DateTimeFormat("en-US", options).format(new Date(parsed))}${mode === "dateTime" ? " ET" : ""}`;
+};
+
+const dateFromAsOfAndSessionLabel = (asOf: string | null | undefined, label: string | undefined) => {
+  if (!asOf || !label) return null;
+  const baseDate = Date.parse(asOf);
+  if (!Number.isFinite(baseDate)) return null;
+  const timeMatch = label.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?$/i);
+  if (!timeMatch) return new Date(baseDate).toISOString();
+  let hours = Number(timeMatch[1]);
+  const minutes = Number(timeMatch[2] || 0);
+  const suffix = timeMatch[3]?.toUpperCase();
+  if (suffix === "PM" && hours < 12) hours += 12;
+  if (suffix === "AM" && hours === 12) hours = 0;
+  const date = new Date(baseDate);
+  date.setUTCHours(hours + 4, minutes, 0, 0);
+  return date.toISOString();
+};
 
 const formatQuoteAsOf = (asOf: string | null | undefined) => {
   if (!asOf) return "loading";
@@ -388,6 +489,14 @@ const parseSymbolsFromText = (text: string) => {
   return sanitizeSymbols(symbols.filter((symbol) => !["HTTP", "JSON", "NATIVE", "NYSE", "NASDAQ", "THE"].includes(symbol))).slice(0, 50);
 };
 
+const chunkSymbols = (symbols: string[], size: number) => {
+  const chunks: string[][] = [];
+  for (let index = 0; index < symbols.length; index += size) {
+    chunks.push(symbols.slice(index, index + size));
+  }
+  return chunks;
+};
+
 const parseWatchlistStocks = (result: NativeToolResult): StocksWatcherUniverseStock[] => {
   const raw = result.raw && typeof result.raw === "object" && !Array.isArray(result.raw)
     ? result.raw as Record<string, unknown>
@@ -449,28 +558,47 @@ const historyFromResult = (result: NativeToolResult | undefined): RawHistoryPoin
     .filter((row) => row.close && row.high && row.low);
 };
 
+const unavailableMarketIndexCard = (definition: MarketIndexDefinition, error?: string): MarketIndexCard => ({
+  symbol: definition.symbol,
+  sourceSymbol: definition.yahooSymbol,
+  label: definition.label,
+  status: "unavailable",
+  value: 0,
+  change: 0,
+  changePercent: 0,
+  historyPointCount: 0,
+  error,
+  history: [],
+});
+
 const emptyMarketIndexCards = (): MarketIndexCard[] =>
-  MARKET_INDEX_DEFINITIONS.map((definition) => ({
-    symbol: definition.symbol,
-    label: definition.label,
-    value: 0,
-    change: 0,
-    changePercent: 0,
-    history: [],
-  }));
+  MARKET_INDEX_DEFINITIONS.map((definition) => unavailableMarketIndexCard(definition));
 
 const parseMarketIndexCard = (definition: MarketIndexDefinition, result: NativeToolResult): MarketIndexCard => {
-  const history = historyFromResult(result).slice(-45);
+  const history = historyFromResult(result)
+    .filter((row): row is RawHistoryPoint & { date: string; close: number } =>
+      typeof row.date === "string" && typeof row.close === "number" && Number.isFinite(row.close) && row.close > 0)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(-45);
+  if (history.length < 10) {
+    throw new Error(`${definition.label} Yahoo history returned ${history.length} valid points`);
+  }
   const latest = history[history.length - 1]?.close || 0;
   const previous = history[Math.max(0, history.length - 2)]?.close || latest;
+  if (latest <= 0 || previous <= 0) {
+    throw new Error(`${definition.label} Yahoo history returned invalid close values`);
+  }
   const change = latest - previous;
   const changePercent = previous > 0 ? (change / previous) * 100 : 0;
   return {
     symbol: definition.symbol,
+    sourceSymbol: definition.yahooSymbol,
     label: definition.label,
+    status: "ok",
     value: latest,
     change,
     changePercent,
+    historyPointCount: history.length,
     history,
   };
 };
@@ -1107,38 +1235,166 @@ const MiniSparkline = ({
   positive = true,
   className = "",
   dataRole,
+  tooltip,
+  sourceLabel,
+  valueFormatter,
+  placement = "top",
 }: {
-  points: number[];
+  points: Array<number | SparklinePoint>;
   positive?: boolean;
   className?: string;
   dataRole?: "hero" | "index";
+  tooltip?: string;
+  sourceLabel?: string;
+  valueFormatter?: (value: number) => string;
+  placement?: "top" | "bottom" | "auto";
 }) => {
-  const cleanPoints = points.filter((point) => Number.isFinite(point));
-  const values = cleanPoints.length >= 2 ? cleanPoints : [1, 1.03, 1.01, 1.05, 1.08, 1.07];
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [tooltipPosition, setTooltipPosition] = useState<SparklineTooltipPosition | null>(null);
+  const cleanPoints = points
+    .map((point, index): SparklinePoint | null => {
+      if (typeof point === "number") {
+        return Number.isFinite(point) ? { label: `Point ${index + 1}`, value: point, source: sourceLabel } : null;
+      }
+      return Number.isFinite(point.value) ? { ...point, source: point.source || sourceLabel } : null;
+    })
+    .filter((point): point is SparklinePoint => Boolean(point));
+  const geometry = dataRole === "index"
+    ? { viewBox: "0 0 100 64", baseline: 60, amplitude: 54, fillBase: 64, emptyTextY: 34 }
+    : dataRole === "hero"
+      ? { viewBox: "0 0 100 52", baseline: 49, amplitude: 45, fillBase: 52, emptyTextY: 28 }
+      : { viewBox: "0 0 100 40", baseline: 36, amplitude: 32, fillBase: 40, emptyTextY: 22 };
+  const resetHover = () => {
+    setHoverIndex(null);
+    setTooltipPosition(null);
+  };
+  if (cleanPoints.length < 2) {
+    const unavailableLabel = tooltip || "Price sparkline unavailable";
+    return (
+      <span className="siw-sparkline-frame">
+        <svg
+          className={`siw-sparkline siw-empty ${className}`}
+          viewBox={geometry.viewBox}
+          preserveAspectRatio="none"
+          role="img"
+          aria-label={unavailableLabel}
+          data-hero-sparkline={dataRole === "hero" ? "true" : undefined}
+          data-index-sparkline={dataRole === "index" ? "true" : undefined}
+        >
+          <title>{unavailableLabel}</title>
+          <line x1="0" x2="100" y1={geometry.baseline} y2={geometry.baseline} />
+          <text x="50" y={geometry.emptyTextY} textAnchor="middle">N/A</text>
+        </svg>
+      </span>
+    );
+  }
+  const values = cleanPoints.map((point) => point.value);
   const min = Math.min(...values);
   const max = Math.max(...values);
   const range = max - min || 1;
+  const first = values[0];
+  const latest = values[values.length - 1];
+  const changePercent = first ? ((latest - first) / first) * 100 : 0;
+  const tooltipText = tooltip || `Price sparkline: ${values.length} points, latest ${latest.toFixed(2)}, ${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}% from first point`;
+  const formatValue = valueFormatter || ((value: number) => value.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 }));
+  const pointX = (index: number) => (index / Math.max(1, values.length - 1)) * 100;
+  const pointY = (value: number) => geometry.baseline - ((value - min) / range) * geometry.amplitude;
   const path = values
     .map((value, index) => {
-      const x = (index / Math.max(1, values.length - 1)) * 100;
-      const y = 34 - ((value - min) / range) * 28;
+      const x = pointX(index);
+      const y = pointY(value);
       return `${index === 0 ? "M" : "L"}${x.toFixed(2)} ${y.toFixed(2)}`;
     })
     .join(" ");
+  const activeIndex = hoverIndex === null ? null : Math.min(values.length - 1, Math.max(0, hoverIndex));
+  const activePoint = activeIndex === null ? null : cleanPoints[activeIndex];
+  const activeValue = activeIndex === null ? null : values[activeIndex];
+  const previousValue = activeIndex === null || activeIndex === 0 ? null : values[activeIndex - 1];
+  const activeChange = activeValue !== null && previousValue !== null ? activeValue - previousValue : null;
+  const activeChangePercent = activeChange !== null && previousValue ? (activeChange / previousValue) * 100 : null;
+  const activeX = activeIndex === null ? 0 : pointX(activeIndex);
+  const activeY = activeValue === null ? 0 : pointY(activeValue);
+  const activeRange = [activePoint?.rangeLabel, activePoint?.granularityLabel].filter(Boolean).join(" ");
+  const activeHeader = activePoint
+    ? [activePoint.label, activePoint.dateTimeLabel, activeRange].filter(Boolean).join(" · ")
+    : "";
+  const tooltipPlacement = placement === "auto" && dataRole === "hero" ? "bottom" : placement;
+  const handlePointerMove = (event: ReactPointerEvent<HTMLElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)));
+    setHoverIndex(Math.round(ratio * (values.length - 1)));
+    const shouldOpenBelow = tooltipPlacement === "bottom" || event.clientY < 170;
+    const left = Math.max(12, Math.min(window.innerWidth - 12, event.clientX + (event.clientX > window.innerWidth - 260 ? -12 : 12)));
+    const top = shouldOpenBelow
+      ? Math.min(window.innerHeight - 148, event.clientY + 18)
+      : Math.max(12, event.clientY - 148);
+    setTooltipPosition({
+      left,
+      top,
+      alignRight: event.clientX > window.innerWidth - 260,
+    });
+  };
 
   return (
-    <svg
-      className={`siw-sparkline ${positive ? "siw-positive" : "siw-negative"} ${className}`}
-      viewBox="0 0 100 40"
-      role="img"
-      aria-label="Price sparkline"
-      data-hero-sparkline={dataRole === "hero" ? "true" : undefined}
-      data-index-sparkline={dataRole === "index" ? "true" : undefined}
-    >
-      <path className="siw-sparkline-fill" d={`${path} L100 40 L0 40 Z`} />
-      <path className="siw-sparkline-line" d={path} />
-      <line x1="0" x2="100" y1="34" y2="34" />
-    </svg>
+    <span className="siw-sparkline-frame" onPointerMove={handlePointerMove} onPointerLeave={resetHover}>
+      <svg
+        className={`siw-sparkline ${positive ? "siw-positive" : "siw-negative"} ${className}`}
+        viewBox={geometry.viewBox}
+        preserveAspectRatio="none"
+        role="img"
+        aria-label={tooltipText}
+        tabIndex={0}
+        data-hero-sparkline={dataRole === "hero" ? "true" : undefined}
+        data-index-sparkline={dataRole === "index" ? "true" : undefined}
+        onBlur={resetHover}
+      >
+        <title>{tooltipText}</title>
+        <path className="siw-sparkline-fill" d={`${path} L100 ${geometry.fillBase} L0 ${geometry.fillBase} Z`} />
+        <path className="siw-sparkline-line" d={path} />
+        <line x1="0" x2="100" y1={geometry.baseline} y2={geometry.baseline} />
+        {activePoint && (
+          <>
+            <line
+              className="siw-sparkline-crosshair"
+              x1={activeX}
+              x2={activeX}
+              y1="0"
+              y2={geometry.fillBase}
+              data-sparkline-crosshair
+            />
+            <circle
+              className="siw-sparkline-active-dot"
+              cx={activeX}
+              cy={activeY}
+              r="2.6"
+              data-sparkline-active-dot
+            />
+          </>
+        )}
+      </svg>
+      {activePoint && activeValue !== null && (
+        <span
+          className={`siw-sparkline-tooltip is-fixed ${tooltipPosition?.alignRight ? "is-right" : ""} ${tooltipPlacement === "bottom" ? "is-bottom" : ""}`}
+          data-sparkline-tooltip
+          data-sparkline-tooltip-placement={tooltipPlacement}
+          style={{
+            left: tooltipPosition ? `${tooltipPosition.left}px` : `${activeX}%`,
+            top: tooltipPosition ? `${tooltipPosition.top}px` : undefined,
+          }}
+        >
+          <b>{activeHeader}</b>
+          <span>
+            Value <strong>{formatValue(activeValue)}</strong>
+          </span>
+          <span className={activeChange === null ? "" : activeChange >= 0 ? "siw-up" : "siw-down"}>
+            {activeChange === null || activeChangePercent === null
+              ? "First point"
+              : `${activeChange >= 0 ? "+" : ""}${formatValue(activeChange)} (${activeChangePercent >= 0 ? "+" : ""}${activeChangePercent.toFixed(2)}%)`}
+          </span>
+          <em>{activePoint.source || sourceLabel || "Source"} · {activeIndex === null ? 0 : activeIndex + 1}/{values.length} pts</em>
+        </span>
+      )}
+    </span>
   );
 };
 
@@ -1163,6 +1419,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       ? STOCKS_WATCHER_DEFAULT_SYMBOL
       : getStocksWatcherInitialSymbolFromHash(window.location.hash),
   );
+  const selectedSymbolRef = useRef(selectedSymbol);
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<StocksWatcherChartMode>("volume");
   const [strikeWindowSize, setStrikeWindowSize] = useState(29);
@@ -1188,6 +1445,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [watchlistSource, setWatchlistSource] = useState<"all" | "favorites">("all");
   const [nativeWatchlist, setNativeWatchlist] = useState<StocksWatcherUniverseStock[]>(STOCKS_WATCHER_UNIVERSE);
   const [customStocks, setCustomStocks] = useState<StocksWatcherUniverseStock[]>(() => readStoredCustomStocks());
+  const [rowQuotesBySymbol, setRowQuotesBySymbol] = useState<Record<string, StocksWatcherRowQuote>>({});
+  const [watchlistRefreshing, setWatchlistRefreshing] = useState(false);
+  const [refreshingSymbols, setRefreshingSymbols] = useState<string[]>([]);
+  const [cacheVersion, setCacheVersion] = useState(0);
   const [sectorFilter, setSectorFilter] = useState("All Sectors");
   const [typeFilter, setTypeFilter] = useState("All Types");
   const [sectorState, setSectorState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
@@ -1213,6 +1474,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [toolSearch, setToolSearch] = useState("");
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    selectedSymbolRef.current = selectedSymbol;
+  }, [selectedSymbol]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -1299,6 +1564,25 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     }
   }, []);
 
+  const fetchSnapshotData = async (symbol: string, options: { signal?: AbortSignal } = {}) => {
+    const nextSymbol = normalizeSymbol(symbol);
+    const response = await fetch(`/api/stocks-intelligence-watcher?symbol=${encodeURIComponent(nextSymbol)}`, {
+      signal: options.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`stocks watcher snapshot ${nextSymbol} failed with HTTP ${response.status}`);
+    }
+    const body = await response.json() as StocksWatcherSnapshot;
+    const fetchedAt = Date.now();
+    snapshotCacheRef.current.set(body.symbol, { snapshot: body, fetchedAt });
+    const customStock = getStocksWatcherCustomStockFromSnapshot(body, getStocksWatcherUniverseStock(body.symbol));
+    if (customStock) {
+      setCustomStocks((current) => uniqueStocks([...current, customStock]));
+    }
+    setCacheVersion((version) => version + 1);
+    return { snapshot: body, fetchedAt };
+  };
+
   const fetchSnapshot = async (symbol: string, options: { background?: boolean } = {}) => {
     const nextSymbol = normalizeSymbol(symbol);
     abortControllerRef.current?.abort();
@@ -1310,22 +1594,13 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     }
     setLoadingSymbol(nextSymbol);
     setError(null);
-
     try {
-      const response = await fetch(`/api/stocks-intelligence-watcher?symbol=${encodeURIComponent(nextSymbol)}`, {
-        signal: controller.signal,
-      });
-      const body = await response.json() as StocksWatcherSnapshot;
-      snapshotCacheRef.current.set(body.symbol, { snapshot: body, fetchedAt: Date.now() });
-      const customStock = getStocksWatcherCustomStockFromSnapshot(body, getStocksWatcherUniverseStock(body.symbol));
-      if (customStock) {
-        setCustomStocks((current) => uniqueStocks([...current, customStock]));
-      }
-      setSnapshot(body);
-      setSelectedSymbol(body.symbol);
-      setSelectedExpiry(getStocksWatcherSnapshotExpiry(body));
+      const result = await fetchSnapshotData(nextSymbol, { signal: controller.signal });
+      setSnapshot(result.snapshot);
+      setSelectedSymbol(result.snapshot.symbol);
+      setSelectedExpiry(getStocksWatcherSnapshotExpiry(result.snapshot));
       setExpiryOverviewState({ loading: false, error: null, data: null });
-      setLastUpdatedAt(Date.now());
+      setLastUpdatedAt(result.fetchedAt);
     } catch (requestError) {
       if (requestError instanceof DOMException && requestError.name === "AbortError") {
         return;
@@ -1358,7 +1633,13 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       setExpiryOverviewState({ loading: false, error: null, data: null });
       setLastUpdatedAt(decision.cached.fetchedAt);
       if (decision.backgroundRefresh) {
-        void fetchSnapshot(decision.symbol, { background: true });
+        void fetchSnapshotData(decision.symbol).then((result) => {
+          if (result.snapshot.symbol === decision.symbol) {
+            setSnapshot(result.snapshot);
+            setSelectedExpiry(getStocksWatcherSnapshotExpiry(result.snapshot));
+            setLastUpdatedAt(result.fetchedAt);
+          }
+        }).catch(() => undefined);
       }
       return;
     }
@@ -1505,15 +1786,11 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             interval: "1d",
           });
           return parseMarketIndexCard(definition, result);
-        } catch {
-          return emptyMarketIndexCards().find((card) => card.symbol === definition.symbol) || {
-            symbol: definition.symbol,
-            label: definition.label,
-            value: 0,
-            change: 0,
-            changePercent: 0,
-            history: [],
-          };
+        } catch (indexError) {
+          return unavailableMarketIndexCard(
+            definition,
+            indexError instanceof Error ? indexError.message : String(indexError),
+          );
         }
       };
       const [regime, breadth, indices] = await Promise.all([
@@ -1650,6 +1927,47 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     if (snapshot) void loadSnapshot(snapshot.symbol, { force: true });
   };
 
+  const refreshAllWatchers = async () => {
+    const symbolsToRefresh = watchlist.map((stock) => stock.symbol);
+    if (symbolsToRefresh.length === 0) return;
+    setWatchlistRefreshing(true);
+    setRefreshingSymbols(symbolsToRefresh);
+    try {
+      const quoteResults = await Promise.allSettled(
+        chunkSymbols(symbolsToRefresh, ROW_QUOTE_REFRESH_CHUNK_SIZE).map(async (chunk) => {
+          const result = await callNativeTool("get_quotes", { tickers: chunk.join(",") });
+          return getStocksWatcherRowQuotesFromRawResult(result.raw);
+        }),
+      );
+      const quotes = quoteResults.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+      if (quotes.length > 0) {
+        setRowQuotesBySymbol((current) => mergeStocksWatcherRowQuoteMap(current, quotes));
+        const selectedQuote = quotes.find((quote) => quote.symbol === selectedSymbolRef.current);
+        if (selectedQuote) {
+          setSnapshot((current) => current && current.symbol === selectedQuote.symbol
+            ? {
+                ...current,
+                quote: {
+                  ...current.quote,
+                  companyName: selectedQuote.companyName || current.quote.companyName,
+                  price: selectedQuote.price,
+                  previousClose: selectedQuote.previousClose ?? current.quote.previousClose,
+                  change: selectedQuote.change,
+                  changePercent: selectedQuote.changePercent,
+                  asOf: selectedQuote.asOf || current.quote.asOf,
+                },
+                spot: selectedQuote.price,
+              }
+            : current);
+          setLastUpdatedAt(selectedQuote.fetchedAt);
+        }
+      }
+    } finally {
+      setRefreshingSymbols([]);
+      setWatchlistRefreshing(false);
+    }
+  };
+
   const openStrikeDrawer = async (strike: number, expiry?: string | null) => {
     const nextExpiry = toYahooExpiry(expiry || currentExpiry || snapshot?.expiries[0]?.expiry) || "";
     const requestId = strikeDrawerRequestRef.current + 1;
@@ -1739,7 +2057,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     );
   };
 
-  const isPositive = (snapshot?.quote.change || 0) >= 0;
+  const heroDirection = snapshot ? quoteDirection(snapshot.quote.change, snapshot.quote.changePercent) : 0;
+  const isPositive = heroDirection >= 0;
+  const heroArrow = directionArrow(heroDirection);
   const selectedChain = optionChainFromResult(expiryOverviewState.data?.get_options);
   const selectedExposures = optionExposuresFromResult(expiryOverviewState.data?.get_options_gex);
   const rows = buildStrikeRowsFromOptionRaw(selectedChain, selectedExposures, snapshot?.strikes || []);
@@ -1789,13 +2109,22 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const updatedSecondsAgo = lastUpdatedAt ? Math.max(0, Math.floor((now - lastUpdatedAt) / 1_000)) : null;
   const visibleRows = focusedRows.length > 0 ? focusedRows : chartRows;
   const latestPrice = snapshot?.quote.price || 0;
-  const historyPrices = (snapshot?.history || [])
-    .map((point) => point.price)
-    .filter((price) => Number.isFinite(price) && (!latestPrice || (price > latestPrice * 0.25 && price < latestPrice * 4)));
-  const previousClose = snapshot ? snapshot.quote.price - snapshot.quote.change : 0;
-  const sessionOpen = historyPrices[0] || previousClose || latestPrice;
-  const sessionHigh = historyPrices.length > 0 ? Math.max(...historyPrices, latestPrice) : Math.max(latestPrice, previousClose);
-  const sessionLow = historyPrices.length > 0 ? Math.min(...historyPrices, latestPrice) : Math.min(latestPrice, previousClose);
+  const heroSparklinePoints: SparklinePoint[] = (snapshot?.history || [])
+    .map((point, index) => {
+      const pointDate = point.date || dateFromAsOfAndSessionLabel(snapshot?.quote.asOf, point.label);
+      return {
+        label: snapshot?.symbol || selectedSymbol,
+        dateTimeLabel: formatSparklineDateTime(pointDate || undefined, point.label ? `${point.label} ET` : `Session point ${index + 1}`, "dateTime"),
+        rangeLabel: "Intraday",
+        value: point.price,
+        source: `${snapshot?.symbol || selectedSymbol} intraday`,
+      };
+    })
+    .filter((point) => Number.isFinite(point.value) && (!latestPrice || (point.value > latestPrice * 0.25 && point.value < latestPrice * 4)));
+  const previousClose = snapshot?.quote.previousClose ?? null;
+  const sessionOpen = snapshot?.quote.open ?? null;
+  const sessionHigh = snapshot?.quote.high ?? null;
+  const sessionLow = snapshot?.quote.low ?? null;
   const totalCallGex = chartRows.reduce((sum, row) => sum + Math.max(0, row.callGex), 0);
   const totalPutGex = chartRows.reduce((sum, row) => sum + Math.min(0, row.putGex), 0);
   const netPositiveGexPct = totalCallGex + Math.abs(totalPutGex) > 0
@@ -2706,6 +3035,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     const marketIndexCards = marketContext.indices.length === MARKET_INDEX_DEFINITIONS.length
       ? marketContext.indices
       : emptyMarketIndexCards();
+    const recentNews = snapshot?.recentNews?.slice(0, 3) || [];
+    const earnings = snapshot?.earnings || null;
+    const earningsMove = earnings?.priceMove;
 
     return (
       <section className="siw-overview-grid" data-primary-tab-panel="Overview">
@@ -2716,19 +3048,46 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           </div>
           <div className="siw-index-cards">
             {marketIndexCards.map((card) => {
+              const points: SparklinePoint[] = card.status === "ok" ? card.history
+                .filter((point): point is RawHistoryPoint & { close: number } =>
+                  typeof point.close === "number" && Number.isFinite(point.close) && point.close > 0)
+                .map((point, index) => ({
+                  label: card.label,
+                  dateTimeLabel: formatSparklineDateTime(point.date, `Daily point ${index + 1}`, "date"),
+                  rangeLabel: "3M",
+                  granularityLabel: "daily",
+                  value: point.close,
+                  source: `Yahoo ${card.sourceSymbol}`,
+                })) : [];
               const positive = card.change >= 0;
-              const points = card.history
-                .map((point) => point.close)
-                .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
+              const latestPoint = points[points.length - 1];
+              const indexTooltip = card.status === "ok"
+                ? `${card.label} · ${latestPoint?.dateTimeLabel || "Latest"} · 3M daily: ${formatIndexValue(card.value)}, ${positive ? "+" : ""}${card.change.toFixed(2)} (${positive ? "+" : ""}${card.changePercent.toFixed(2)}%). Yahoo ${card.sourceSymbol} · ${card.historyPointCount} pts`
+                : `${card.label} (${card.sourceSymbol}) unavailable: ${card.error || "Needs checking from Yahoo chart history"}`;
               return (
-              <div key={card.symbol} data-market-index-card={card.symbol}>
-                <span data-market-index-label>{card.label}</span>
-                <strong>{formatIndexValue(card.value)}</strong>
-                <em className={positive ? "siw-up" : "siw-down"}>
-                  {card.value > 0 ? `${positive ? "+" : ""}${card.change.toFixed(2)}  ${positive ? "+" : ""}${card.changePercent.toFixed(2)}%` : "--"}
-                </em>
-                <MiniSparkline points={points} positive={positive} dataRole="index" />
-              </div>
+                <div
+                  key={card.symbol}
+                  data-market-index-card={card.symbol}
+                  data-market-index-status={card.status}
+                  data-market-index-source={card.sourceSymbol}
+                  data-market-index-history-points={card.historyPointCount}
+                >
+                  <div className="siw-index-copy">
+                    <span data-market-index-label>{card.label}</span>
+                    <strong>{formatIndexValue(card.value)}</strong>
+                    <em className={positive ? "siw-up" : "siw-down"}>
+                      {card.status === "ok" ? `${positive ? "+" : ""}${card.change.toFixed(2)}  ${positive ? "+" : ""}${card.changePercent.toFixed(2)}%` : "Needs checking"}
+                    </em>
+                  </div>
+                  <MiniSparkline
+                    points={points}
+                    positive={positive}
+                    dataRole="index"
+                    tooltip={indexTooltip}
+                    sourceLabel={`Yahoo ${card.sourceSymbol}`}
+                    valueFormatter={formatIndexValue}
+                  />
+                </div>
               );
             })}
           </div>
@@ -2772,22 +3131,49 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           <div className="siw-panel siw-news-panel" data-overview-tertiary-panel="news">
             <div className="siw-overview-head">
               <h2>Recent News</h2>
+              <span>Yahoo native</span>
             </div>
-            <div className="siw-link-list">
-              <button type="button" onClick={() => setActiveTab("News")}>Open Yahoo news tool output</button>
-              <span>Native news is loaded in the News tab to avoid stale headlines.</span>
-              <span>{snapshot?.quote.companyName || selectedSymbol} selected.</span>
+            <div className="siw-news-list">
+              {recentNews.length > 0 ? recentNews.map((item) => (
+                <a key={`${item.title}-${item.publishedAt || item.publisher}`} href={item.link || undefined} target="_blank" rel="noreferrer">
+                  <strong>{item.title}</strong>
+                  <span>{item.publisher} · {formatNewsTimestamp(item.publishedAt)}</span>
+                </a>
+              )) : (
+                <div className="siw-data-empty">
+                  <strong>Needs checking</strong>
+                  <span>Yahoo native news returned no recent headlines for {snapshot?.quote.companyName || selectedSymbol}.</span>
+                </div>
+              )}
             </div>
           </div>
 
           <div className="siw-panel siw-earnings-panel" data-overview-tertiary-panel="earnings">
             <div className="siw-overview-head">
               <h2>Earnings Calendar</h2>
+              <span>{earnings?.source ? "Yahoo" : "Needs checking"}</span>
             </div>
-            <div className="siw-link-list">
-              <button type="button" onClick={() => setActiveTab("Earnings")}>View earnings tools</button>
-              <span>Needs checking from Yahoo native event tools.</span>
-              <span>Not financial advice.</span>
+            <div className="siw-earnings-summary">
+              <div>
+                <span>Next earnings</span>
+                <strong>{earnings?.nextEarningsDate || "Needs checking"}</strong>
+                <em>EPS est {formatOptionalNumber(earnings?.nextEpsEstimate)} · Revenue est {earnings?.nextRevenueEstimate || "N/A"}</em>
+              </div>
+              <div>
+                <span>Last earnings</span>
+                <strong>{earnings?.lastEarningsDate || earnings?.lastReportedQuarter || "Needs checking"}</strong>
+                <em>
+                  EPS {formatOptionalNumber(earnings?.epsActual)} vs {formatOptionalNumber(earnings?.epsEstimate)}
+                  {earnings?.result ? ` · ${earnings.result.toUpperCase()} ${formatSignedPercent(earnings.surprisePercent)}` : " · N/A"}
+                </em>
+              </div>
+              <div>
+                <span>Earnings-date move</span>
+                <strong className={(earningsMove?.changePercent || 0) >= 0 ? "siw-up" : "siw-down"}>
+                  {formatSignedPercent(earningsMove?.changePercent)}
+                </strong>
+                <em>{earningsMove ? `${earningsMove.eventTradingDate} close-to-close` : "Needs checking from Yahoo chart history"}</em>
+              </div>
             </div>
           </div>
 
@@ -2962,8 +3348,17 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                   <kbd>/</kbd>
                 </label>
                 <button type="button" onClick={submitSearch} className="siw-load-button">
-                  <span>⌁</span>
                   LOAD
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void refreshAllWatchers()}
+                  className="siw-refresh-all-button"
+                  aria-label="Refresh all watcher tickers"
+                  title="Refresh all watcher tickers"
+                  disabled={watchlistRefreshing}
+                >
+                  <RefreshCw className={watchlistRefreshing ? "animate-spin" : ""} />
                 </button>
               </div>
 
@@ -3019,23 +3414,30 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 <span>Change</span>
               </div>
 
-              <div className="siw-watchlist" data-watchlist-scope>
+              <div className="siw-watchlist" data-watchlist-scope data-cache-version={cacheVersion}>
                 {watchlist.map((stock) => {
                   const symbol = stock.symbol;
                   const selected = symbol === selectedSymbol;
-                  const cachedRowQuote = getFreshStocksWatcherCacheEntry(snapshotCacheRef.current, symbol)?.snapshot.quote ?? null;
-                  const rowQuote = selected && snapshot?.symbol === symbol ? snapshot.quote : cachedRowQuote;
+                  const yahooRowQuote = rowQuotesBySymbol[symbol] ?? null;
+                  const selectedSnapshotQuote = selected && snapshot?.symbol === symbol ? snapshot.quote : null;
+                  const rowQuote = yahooRowQuote || selectedSnapshotQuote;
                   const change = rowQuote?.change ?? stock.fallbackChange;
                   const rowPositive = change >= 0;
-                  const isRowLoading = loadingSymbol === symbol;
+                  const isRowLoading = loadingSymbol === symbol || refreshingSymbols.includes(symbol);
                   const isFavorite = favorites.includes(symbol);
                   const price = rowQuote?.price ?? stock.fallbackPrice;
                   const pct = rowQuote?.changePercent ?? stock.fallbackChangePercent;
+                  const rowSource = yahooRowQuote ? "yahoo_quote" : selectedSnapshotQuote ? "selected_snapshot" : "fallback";
+                  const rowAsOf = yahooRowQuote?.asOf || selectedSnapshotQuote?.asOf || "";
 
                   return (
                     <div
                       key={symbol}
                       data-watchlist-row={symbol}
+                      data-row-price={price.toFixed(2)}
+                      data-row-change={change.toFixed(2)}
+                      data-row-source={rowSource}
+                      data-row-asof={rowAsOf}
                       data-stock-sector={stock.sector}
                       data-stock-type={stock.type}
                       role="button"
@@ -3141,23 +3543,32 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
               <span>USD</span>
               {snapshot && (
                 <em className={isPositive ? "siw-up" : "siw-down"}>
-                  {isPositive ? "+" : ""}{snapshot.quote.change.toFixed(2)}
+                  {signedNumberText(snapshot.quote.change)}
                   {" "}
-                  {isPositive ? "+" : ""}{snapshot.quote.changePercent.toFixed(2)}%
-                  {" ▲"}
+                  {signedNumberText(snapshot.quote.changePercent)}%
+                  {heroArrow ? ` ${heroArrow}` : ""}
                 </em>
               )}
             </div>
 
             <div className="siw-hero-stats">
-              <span>High <b>{sessionHigh ? sessionHigh.toFixed(2) : "--"}</b></span>
-              <span>Low <b>{sessionLow ? sessionLow.toFixed(2) : "--"}</b></span>
-              <span>Open <b>{sessionOpen ? sessionOpen.toFixed(2) : "--"}</b></span>
-              <span>Prev Close <b>{previousClose ? previousClose.toFixed(2) : "--"}</b></span>
+              <span>High <b>{formatOptionalPrice(sessionHigh)}</b></span>
+              <span>Low <b>{formatOptionalPrice(sessionLow)}</b></span>
+              <span>Open <b>{formatOptionalPrice(sessionOpen)}</b></span>
+              <span>Prev Close <b>{formatOptionalPrice(previousClose)}</b></span>
             </div>
 
             <div className="siw-hero-chart">
-              <MiniSparkline points={historyPrices} positive={isPositive} className="siw-hero-sparkline" dataRole="hero" />
+              <MiniSparkline
+                points={heroSparklinePoints}
+                positive={isPositive}
+                className="siw-hero-sparkline"
+                dataRole="hero"
+                tooltip={`${snapshot?.symbol || selectedSymbol} price sparkline: ${heroSparklinePoints.length} points, latest ${latestPrice ? currency(latestPrice) : "N/A"}, ${snapshot ? `${signedNumberText(snapshot.quote.changePercent)}%` : "change N/A"}`}
+                sourceLabel={`${snapshot?.symbol || selectedSymbol} intraday`}
+                valueFormatter={currency}
+                placement="bottom"
+              />
               <span>Updated {updatedSecondsAgo === null ? "--" : `${updatedSecondsAgo}s ago`}</span>
             </div>
 
@@ -3170,24 +3581,17 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           </header>
 
           <nav className="siw-main-tabs" aria-label="Stocks watcher sections">
-            {TOP_TABS.map((item) => (
-              <button key={item} type="button" onClick={() => setActiveTab(item)} className={item === activeTab ? "is-active" : ""}>
-                <span className="siw-tab-icon">
-                  {{
-                    Overview: "⌁",
-                    Chart: "⌁",
-                    Fundamentals: "▧",
-                    Stats: "▥",
-                    Earnings: "▣",
-                    Options: "⌘",
-                    "Short Vol": "◷",
-                    News: "▤",
-                    Holders: "♙",
-                  }[item]}
-                </span>
-                {item}
-              </button>
-            ))}
+            {TOP_TABS.map((item) => {
+              const TabIcon = TOP_TAB_ICONS[item];
+              return (
+                <button key={item} type="button" onClick={() => setActiveTab(item)} className={item === activeTab ? "is-active" : ""}>
+                  <span className="siw-tab-icon">
+                    <TabIcon className="siw-tab-svg" aria-hidden="true" />
+                  </span>
+                  {item}
+                </button>
+              );
+            })}
           </nav>
 
           <div className="siw-main-scroll">
@@ -3335,12 +3739,12 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
               </button>
               <button
                 type="button"
-                onClick={refreshCurrent}
+                onClick={() => void refreshAllWatchers()}
                 className="flex h-10 w-10 items-center justify-center rounded-md border border-slate-700 bg-slate-900 text-slate-300 transition-colors hover:border-blue-400 hover:text-blue-300"
-                title="Refresh"
-                aria-label="Refresh"
+                title="Refresh all watcher tickers"
+                aria-label="Refresh all watcher tickers"
               >
-                <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+                <RefreshCw className={`h-4 w-4 ${watchlistRefreshing ? "animate-spin" : ""}`} />
               </button>
               <div className="mt-2 flex min-h-28 w-10 items-center justify-center rounded-md border border-slate-800 bg-slate-950/70 text-xs font-black tracking-[0.18em] text-blue-100 [writing-mode:vertical-rl]">
                 {selectedSymbol}
@@ -3378,12 +3782,12 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={refreshCurrent}
+                onClick={() => void refreshAllWatchers()}
                 className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-700 bg-slate-900 text-slate-300 transition-colors hover:border-blue-400 hover:text-blue-300"
-                title="Refresh"
-                aria-label="Refresh watchlist"
+                title="Refresh all watcher tickers"
+                aria-label="Refresh all watcher tickers"
               >
-                <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+                <RefreshCw className={`h-4 w-4 ${watchlistRefreshing ? "animate-spin" : ""}`} />
               </button>
               <button
                 type="button"
@@ -3576,7 +3980,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 <span className="text-2xl font-black">{snapshot ? currency(snapshot.quote.price) : "--"}</span>
                 {snapshot && (
                   <span className={`font-bold ${isPositive ? "text-emerald-400" : "text-red-400"}`}>
-                    {isPositive ? "+" : ""}{snapshot.quote.change.toFixed(2)} ({isPositive ? "+" : ""}{snapshot.quote.changePercent.toFixed(2)}%)
+                    {signedNumberText(snapshot.quote.change)} ({signedNumberText(snapshot.quote.changePercent)}%)
                   </span>
                 )}
               </div>

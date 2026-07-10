@@ -7,12 +7,20 @@ import {
   buildStocksWatcherSnapshotFromNative,
   getFreshStocksWatcherCacheEntry,
   getGammaFlipLevel,
+  getStocksWatcherRowQuotesFromRawResult,
   getStocksWatcherVisibleSymbols,
   getNearestSpotStrike,
+  mergeStocksWatcherRowQuoteMap,
+  refreshStocksWatcherSymbolsBatch,
   type StocksWatcherToolClient,
 } from "../src/lib/stocks-intelligence-watcher";
 import { STOCKS_WATCHER_SYMBOLS, STOCKS_WATCHER_UNIVERSE } from "../src/lib/stocks-watcher-universe";
-import { listNativeStocksTools, normalizeStocksWatcherSymbol, resolveStocksWatcherYahooSymbol } from "../src/lib/stocks-native-yahoo";
+import {
+  listNativeStocksTools,
+  normalizeStocksWatcherSymbol,
+  quoteRowFromYahooChartResult,
+  resolveStocksWatcherYahooSymbol,
+} from "../src/lib/stocks-native-yahoo";
 import {
   buildStocksWatcherAiSummaryPayload,
   buildStocksWatcherDeterministicSummary,
@@ -95,7 +103,91 @@ class FakeStocksNativeClient implements StocksWatcherToolClient {
       return "NVDA leads the watchlist.";
     }
 
+    if (name === "pre_event_brief") {
+      return "# NVDA pre-event brief\n- Latest news: NVIDIA headline (Yahoo Finance)";
+    }
+
+    if (name === "earnings_vol_crush") {
+      return "# NVDA earnings vol-crush context\n- Earnings date: 2026-08-26";
+    }
+
     throw new Error(`Unexpected tool ${name}`);
+  }
+
+  async callTool(name: string, args: Record<string, unknown> = {}) {
+    const text = await this.callToolText(name);
+    if (name === "get_quotes") {
+      return {
+        text,
+        raw: {
+          quotes: [{
+            symbol: "NVDA",
+            name: "NVIDIA Corporation",
+            price: 181.8,
+            open: 179.8,
+            high: 182.4,
+            low: 178.6,
+            previousClose: 179.66,
+            change: 2.14,
+            changePercent: 1.19,
+            asOf: "2026-05-28T20:00:00.000Z",
+          }],
+        },
+      };
+    }
+    if (name === "get_intraday") {
+      return {
+        text,
+        raw: {
+          history: [
+            { date: "2026-05-28T13:30:00.000Z", open: 178.1, high: 179, low: 177.9, close: 178.4, volume: 1000 },
+            { date: "2026-05-28T14:00:00.000Z", open: 178.4, high: 180, low: 178.2, close: 179.4, volume: 1100 },
+            { date: "2026-05-28T14:30:00.000Z", open: 179.4, high: 182, low: 179.1, close: 181.8, volume: 1200 },
+            { date: "2026-05-28T15:00:00.000Z", open: 181.8, high: 182.4, low: 181.2, close: 181.7, volume: 900 },
+          ],
+        },
+      };
+    }
+    if (name === "pre_event_brief") {
+      return {
+        text,
+        raw: {
+          news: [
+            { title: "NVIDIA expands AI platform", publisher: "Yahoo Finance", link: "https://finance.yahoo.com/nvda-1", publishedAt: "2026-05-28T13:00:00.000Z" },
+            { title: "Chip stocks rally with NVDA", publisher: "Reuters", link: "https://finance.yahoo.com/nvda-2", publishedAt: "2026-05-28T12:00:00.000Z" },
+            { title: "Analysts lift NVIDIA targets", publisher: "MarketWatch", link: "https://finance.yahoo.com/nvda-3", publishedAt: "2026-05-28T11:00:00.000Z" },
+          ],
+        },
+      };
+    }
+    if (name === "earnings_vol_crush") {
+      return {
+        text,
+        raw: {
+          earnings: {
+            source: "Yahoo quoteSummary calendarEvents + earningsHistory",
+            nextEarningsDate: "2026-08-26",
+            nextEpsEstimate: 2.08,
+            nextRevenueEstimate: "91.73B",
+            lastEarningsDate: "2026-05-20",
+            lastReportedQuarter: "2026-04-30",
+            epsActual: 1.87,
+            epsEstimate: 1.77,
+            epsDifference: 0.1,
+            surprisePercent: 5.54,
+            result: "beat",
+            priceMove: {
+              eventTradingDate: "2026-05-20",
+              previousClose: 134.38,
+              close: 135.5,
+              changePercent: 0.83,
+              basis: "close_to_close",
+            },
+          },
+        },
+      };
+    }
+    return { text, raw: null };
   }
 }
 
@@ -442,11 +534,146 @@ test("snapshot cache returns only fresh entries", () => {
   assert.equal(getFreshStocksWatcherCacheEntry(cache, "iren", 1_000 + STOCKS_WATCHER_CACHE_TTL_MS + 1), null);
 });
 
+test("refresh batch bounds concurrency and keeps failed symbols isolated", async () => {
+  let active = 0;
+  let maxActive = 0;
+  const started: string[] = [];
+  const results = await refreshStocksWatcherSymbolsBatch(
+    ["NVDA", "GOOG", "AAPL", "MSFT", "NVDA"],
+    async (symbol) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      started.push(symbol);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      if (symbol === "AAPL") throw new Error("AAPL failed");
+      return `${symbol}-quote`;
+    },
+    { concurrency: 2 },
+  );
+
+  assert.equal(maxActive <= 2, true);
+  assert.deepEqual(started.sort(), ["AAPL", "GOOG", "MSFT", "NVDA"]);
+  assert.equal(results.length, 4);
+  assert.equal(results.find((item) => item.symbol === "AAPL")?.status, "rejected");
+  assert.equal(results.find((item) => item.symbol === "MSFT")?.value, "MSFT-quote");
+});
+
+test("row quote parser preserves Yahoo quote fields for watcher rows", () => {
+  const quotes = getStocksWatcherRowQuotesFromRawResult({
+    quotes: [
+      { symbol: "goog", name: "Alphabet Inc.", price: 356.24, previousClose: 357.89, change: -1.65, changePercent: -0.46, asOf: "2026-07-09T20:00:00.000Z" },
+      { symbol: "AAPL", name: "Apple Inc.", price: 316.22, change: 21.84, changePercent: 7.42, asOf: "2026-07-09T20:01:00.000Z" },
+      { symbol: "BAD", name: "Bad row" },
+    ],
+  }, 1234);
+
+  assert.deepEqual(
+    quotes.map((quote) => ({ symbol: quote.symbol, price: quote.price, previousClose: quote.previousClose, change: quote.change, changePercent: quote.changePercent, source: quote.source, fetchedAt: quote.fetchedAt })),
+    [
+      { symbol: "GOOG", price: 356.24, previousClose: 357.89, change: -1.65, changePercent: -0.46, source: "yahoo_quote", fetchedAt: 1234 },
+      { symbol: "AAPL", price: 316.22, previousClose: null, change: 21.84, changePercent: 7.42, source: "yahoo_quote", fetchedAt: 1234 },
+    ],
+  );
+  assert.equal(quotes[0]?.asOf, "2026-07-09T20:00:00.000Z");
+});
+
+test("Yahoo chart quote derivation keeps explicit same-session TSLA change positive", () => {
+  const quote = quoteRowFromYahooChartResult("TSLA", {
+    meta: {
+      longName: "Tesla, Inc.",
+      regularMarketPrice: 406.55,
+      regularMarketPreviousClose: 394.06,
+      chartPreviousClose: 425.3,
+      regularMarketChange: 12.49,
+      regularMarketChangePercent: 3.17,
+      regularMarketOpen: 393.94,
+      regularMarketDayHigh: 407.86,
+      regularMarketDayLow: 390.86,
+      regularMarketVolume: 102_000_000,
+      currency: "USD",
+      marketState: "REGULAR",
+      regularMarketTime: 1783641600,
+    },
+    timestamp: [1783555200, 1783641600],
+    indicators: {
+      quote: [{
+        close: [394.06, 406.55],
+        open: [392.1, 393.94],
+        high: [396.2, 407.86],
+        low: [389.2, 390.86],
+        volume: [91_000_000, 102_000_000],
+      }],
+    },
+  });
+
+  assert.equal(quote.symbol, "TSLA");
+  assert.equal(quote.price, 406.55);
+  assert.equal(quote.previousClose, 394.06);
+  assert.equal(quote.change, 12.49);
+  assert.equal(quote.changePercent, 3.17);
+});
+
+test("Yahoo explicit quote change wins over bad chartPreviousClose fallback", () => {
+  const quote = quoteRowFromYahooChartResult("TSLA", {
+    meta: {
+      shortName: "Tesla, Inc.",
+      regularMarketPrice: 406.55,
+      chartPreviousClose: 425.3,
+      regularMarketChange: 12.49,
+      regularMarketChangePercent: 3.17,
+      regularMarketTime: 1783641600,
+    },
+    timestamp: [1783555200, 1783641600],
+    indicators: {
+      quote: [{
+        close: [425.3, 406.55],
+        volume: [91_000_000, 102_000_000],
+      }],
+    },
+  });
+
+  assert.equal(quote.previousClose, 394.06);
+  assert.equal(quote.change, 12.49);
+  assert.equal(quote.changePercent, 3.17);
+  assert.equal(quote.warning, undefined);
+});
+
+test("row quote map merge keeps old quotes when a refresh chunk omits a symbol", () => {
+  const current = mergeStocksWatcherRowQuoteMap({}, getStocksWatcherRowQuotesFromRawResult({
+    quotes: [
+      { symbol: "GOOG", price: 376.43, change: -9.69, changePercent: -2.51, asOf: "old" },
+      { symbol: "AAPL", price: 312.06, change: -0.45, changePercent: -0.14, asOf: "old" },
+    ],
+  }, 1000));
+  const next = mergeStocksWatcherRowQuoteMap(current, getStocksWatcherRowQuotesFromRawResult({
+    quotes: [
+      { symbol: "GOOG", price: 356.24, change: -1.65, changePercent: -0.46, asOf: "new" },
+    ],
+  }, 2000));
+
+  assert.equal(next.GOOG.price, 356.24);
+  assert.equal(next.GOOG.fetchedAt, 2000);
+  assert.equal(next.AAPL.price, 312.06);
+  assert.equal(next.AAPL.fetchedAt, 1000);
+});
+
 test("native snapshot parses quotes, options, GEX, and tools/list metadata", async () => {
   const snapshot = await buildStocksWatcherSnapshotFromNative("NVDA", new FakeStocksNativeClient());
 
   assert.equal(snapshot.source, "native_yahoo");
   assert.equal(snapshot.quote.price, 181.8);
+  assert.equal(snapshot.quote.open, 179.8);
+  assert.equal(snapshot.quote.high, 182.4);
+  assert.equal(snapshot.quote.low, 178.6);
+  assert.equal(snapshot.quote.previousClose, 179.66);
+  assert.equal(snapshot.history[0]?.price, 178.4);
+  assert.equal(snapshot.history[0]?.date, "2026-05-28T13:30:00.000Z");
+  assert.equal(snapshot.history[0]?.label, "13:30");
+  assert.equal(snapshot.recentNews.length, 3);
+  assert.equal(snapshot.earnings.nextEarningsDate, "2026-08-26");
+  assert.equal(snapshot.earnings.result, "beat");
+  assert.equal(snapshot.earnings.priceMove?.changePercent, 0.83);
   assert.equal(snapshot.availableTools.length, 2);
   assert.deepEqual(snapshot.availableExpiries, ["2026-05-29", "2026-06-01", "2026-06-05"]);
   assert.equal(snapshot.selectedExpiry, "2026-05-29");
@@ -454,6 +681,23 @@ test("native snapshot parses quotes, options, GEX, and tools/list metadata", asy
   assert.ok(snapshot.expiryRows.some((row) => row.expiry === "2026-05-29" && row.openInterest === 426_000));
   assert.ok(snapshot.strikes.some((row) => row.strike === 180 && row.callGex === 12_800_000));
   assert.ok(snapshot.toolRuns.some((run) => run.name === "market_breadth" && run.status === "ok"));
+});
+
+test("native snapshot preserves markdown history dates when raw history is unavailable", async () => {
+  const client = new FakeStocksNativeClient();
+  const originalCallTool = client.callTool.bind(client);
+  client.callTool = async (name, args) => {
+    if (name === "get_intraday" || name === "get_stock_history") {
+      return { text: await client.callToolText(name), raw: {} };
+    }
+    return originalCallTool(name, args);
+  };
+
+  const snapshot = await buildStocksWatcherSnapshotFromNative("NVDA", client);
+
+  assert.equal(snapshot.history[0]?.date, "2026-05-28 09:30");
+  assert.equal(snapshot.history[0]?.label, "05-28 09:30");
+  assert.equal(snapshot.history[0]?.price, 178.1);
 });
 
 test("native snapshot records a failed optional tool without blocking core ticker data", async () => {

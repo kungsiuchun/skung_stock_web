@@ -28,10 +28,13 @@ interface YahooSession {
   fetchedAt: number;
 }
 
-interface QuoteRow {
+export interface QuoteRow {
   symbol: string;
   name: string;
   price: number;
+  open: number | null;
+  high: number | null;
+  low: number | null;
   previousClose: number | null;
   change: number;
   changePercent: number;
@@ -40,6 +43,7 @@ interface QuoteRow {
   exchange: string;
   marketState: string;
   asOf: string | null;
+  warning?: string;
 }
 
 export interface NativeYahooHistoryRow {
@@ -125,6 +129,35 @@ const displayNumber = (value: number | null | undefined) =>
 
 const numberOrZero = (value: number | null | undefined) =>
   typeof value === "number" && Number.isFinite(value) ? value : 0;
+
+const rawNumberFromYahoo = (value: unknown) => {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (value && typeof value === "object" && "raw" in value) {
+    const raw = (value as { raw?: unknown }).raw;
+    return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+  }
+  return null;
+};
+
+const fmtFromYahoo = (value: unknown) => {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") {
+    const record = value as { fmt?: unknown; raw?: unknown };
+    if (typeof record.fmt === "string") return record.fmt;
+    if (typeof record.raw === "number") return String(record.raw);
+  }
+  return null;
+};
+
+const dateFromYahoo = (value: unknown) => {
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  if (value && typeof value === "object") {
+    const record = value as { fmt?: unknown; raw?: unknown };
+    if (typeof record.fmt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(record.fmt)) return record.fmt;
+    if (typeof record.raw === "number" && Number.isFinite(record.raw)) return dateFromSeconds(record.raw);
+  }
+  return null;
+};
 
 const sumPresent = (values: Array<number | null | undefined>) => {
   const present = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
@@ -217,26 +250,40 @@ const fetchChart = async (symbol: string, range = "1y", interval = "1d") => {
   return result as Record<string, any>;
 };
 
-const fetchQuote = async (symbol: string): Promise<QuoteRow> => {
+export const quoteRowFromYahooChartResult = (symbol: string, chart: Record<string, any>): QuoteRow => {
   const { displaySymbol } = resolveStocksWatcherYahooSymbol(symbol);
-  const chart = await fetchChart(symbol, "5d", "1d");
   const meta = chart.meta || {};
   const timestamps: number[] = chart.timestamp || [];
   const quote = chart.indicators?.quote?.[0] || {};
   const closes: Array<number | null> = quote.close || [];
+  const opens: Array<number | null> = quote.open || [];
+  const highs: Array<number | null> = quote.high || [];
+  const lows: Array<number | null> = quote.low || [];
   const volumes: Array<number | null> = quote.volume || [];
   let lastIndex = closes.length - 1;
   while (lastIndex > 0 && typeof closes[lastIndex] !== "number") lastIndex -= 1;
 
   const price = toNumber(meta.regularMarketPrice, toNumber(closes[lastIndex], toNumber(meta.previousClose, 0)));
-  const previousClose = toNumber(meta.chartPreviousClose, toNumber(meta.previousClose, toNumber(closes[Math.max(0, lastIndex - 1)], price)));
-  const change = price - previousClose;
-  const changePercent = previousClose ? (change / previousClose) * 100 : 0;
+  const explicitPreviousClose = toOptionalNumber(meta.regularMarketPreviousClose ?? meta.previousClose);
+  const explicitChange = toOptionalNumber(meta.regularMarketChange);
+  const explicitChangePercent = toOptionalNumber(meta.regularMarketChangePercent);
+  const previousCloseFallback = toOptionalNumber(closes[Math.max(0, lastIndex - 1)])
+    ?? toOptionalNumber(meta.chartPreviousClose)
+    ?? price;
+  const previousClose = explicitPreviousClose
+    ?? (explicitChange !== null ? price - explicitChange : previousCloseFallback);
+  const fallbackChange = price - previousClose;
+  const changeConflict = explicitChange !== null && Math.abs(explicitChange - fallbackChange) > Math.max(0.2, Math.abs(price) * 0.01);
+  const change = explicitChange ?? fallbackChange;
+  const changePercent = explicitChangePercent ?? (previousClose ? (change / previousClose) * 100 : 0);
 
   return {
     symbol: displaySymbol,
     name: String(meta.longName || meta.shortName || meta.instrumentType || symbol),
     price: round(price, 2),
+    open: roundOptional(meta.regularMarketOpen ?? opens[lastIndex]),
+    high: roundOptional(meta.regularMarketDayHigh ?? highs[lastIndex]),
+    low: roundOptional(meta.regularMarketDayLow ?? lows[lastIndex]),
     previousClose: round(previousClose, 2),
     change: round(change, 2),
     changePercent: round(changePercent, 2),
@@ -249,7 +296,13 @@ const fetchQuote = async (symbol: string): Promise<QuoteRow> => {
       : typeof timestamps[lastIndex] === "number"
         ? new Date(timestamps[lastIndex] * 1000).toISOString()
         : null,
+    ...(changeConflict ? { warning: "Yahoo explicit quote change differs from derived price-minus-previous-close; explicit quote change used." } : {}),
   };
+};
+
+const fetchQuote = async (symbol: string): Promise<QuoteRow> => {
+  const chart = await fetchChart(symbol, "5d", "1d");
+  return quoteRowFromYahooChartResult(symbol, chart);
 };
 
 const fetchHistory = async (symbol: string, range = "1y", interval = "1d"): Promise<NativeYahooHistoryRow[]> => {
@@ -288,6 +341,8 @@ const fetchQuoteSummary = async (symbol: string) => {
     "balanceSheetHistory",
     "cashflowStatementHistory",
     "calendarEvents",
+    "earningsHistory",
+    "earningsTrend",
     "assetProfile",
   ].join(",");
   const data = await yahooAuthedJson<Record<string, any>>(
@@ -296,17 +351,27 @@ const fetchQuoteSummary = async (symbol: string) => {
   return data.quoteSummary?.result?.[0] || {};
 };
 
-const fetchNews = async (symbol: string) => {
+const fetchNews = async (symbol: string, relevanceKeywords: string[] = []) => {
   const { yahooSymbol } = resolveStocksWatcherYahooSymbol(symbol);
   const data = await yahooJson<Record<string, any>>(
-    `https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(yahooSymbol)}&newsCount=8&quotesCount=1`,
+    `https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(yahooSymbol)}&newsCount=12&quotesCount=1`,
   );
-  return (data.news || []).map((item: Record<string, any>) => ({
+  const keywords = Array.from(new Set([
+    normalizeStocksWatcherSymbol(symbol).toLowerCase(),
+    yahooSymbol.toLowerCase().replace(/^\^/, ""),
+    ...relevanceKeywords.map((keyword) => keyword.toLowerCase()).filter((keyword) => keyword.length >= 3),
+  ]));
+  const rows: Array<{ title: string; publisher: string; link: string; publishedAt: string | null }> = (data.news || []).map((item: Record<string, any>) => ({
     title: String(item.title || ""),
     publisher: String(item.publisher || "Yahoo Finance"),
     link: String(item.link || ""),
     publishedAt: typeof item.providerPublishTime === "number" ? new Date(item.providerPublishTime * 1000).toISOString() : null,
   }));
+  const score = (item: { title: string }) => {
+    const title = item.title.toLowerCase();
+    return keywords.some((keyword) => title.includes(keyword)) ? 1 : 0;
+  };
+  return rows.sort((a, b) => score(b) - score(a));
 };
 
 const fetchOptions = async (symbol: string, expiry?: string): Promise<OptionChain> => {
@@ -1009,16 +1074,73 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
 
 const NATIVE_TOOL_BY_NAME = new Map(NATIVE_TOOL_REGISTRY.map((definition) => [definition.name, definition]));
 
+const latestEarningsHistoryRow = (summary: Record<string, any>) => {
+  const history = Array.isArray(summary.earningsHistory?.history) ? summary.earningsHistory.history : [];
+  return history.length > 0 ? history[history.length - 1] as Record<string, any> : null;
+};
+
+const findCloseToCloseMove = (history: NativeYahooHistoryRow[], eventDate: string | null) => {
+  if (!eventDate) return null;
+  const eventIndex = history.findIndex((row) => row.date.slice(0, 10) >= eventDate);
+  if (eventIndex <= 0) return null;
+  const eventRow = history[eventIndex];
+  const previousRow = history[eventIndex - 1];
+  if (!eventRow || !previousRow?.close) return null;
+  return {
+    eventTradingDate: eventRow.date.slice(0, 10),
+    previousClose: round(previousRow.close, 2),
+    close: round(eventRow.close, 2),
+    changePercent: round(((eventRow.close - previousRow.close) / previousRow.close) * 100, 2),
+    basis: "close_to_close",
+  };
+};
+
+const buildEarningsSnapshot = (summary: Record<string, any>, history: NativeYahooHistoryRow[]) => {
+  const calendar = summary.calendarEvents || {};
+  const earnings = calendar.earnings || {};
+  const latestHistory = latestEarningsHistoryRow(summary);
+  const nextEarningsDate = dateFromYahoo(earnings.earningsDate?.[0]);
+  const lastEarningsDate = dateFromYahoo(earnings.earningsCallDate?.[0]) || dateFromYahoo(latestHistory?.quarter);
+  const epsActual = rawNumberFromYahoo(latestHistory?.epsActual);
+  const epsEstimate = rawNumberFromYahoo(latestHistory?.epsEstimate);
+  const surpriseRaw = rawNumberFromYahoo(latestHistory?.surprisePercent);
+  const surprisePercent = typeof surpriseRaw === "number"
+    ? round(Math.abs(surpriseRaw) <= 1 ? surpriseRaw * 100 : surpriseRaw, 2)
+    : null;
+  const revenueEstimate = fmtFromYahoo(earnings.revenueAverage);
+
+  return {
+    source: "Yahoo quoteSummary calendarEvents + earningsHistory",
+    nextEarningsDate,
+    nextEpsEstimate: rawNumberFromYahoo(earnings.earningsAverage),
+    nextRevenueEstimate: revenueEstimate,
+    lastEarningsDate,
+    lastReportedQuarter: dateFromYahoo(latestHistory?.quarter),
+    epsActual,
+    epsEstimate,
+    epsDifference: rawNumberFromYahoo(latestHistory?.epsDifference),
+    surprisePercent,
+    result: typeof epsActual === "number" && typeof epsEstimate === "number"
+      ? epsActual >= epsEstimate ? "beat" : "miss"
+      : null,
+    priceMove: findCloseToCloseMove(history, lastEarningsDate),
+  };
+};
+
 const buildEventContextToolResult = async (
   canonicalName: "earnings_vol_crush" | "historical_context" | "pre_event_brief",
   ticker: string,
   params: Record<string, unknown>,
 ) => {
-  const [stats, history, news] = await Promise.all([
+  const [stats, history] = await Promise.all([
     latestQuoteSummaryText(ticker),
     fetchHistory(ticker, "1y", "1d"),
-    fetchNews(ticker).catch(() => []),
   ]);
+  const quoteName = (stats.raw as { quote?: { name?: unknown } }).quote?.name;
+  const news = await fetchNews(ticker, [
+    typeof quoteName === "string" ? quoteName : "",
+    typeof quoteName === "string" ? quoteName.split(/\s+/)[0] : "",
+  ]).catch(() => []);
   const latest = history[history.length - 1];
   const prior = history[Math.max(0, history.length - 21)];
   const oneMonthReturn = prior?.close ? ((latest.close - prior.close) / prior.close) * 100 : 0;
@@ -1026,13 +1148,16 @@ const buildEventContextToolResult = async (
   if (canonicalName === "earnings_vol_crush") {
     const calendar = (stats.raw as { summary?: Record<string, any> }).summary?.calendarEvents || {};
     const earningsDate = calendar.earnings?.earningsDate?.[0]?.fmt || "n/a";
+    const earnings = buildEarningsSnapshot((stats.raw as { summary?: Record<string, any> }).summary || {}, history);
     const text = [
       `# ${ticker} earnings vol-crush context`,
       `- Earnings date: ${earningsDate}`,
+      earnings.lastEarningsDate ? `- Last earnings: ${earnings.lastEarningsDate}; EPS ${earnings.epsActual ?? "n/a"} vs ${earnings.epsEstimate ?? "n/a"} (${earnings.result || "Needs checking"})` : "- Last earnings: Needs checking from Yahoo earningsHistory.",
+      earnings.priceMove ? `- Earnings-date close move: ${fmtPct(earnings.priceMove.changePercent)} (${earnings.priceMove.basis})` : "- Earnings-date price move: Needs checking from Yahoo chart history.",
       `- 1M price context: ${fmtPct(oneMonthReturn)}`,
-      "- Native Yahoo mode uses option-chain IV and price history; no realized earnings move database is stored here.",
+      "- Native Yahoo mode uses quoteSummary earningsHistory and chart close-to-close history.",
     ].join("\n");
-    return toolResult(text, { stats: stats.raw, historyTail: history.slice(-30), news, oneMonthReturn, earningsDate });
+    return toolResult(text, { stats: stats.raw, historyTail: history.slice(-30), news, oneMonthReturn, earningsDate, earnings });
   }
 
   if (canonicalName === "historical_context") {

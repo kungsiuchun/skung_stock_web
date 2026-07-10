@@ -67,7 +67,7 @@ const stockRecords = uatStocks.map(([symbol, companyName, sector, type, fallback
 
 const fmtDate = (date) => date.replaceAll("-", "").slice(2);
 
-const buildSnapshot = (symbol) => {
+const buildSnapshot = (symbol, overrides = {}) => {
   const stock = stockRecords.find((item) => item.symbol === symbol) || {
     symbol,
     companyName: `${symbol} custom stock`,
@@ -77,7 +77,13 @@ const buildSnapshot = (symbol) => {
     fallbackChange: 1.18,
     fallbackChangePercent: 1.35,
   };
-  const price = stock.fallbackPrice;
+  const quoteBase = symbol === "TSLA"
+    ? { price: 406.55, previousClose: 394.06, change: 12.49, changePercent: 3.17 }
+    : { price: stock.fallbackPrice, previousClose: 200.09, change: stock.fallbackChange, changePercent: stock.fallbackChangePercent };
+  const price = (typeof overrides.price === "number" ? overrides.price : quoteBase.price) + (overrides.priceOffset || 0);
+  const previousClose = typeof overrides.previousClose === "number" ? overrides.previousClose : quoteBase.previousClose;
+  const change = (typeof overrides.change === "number" ? overrides.change : quoteBase.change) + (overrides.changeOffset || 0);
+  const changePercent = (typeof overrides.changePercent === "number" ? overrides.changePercent : quoteBase.changePercent) + (overrides.changePercentOffset || 0);
   const strikes = Array.from({ length: 29 }, (_, index) => {
     const strike = 170 + index * 2.5;
     const callVolume = Math.max(50, Math.round(2400 - Math.abs(strike - price) * 28));
@@ -101,8 +107,12 @@ const buildSnapshot = (symbol) => {
       symbol,
       companyName: stock.companyName,
       price,
-      change: stock.fallbackChange,
-      changePercent: stock.fallbackChangePercent,
+      open: 195.18,
+      high: 205.15,
+      low: 195.11,
+      previousClose,
+      change,
+      changePercent,
       asOf: "2026-07-08T20:00:00.000Z",
     },
     spot: price,
@@ -134,12 +144,37 @@ const buildSnapshot = (symbol) => {
     })),
     strikes,
     history: [
-      { label: "9:30", price: price - 4.03 },
-      { label: "10:30", price: price - 2.1 },
-      { label: "11:30", price: price - 3.2 },
-      { label: "12:30", price: price + 0.4 },
-      { label: "1:00", price },
+      { date: "2026-07-09T13:30:00.000Z", label: "9:30", price: price - 4.03 },
+      { date: "2026-07-09T14:30:00.000Z", label: "10:30", price: price - 2.1 },
+      { date: "2026-07-09T15:30:00.000Z", label: "11:30", price: price - 3.2 },
+      { date: "2026-07-09T16:30:00.000Z", label: "12:30", price: price + 0.4 },
+      { date: "2026-07-09T17:00:00.000Z", label: "1:00", price },
     ],
+    recentNews: [
+      { title: "NVDA Stock Ready For A Comeback", publisher: "Stocktwits", link: "https://finance.yahoo.com/nvda-1", publishedAt: "2026-07-09T03:56:47.000Z" },
+      { title: "Dow Jones Futures Put Nvidia In Focus", publisher: "Investor's Business Daily", link: "https://finance.yahoo.com/nvda-2", publishedAt: "2026-07-09T05:19:03.000Z" },
+      { title: "Analysts lift NVIDIA targets", publisher: "Yahoo Finance", link: "https://finance.yahoo.com/nvda-3", publishedAt: "2026-07-09T02:30:00.000Z" },
+    ],
+    earnings: {
+      source: "Yahoo quoteSummary calendarEvents + earningsHistory",
+      nextEarningsDate: "2026-08-26",
+      nextEpsEstimate: 2.08,
+      nextRevenueEstimate: "91.73B",
+      lastEarningsDate: "2026-05-20",
+      lastReportedQuarter: "2026-04-30",
+      epsActual: 1.87,
+      epsEstimate: 1.77,
+      epsDifference: 0.1,
+      surprisePercent: 5.54,
+      result: "beat",
+      priceMove: {
+        eventTradingDate: "2026-05-20",
+        previousClose: 220.61,
+        close: 223.47,
+        changePercent: 1.3,
+        basis: "close_to_close",
+      },
+    },
     marketContext: {
       breadth: "Watcher breadth mock response.",
       relativeStrength: "Relative strength mock response.",
@@ -201,6 +236,8 @@ const historyRows = () => Array.from({ length: 90 }, (_, index) => ({
   volume: 1_000_000 + index * 12_000,
 }));
 
+let refreshAllMode = false;
+
 const buildToolResponse = (tool, params = {}) => {
   if (tool === "get_watchlist") {
     return { ok: true, tool, params, text: "watchlist", raw: { stocks: stockRecords }, calledAt: "2026-07-08T21:33:01.000Z" };
@@ -208,6 +245,33 @@ const buildToolResponse = (tool, params = {}) => {
 
   if (tool === "save_memory") {
     return { ok: true, tool, params, text: "saved", raw: { saved: true }, calledAt: "2026-07-08T21:33:02.000Z" };
+  }
+
+  if (tool === "get_quotes") {
+    const symbols = String(params.tickers || "NVDA").split(",").map((symbol) => symbol.trim().toUpperCase()).filter(Boolean);
+    const quotes = symbols.map((symbol) => {
+      const stock = stockRecords.find((item) => item.symbol === symbol) || {
+        symbol,
+        companyName: `${symbol} custom stock`,
+        fallbackPrice: 88.42,
+        fallbackChange: 1.18,
+        fallbackChangePercent: 1.35,
+      };
+      const shouldMove = refreshAllMode && ["GOOG", "AAPL", "MSFT"].includes(symbol);
+      const quoteBase = symbol === "TSLA"
+        ? { price: 406.55, previousClose: 394.06, change: 12.49, changePercent: 3.17 }
+        : { price: stock.fallbackPrice, previousClose: null, change: stock.fallbackChange, changePercent: stock.fallbackChangePercent };
+      return {
+        symbol,
+        name: stock.companyName,
+        price: quoteBase.price + (shouldMove ? 7.77 : 0),
+        previousClose: quoteBase.previousClose,
+        change: quoteBase.change + (shouldMove ? 7.77 : 0),
+        changePercent: quoteBase.changePercent + (shouldMove ? 1.11 : 0),
+        asOf: "2026-07-09T20:00:00.000Z",
+      };
+    });
+    return { ok: true, tool, params, text: "quotes", raw: { quotes }, calledAt: "2026-07-09T20:00:00.000Z" };
   }
 
   if (tool === "get_intraday" || tool === "get_stock_history") {
@@ -297,10 +361,13 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
 
       const symbol = (url.searchParams.get("symbol") || "NVDA").toUpperCase();
       apiCalls.push({ method: "GET", symbol });
+      const refreshedRowOverrides = refreshAllMode && ["GOOG", "AAPL", "MSFT"].includes(symbol)
+        ? { priceOffset: 7.77, changeOffset: 7.77, changePercentOffset: 1.11 }
+        : {};
       request.respond({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(buildSnapshot(symbol)),
+        body: JSON.stringify(buildSnapshot(symbol, refreshedRowOverrides)),
       });
     });
 
@@ -321,10 +388,103 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       ["S&P 500", "NASDAQ 100", "DOW JONES"],
       "overview must render real market index cards",
     );
+    const heroSparklineBox = await page.$eval("[data-hero-sparkline='true']", (node) => {
+      const rect = node.getBoundingClientRect();
+      return {
+        width: rect.width,
+        height: rect.height,
+        preserveAspectRatio: node.getAttribute("preserveAspectRatio"),
+        title: node.querySelector("title")?.textContent || "",
+      };
+    });
+    assert.ok(heroSparklineBox.width >= 320, `hero price sparkline should keep usable width without forcing title overlap; got ${JSON.stringify(heroSparklineBox)}`);
+    assert.ok(heroSparklineBox.height >= 64 && heroSparklineBox.height <= 84, `hero price sparkline should be readable but not crowd the header; got ${JSON.stringify(heroSparklineBox)}`);
+    assert.equal(heroSparklineBox.preserveAspectRatio, "none", "hero sparkline must stretch to its assigned chart box");
+    assert.match(heroSparklineBox.title, /NVDA price sparkline/i, "hero sparkline should expose a tooltip title");
+    const refreshAllButtonBox = await page.$eval(".siw-search-row [aria-label='Refresh all watcher tickers']", (node) => {
+      const rect = node.getBoundingClientRect();
+      const icon = node.querySelector("svg")?.getBoundingClientRect();
+      return {
+        width: rect.width,
+        height: rect.height,
+        iconWidth: icon?.width || 0,
+        iconHeight: icon?.height || 0,
+      };
+    });
     assert.ok(
-      await page.$eval("[data-hero-sparkline='true']", (node) => node.getBoundingClientRect().width >= 220),
-      "hero price sparkline should be wide enough to show the full shape",
+      refreshAllButtonBox.width >= 38 &&
+      refreshAllButtonBox.height >= 38 &&
+      refreshAllButtonBox.iconWidth >= 15 &&
+      refreshAllButtonBox.iconHeight >= 15,
+      `left nav refresh-all button should have a normal aligned icon; got ${JSON.stringify(refreshAllButtonBox)}`,
     );
+    const watchedRowsBeforeRefresh = await page.$$eval("[data-watchlist-row]", (rows) =>
+      Object.fromEntries(rows.slice(0, 8).map((row) => [
+        row.getAttribute("data-watchlist-row"),
+        {
+          price: row.getAttribute("data-row-price"),
+          change: row.getAttribute("data-row-change"),
+          source: row.getAttribute("data-row-source"),
+          asOf: row.getAttribute("data-row-asof"),
+        },
+      ])),
+    );
+    const callsBeforeRefreshAll = apiCalls.length;
+    refreshAllMode = true;
+    await page.click(".siw-search-row [aria-label='Refresh all watcher tickers']");
+    await page.waitForFunction(() => {
+      const rows = ["GOOG", "AAPL", "MSFT"].map((symbol) => document.querySelector(`[data-watchlist-row='${symbol}']`)?.getAttribute("data-row-price"));
+      return rows.every((value) => value && !["376.43", "312.06", "450.24"].includes(value));
+    }, { timeout: 5000 });
+    await wait(150);
+    refreshAllMode = false;
+    const watchedRowsAfterRefresh = await page.$$eval("[data-watchlist-row]", (rows) =>
+      Object.fromEntries(rows.slice(0, 8).map((row) => [
+        row.getAttribute("data-watchlist-row"),
+        {
+          price: row.getAttribute("data-row-price"),
+          change: row.getAttribute("data-row-change"),
+          source: row.getAttribute("data-row-source"),
+          asOf: row.getAttribute("data-row-asof"),
+        },
+      ])),
+    );
+    const refreshAllCalls = apiCalls.slice(callsBeforeRefreshAll);
+    const refreshQuoteCall = refreshAllCalls.find((call) => call.tool === "get_quotes");
+    assert.ok(refreshQuoteCall, `refresh-all should use get_quotes for row data; got ${JSON.stringify(refreshAllCalls)}`);
+    assert.match(refreshQuoteCall.params?.tickers || "", /NVDA/);
+    assert.match(refreshQuoteCall.params?.tickers || "", /GOOG/);
+    assert.match(refreshQuoteCall.params?.tickers || "", /AAPL/);
+    assert.equal(refreshAllCalls.some((call) => call.method === "GET" && call.symbol !== "NVDA"), false, `refresh-all should not spam full snapshots for non-selected rows; got ${JSON.stringify(refreshAllCalls)}`);
+    assert.notEqual(watchedRowsBeforeRefresh.GOOG?.price, watchedRowsAfterRefresh.GOOG?.price, "GOOG row price should visibly change after refresh-all");
+    assert.notEqual(watchedRowsBeforeRefresh.AAPL?.price, watchedRowsAfterRefresh.AAPL?.price, "AAPL row price should visibly change after refresh-all");
+    assert.notEqual(watchedRowsBeforeRefresh.MSFT?.price, watchedRowsAfterRefresh.MSFT?.price, "MSFT row price should visibly change after refresh-all");
+    assert.equal(watchedRowsAfterRefresh.GOOG?.source, "yahoo_quote", "GOOG row should show Yahoo quote as source after refresh-all");
+    assert.equal(watchedRowsAfterRefresh.AAPL?.source, "yahoo_quote", "AAPL row should show Yahoo quote as source after refresh-all");
+    assert.equal(watchedRowsAfterRefresh.MSFT?.source, "yahoo_quote", "MSFT row should show Yahoo quote as source after refresh-all");
+    assert.match(watchedRowsAfterRefresh.GOOG?.asOf || "", /2026-07-09T20:00:00/);
+    assert.match(await page.$eval(".siw-hero-identity h1", (node) => node.textContent || ""), /NVDA/, "refresh-all should not change the selected hero ticker");
+    assert.equal(refreshAllCalls.some((call) => call.tool === "market_breadth"), false, "refresh-all should only refresh quote rows, not market context");
+    await page.setViewport({ width: 1508, height: 1471, deviceScaleFactor: 1 });
+    await wait(300);
+    const heroTitleAndPriceRects = await page.evaluate(() => {
+      const title = document.querySelector(".siw-hero-identity h1");
+      const price = document.querySelector(".siw-hero-price strong");
+      const titleRect = title.getBoundingClientRect();
+      const priceRect = price.getBoundingClientRect();
+      return {
+        title: { left: titleRect.left, right: titleRect.right, top: titleRect.top, bottom: titleRect.bottom },
+        price: { left: priceRect.left, right: priceRect.right, top: priceRect.top, bottom: priceRect.bottom },
+      };
+    });
+    const noHeroOverlap =
+      heroTitleAndPriceRects.title.right <= heroTitleAndPriceRects.price.left ||
+      heroTitleAndPriceRects.price.right <= heroTitleAndPriceRects.title.left ||
+      heroTitleAndPriceRects.title.bottom <= heroTitleAndPriceRects.price.top ||
+      heroTitleAndPriceRects.price.bottom <= heroTitleAndPriceRects.title.top;
+    assert.ok(noHeroOverlap, `hero title and price must not overlap at 1508px viewport; got ${JSON.stringify(heroTitleAndPriceRects)}`);
+    await page.setViewport({ width: 1600, height: 1000, deviceScaleFactor: 1 });
+    await wait(300);
     const logoBox = await page.$eval("[data-ticker-logo='NVDA']", (node) => {
       const rect = node.getBoundingClientRect();
       return { width: rect.width, height: rect.height };
@@ -345,6 +505,133 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       tertiaryBoxes[0].left < tertiaryBoxes[1].left && tertiaryBoxes[1].left < tertiaryBoxes[2].left,
       "overview tertiary panels should be side by side left-to-right",
     );
+    const overviewText = await visibleText(page);
+    assert.match(overviewText, /High\s+205\.15/i, "hero high must come from quote OHLC, not copied price fallback");
+    assert.match(overviewText, /Low\s+195\.11/i, "hero low must come from quote OHLC, not copied price fallback");
+    assert.match(overviewText, /Open\s+195\.18/i, "hero open must come from quote OHLC, not copied price fallback");
+    assert.match(overviewText, /Prev Close\s+200\.09/i, "hero previous close must come from quote previousClose");
+    assert.equal(
+      await page.$$eval(".siw-news-list a", (nodes) => nodes.length),
+      3,
+      "overview must render three inline Yahoo native news items",
+    );
+    assert.match(overviewText, /Next earnings\s+2026-08-26/i);
+    assert.match(overviewText, /Last earnings\s+2026-05-20/i);
+    assert.match(overviewText, /EPS 1\.87 vs 1\.77/i);
+    assert.match(overviewText, /Earnings-date move\s+\+1\.30%/i);
+    const indexSparklineBoxes = await page.$$eval("[data-market-index-card]", (cards) =>
+      cards.map((card) => {
+        const cardRect = card.getBoundingClientRect();
+        const svg = card.querySelector("[data-index-sparkline='true']");
+        const svgRect = svg.getBoundingClientRect();
+        return {
+          symbol: card.getAttribute("data-market-index-card"),
+          status: card.getAttribute("data-market-index-status"),
+          source: card.getAttribute("data-market-index-source"),
+          historyPoints: Number(card.getAttribute("data-market-index-history-points")),
+          leftDelta: Math.abs(svgRect.left - cardRect.left),
+          cardHeight: cardRect.height,
+          height: svgRect.height,
+          preserveAspectRatio: svg.getAttribute("preserveAspectRatio"),
+          title: svg.querySelector("title")?.textContent || "",
+          text: card.textContent || "",
+        };
+      }),
+    );
+    assert.equal(indexSparklineBoxes.length, 3, "overview must render three market index sparkline boxes");
+    assert.ok(
+      indexSparklineBoxes.every((box) =>
+        box.height >= 56 &&
+        box.height <= 78 &&
+        box.cardHeight < 180 &&
+        box.leftDelta >= 14 &&
+        box.leftDelta <= 24 &&
+        box.preserveAspectRatio === "none"),
+      `market index cards should match the compact reference layout; got ${JSON.stringify(indexSparklineBoxes)}`,
+    );
+    const dowSparkline = indexSparklineBoxes.find((box) => box.symbol === "DJI");
+    assert.ok(dowSparkline, "DOW JONES card should render as DJI");
+    assert.equal(dowSparkline.status, "ok", `DOW JONES must use valid Yahoo history, not unavailable fallback; got ${JSON.stringify(dowSparkline)}`);
+    assert.equal(dowSparkline.source, "^DJI");
+    assert.ok(dowSparkline.historyPoints >= 10, `DOW JONES chart needs real history points; got ${JSON.stringify(dowSparkline)}`);
+    assert.match(dowSparkline.title, /DOW JONES\s+·\s+Jul\s+\d{1,2},\s+2026\s+·\s+3M daily/i, "DOW chart should expose the same date/range title format as the custom tooltip");
+    assert.match(dowSparkline.title, /Yahoo \^DJI/i, "DOW chart title should expose source symbol");
+    const ndxSparkline = indexSparklineBoxes.find((box) => box.symbol === "NDX");
+    assert.ok(ndxSparkline, "NASDAQ 100 card should render as NDX");
+    assert.match(ndxSparkline.title, /NASDAQ 100\s+·\s+Jul\s+\d{1,2},\s+2026\s+·\s+3M daily/i, "NDX chart title should match the top ticker tooltip style");
+    assert.match(ndxSparkline.title, /Yahoo \^NDX/i, "NDX chart title should expose source symbol");
+    await page.hover(".siw-hero-chart .siw-sparkline-frame");
+    await wait(150);
+    const heroTooltipText = await page.$eval("[data-sparkline-tooltip]", (node) => node.textContent || "");
+    assert.match(heroTooltipText, /NVDA/i, "hero tooltip should include ticker source");
+    assert.match(heroTooltipText, /Jul\s+9,\s+2026/i, "hero tooltip should include the session date");
+    assert.match(heroTooltipText, /\d{1,2}:\d{2}\s*(AM|PM)\s*ET/i, "hero tooltip should include the intraday timestamp");
+    assert.match(heroTooltipText, /Intraday/i, "hero tooltip should label hero chart as intraday");
+    assert.match(heroTooltipText, /\$/i, "hero tooltip should include a formatted numeric value");
+    assert.match(heroTooltipText, /%/i, "hero tooltip should include point-over-point percent change");
+    assert.match(heroTooltipText, /\d+\/\d+ pts/i, "hero tooltip should include point count");
+    const heroTooltipRect = await page.$eval("[data-sparkline-tooltip]", (node) => {
+      const rect = node.getBoundingClientRect();
+      const hero = document.querySelector(".siw-hero")?.getBoundingClientRect();
+      return {
+        top: rect.top,
+        bottom: rect.bottom,
+        left: rect.left,
+        right: rect.right,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+        heroBottom: hero?.bottom || 0,
+        placement: node.getAttribute("data-sparkline-tooltip-placement"),
+      };
+    });
+    assert.equal(heroTooltipRect.placement, "bottom", `hero tooltip should open below the chart; got ${JSON.stringify(heroTooltipRect)}`);
+    assert.ok(
+      heroTooltipRect.top >= 0 &&
+      heroTooltipRect.left >= 0 &&
+      heroTooltipRect.right <= heroTooltipRect.viewportWidth &&
+      heroTooltipRect.bottom <= heroTooltipRect.viewportHeight,
+      `hero tooltip should be inside the viewport and not clipped by the header; got ${JSON.stringify(heroTooltipRect)}`,
+    );
+    for (const [symbol, source] of [["SPX", "^GSPC"], ["NDX", "^NDX"], ["DJI", "^DJI"]]) {
+      await page.hover(`[data-market-index-card='${symbol}'] .siw-sparkline-frame`);
+      await wait(150);
+      const tooltipText = await page.$eval("[data-sparkline-tooltip]", (node) => node.textContent || "");
+      assert.match(tooltipText, new RegExp(source.replace("^", "\\^")), `${symbol} tooltip should include source ${source}`);
+      assert.match(tooltipText, /Jul\s+\d{1,2},\s+2026/i, `${symbol} tooltip should include full Yahoo history date`);
+      assert.match(tooltipText, /3M\s+daily/i, `${symbol} tooltip should label the index history as 3M daily`);
+      assert.match(tooltipText, /%/, `${symbol} tooltip should include point-over-point percent change`);
+      const indexTooltipRect = await page.$eval("[data-sparkline-tooltip]", (node) => {
+        const rect = node.getBoundingClientRect();
+        return { top: rect.top, left: rect.left, right: rect.right, bottom: rect.bottom, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight };
+      });
+      assert.ok(
+        indexTooltipRect.top >= 0 &&
+        indexTooltipRect.left >= 0 &&
+        indexTooltipRect.right <= indexTooltipRect.viewportWidth &&
+        indexTooltipRect.bottom <= indexTooltipRect.viewportHeight,
+        `${symbol} custom tooltip should be visible inside viewport; got ${JSON.stringify(indexTooltipRect)}`,
+      );
+      assert.ok(
+        await page.$eval(`[data-market-index-card='${symbol}'] [data-sparkline-active-dot]`, () => true),
+        `${symbol} hover should show active point dot`,
+      );
+      assert.ok(
+        await page.$eval(`[data-market-index-card='${symbol}'] [data-sparkline-crosshair]`, () => true),
+        `${symbol} hover should show crosshair`,
+      );
+    }
+    await page.mouse.move(5, 5);
+    await wait(150);
+    assert.equal(await page.$("[data-sparkline-tooltip]"), null, "sparkline tooltip should hide after pointer leaves");
+    const loadButtonHtml = await page.$eval(".siw-load-button", (button) => button.innerHTML);
+    assert.equal(loadButtonHtml.includes("⌁"), false, "LOAD button should not render the tiny glyph icon");
+    assert.ok(
+      await page.$$eval(".siw-tab-svg", (nodes) => nodes.every((node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.width >= 16 && rect.height >= 16;
+      })),
+      "tab icons should use consistent readable SVG sizing",
+    );
 
     await page.type('input[name="stock-search"]', "EOSE");
     await clickText(page, "LOAD");
@@ -361,6 +648,15 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await clickText(page, "LOAD");
     await wait(600);
     assert.match(await visibleText(page), /TSLA/);
+    const tslaHeroQuote = await page.$eval(".siw-hero-price", (node) => node.textContent || "");
+    assert.match(tslaHeroQuote, /406\.55/);
+    assert.match(tslaHeroQuote, /\+12\.49\s+\+3\.17%\s+\u25B2/, `TSLA hero quote should use positive Yahoo quote change; got ${tslaHeroQuote}`);
+    assert.doesNotMatch(tslaHeroQuote, /-18\.75|-4\.41%|\u25BC/);
+    assert.equal(
+      await page.$eval(".siw-hero-price", (node) => /-\d[\d,.]*\s+-?\d[\d,.]*\.\d+%\s*\u25B2|\+\d[\d,.]*\s+\+\d[\d,.]*\.\d+%\s*\u25BC/.test(node.textContent || "")),
+      false,
+      "hero quote direction must not mix negative values with an up arrow or positive values with a down arrow",
+    );
 
     await page.click('input[name="stock-search"]');
     await page.keyboard.down("Control");
@@ -486,11 +782,8 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await wait(150);
 
     await clickText(page, "Overview");
-    await clickText(page, "Open Yahoo news tool output");
-    assert.match(await page.$eval(".siw-main-tabs .is-active", (node) => node.textContent), /News/);
-    await clickText(page, "Overview");
-    await clickText(page, "View earnings tools");
-    assert.match(await page.$eval(".siw-main-tabs .is-active", (node) => node.textContent), /Earnings/);
+    assert.equal(await page.$$eval(".siw-news-list a", (nodes) => nodes.length), 3);
+    assert.match(await visibleText(page), /Yahoo quoteSummary calendarEvents \+ earningsHistory|Next earnings/i);
 
     await page.setViewport({ width: 1180, height: 820, deviceScaleFactor: 1 });
     await wait(300);
