@@ -213,9 +213,33 @@ export const getGammaFlipLevel = (rows: StocksWatcherStrikeRow[], spot: number) 
 };
 
 const normalizeSymbol = (symbol: string) => symbol.trim().toUpperCase();
+const SEARCH_SYMBOL_PATTERN = /^[A-Z0-9.^-]{1,12}$/;
 
 const uniqueSymbols = (symbols: string[]) =>
   Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
+
+export const resolveStocksWatcherSearchSymbol = (
+  query: string,
+  universe: StocksWatcherUniverseStock[] = STOCKS_WATCHER_UNIVERSE,
+) => {
+  const rawQuery = query.trim();
+  if (!rawQuery) return null;
+
+  const searchUniverse = [...universe, ...STOCKS_WATCHER_UNIVERSE];
+  const normalizedQuery = normalizeStocksWatcherSymbol(rawQuery, "");
+  const bySymbol = new Map(searchUniverse.map((stock) => [normalizeSymbol(stock.symbol), stock.symbol]));
+  const exactSymbol = bySymbol.get(normalizedQuery);
+  if (exactSymbol) return exactSymbol;
+
+  const companyNeedle = rawQuery.toLowerCase();
+  const companyMatch = searchUniverse.find((stock) => stock.companyName.toLowerCase().includes(companyNeedle));
+  if (companyMatch) return normalizeSymbol(companyMatch.symbol);
+
+  const tickerCandidate = rawQuery.toUpperCase();
+  if (SEARCH_SYMBOL_PATTERN.test(tickerCandidate)) return normalizeStocksWatcherSymbol(tickerCandidate, "");
+
+  return null;
+};
 
 export const getStocksWatcherVisibleSymbols = (options: StocksWatcherVisibleSymbolsOptions) => {
   const hidden = new Set(options.hiddenSymbols.map(normalizeSymbol));

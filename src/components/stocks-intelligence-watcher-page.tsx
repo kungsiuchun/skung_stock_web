@@ -37,6 +37,7 @@ import {
   getStocksWatcherRowQuotesFromRawResult,
   getStocksWatcherVisibleSymbols,
   mergeStocksWatcherRowQuoteMap,
+  resolveStocksWatcherSearchSymbol,
 } from "@/lib/stocks-intelligence-watcher";
 import {
   buildStocksWatcherAiSummaryPayload,
@@ -1421,6 +1422,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   );
   const selectedSymbolRef = useRef(selectedSymbol);
   const [query, setQuery] = useState("");
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [mode, setMode] = useState<StocksWatcherChartMode>("volume");
   const [strikeWindowSize, setStrikeWindowSize] = useState(29);
   const [watchlistCollapsed, setWatchlistCollapsed] = useState(false);
@@ -1835,11 +1837,11 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       selectedSymbol,
       defaultSymbols: nativeSymbols,
       limit: 60,
-      query,
+      query: searchError ? "" : query,
       sector: sectorFilter,
       type: typeFilter,
       universe: allStocks,
-      includeSelected: false,
+      includeSelected: true,
       includeDefaultSymbols: false,
       restrictToDefaultSymbols: false,
     });
@@ -1847,7 +1849,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     return visibleSymbols
       .map((symbol) => bySymbol.get(symbol) || getStocksWatcherUniverseStock(symbol))
       .filter((stock): stock is StocksWatcherUniverseStock => Boolean(stock));
-  }, [allStocks, favorites, hiddenSymbols, query, sectorFilter, selectedSymbol, typeFilter, watchlistSource]);
+  }, [allStocks, favorites, hiddenSymbols, query, searchError, sectorFilter, selectedSymbol, typeFilter, watchlistSource]);
 
   const favoriteCount = useMemo(() => {
     const hidden = new Set(hiddenSymbols.map(normalizeSymbol));
@@ -1870,17 +1872,20 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   }, [filteredTools]);
 
   const submitSearch = () => {
-    const requestedSymbol = normalizeSymbol(query);
-    const exact = allStocks.find((stock) => stock.symbol === requestedSymbol);
-    const looksLikeTicker = /^[A-Z0-9.^-]{1,12}$/.test(requestedSymbol);
-    const nextSymbol = exact?.symbol || (looksLikeTicker ? requestedSymbol : watchlist[0]?.symbol);
-    if (nextSymbol) {
-      setQuery("");
-      setSectorFilter("All Sectors");
-      setTypeFilter("All Types");
-      setWatchlistSource("all");
-      void loadSnapshot(nextSymbol);
+    const searchTerm = query.trim();
+    const nextSymbol = resolveStocksWatcherSearchSymbol(searchTerm, allStocks);
+    if (!nextSymbol) {
+      setSearchError(`No ticker matched "${searchTerm || "blank search"}". Try MSFT, TSLA, or a company name.`);
+      return;
     }
+
+    setSearchError(null);
+    setQuery("");
+    setSectorFilter("All Sectors");
+    setTypeFilter("All Types");
+    setWatchlistSource("all");
+    setHiddenSymbols((current) => current.filter((symbol) => normalizeSymbol(symbol) !== nextSymbol));
+    void loadSnapshot(nextSymbol);
   };
 
   const toggleFavorite = (symbol: string) => {
@@ -3337,7 +3342,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                   <Search className="h-4 w-4" />
                   <input
                     value={query}
-                    onChange={(event) => setQuery(event.target.value)}
+                    onChange={(event) => {
+                      setQuery(event.target.value);
+                      if (searchError) setSearchError(null);
+                    }}
                     onKeyDown={(event) => {
                       if (event.key === "Enter") submitSearch();
                     }}
@@ -3361,6 +3369,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                   <RefreshCw className={watchlistRefreshing ? "animate-spin" : ""} />
                 </button>
               </div>
+              {searchError && <p className="siw-search-error">{searchError}</p>}
 
               <div className={`siw-filter-row ${filtersOpen ? "is-open" : ""}`}>
                 <label>

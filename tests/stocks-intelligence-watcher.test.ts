@@ -12,6 +12,7 @@ import {
   getNearestSpotStrike,
   mergeStocksWatcherRowQuoteMap,
   refreshStocksWatcherSymbolsBatch,
+  resolveStocksWatcherSearchSymbol,
   type StocksWatcherToolClient,
 } from "../src/lib/stocks-intelligence-watcher";
 import { STOCKS_WATCHER_SYMBOLS, STOCKS_WATCHER_UNIVERSE } from "../src/lib/stocks-watcher-universe";
@@ -422,6 +423,57 @@ test("visible list filters locally by ticker and company name", () => {
       limit: 50,
     }),
     ["AAPL"],
+  );
+});
+
+test("watcher search resolves symbols, company names, and custom tickers without fallback rows", () => {
+  assert.equal(resolveStocksWatcherSearchSymbol("tsla", STOCKS_WATCHER_UNIVERSE), "TSLA");
+  assert.equal(resolveStocksWatcherSearchSymbol("Tesla", STOCKS_WATCHER_UNIVERSE), "TSLA");
+  assert.equal(resolveStocksWatcherSearchSymbol("Microsoft", STOCKS_WATCHER_UNIVERSE), "MSFT");
+  assert.equal(resolveStocksWatcherSearchSymbol("Microsoft", [{
+    symbol: "SOFI",
+    companyName: "SoFi Technologies Inc.",
+    sector: "Custom",
+    type: "Stock",
+    fallbackPrice: 12.34,
+    fallbackChange: 0.56,
+    fallbackChangePercent: 4.75,
+  }]), "MSFT");
+  assert.equal(resolveStocksWatcherSearchSymbol("SOFI", STOCKS_WATCHER_UNIVERSE), "SOFI");
+  assert.equal(resolveStocksWatcherSearchSymbol("AI semiconductor", STOCKS_WATCHER_UNIVERSE), null);
+  assert.equal(resolveStocksWatcherSearchSymbol("AAPL DROP", STOCKS_WATCHER_UNIVERSE), null);
+});
+
+test("explicit watcher search can reveal a hidden ticker instead of leaving the list empty", () => {
+  const hiddenSymbols = ["MSFT", "TSLA"];
+  const resolved = resolveStocksWatcherSearchSymbol("Microsoft", STOCKS_WATCHER_UNIVERSE);
+  assert.equal(resolved, "MSFT");
+
+  assert.deepEqual(
+    getStocksWatcherVisibleSymbols({
+      favorites: STOCKS_WATCHER_SYMBOLS,
+      hiddenSymbols,
+      selectedSymbol: "NVDA",
+      defaultSymbols: STOCKS_WATCHER_SYMBOLS,
+      universe: STOCKS_WATCHER_UNIVERSE,
+      includeSelected: false,
+      query: "Microsoft",
+      limit: 50,
+    }),
+    [],
+  );
+  assert.deepEqual(
+    getStocksWatcherVisibleSymbols({
+      favorites: STOCKS_WATCHER_SYMBOLS,
+      hiddenSymbols: hiddenSymbols.filter((symbol) => symbol !== resolved),
+      selectedSymbol: resolved,
+      defaultSymbols: STOCKS_WATCHER_SYMBOLS,
+      universe: STOCKS_WATCHER_UNIVERSE,
+      includeSelected: false,
+      query: "Microsoft",
+      limit: 50,
+    }),
+    ["MSFT"],
   );
 });
 
