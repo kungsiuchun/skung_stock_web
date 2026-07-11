@@ -274,6 +274,40 @@ const buildToolResponse = (tool, params = {}) => {
     return { ok: true, tool, params, text: "quotes", raw: { quotes }, calledAt: "2026-07-09T20:00:00.000Z" };
   }
 
+  if (tool === "get_macro_regime") {
+    return { ok: true, tool, params, text: "macro regime", raw: { regime: "risk_on", advancers: 4, avgChange: 1.27, universeCount: 5 }, calledAt: "2026-07-09T20:00:00.000Z" };
+  }
+
+  if (tool === "market_breadth") {
+    return { ok: true, tool, params, text: "market breadth", raw: { quotes: [
+      { symbol: "AAA", name: "Alpha", price: 100, change: 2.1, changePercent: 2.1, volume: 1000 },
+      { symbol: "BBB", name: "Beta", price: 100, change: 1.5, changePercent: 1.5, volume: 1000 },
+      { symbol: "CCC", name: "Gamma", price: 100, change: 1.1, changePercent: 1.1, volume: 1000 },
+      { symbol: "DDD", name: "Delta", price: 100, change: 0.7, changePercent: 0.7, volume: 1000 },
+      { symbol: "EEE", name: "Epsilon", price: 100, change: -0.4, changePercent: -0.4, volume: 1000 },
+    ] }, calledAt: "2026-07-09T20:00:00.000Z" };
+  }
+
+  if (tool === "get_sector_stats") {
+    const sectorStats = refreshAllMode
+      ? [
+          { sector: "Technology", count: 3, avgChangePercent: 2.75, dollarVolume: 9000000 },
+          { sector: "Consumer Discretionary", count: 2, avgChangePercent: -1.25, dollarVolume: 3000000 },
+        ]
+      : [{ sector: "Stale cache sector", count: 99, avgChangePercent: -9.99, dollarVolume: 1 }];
+    return { ok: true, tool, params, text: "sector stats", raw: { sectorStats }, calledAt: "2026-07-09T20:00:00.000Z" };
+  }
+
+  if (tool === "get_sector_top_holdings") {
+    return { ok: true, tool, params, text: "sector top holdings", raw: { holdings: [
+      { symbol: "LEAD", sector: "Technology", price: 100, changePercent: 4.2, volume: 1000 },
+      { symbol: "GAIN", sector: "Technology", price: 100, changePercent: 2.5, volume: 1000 },
+      { symbol: "UP", sector: "Technology", price: 100, changePercent: 0.8, volume: 1000 },
+      { symbol: "DOWN", sector: "Consumer Discretionary", price: 100, changePercent: -0.4, volume: 1000 },
+      { symbol: "LOSS", sector: "Consumer Discretionary", price: 100, changePercent: -2.7, volume: 1000 },
+    ] }, calledAt: "2026-07-09T20:00:00.000Z" };
+  }
+
   if (tool === "get_intraday" || tool === "get_stock_history") {
     return { ok: true, tool, params, text: "history", raw: { history: historyRows() }, calledAt: "2026-07-08T21:33:03.000Z" };
   }
@@ -418,6 +452,8 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       refreshAllButtonBox.iconHeight >= 15,
       `left nav refresh-all button should have a normal aligned icon; got ${JSON.stringify(refreshAllButtonBox)}`,
     );
+    assert.equal(await page.$eval("[data-watchlist-breadth]", (node) => node.getAttribute("data-watchlist-coverage")), "0/10", "watchlist breadth must not fabricate fallback coverage before Yahoo rows refresh");
+    assert.equal(await page.$$("[data-watchlist-sector]").then((nodes) => nodes.length), 0, "watchlist sector panel must not render fallback/cache sectors before Yahoo rows refresh");
     const watchedRowsBeforeRefresh = await page.$$eval("[data-watchlist-row]", (rows) =>
       Object.fromEntries(rows.slice(0, 8).map((row) => [
         row.getAttribute("data-watchlist-row"),
@@ -464,7 +500,26 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(watchedRowsAfterRefresh.MSFT?.source, "yahoo_quote", "MSFT row should show Yahoo quote as source after refresh-all");
     assert.match(watchedRowsAfterRefresh.GOOG?.asOf || "", /2026-07-09T20:00:00/);
     assert.match(await page.$eval(".siw-hero-identity h1", (node) => node.textContent || ""), /NVDA/, "refresh-all should not change the selected hero ticker");
-    assert.equal(refreshAllCalls.some((call) => call.tool === "market_breadth"), false, "refresh-all should only refresh quote rows, not market context");
+    for (const tool of ["get_macro_regime", "market_breadth", "get_sector_stats", "get_sector_top_holdings"]) {
+      assert.ok(refreshAllCalls.some((call) => call.tool === tool), `refresh-all should refresh approved-universe ${tool}`);
+    }
+    await page.waitForFunction(() => document.querySelector("[data-approved-universe-market-context]")?.innerText.includes("Risk-on"), { timeout: 5000 });
+    const approvedUniverseContext = await page.$eval("[data-approved-universe-market-context]", (node) => node.innerText);
+    assert.match(approvedUniverseContext, /BREADTH\s*4\/5 · 80%/);
+    assert.match(approvedUniverseContext, /AVERAGE DAY MOVE\s*\+1\.27%/);
+    assert.match(approvedUniverseContext, /COVERAGE\s*5 Yahoo symbols/);
+    assert.match(await visibleText(page), /Technology · 2\/2/);
+    assert.doesNotMatch(await visibleText(page), /Stale cache sector/);
+    assert.match(await visibleText(page), /LEAD \+4\.20%/);
+    assert.match(await visibleText(page), /LOSS -2\.70%/);
+    assert.match(await visibleText(page), /Watchlist Market Breadth \(Yahoo live quotes\)/i);
+    assert.equal(await page.$eval("[data-watchlist-breadth]", (node) => node.getAttribute("data-watchlist-coverage")), "10/10", "watchlist breadth should cover every visible ticker after Yahoo refresh");
+    assert.equal(await page.$eval("[data-watchlist-sector='Technology']", (node) => node.getAttribute("data-watchlist-sector-coverage")), "2/2", "sector coverage should derive from visible Yahoo quote rows");
+    await page.select("select[aria-label='Sector filter']", "Technology");
+    await page.waitForFunction(() => document.querySelector("[data-watchlist-breadth]")?.getAttribute("data-watchlist-coverage") === "2/2", { timeout: 5000 });
+    assert.equal(await page.$$("[data-watchlist-sector]").then((nodes) => nodes.length), 1, "sector filter should limit the watchlist sector panel to visible rows");
+    assert.equal(await page.$eval("[data-watchlist-sector]", (node) => node.getAttribute("data-watchlist-sector")), "Technology");
+    await page.select("select[aria-label='Sector filter']", "All Sectors");
     await page.setViewport({ width: 1508, height: 1471, deviceScaleFactor: 1 });
     await wait(300);
     const heroTitleAndPriceRects = await page.evaluate(() => {

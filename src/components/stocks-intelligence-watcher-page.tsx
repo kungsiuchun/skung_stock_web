@@ -193,7 +193,24 @@ interface MarketContextState {
   error: string | null;
   regime: NativeToolResult | null;
   breadth: NativeToolResult | null;
+  sectorStats: NativeToolResult | null;
+  sectorTopHoldings: NativeToolResult | null;
   indices: MarketIndexCard[];
+}
+
+interface ApprovedUniverseRegime {
+  regime: "risk_on" | "risk_off" | "mixed";
+  advancers: number;
+  avgChange: number;
+  universeCount: number;
+}
+
+interface ApprovedUniverseHolding {
+  symbol: string;
+  sector: string;
+  price: number;
+  changePercent: number;
+  volume: number;
 }
 
 interface RawOptionLeg {
@@ -1231,6 +1248,38 @@ const TickerLogo = ({ symbol, large = false }: { symbol: string; large?: boolean
   );
 };
 
+const approvedUniverseRegimeFromResult = (result: NativeToolResult | null): ApprovedUniverseRegime | null => {
+  const raw = rawRecord(result?.raw);
+  if (!raw) return null;
+  const regime = raw.regime;
+  if (regime !== "risk_on" && regime !== "risk_off" && regime !== "mixed") return null;
+  const universeCount = rawNumber(raw.universeCount);
+  if (universeCount <= 0) return null;
+  return {
+    regime,
+    advancers: rawNumber(raw.advancers),
+    avgChange: rawNumber(raw.avgChange),
+    universeCount,
+  };
+};
+
+const approvedUniverseHoldingsFromResult = (result: NativeToolResult | null): ApprovedUniverseHolding[] => {
+  const raw = rawRecord(result?.raw);
+  const rows = Array.isArray(raw?.holdings) ? raw.holdings : [];
+  return rows
+    .map((item) => rawRecord(item))
+    .filter((item): item is Record<string, unknown> => Boolean(item))
+    .map((item) => ({
+      symbol: typeof item.symbol === "string" ? item.symbol : "",
+      sector: typeof item.sector === "string" ? item.sector : "",
+      price: rawNumber(item.price),
+      changePercent: rawNumber(item.changePercent),
+      volume: rawNumber(item.volume),
+    }))
+    .filter((item) => item.symbol)
+    .sort((a, b) => b.changePercent - a.changePercent);
+};
+
 const MiniSparkline = ({
   points,
   positive = true,
@@ -1471,6 +1520,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     error: null,
     regime: null,
     breadth: null,
+    sectorStats: null,
+    sectorTopHoldings: null,
     indices: emptyMarketIndexCards(),
   });
   const [toolSearch, setToolSearch] = useState("");
@@ -1795,18 +1846,22 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           );
         }
       };
-      const [regime, breadth, indices] = await Promise.all([
+      const [regime, breadth, sectorStats, sectorTopHoldings, indices] = await Promise.all([
         callNativeTool("get_macro_regime", {}),
         callNativeTool("market_breadth", { market: "US" }),
+        callNativeTool("get_sector_stats", {}),
+        callNativeTool("get_sector_top_holdings", {}),
         Promise.all(MARKET_INDEX_DEFINITIONS.map(loadIndexCard)),
       ]);
-      setMarketContext({ loading: false, error: null, regime, breadth, indices });
+      setMarketContext({ loading: false, error: null, regime, breadth, sectorStats, sectorTopHoldings, indices });
     } catch (requestError) {
       setMarketContext({
         loading: false,
         error: requestError instanceof Error ? requestError.message : String(requestError),
         regime: null,
         breadth: null,
+        sectorStats: null,
+        sectorTopHoldings: null,
         indices: emptyMarketIndexCards(),
       });
     }
@@ -1938,12 +1993,15 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     setWatchlistRefreshing(true);
     setRefreshingSymbols(symbolsToRefresh);
     try {
-      const quoteResults = await Promise.allSettled(
-        chunkSymbols(symbolsToRefresh, ROW_QUOTE_REFRESH_CHUNK_SIZE).map(async (chunk) => {
-          const result = await callNativeTool("get_quotes", { tickers: chunk.join(",") });
-          return getStocksWatcherRowQuotesFromRawResult(result.raw);
-        }),
-      );
+      const [quoteResults] = await Promise.all([
+        Promise.allSettled(
+          chunkSymbols(symbolsToRefresh, ROW_QUOTE_REFRESH_CHUNK_SIZE).map(async (chunk) => {
+            const result = await callNativeTool("get_quotes", { tickers: chunk.join(",") });
+            return getStocksWatcherRowQuotesFromRawResult(result.raw);
+          }),
+        ),
+        loadMarketContext(),
+      ]);
       const quotes = quoteResults.flatMap((result) => result.status === "fulfilled" ? result.value : []);
       if (quotes.length > 0) {
         setRowQuotesBySymbol((current) => mergeStocksWatcherRowQuoteMap(current, quotes));
@@ -2132,10 +2190,6 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const sessionLow = snapshot?.quote.low ?? null;
   const totalCallGex = chartRows.reduce((sum, row) => sum + Math.max(0, row.callGex), 0);
   const totalPutGex = chartRows.reduce((sum, row) => sum + Math.min(0, row.putGex), 0);
-  const netPositiveGexPct = totalCallGex + Math.abs(totalPutGex) > 0
-    ? (totalCallGex / (totalCallGex + Math.abs(totalPutGex))) * 100
-    : 0;
-  const negativeGexPct = Math.max(0, 100 - netPositiveGexPct);
   const axisTicks = mode === "gex"
     ? [
         { value: maxValue, position: 0 },
@@ -3013,30 +3067,34 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   };
 
   const renderOverviewPanel = () => {
+    const visibleWatchlistCount = watchlist.length;
+    const visibleWatchlistSectorTotals = watchlist.reduce<Map<string, number>>((totals, stock) => {
+      totals.set(stock.sector, (totals.get(stock.sector) || 0) + 1);
+      return totals;
+    }, new Map());
+    const liveWatchlistQuotes = watchlist.flatMap((stock) => {
+      const quote = rowQuotesBySymbol[stock.symbol];
+      return quote?.source === "yahoo_quote" ? [{ stock, quote }] : [];
+    });
+    const watchlistCoverage = liveWatchlistQuotes.length;
     const sectorRows = Array.from(
-      watchlist.reduce<Map<string, { sector: string; total: number; count: number }>>((groups, stock) => {
-        const current = groups.get(stock.sector) || { sector: stock.sector, total: 0, count: 0 };
-        const quote = stock.symbol === snapshot?.symbol
-          ? snapshot.quote
-          : getFreshStocksWatcherCacheEntry(snapshotCacheRef.current, stock.symbol)?.snapshot.quote;
-        current.total += quote?.changePercent ?? stock.fallbackChangePercent;
-        current.count += 1;
+      liveWatchlistQuotes.reduce<Map<string, { sector: string; totalChangePercent: number; covered: number }>>((groups, { stock, quote }) => {
+        const current = groups.get(stock.sector) || { sector: stock.sector, totalChangePercent: 0, covered: 0 };
+        current.totalChangePercent += quote.changePercent;
+        current.covered += 1;
         groups.set(stock.sector, current);
         return groups;
       }, new Map()).values(),
     )
-      .map((row) => ({ ...row, value: row.count ? row.total / row.count : 0 }))
-      .sort((a, b) => b.value - a.value)
+      .map((row) => ({ ...row, total: visibleWatchlistSectorTotals.get(row.sector) || row.covered, avgChangePercent: row.totalChangePercent / row.covered }))
+      .sort((a, b) => b.avgChangePercent - a.avgChangePercent)
       .slice(0, 9);
-    const advancers = watchlist.filter((stock) => {
-      const quote = stock.symbol === snapshot?.symbol
-        ? snapshot.quote
-        : getFreshStocksWatcherCacheEntry(snapshotCacheRef.current, stock.symbol)?.snapshot.quote;
-      return (quote?.changePercent ?? stock.fallbackChangePercent) >= 0;
-    }).length;
-    const decliners = Math.max(0, watchlist.length - advancers);
-    const unchanged = 0;
-    const breadthTotal = Math.max(1, advancers + decliners + unchanged);
+    const advancers = liveWatchlistQuotes.filter(({ quote }) => quote.changePercent > 0).length;
+    const decliners = liveWatchlistQuotes.filter(({ quote }) => quote.changePercent < 0).length;
+    const unchanged = Math.max(0, watchlistCoverage - advancers - decliners);
+    const breadthTotal = Math.max(1, watchlistCoverage);
+    const latestWatchlistQuoteAt = liveWatchlistQuotes.reduce<number | null>((latest, { quote }) =>
+      latest === null || quote.fetchedAt > latest ? quote.fetchedAt : latest, null);
     const marketIndexCards = marketContext.indices.length === MARKET_INDEX_DEFINITIONS.length
       ? marketContext.indices
       : emptyMarketIndexCards();
@@ -3098,10 +3156,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           </div>
           <div className="siw-market-breadth">
             <div>
-              <span>Market Breadth (watchlist)</span>
-              <em>As of {new Date(snapshot?.generatedAt || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} ET</em>
+              <span>Watchlist Market Breadth (Yahoo live quotes)</span>
+              <em>{watchlistCoverage > 0 ? `Coverage ${watchlistCoverage}/${visibleWatchlistCount} · ${new Date(latestWatchlistQuoteAt || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} ET` : `Coverage 0/${visibleWatchlistCount} · Refresh to load`}</em>
             </div>
-            <div className="siw-breadth-rail">
+            <div className="siw-breadth-rail" data-watchlist-breadth data-watchlist-coverage={`${watchlistCoverage}/${visibleWatchlistCount}`}>
               <b style={{ width: `${(advancers / breadthTotal) * 100}%` }} />
               <i style={{ width: `${(unchanged / breadthTotal) * 100}%` }} />
               <strong style={{ width: `${(decliners / breadthTotal) * 100}%` }} />
@@ -3111,24 +3169,25 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
               <span>Unchanged <b>{unchanged}</b></span>
               <span className="siw-down">Decliners <b>{decliners}</b></span>
             </div>
+            {watchlistCoverage === 0 && <div className="siw-data-empty"><strong>Needs checking</strong><span>No live Yahoo quotes for the currently visible watchlist. Refresh all to try again.</span></div>}
           </div>
         </div>
 
         <div className="siw-panel siw-sector-panel">
           <div className="siw-overview-head">
-            <h2>Sector Performance</h2>
-            <span>Watcher universe</span>
+            <h2>Watchlist Sector Performance</h2>
+            <span>Yahoo live quotes · {watchlistCoverage}/{visibleWatchlistCount} covered</span>
           </div>
           <div className="siw-sector-list">
-            {sectorRows.map((row) => (
-              <div key={row.sector}>
-                <span>{row.sector}</span>
+            {sectorRows.length > 0 ? sectorRows.map((row) => (
+              <div key={row.sector} data-watchlist-sector={row.sector} data-watchlist-sector-coverage={`${row.covered}/${row.total}`}>
+                <span>{row.sector} · {row.covered}/{row.total}</span>
                 <b>
-                  <i style={{ width: `${Math.min(100, Math.max(8, Math.abs(row.value) * 18))}%` }} className={row.value >= 0 ? "siw-sector-up" : "siw-sector-down"} />
+                  <i style={{ width: `${Math.min(100, Math.max(8, Math.abs(row.avgChangePercent) * 18))}%` }} className={row.avgChangePercent >= 0 ? "siw-sector-up" : "siw-sector-down"} />
                 </b>
-                <em className={row.value >= 0 ? "siw-up" : "siw-down"}>{row.value >= 0 ? "+" : ""}{row.value.toFixed(2)}%</em>
+                <em className={row.avgChangePercent >= 0 ? "siw-up" : "siw-down"}>{formatSignedPercent(row.avgChangePercent)}</em>
               </div>
-            ))}
+            )) : <div className="siw-data-empty"><strong>Needs checking</strong><span>No live Yahoo quotes for the currently visible watchlist. Refresh all to try again.</span></div>}
           </div>
         </div>
 
@@ -3353,7 +3412,6 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                     autoComplete="off"
                     placeholder="Search ticker or name..."
                   />
-                  <kbd>/</kbd>
                 </label>
                 <button type="button" onClick={submitSearch} className="siw-load-button">
                   LOAD
@@ -3652,27 +3710,41 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 <div className="siw-panel siw-market-context">
                   <div className="siw-panel-title">
                     <Building2 className="h-4 w-4" />
-                    <span>2) Market Context (Yahoo)</span>
-                    <button type="button" onClick={() => void loadMarketContext()}>Refresh</button>
+                    <span>2) Approved Universe Market Context</span>
+                    <button type="button" onClick={() => void loadMarketContext()} disabled={marketContext.loading}>{marketContext.loading ? "Refreshing" : "Refresh"}</button>
                   </div>
-                  <div className="siw-context-cards">
-                    <MetricTile label="Market Regime" value={snapshot?.marketContext.breadth?.slice(0, 22) || "Low Stress"} tone="positive" />
-                    <MetricTile label="Universe" value={`${watchlist.length} rows`} tone="blue" />
-                  </div>
-                  <div className="siw-breadth-bar">
-                    <span style={{ width: `${Math.max(8, Math.min(92, netPositiveGexPct))}%` }} />
-                    <em style={{ width: `${Math.max(8, Math.min(92, negativeGexPct))}%` }} />
-                  </div>
-                  <div className="siw-leader-laggard">
-                    <div>
-                      <b>Top Leaders</b>
-                      {watchlist.slice(0, 5).map((stock) => <span key={stock.symbol}>{stock.symbol}</span>)}
-                    </div>
-                    <div>
-                      <b>Top Laggards</b>
-                      {[...watchlist].slice(-5).map((stock) => <span key={stock.symbol}>{stock.symbol}</span>)}
-                    </div>
-                  </div>
+                  {(() => {
+                    const context = approvedUniverseRegimeFromResult(marketContext.regime);
+                    const holdings = approvedUniverseHoldingsFromResult(marketContext.sectorTopHoldings);
+                    const positiveRate = context ? Math.round((context.advancers / Math.max(1, context.universeCount)) * 100) : 0;
+                    const posture = context?.regime === "risk_on" ? "Risk-on" : context?.regime === "risk_off" ? "Risk-off" : context?.regime === "mixed" ? "Mixed" : "Needs checking";
+                    const postureTone = context?.regime === "risk_on" ? "positive" : context?.regime === "risk_off" ? "negative" : "blue";
+                    const leaders = holdings.slice(0, 3);
+                    const laggards = holdings.slice(-3).reverse();
+                    return <>
+                      <div className="siw-context-cards" data-approved-universe-market-context>
+                        <MetricTile label="Market posture" value={posture} tone={postureTone} />
+                        <MetricTile label="Breadth" value={context ? `${context.advancers}/${context.universeCount} · ${positiveRate}%` : "Needs checking"} tone="blue" />
+                        <MetricTile label="Average day move" value={context ? formatSignedPercent(context.avgChange) : "Needs checking"} tone={context && context.avgChange < 0 ? "negative" : "positive"} />
+                        <MetricTile label="Coverage" value={context ? `${context.universeCount} Yahoo symbols` : "Needs checking"} tone="blue" />
+                      </div>
+                      <div className="siw-breadth-bar" aria-label={context ? `${context.advancers} of ${context.universeCount} Yahoo approved-universe symbols are positive` : "Yahoo approved-universe breadth unavailable"}>
+                        <span style={{ width: `${positiveRate}%` }} />
+                        <em style={{ width: `${100 - positiveRate}%` }} />
+                      </div>
+                      <div className="siw-leader-laggard">
+                        <div>
+                          <b>Top Leaders</b>
+                          {leaders.length ? leaders.map((holding) => <span key={holding.symbol}>{holding.symbol} {formatSignedPercent(holding.changePercent)}</span>) : <span>Needs checking</span>}
+                        </div>
+                        <div>
+                          <b>Top Laggards</b>
+                          {laggards.length ? laggards.map((holding) => <span key={holding.symbol}>{holding.symbol} {formatSignedPercent(holding.changePercent)}</span>) : <span>Needs checking</span>}
+                        </div>
+                      </div>
+                    </>;
+                  })()}
+                  <p className="siw-context-source">Yahoo approved universe · {marketContext.error ? `Refresh failed: ${marketContext.error}` : "Daily change uses Yahoo quote changePercent."}</p>
                 </div>
 
                 <div className="siw-panel siw-tool-catalog">

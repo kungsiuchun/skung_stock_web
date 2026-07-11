@@ -1095,12 +1095,12 @@ const findCloseToCloseMove = (history: NativeYahooHistoryRow[], eventDate: strin
   };
 };
 
-const buildEarningsSnapshot = (summary: Record<string, any>, history: NativeYahooHistoryRow[]) => {
+export const buildNativeYahooEarningsSnapshot = (summary: Record<string, any>, history: NativeYahooHistoryRow[]) => {
   const calendar = summary.calendarEvents || {};
   const earnings = calendar.earnings || {};
   const latestHistory = latestEarningsHistoryRow(summary);
   const nextEarningsDate = dateFromYahoo(earnings.earningsDate?.[0]);
-  const lastEarningsDate = dateFromYahoo(earnings.earningsCallDate?.[0]) || dateFromYahoo(latestHistory?.quarter);
+  const lastEarningsDate = dateFromYahoo(latestHistory?.quarter) || dateFromYahoo(earnings.earningsCallDate?.[0]);
   const epsActual = rawNumberFromYahoo(latestHistory?.epsActual);
   const epsEstimate = rawNumberFromYahoo(latestHistory?.epsEstimate);
   const surpriseRaw = rawNumberFromYahoo(latestHistory?.surprisePercent);
@@ -1148,7 +1148,7 @@ const buildEventContextToolResult = async (
   if (canonicalName === "earnings_vol_crush") {
     const calendar = (stats.raw as { summary?: Record<string, any> }).summary?.calendarEvents || {};
     const earningsDate = calendar.earnings?.earningsDate?.[0]?.fmt || "n/a";
-    const earnings = buildEarningsSnapshot((stats.raw as { summary?: Record<string, any> }).summary || {}, history);
+    const earnings = buildNativeYahooEarningsSnapshot((stats.raw as { summary?: Record<string, any> }).summary || {}, history);
     const text = [
       `# ${ticker} earnings vol-crush context`,
       `- Earnings date: ${earningsDate}`,

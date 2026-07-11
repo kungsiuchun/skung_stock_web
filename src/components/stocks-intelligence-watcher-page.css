@@ -202,7 +202,7 @@
 
 .siw-search-row input,
 .siw-tool-catalog input {
-  padding: 0 42px 0 38px;
+  padding: 0 12px 0 38px;
 }
 
 .siw-search-row input:focus,
@@ -1880,6 +1880,13 @@
 .siw-leader-laggard span {
   color: var(--siw-text);
   line-height: 1.6;
+}
+
+.siw-context-source {
+  margin: -2px 12px 12px;
+  color: var(--siw-muted);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .siw-tool-catalog label {

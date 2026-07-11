@@ -17,6 +17,7 @@ import {
 } from "../src/lib/stocks-intelligence-watcher";
 import { STOCKS_WATCHER_SYMBOLS, STOCKS_WATCHER_UNIVERSE } from "../src/lib/stocks-watcher-universe";
 import {
+  buildNativeYahooEarningsSnapshot,
   listNativeStocksTools,
   normalizeStocksWatcherSymbol,
   quoteRowFromYahooChartResult,
@@ -689,6 +690,32 @@ test("Yahoo explicit quote change wins over bad chartPreviousClose fallback", ()
   assert.equal(quote.change, 12.49);
   assert.equal(quote.changePercent, 3.17);
   assert.equal(quote.warning, undefined);
+});
+
+test("earnings move uses the latest reported quarter instead of a future call date", () => {
+  const earnings = buildNativeYahooEarningsSnapshot({
+    calendarEvents: {
+      earnings: {
+        earningsDate: [{ fmt: "2026-07-29" }],
+        earningsCallDate: [{ fmt: "2026-07-29" }],
+      },
+    },
+    earningsHistory: {
+      history: [{
+        quarter: { fmt: "2026-04-30" },
+        epsActual: { raw: 0.11 },
+        epsEstimate: { raw: 0.08 },
+      }],
+    },
+  }, [
+    { date: "2026-04-29", open: 10, high: 10.2, low: 9.8, close: 10, volume: 1_000 },
+    { date: "2026-04-30", open: 10.1, high: 10.6, low: 10, close: 10.5, volume: 1_100 },
+  ]);
+
+  assert.equal(earnings.nextEarningsDate, "2026-07-29");
+  assert.equal(earnings.lastEarningsDate, "2026-04-30");
+  assert.equal(earnings.priceMove?.eventTradingDate, "2026-04-30");
+  assert.equal(earnings.priceMove?.changePercent, 5);
 });
 
 test("row quote map merge keeps old quotes when a refresh chunk omits a symbol", () => {
