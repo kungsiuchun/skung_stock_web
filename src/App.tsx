@@ -8,6 +8,7 @@ import { TradingAgentDashboard } from './components/dashboard/trading-agent-dash
 import { SPXRecapPage } from './components/spx-recap-page'
 import { SPXGexHeatmapPage } from './components/spx-gex-heatmap-page'
 import { StocksIntelligenceWatcherPage } from './components/stocks-intelligence-watcher-page'
+import { FixedIncomePage } from './components/fixed-income-page'
 import { AboutPage } from './components/about-page'
 import { ContactPage } from './components/contact-page'
 import { WorkGallery } from './components/work-gallery'
@@ -21,7 +22,12 @@ function App() {
   const [currentView, setCurrentView] = useState<ViewState>(() =>
     typeof window === 'undefined' ? 'home' : getViewFromHash(window.location.hash)
   );
-  const isFullScreenLabView = currentView === 'stocks-intelligence-watcher';
+  const isFullScreenLabView = [
+    'finance-dashboard',
+    'spx-gex-heatmap',
+    'stocks-intelligence-watcher',
+    'fixed-income',
+  ].includes(currentView);
 
   useEffect(() => {
     const syncViewFromHash = () => {
@@ -93,6 +99,7 @@ function App() {
               onOpenSPXRecap={() => navigateToView('spx-recap')}
               onOpenSPXGexHeatmap={() => navigateToView('spx-gex-heatmap')}
               onOpenStocksWatcher={() => navigateToView('stocks-intelligence-watcher')}
+              onOpenFixedIncome={() => navigateToView('fixed-income')}
             />
           ) : currentView === 'settle-up' ? (
             <SettleUpPage onBackToWork={() => navigateToView('work-gallery')} />
@@ -109,6 +116,8 @@ function App() {
             <SPXGexHeatmapPage onBackToWork={() => navigateToView('work-gallery')} />
           ) : currentView === 'stocks-intelligence-watcher' ? (
             <StocksIntelligenceWatcherPage onBackToWork={() => navigateToView('work-gallery')} />
+          ) : currentView === 'fixed-income' ? (
+            <FixedIncomePage onBackToWork={() => navigateToView('work-gallery')} />
           ) : (
             <HomeLandingPage
               onOpenMarketLab={() => navigateToView('work-gallery')}

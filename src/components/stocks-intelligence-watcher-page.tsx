@@ -34,6 +34,7 @@ import {
   getFreshStocksWatcherCacheEntry,
   getGammaFlipLevel,
   getNearestSpotStrike,
+  getStocksWatcherMarketSession,
   getStocksWatcherRowQuotesFromRawResult,
   getStocksWatcherVisibleSymbols,
   mergeStocksWatcherRowQuoteMap,
@@ -1498,6 +1499,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [customStocks, setCustomStocks] = useState<StocksWatcherUniverseStock[]>(() => readStoredCustomStocks());
   const [rowQuotesBySymbol, setRowQuotesBySymbol] = useState<Record<string, StocksWatcherRowQuote>>({});
   const [watchlistRefreshing, setWatchlistRefreshing] = useState(false);
+  const [pageRefreshing, setPageRefreshing] = useState(false);
   const [refreshingSymbols, setRefreshingSymbols] = useState<string[]>([]);
   const [cacheVersion, setCacheVersion] = useState(0);
   const [sectorFilter, setSectorFilter] = useState("All Sectors");
@@ -2017,6 +2019,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                   previousClose: selectedQuote.previousClose ?? current.quote.previousClose,
                   change: selectedQuote.change,
                   changePercent: selectedQuote.changePercent,
+                  marketState: selectedQuote.marketState ?? current.quote.marketState,
                   asOf: selectedQuote.asOf || current.quote.asOf,
                 },
                 spot: selectedQuote.price,
@@ -2028,6 +2031,33 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     } finally {
       setRefreshingSymbols([]);
       setWatchlistRefreshing(false);
+    }
+  };
+
+  const refreshPageData = async () => {
+    if (pageRefreshing) return;
+
+    const symbol = snapshot?.symbol || selectedSymbol;
+    const activePanelRefresh = activeTab === "Options"
+      ? activeSubTab === "Overview"
+        ? loadExpiryOverview(currentExpiry, true)
+        : loadOptionsSubTab(activeSubTab, true)
+      : activeTab === "Overview"
+        ? Promise.resolve()
+        : loadTopTab(activeTab, true);
+
+    setPageRefreshing(true);
+    tabDataCache.current.clear();
+
+    try {
+      await Promise.all([
+        loadSnapshot(symbol, { force: true }),
+        refreshAllWatchers(),
+        loadNativeWatchlist(),
+        activePanelRefresh,
+      ]);
+    } finally {
+      setPageRefreshing(false);
     }
   };
 
@@ -2188,6 +2218,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const sessionOpen = snapshot?.quote.open ?? null;
   const sessionHigh = snapshot?.quote.high ?? null;
   const sessionLow = snapshot?.quote.low ?? null;
+  const marketSession = getStocksWatcherMarketSession(snapshot?.quote.marketState);
   const totalCallGex = chartRows.reduce((sum, row) => sum + Math.max(0, row.callGex), 0);
   const totalPutGex = chartRows.reduce((sum, row) => sum + Math.min(0, row.putGex), 0);
   const axisTicks = mode === "gex"
@@ -3639,11 +3670,18 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
               <span>Updated {updatedSecondsAgo === null ? "--" : `${updatedSecondsAgo}s ago`}</span>
             </div>
 
-            <button type="button" className="siw-market-pill" onClick={refreshCurrent}>
+            <button
+              type="button"
+              className={`siw-market-pill is-${marketSession.tone}`}
+              onClick={() => void refreshPageData()}
+              disabled={pageRefreshing}
+              aria-label={`Refresh all live watcher data; market ${marketSession.label}`}
+              title={`Refresh all live watcher data; market ${marketSession.label}`}
+            >
               <span />
               <b>Market</b>
-              <strong>Open</strong>
-              <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+              <strong>{marketSession.label}</strong>
+              <RefreshCw className={`h-3.5 w-3.5 ${loading || watchlistRefreshing || pageRefreshing ? "animate-spin" : ""}`} />
             </button>
           </header>
 

@@ -1,4 +1,4 @@
-import { Activity, ArrowRight, BarChart3, Camera, CircleDollarSign, ImageIcon, MessageSquare, ReceiptText, Users, Waves } from "lucide-react";
+import { Activity, ArrowRight, BarChart3, Camera, CircleDollarSign, ImageIcon, Landmark, MessageSquare, ReceiptText, Users, Waves } from "lucide-react";
 import { GlowingEffect } from "@/components/ui/glowing-effect";
 import { cn } from "@/lib/utils";
 
@@ -10,6 +10,7 @@ interface WorkGalleryProps {
   onOpenSPXRecap: () => void;
   onOpenSPXGexHeatmap: () => void;
   onOpenStocksWatcher: () => void;
+  onOpenFixedIncome: () => void;
 }
 
 type WorkItem = {
@@ -31,6 +32,7 @@ export function WorkGallery({
   onOpenSPXRecap,
   onOpenSPXGexHeatmap,
   onOpenStocksWatcher,
+  onOpenFixedIncome,
 }: WorkGalleryProps) {
   const workItems: WorkItem[] = [
     {
@@ -88,6 +90,15 @@ export function WorkGallery({
       icon: <Activity className="h-5 w-5" />,
       featured: true,
       onClick: onOpenStocksWatcher,
+    },
+    {
+      title: "Fixed Income",
+      category: "Rates Terminal",
+      description: "An official U.S. Treasury yield curve view across the latest, weekly, monthly, and year-start snapshots.",
+      buildNote: "Uses Treasury's published par yield curve directly, with explicit curve dates and basis-point changes.",
+      action: "Open rates",
+      icon: <Landmark className="h-5 w-5" />,
+      onClick: onOpenFixedIncome,
     },
     {
       title: "Image Caption",

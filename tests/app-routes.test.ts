@@ -18,13 +18,14 @@ test("round trips every page-level view to a hash route", () => {
   const expected: Array<[ViewState, string]> = [
     ["home", "#/"],
     ["about", "#/about"],
-    ["work-gallery", "#/work"],
+    ["work-gallery", "#/market-lab"],
     ["settle-up", "#/work/settle-up"],
     ["finance-dashboard", "#/work/finance-analyzer"],
     ["trading-agent-dashboard", "#/work/trading-agent-dashboard"],
     ["spx-recap", "#/work/spx-recap"],
     ["spx-gex-heatmap", "#/work/spx-gex-heatmap"],
     ["stocks-intelligence-watcher", "#/work/stocks-intelligence-watcher"],
+    ["fixed-income", "#/work/fixed-income"],
   ];
 
   for (const [view, hash] of expected) {

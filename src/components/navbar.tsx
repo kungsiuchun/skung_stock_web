@@ -18,6 +18,7 @@ const labViews: ViewState[] = [
   "spx-recap",
   "spx-gex-heatmap",
   "stocks-intelligence-watcher",
+  "fixed-income",
 ];
 
 const navItems = [

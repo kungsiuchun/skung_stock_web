@@ -830,6 +830,8 @@
 }
 
 .siw-market-pill {
+  --siw-market-state: var(--siw-muted);
+  --siw-market-glow: rgba(143, 161, 183, 0.45);
   display: grid;
   min-width: 116px;
   grid-template-columns: 12px 1fr auto;
@@ -845,8 +847,8 @@
   width: 10px;
   height: 10px;
   border-radius: 999px;
-  background: var(--siw-green);
-  box-shadow: 0 0 14px rgba(22, 219, 114, 0.72);
+  background: var(--siw-market-state);
+  box-shadow: 0 0 14px var(--siw-market-glow);
 }
 
 .siw-market-pill b {
@@ -856,8 +858,23 @@
 
 .siw-market-pill strong {
   grid-column: 2;
-  color: var(--siw-green);
+  color: var(--siw-market-state);
   font-size: 13px;
+}
+
+.siw-market-pill.is-open {
+  --siw-market-state: var(--siw-green);
+  --siw-market-glow: rgba(22, 219, 114, 0.72);
+}
+
+.siw-market-pill.is-extended {
+  --siw-market-state: var(--siw-yellow);
+  --siw-market-glow: rgba(255, 212, 0, 0.62);
+}
+
+.siw-market-pill.is-closed {
+  --siw-market-state: var(--siw-red);
+  --siw-market-glow: rgba(255, 62, 77, 0.62);
 }
 
 .siw-market-pill svg {

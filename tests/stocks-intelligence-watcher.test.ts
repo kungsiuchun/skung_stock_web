@@ -7,6 +7,7 @@ import {
   buildStocksWatcherSnapshotFromNative,
   getFreshStocksWatcherCacheEntry,
   getGammaFlipLevel,
+  getStocksWatcherMarketSession,
   getStocksWatcherRowQuotesFromRawResult,
   getStocksWatcherVisibleSymbols,
   getNearestSpotStrike,
@@ -132,6 +133,7 @@ class FakeStocksNativeClient implements StocksWatcherToolClient {
             previousClose: 179.66,
             change: 2.14,
             changePercent: 1.19,
+            marketState: "REGULAR",
             asOf: "2026-05-28T20:00:00.000Z",
           }],
         },
@@ -615,7 +617,7 @@ test("refresh batch bounds concurrency and keeps failed symbols isolated", async
 test("row quote parser preserves Yahoo quote fields for watcher rows", () => {
   const quotes = getStocksWatcherRowQuotesFromRawResult({
     quotes: [
-      { symbol: "goog", name: "Alphabet Inc.", price: 356.24, previousClose: 357.89, change: -1.65, changePercent: -0.46, asOf: "2026-07-09T20:00:00.000Z" },
+      { symbol: "goog", name: "Alphabet Inc.", price: 356.24, previousClose: 357.89, change: -1.65, changePercent: -0.46, marketState: "CLOSED", asOf: "2026-07-09T20:00:00.000Z" },
       { symbol: "AAPL", name: "Apple Inc.", price: 316.22, change: 21.84, changePercent: 7.42, asOf: "2026-07-09T20:01:00.000Z" },
       { symbol: "BAD", name: "Bad row" },
     ],
@@ -629,6 +631,15 @@ test("row quote parser preserves Yahoo quote fields for watcher rows", () => {
     ],
   );
   assert.equal(quotes[0]?.asOf, "2026-07-09T20:00:00.000Z");
+  assert.equal(quotes[0]?.marketState, "CLOSED");
+});
+
+test("market session label follows Yahoo marketState without guessing from local time", () => {
+  assert.deepEqual(getStocksWatcherMarketSession("REGULAR"), { label: "Open", tone: "open" });
+  assert.deepEqual(getStocksWatcherMarketSession("PRE"), { label: "Pre-market", tone: "extended" });
+  assert.deepEqual(getStocksWatcherMarketSession("POST"), { label: "After-hours", tone: "extended" });
+  assert.deepEqual(getStocksWatcherMarketSession("CLOSED"), { label: "Closed", tone: "closed" });
+  assert.deepEqual(getStocksWatcherMarketSession(null), { label: "Unavailable", tone: "unknown" });
 });
 
 test("Yahoo chart quote derivation keeps explicit same-session TSLA change positive", () => {
@@ -746,6 +757,7 @@ test("native snapshot parses quotes, options, GEX, and tools/list metadata", asy
   assert.equal(snapshot.quote.high, 182.4);
   assert.equal(snapshot.quote.low, 178.6);
   assert.equal(snapshot.quote.previousClose, 179.66);
+  assert.equal(snapshot.quote.marketState, "REGULAR");
   assert.equal(snapshot.history[0]?.price, 178.4);
   assert.equal(snapshot.history[0]?.date, "2026-05-28T13:30:00.000Z");
   assert.equal(snapshot.history[0]?.label, "13:30");

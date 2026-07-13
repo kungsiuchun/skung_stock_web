@@ -15,8 +15,34 @@ export interface StocksWatcherQuote {
   previousClose: number | null;
   change: number;
   changePercent: number;
+  marketState: string | null;
   asOf: string | null;
 }
+
+export type StocksWatcherMarketSessionTone = "open" | "extended" | "closed" | "unknown";
+
+export interface StocksWatcherMarketSession {
+  label: "Open" | "Pre-market" | "After-hours" | "Closed" | "Unavailable";
+  tone: StocksWatcherMarketSessionTone;
+}
+
+/** Maps Yahoo's quoted session state directly to a display state; it never infers the session from local time. */
+export const getStocksWatcherMarketSession = (marketState: string | null | undefined): StocksWatcherMarketSession => {
+  switch (marketState?.trim().toUpperCase()) {
+    case "REGULAR":
+      return { label: "Open", tone: "open" };
+    case "PRE":
+    case "PREPRE":
+      return { label: "Pre-market", tone: "extended" };
+    case "POST":
+    case "POSTPOST":
+      return { label: "After-hours", tone: "extended" };
+    case "CLOSED":
+      return { label: "Closed", tone: "closed" };
+    default:
+      return { label: "Unavailable", tone: "unknown" };
+  }
+};
 
 export interface StocksWatcherNewsItem {
   title: string;
@@ -129,6 +155,7 @@ export interface StocksWatcherRowQuote {
   previousClose?: number | null;
   change: number;
   changePercent: number;
+  marketState: string | null;
   asOf: string | null;
   fetchedAt: number;
   source: "yahoo_quote";
@@ -671,6 +698,7 @@ export const buildDemoStocksWatcherSnapshot = (symbol: string, warning: string):
       previousClose: round(base - change),
       change,
       changePercent: universeStock?.fallbackChangePercent ?? round((change / base) * 100, 2),
+      marketState: null,
       asOf: "05/28, 04:00 PM",
     },
     spot: base,
@@ -769,6 +797,7 @@ export const getStocksWatcherRowQuotesFromRawResult = (raw: unknown, fetchedAt =
         previousClose: numberFromUnknown(quote.previousClose) ?? null,
         change: numberFromUnknown(quote.change) ?? 0,
         changePercent: numberFromUnknown(quote.changePercent) ?? 0,
+        marketState: typeof quote.marketState === "string" ? quote.marketState : null,
         asOf: typeof quote.asOf === "string" ? quote.asOf : null,
         fetchedAt,
         source: "yahoo_quote" as const,
@@ -808,6 +837,7 @@ const quoteFromRawResult = (symbol: string, raw: unknown): Partial<StocksWatcher
     previousClose: numberFromUnknown(quote.previousClose) ?? null,
     change: numberFromUnknown(quote.change),
     changePercent: numberFromUnknown(quote.changePercent),
+    marketState: typeof quote.marketState === "string" ? quote.marketState : undefined,
     asOf: typeof quote.asOf === "string" ? quote.asOf : undefined,
   };
 };
@@ -1004,6 +1034,7 @@ export const buildStocksWatcherSnapshotFromNative = async (
       high: partialQuote.high ?? demoBase.quote.high,
       low: partialQuote.low ?? demoBase.quote.low,
       previousClose: partialQuote.previousClose ?? demoBase.quote.previousClose,
+      marketState: partialQuote.marketState ?? demoBase.quote.marketState,
       asOf: partialQuote.asOf || demoBase.quote.asOf,
     },
     spot: price,
