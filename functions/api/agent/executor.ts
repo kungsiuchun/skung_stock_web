@@ -62,6 +62,8 @@ export interface ExecutorConfig {
   maxSteps?: number;
   skillInstructions?: string;
   hooks?: AgentHook[];
+  requiredFinalToolName?: string;
+  requiredFinalContentValidator?: (content: string) => { valid: boolean; reason?: string };
 }
 
 export class AgentExecutor {
@@ -70,6 +72,8 @@ export class AgentExecutor {
   private maxSteps: number;
   private skillInstructions: string;
   private hooks: AgentHook[];
+  private requiredFinalToolName?: string;
+  private requiredFinalContentValidator?: (content: string) => { valid: boolean; reason?: string };
 
   constructor(
     registry: ToolRegistry,
@@ -81,6 +85,8 @@ export class AgentExecutor {
     this.maxSteps = config?.maxSteps ?? 5;
     this.skillInstructions = config?.skillInstructions || "";
     this.hooks = config?.hooks || [new LoggerHook()];
+    this.requiredFinalToolName = config?.requiredFinalToolName;
+    this.requiredFinalContentValidator = config?.requiredFinalContentValidator;
   }
 
   /**
@@ -116,6 +122,7 @@ export class AgentExecutor {
     const toolDecls = this.registry.toOpenAITools();
     const steps: AgentStep[] = [];
     const new_memories: string[] = [];
+    let narrativeDraft: string | undefined;
 
     console.log(`[Agent] Starting ReAct loop. Tools: [${this.registry.getToolNames().join(", ")}]`);
 
@@ -246,17 +253,60 @@ export class AgentExecutor {
 
       // 4. No tool calls → Final Answer
       const finalContent = response.content || "No analysis generated.";
-      console.log(`[Agent] Final answer received (${finalContent.length} chars)`);
+
+      if (
+        this.requiredFinalToolName &&
+        !steps.some((item) => item.type === "tool_call" && item.tool_name === this.requiredFinalToolName)
+      ) {
+        if (this.requiredFinalContentValidator) {
+          const draftValidation = this.requiredFinalContentValidator(finalContent);
+          if (draftValidation.valid && !narrativeDraft) {
+            narrativeDraft = finalContent;
+            console.log(`[FinanceDashboardNarrative] saved pre-decision draft (${finalContent.length} chars)`);
+          }
+        }
+        console.warn(`[Agent] Final response omitted required tool ${this.requiredFinalToolName}; requesting structured submission.`);
+        messages.push({ role: "assistant", content: finalContent });
+        messages.push({
+          role: "user",
+          content: `Do not provide a final answer yet. Call ${this.requiredFinalToolName} now using only the tool results already collected. After the tool succeeds, return the complete report requested by the system instructions.`,
+        });
+        continue;
+      }
+
+      let adoptedFinalContent = finalContent;
+      if (this.requiredFinalContentValidator) {
+        const finalValidation = this.requiredFinalContentValidator(finalContent);
+        if (!finalValidation.valid) {
+          const draftValidation = narrativeDraft ? this.requiredFinalContentValidator(narrativeDraft) : { valid: false, reason: "No valid draft was captured." };
+          if (draftValidation.valid && narrativeDraft) {
+            adoptedFinalContent = narrativeDraft;
+            console.warn(`[FinanceDashboardNarrative] final response rejected (${finalValidation.reason}); using saved draft.`);
+          } else {
+            const reason = finalValidation.reason || "Final AI narrative failed validation.";
+            console.error(`[FinanceDashboardNarrative] unavailable: ${reason}`);
+            return {
+              success: false,
+              content: "",
+              steps,
+              error: reason,
+              new_memories: new_memories.length > 0 ? new_memories : undefined,
+            };
+          }
+        }
+      }
+
+      console.log(`[Agent] Final answer received (${adoptedFinalContent.length} chars)`);
 
       steps.push({
         step: step + 1,
         type: "final_answer",
-        content: finalContent,
+        content: adoptedFinalContent,
       });
 
       return {
         success: true,
-        content: finalContent,
+        content: adoptedFinalContent,
         steps,
         new_memories: new_memories.length > 0 ? new_memories : undefined,
       };

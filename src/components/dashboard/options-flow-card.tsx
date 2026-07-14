@@ -24,7 +24,9 @@ const buildWatcherHref = (symbol?: string) => {
 };
 
 export function OptionsFlowCard({ data, symbol }: OptionsFlowProps) {
-  if (!data || data.error || !data.topStrikes || data.topStrikes.length === 0) {
+  const hasOpenInterest = Boolean(data?.topStrikes?.some((row) => row.callOI + row.putOI > 0));
+
+  if (!data || data.error || !hasOpenInterest) {
     return (
       <div className="bg-white border border-gray-200 rounded-3xl p-5 shadow-sm flex flex-col items-center justify-center text-center py-10 h-full min-h-[280px]">
          <p className="text-xs text-gray-500 uppercase tracking-widest font-bold">無期權數據</p>
@@ -66,28 +68,25 @@ export function OptionsFlowCard({ data, symbol }: OptionsFlowProps) {
              <span>Call 未平倉 (看漲)</span>
           </div>
           {data.topStrikes.map((cat, idx) => {
-            const rowTotal = cat.callOI + cat.putOI || 1;
             // Use maximum single OI for width normalization to show proper VS scale
-            const putWidth = Math.max((cat.putOI / highestSingleOI) * 100, 2);
-            const callWidth = Math.max((cat.callOI / highestSingleOI) * 100, 2);
+            const putWidth = (cat.putOI / highestSingleOI) * 100;
+            const callWidth = (cat.callOI / highestSingleOI) * 100;
             const callDominates = cat.callOI >= cat.putOI;
             
             return (
-              <div key={idx} className="flex items-center gap-2 w-full text-xs">
-                <div className="w-10 text-gray-500 text-right font-medium">@{cat.strike}</div>
-                <div className="flex-1 flex items-center">
-                  {/* Outflow / Put side */}
-                  <div className="flex-1 flex justify-end">
-                    <div className={`h-4 rounded-l ${!callDominates ? 'bg-red-500' : 'bg-red-300'}`} style={{ width: `${putWidth}%` }} />
-                  </div>
-                  <div className="w-px h-5 bg-gray-200 mx-0.5" />
-                  {/* Inflow / Call side */}
-                  <div className="flex-1">
-                    <div className={`h-4 rounded-r ${callDominates ? 'bg-green-500' : 'bg-green-300'}`} style={{ width: `${callWidth}%` }} />
+              <div key={idx} className="grid w-full grid-cols-[minmax(0,1fr)_2.5rem_minmax(0,1fr)] items-center gap-1 text-xs">
+                <div className="flex min-w-0 items-center gap-1">
+                  <span className="w-8 shrink-0 text-right font-bold tabular-nums text-gray-600">{formatValue(cat.putOI)}</span>
+                  <div className="flex-1 border-r border-gray-200 py-0.5 pr-0.5">
+                    <div className={`ml-auto h-3 rounded-l ${!callDominates ? 'bg-red-500' : 'bg-red-300'}`} style={{ width: `${putWidth}%` }} />
                   </div>
                 </div>
-                <div className={`w-16 text-right font-bold tabular-nums text-gray-600`}>
-                  {formatValue(rowTotal)}
+                <div className="text-center font-medium text-gray-500">@{cat.strike}</div>
+                <div className="flex min-w-0 items-center gap-1">
+                  <div className="flex-1 border-l border-gray-200 py-0.5 pl-0.5">
+                    <div className={`h-3 rounded-r ${callDominates ? 'bg-green-500' : 'bg-green-300'}`} style={{ width: `${callWidth}%` }} />
+                  </div>
+                  <span className="w-8 shrink-0 font-bold tabular-nums text-gray-600">{formatValue(cat.callOI)}</span>
                 </div>
               </div>
             );

@@ -2,6 +2,7 @@ import { STOCKS_WATCHER_SYMBOLS, normalizeStocksWatcherSymbol } from "./stocks-n
 import type { StocksNativeToolResult, StocksNativeToolSummary } from "./stocks-native-yahoo";
 import { STOCKS_WATCHER_UNIVERSE } from "./stocks-watcher-universe";
 import type { StocksWatcherUniverseStock } from "./stocks-watcher-universe";
+import type { MarketCacheMetadata } from "./market-data-cache";
 
 export type StocksWatcherChartMode = "oi" | "volume" | "gex";
 
@@ -108,6 +109,7 @@ export interface StocksWatcherToolRun {
 export interface StocksWatcherSnapshot {
   generatedAt: string;
   symbol: string;
+  cache?: MarketCacheMetadata;
   quote: StocksWatcherQuote;
   spot: number;
   atm: number;

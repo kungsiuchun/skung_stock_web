@@ -14,7 +14,7 @@ import { ContactPage } from './components/contact-page'
 import { WorkGallery } from './components/work-gallery'
 import { SettleUpPage } from './components/settle-up-page'
 import { getHashForView, getViewFromHash, type ViewState } from '@/lib/app-routes'
-import { Home, LineChart } from 'lucide-react'
+import { ArrowLeft, Home, LineChart } from 'lucide-react'
 
 function App() {
   const [isAIOpen, setIsAIOpen] = useState(false);
@@ -66,6 +66,15 @@ function App() {
         {/* Left App Navigation Component - ONLY active during Finance Dashboard */}
         {currentView === 'finance-dashboard' && (
           <div className="w-16 h-full flex flex-col items-center py-8 border-r border-white/5 bg-[#0a0f16] z-50 shrink-0">
+            <button
+              type="button"
+              title="Back to Market Lab"
+              aria-label="Back to Market Lab"
+              onClick={() => navigateToView('work-gallery')}
+              className="mb-5 rounded-lg border border-white/10 p-3 text-white/60 transition-colors hover:border-cyan-400/50 hover:bg-cyan-500/10 hover:text-cyan-300"
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </button>
             <div className="flex flex-col gap-4 bg-white/5 rounded-full p-2 border border-white/10 shadow-xl">
                <button title="Dashboard view" onClick={() => { setIsFinanceChatOpen(false); }} className={`p-3 rounded-full transition-colors ${!isFinanceChatOpen ? 'bg-cyan-500/20 text-cyan-400' : 'text-white/50 hover:text-white'}`}>
                   <Home className="w-5 h-5" />

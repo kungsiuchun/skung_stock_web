@@ -2341,11 +2341,16 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         </div>
         <div className="flex flex-wrap justify-end gap-2 text-xs font-black">
           <span className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-300">
-            {snapshot?.source === "native_yahoo" ? "Native Yahoo" : "Demo fallback"}
+            {snapshot?.source === "native_yahoo" ? "Native Yahoo" : "Source unavailable"}
           </span>
           <span className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-300">
             Updated {snapshot ? new Date(snapshot.generatedAt).toLocaleString() : "--"}
           </span>
+          {snapshot?.cache && (
+            <span className={`rounded-md border px-3 py-1.5 ${snapshot.cache.status === "stale" ? "border-amber-800 bg-amber-950/40 text-amber-200" : "border-slate-700 bg-slate-900 text-slate-300"}`}>
+              {snapshot.cache.status === "stale" ? `Stale ${snapshot.cache.ageSeconds}s` : snapshot.cache.status === "hit" ? `Cache hit ${snapshot.cache.ageSeconds}s` : snapshot.cache.status === "bypassed" ? "Cache bypassed" : "Fresh source"}
+            </span>
+          )}
         </div>
       </div>
 
@@ -3705,7 +3710,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
               <section className="siw-settings-panel" data-settings-panel>
                 <div>
                   <strong>Watcher config</strong>
-                  <span>Strike window: {strikeWindowSize} | Source: {snapshot?.source === "native_yahoo" ? "Yahoo Finance native" : "Demo fallback"}</span>
+                <span>Strike window: {strikeWindowSize} | Source: {snapshot?.source === "native_yahoo" ? "Yahoo Finance native" : "Unavailable"}</span>
                 </div>
                 <button type="button" onClick={refreshCurrent}>Retry / refresh</button>
               </section>
@@ -3823,7 +3828,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           <footer className="siw-status-bar">
             <span><b /> Market: Open</span>
             <span>Data: Yahoo Finance <em>(Delayed 15-20 min)</em></span>
-            <span>Source: {snapshot?.source === "native_yahoo" ? "Yahoo options chain + local Greek approximation" : "Demo fallback"}</span>
+                <span>Source: {snapshot?.source === "native_yahoo" ? "Yahoo options chain + local Greek approximation" : "Unavailable"}</span>
             <span>Not financial advice</span>
             <button type="button" onClick={() => setSettingsOpen((value) => !value)}>Help</button>
           </footer>

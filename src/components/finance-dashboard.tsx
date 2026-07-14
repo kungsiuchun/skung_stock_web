@@ -21,46 +21,24 @@ import {
   FINANCE_ANALYZER_MODEL_CALL_BUDGETS,
   FINANCE_ANALYZER_SOURCE_MAP,
   normalizeQuantStrategiesFromAgentResponse,
+  selectRecommendedQuantTrade,
 } from "@/lib/finance-analyzer-contract";
-import type { SentimentApiResult } from "@/lib/market-sentiment";
-
-interface NewsItem {
-  title: string;
-  publisher: string;
-  publish_time: string;
-  link: string;
-  source?: string;
-}
-
-interface DashboardData {
-  symbol: string;
-  price: number;
-  change: string;
-  algoRating: number;
-  marketSentiment: number | null;
-  sentimentSource?: string;
-  sentimentData?: SentimentApiResult | null;
-  signal: string;
-  trend: string;
-  strategyPoints: {
-    entry: number;
-    stopLoss: number;
-    takeProfit: number;
-  };
-  news: NewsItem[];
-  chartData: { date: string; date_iso?: string; price: number; open?: number; high?: number; low?: number; volume: number }[];
-  optionsFlow?: {
-    totalCallOI: number;
-    totalPutOI: number;
-    ratio: number;
-    topStrikes: { strike: number; callOI: number; putOI: number }[];
-    expirationDate?: string;
-    interpretation?: string;
-    error?: string;
-  };
-  quantStrategies?: { name: string; score: number }[];
-  finalAnalysis?: string;
-}
+import {
+  formatDashboardAction,
+  formatDashboardTrend,
+  normalizeDashboardDecision,
+} from "@/lib/finance-dashboard-ai-decision";
+import type { FinanceDashboardData as DashboardData, FinanceDashboardSnapshotPayload } from "@/lib/finance-dashboard-snapshot";
+import type { MarketCacheMetadata } from "@/lib/market-data-cache";
+import {
+  DASHBOARD_LOADING_LABELS,
+  DASHBOARD_LOADING_PHASE_MS,
+  getNextDashboardLoadingPhase,
+  type DashboardLoadingPhase,
+} from "@/lib/finance-dashboard-loading";
+import {
+  getDashboardNarrativeStatus,
+} from "@/lib/finance-dashboard-narrative";
 
 interface HistoryItem {
   symbol: string;
@@ -85,16 +63,96 @@ const hasLegacyDeepEarData = (data: unknown) => {
   );
 };
 
+const normalizeStoredDashboardData = (data: unknown): DashboardData | null => {
+  if (!data || typeof data !== "object") return null;
+  const stored = data as DashboardData & { quantStrategies?: unknown };
+  const normalizedStrategies = normalizeQuantStrategiesFromAgentResponse({ quant_strategies: stored.quantStrategies });
+  const hasCurrentQuantSchema = stored.quantStrategySchemaVersion === "v3";
+  const quantStrategies = hasCurrentQuantSchema
+    ? normalizedStrategies
+    : normalizedStrategies.map((strategy) => ({
+      ...strategy,
+      entry: undefined,
+      stopLoss: undefined,
+      target: undefined,
+      tradeSetup: {
+        actionability: "PENDING_TRIGGER" as const,
+        nextStep: "舊快取不符合目前量化策略合約；重新分析後才會產生交易計劃。",
+        optionsStatus: "PENDING" as const,
+      },
+    }));
+  return {
+    ...(stored as DashboardData),
+    quantStrategySchemaVersion: "v3",
+    decision: normalizeDashboardDecision((stored as { decision?: unknown }).decision),
+    quantStrategies,
+    recommendedTrade: hasCurrentQuantSchema ? selectRecommendedQuantTrade(quantStrategies) : null,
+    dashboardNarrative: stored.dashboardNarrative || getDashboardNarrativeStatus(stored.finalAnalysis),
+  };
+};
+
 const sanitizeHistory = (items: unknown): HistoryItem[] => {
   if (!Array.isArray(items)) return [];
   return items
     .filter((item): item is HistoryItem => Boolean(item && typeof item === "object" && "symbol" in item))
-    .map((item) => (
-      hasLegacyDeepEarData(item.fullData)
-        ? { ...item, fullData: undefined }
-        : item
-    ));
+    .map((item) => {
+      if (hasLegacyDeepEarData(item.fullData)) return { ...item, fullData: undefined };
+      return {
+        ...item,
+        fullData: item.fullData ? normalizeStoredDashboardData(item.fullData) || undefined : undefined,
+      };
+    });
 };
+
+function FinanceDashboardLoading({ phase, symbol }: { phase: DashboardLoadingPhase; symbol: string }) {
+  const phases: DashboardLoadingPhase[] = ["market", "options", "quant", "synthesis"];
+  const activeIndex = phases.indexOf(phase);
+
+  return (
+    <div className="grid grid-cols-1 gap-8 lg:grid-cols-12" aria-live="polite" aria-label="Finance Analyzer loading">
+      <div className="space-y-8 lg:col-span-8">
+        <div className="rounded-3xl border border-gray-200 bg-white p-8 shadow-sm">
+          <div className="flex items-end justify-between gap-6">
+            <div className="space-y-4">
+              <div className="h-4 w-24 animate-pulse rounded bg-blue-100" />
+              <div className="h-12 w-48 animate-pulse rounded-xl bg-gray-200" />
+              <div className="h-8 w-36 animate-pulse rounded-lg bg-gray-100" />
+            </div>
+            <div className="grid w-1/2 grid-cols-3 gap-3">
+              {Array.from({ length: 3 }).map((_, index) => <div key={index} className="h-20 animate-pulse rounded-2xl bg-gray-100" />)}
+            </div>
+          </div>
+          <p className="mt-8 text-sm font-semibold text-blue-700">
+            {symbol ? `${symbol.toUpperCase()} · ` : ""}{DASHBOARD_LOADING_LABELS[phase]}
+          </p>
+          <div className="mt-3 h-2 overflow-hidden rounded-full bg-gray-100">
+            <div className="h-full rounded-full bg-blue-500 transition-all duration-700" style={{ width: `${((activeIndex + 1) / phases.length) * 100}%` }} />
+          </div>
+        </div>
+        <div className="h-[360px] animate-pulse rounded-3xl border border-gray-200 bg-white p-8 shadow-sm">
+          <div className="h-5 w-48 rounded bg-gray-100" />
+          <div className="mt-8 h-64 rounded-2xl bg-gray-50" />
+        </div>
+        <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+          <div className="mb-5 h-5 w-56 rounded bg-gray-100" />
+          <div className="space-y-3">
+            {Array.from({ length: 6 }).map((_, index) => <div key={index} className="h-12 animate-pulse rounded-2xl bg-gray-50" />)}
+          </div>
+        </div>
+      </div>
+      <div className="space-y-8 lg:col-span-4">
+        <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+          <div className="mb-6 h-5 w-40 rounded bg-gray-100" />
+          <div className="space-y-3">
+            {Array.from({ length: 6 }).map((_, index) => <div key={index} className="h-14 animate-pulse rounded-2xl bg-gray-50" />)}
+          </div>
+        </div>
+        <div className="h-64 animate-pulse rounded-3xl border border-gray-200 bg-white p-6 shadow-sm" />
+        <div className="h-52 animate-pulse rounded-3xl border border-gray-200 bg-white p-6 shadow-sm" />
+      </div>
+    </div>
+  );
+}
 
 export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashboardProps) {
   const [valuationData, setValuationData] = useState<any>(null);
@@ -104,9 +162,11 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
   const [activeData, setActiveData] = useState<DashboardData | null>(null);
   const [symbol, setSymbol] = useState("");
   const [loading, setLoading] = useState(false);
+  const [loadingPhase, setLoadingPhase] = useState<DashboardLoadingPhase | null>(null);
   const [vixData, setVixData] = useState<any>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [cache, setCache] = useState<MarketCacheMetadata | null>(null);
   const [showHistory, setShowHistory] = useState(false);
 
   // 1. Load from localStorage on mount
@@ -129,7 +189,12 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
         if (hasLegacyDeepEarData(parsedActiveData)) {
           localStorage.removeItem("finance_dashboard_active_data");
         } else {
-          setActiveData(parsedActiveData);
+          const normalizedActiveData = normalizeStoredDashboardData(parsedActiveData);
+          if (normalizedActiveData) {
+            setActiveData(normalizedActiveData);
+          } else {
+            localStorage.removeItem("finance_dashboard_active_data");
+          }
         }
       } catch (e) {
         console.error("Failed to parse active data", e);
@@ -148,223 +213,46 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
     }
   }, [activeData]);
 
+  useEffect(() => {
+    if (!loadingPhase) return;
+    const timer = window.setInterval(() => {
+      setLoadingPhase((current) => current ? getNextDashboardLoadingPhase(current) : current);
+    }, DASHBOARD_LOADING_PHASE_MS);
+    return () => window.clearInterval(timer);
+  }, [loadingPhase]);
+
   const handleAnalyze = async () => {
     if (!symbol.trim() || loading) return;
-    
+
     try {
       setLoading(true);
+      setLoadingPhase("market");
       setError(null);
-      // Reset all data states to avoid pollution (Rule 7)
       setActiveData(null);
 
-      // Start news fetch in parallel
-      const newsPromise = fetch(`/api/news?symbol=${symbol.toUpperCase()}`)
-        .then(r => r.json())
-        .catch(() => ({ news: [] }));
-
-      const response = await fetch("/api/agent/chat", {
+      const response = await fetch("/api/finance-dashboard/snapshot", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          surface: "finance_dashboard",
-          message: `分析 ${symbol.toUpperCase()}。
-1. 先使用 get_realtime_quote 取得最新價格。
-2. 使用 get_options_chain 取得股票期權鏈；如果 Yahoo 沒有資料，明確說沒有期權鏈資料。
-3. 使用 run_algorithmic_strategy，strategy_name 必須是 "all"，由 deterministic strategy engine 回傳策略分數。
-4. 最終回覆使用繁體中文，綜合工具結果做精簡 narrative；缺資料要標示，不要用假資料補洞。`,
-          history: [],
+          symbol: symbol.toUpperCase(),
         }),
       });
-
-      const vixPromise = fetch(`/api/vix`).then(r => r.json()).catch(() => null);
-      const valuationPromise = fetch(`/api/fundamentals?symbol=${symbol.toUpperCase()}`).then(r => r.json()).catch(() => null);
-      const technicalPromise = fetch(`/api/technical-radar?symbol=${symbol.toUpperCase()}`).then(r => r.json()).catch(() => null);
-      const sentimentPromise = fetch(`/api/sentiment?symbol=${symbol.toUpperCase()}`).then(r => r.json()).catch(() => null);
-
-      const [data, newsData, vixResponse, valuationRes, technicalRes, sentimentRes] = await Promise.all([
-        response.json(),
-        newsPromise,
-        vixPromise,
-        valuationPromise,
-        technicalPromise,
-        sentimentPromise
-      ]);
-
-      if (vixResponse && !vixResponse.error) {
-        setVixData(vixResponse);
-      }
-      
-      if (valuationRes) setValuationData(valuationRes);
-      if (technicalRes) setTechnicalData(technicalRes);
-
-      if (!response.ok) throw new Error(data.error || "API 請求失敗");
-
-      const sentimentPayload: SentimentApiResult | null =
-        sentimentRes && !sentimentRes.error ? sentimentRes as SentimentApiResult : null;
-
-      // 2. Parse Tool Results from Steps
-      let price = 0;
-      let change = "0.00%";
-      let signalResult = "觀望";
-      let algoScore = 50;
-      let sentimentValue: number | null = null;
-      let sentimentSource: string | undefined;
-      let entry = 0, sl = 0, tp = 0;
-      let trendResult = "震盪";
-      let parsedNews: NewsItem[] = (newsData.news || []).map((n: any) => ({
-        ...n,
-        source: n.publisher || n.source || "Yahoo Finance"
-      }));
-      let chartDataArray: any[] = [];
-      let optionsFlowData: any = null;
-      let quantStrategiesResult: any[] = [];
-
-      if (data.steps && Array.isArray(data.steps)) {
-        for (const step of data.steps) {
-          if (step.type === "tool_call" && step.tool_result) {
-            try {
-              // Standardize tool result (protect against NaN)
-              const toolResult = step.tool_result.trim();
-              const resJson = JSON.parse(toolResult);
-              
-              if (step.tool_name === "get_realtime_quote") {
-                const p = Number(resJson.price || resJson.current_price);
-                if (!isNaN(p)) price = p;
-                // change_pct comes back as a number like -2.15, format to "-2.15%"
-                const rawPct = resJson.change_pct ?? resJson.change_percent;
-                if (rawPct !== undefined && rawPct !== null) {
-                  const pctNum = Number(rawPct);
-                  if (!isNaN(pctNum)) {
-                    change = (pctNum >= 0 ? "+" : "") + pctNum.toFixed(2) + "%";
-                  }
-                }
-              }
-
-              // Data-driven extraction to protect against LLM tool-calling drift
-              if (resJson.chart_data && Array.isArray(resJson.chart_data)) {
-                chartDataArray = resJson.chart_data.map((d: any) => ({
-                  ...d,
-                  price: Number(d.price || 0),
-                  open: Number(d.open || d.price || 0),
-                  high: Number(d.high || d.price || 0),
-                  low: Number(d.low || d.price || 0),
-                  volume: Number(d.volume || 0)
-                }));
-              }
-
-              if (resJson.score !== undefined) algoScore = Number(resJson.score);
-              if (resJson.entry !== undefined) entry = Number(resJson.entry);
-              if (resJson.stopLoss !== undefined) sl = Number(resJson.stopLoss);
-              if (resJson.target !== undefined) tp = Number(resJson.target);
-              if (resJson.trend) trendResult = resJson.trend;
-              if (resJson.signal) signalResult = resJson.signal;
-
-              if (step.tool_name === "get_options_chain") {
-                let totalCallOI = 0;
-                let totalPutOI = 0;
-                const topStrikesMap = new Map<number, {callOI: number, putOI: number}>();
-                
-                const calls = resJson.calls || [];
-                const puts = resJson.puts || [];
-                
-                calls.forEach((c: any) => {
-                  const oi = c.open_interest || c.volume || 0;
-                  totalCallOI += oi;
-                  const s = topStrikesMap.get(c.strike) || { callOI: 0, putOI: 0 };
-                  s.callOI += oi;
-                  topStrikesMap.set(c.strike, s);
-                });
-                
-                puts.forEach((p: any) => {
-                  const oi = p.open_interest || p.volume || 0;
-                  totalPutOI += oi;
-                  const s = topStrikesMap.get(p.strike) || { callOI: 0, putOI: 0 };
-                  s.putOI += oi;
-                  topStrikesMap.set(p.strike, s);
-                });
-                
-                const ratio = totalPutOI > 0 ? (totalCallOI / totalPutOI) : 1;
-                const underlyingPrice = resJson.underlying_price || 0;
-                const topStrikes = Array.from(topStrikesMap.entries())
-                  .map(([strike, data]) => ({ strike: Number(strike), ...data }))
-                  .sort((a, b) => Math.abs(a.strike - underlyingPrice) - Math.abs(b.strike - underlyingPrice))
-                  .slice(0, 8)
-                  .sort((a, b) => b.strike - a.strike); // sort descending by strike for display
-
-                let expStr = "";
-                if (resJson.current_expiration) {
-                  const d = new Date(resJson.current_expiration * 1000);
-                  expStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-                }
-
-                if (topStrikes.length > 0) {
-                  optionsFlowData = {
-                    totalCallOI,
-                    totalPutOI,
-                    ratio,
-                    topStrikes,
-                    expirationDate: expStr || undefined
-                  };
-                } else if (resJson.error) {
-                  optionsFlowData = { error: resJson.error };
-                }
-              }
-
-              if (step.tool_name === "run_algorithmic_strategy" && Array.isArray(resJson.signals)) {
-                const topSignal = resJson.signals[0];
-                if (topSignal) {
-                  if (Number.isFinite(Number(topSignal.score))) algoScore = Number(topSignal.score);
-                  if (topSignal.signal) signalResult = topSignal.signal;
-                  if (topSignal.trend) trendResult = topSignal.trend;
-                  if (Number.isFinite(Number(topSignal.entry))) entry = Number(topSignal.entry);
-                  if (Number.isFinite(Number(topSignal.stopLoss))) sl = Number(topSignal.stopLoss);
-                  if (Number.isFinite(Number(topSignal.target))) tp = Number(topSignal.target);
-                }
-              }
-            } catch (e) {
-              console.warn("Failed to parse tool result for step:", step.tool_name, e);
-            }
-          }
-        }
-      }
-
-      quantStrategiesResult = normalizeQuantStrategiesFromAgentResponse(data);
-      if (typeof sentimentPayload?.score === "number" && Number.isFinite(sentimentPayload.score)) {
-        sentimentValue = sentimentPayload.score;
-      }
-      if (sentimentPayload?.sourceLabel) {
-        sentimentSource = sentimentPayload.sourceLabel;
-      }
-
-      const finalData: DashboardData = {
-        symbol: symbol.toUpperCase(),
-        price,
-        change,
-        algoRating: algoScore,
-        marketSentiment: sentimentValue,
-        sentimentSource,
-        sentimentData: sentimentPayload,
-        signal: signalResult,
-        trend: trendResult,
-        strategyPoints: { entry, stopLoss: sl, takeProfit: tp },
-        news: parsedNews,
-        chartData: chartDataArray,
-        optionsFlow: optionsFlowData || {
-          totalCallOI: 0,
-          totalPutOI: 0,
-          ratio: 1,
-          topStrikes: [],
-          error: "未找到期權鏈數據"
-        },
-        quantStrategies: quantStrategiesResult,
-        finalAnalysis: data.reply || data.summary || "AI 代理尚未生成最終分析總結。"
+      const payload = await response.json() as {
+        data?: FinanceDashboardSnapshotPayload;
+        cache?: MarketCacheMetadata;
+        error?: string;
       };
+      if (!response.ok && response.status !== 206) throw new Error(payload.error || "分析快照請求失敗");
+      if (!payload.data || !payload.cache) throw new Error("分析快照回應格式無效。");
 
-      setActiveData(finalData);
+      setVixData(payload.data.vixData);
+      setValuationData(payload.data.valuationData);
+      setTechnicalData(payload.data.technicalData);
+      setCache(payload.cache);
+      setActiveData(payload.data.data);
       
-      // Update history with full data for instant switching
       const newHistory = [
-        { symbol: symbol.toUpperCase(), timestamp: new Date().toLocaleTimeString(), score: algoScore, fullData: finalData },
+        { symbol: symbol.toUpperCase(), timestamp: new Date().toLocaleTimeString(), score: payload.data.data.algoRating, fullData: payload.data.data },
         ...history.filter(h => h.symbol !== symbol.toUpperCase()).slice(0, 4)
       ];
       setHistory(newHistory);
@@ -374,6 +262,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
       setError(err.message || "分析過程中發生錯誤");
     } finally {
       setLoading(false);
+      setLoadingPhase(null);
     }
   };
 
@@ -464,7 +353,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
                         key={i}
                         onClick={() => {
                           if (h.fullData) {
-                            setActiveData(h.fullData);
+                            setActiveData(normalizeStoredDashboardData(h.fullData));
                             setSymbol(h.symbol);
                           } else {
                             setSymbol(h.symbol);
@@ -488,7 +377,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
               )}
             </div>
             <button
-              onClick={handleAnalyze}
+              onClick={() => handleAnalyze()}
               disabled={loading}
               className="px-8 py-4 bg-gray-900 text-white rounded-2xl text-sm font-bold hover:bg-blue-600 transition-all active:scale-95 disabled:opacity-50 disabled:active:scale-100 flex items-center gap-2 whitespace-nowrap shadow-md"
             >
@@ -505,7 +394,18 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
           </div>
         )}
 
-        {!activeData && !loading ? (
+        {cache && activeData && (
+          <div className={`mb-6 flex items-center gap-2 rounded-xl border px-4 py-3 text-sm font-semibold ${cache.status === "stale" ? "border-amber-300 bg-amber-50 text-amber-900" : "border-blue-100 bg-blue-50 text-blue-800"}`}>
+            <Clock className="h-4 w-4" />
+            {cache.status === "stale"
+              ? `來源暫時無法更新，正顯示 ${cache.ageSeconds} 秒前資料。${cache.refreshError ? ` 原因：${cache.refreshError}` : ""}`
+              : `資料更新於 ${new Date(cache.sourceAsOf || cache.cachedAt).toLocaleTimeString()}`}
+          </div>
+        )}
+
+        {loading && loadingPhase ? (
+          <FinanceDashboardLoading phase={loadingPhase} symbol={symbol} />
+        ) : !activeData ? (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
              <div className="lg:col-span-8 space-y-8">
                 <div className="bg-white border border-gray-200 rounded-3xl p-12 flex flex-col items-center justify-center text-center min-h-[500px] group transition-all duration-700 shadow-sm">
@@ -543,7 +443,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
                         key={i}
                         onClick={() => { 
                           if (h.fullData) {
-                            setActiveData(h.fullData);
+                            setActiveData(normalizeStoredDashboardData(h.fullData));
                           } else {
                             setSymbol(h.symbol);
                           }
@@ -609,14 +509,19 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
                       </div>
                       <div className="space-y-1">
                         <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Trend</p>
-                        <p className="text-2xl font-black text-gray-800">{activeData.trend}</p>
+                        <p className={`text-2xl font-black ${activeData.decision.status === "available" ? "text-gray-800" : "text-red-600"}`}>
+                          {activeData.decision.status === "available" ? formatDashboardTrend(activeData.decision.trend) : "AI 判斷不可用"}
+                        </p>
                       </div>
                       <div className="space-y-1 col-span-2 md:col-span-1">
                         <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Action</p>
-                        <p className={`text-2xl font-black ${activeData.signal === '買入' ? 'text-blue-600' : activeData.signal === '賣出' ? 'text-red-500' : 'text-gray-400'}`}>
-                          {activeData.signal}
+                        <p className={`text-2xl font-black ${activeData.decision.status !== "available" ? "text-red-600" : activeData.decision.action === "buy" ? "text-blue-600" : activeData.decision.action === "sell" ? "text-red-500" : "text-gray-500"}`}>
+                          {activeData.decision.status === "available" ? formatDashboardAction(activeData.decision.action) : "AI 判斷不可用"}
                         </p>
                       </div>
+                      {activeData.decision.status === "unavailable" && (
+                        <p className="col-span-2 md:col-span-3 -mt-2 text-xs font-medium text-red-600">{activeData.decision.reason}</p>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -639,12 +544,8 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 mt-8">
                 <div className="lg:col-span-8">
                   <StrategyCards 
-                     signal={activeData?.signal || "觀望"} 
-                     trend={activeData?.trend || "震盪"} 
-                     price={activeData?.price || 0} 
-                     entry={activeData?.strategyPoints.entry}
-                     stopLoss={activeData?.strategyPoints.stopLoss}
-                     takeProfit={activeData?.strategyPoints.takeProfit}
+                     quantStrategies={activeData?.quantStrategies || []}
+                     recommendedTrade={activeData?.recommendedTrade}
                   />
                 </div>
                 
@@ -654,7 +555,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
               </div>
 
               {/* Key Insights AI Analysis */}
-              {activeData?.finalAnalysis && (
+              {activeData && activeData.dashboardNarrative?.status === "available" && activeData.finalAnalysis ? (
                 <div className="bg-gradient-to-br from-blue-50 to-white border border-blue-100 shadow-sm rounded-3xl p-8 lg:p-10 relative overflow-hidden group mt-8">
                    <div className="absolute top-0 right-0 w-64 h-64 bg-blue-100 blur-[80px] -mr-32 -mt-32 rounded-full transition-all duration-700" />
                    <h3 className="text-xl font-black text-blue-800 tracking-tight mb-6 flex items-center gap-3">
@@ -667,7 +568,19 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
                      </ReactMarkdown>
                    </div>
                 </div>
-              )}
+              ) : activeData ? (
+                <div className="mt-8 rounded-3xl border border-amber-200 bg-amber-50 p-8 shadow-sm">
+                  <h3 className="flex items-center gap-3 text-xl font-black text-amber-900">
+                    <AlertCircle className="h-5 w-5 text-amber-600" />
+                    AI Key Insights 暫不可用
+                  </h3>
+                  <p className="mt-3 text-sm font-semibold leading-6 text-amber-800">
+                    {(activeData.dashboardNarrative && "reason" in activeData.dashboardNarrative
+                      ? activeData.dashboardNarrative.reason
+                      : "API 未返回完整 AI 分析。")}
+                  </p>
+                </div>
+              ) : null}
             </div>
 
             {/* Right Side Column */}
