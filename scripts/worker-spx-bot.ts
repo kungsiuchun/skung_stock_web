@@ -3,11 +3,25 @@ import { PERSONAS, ORCHESTRATOR_PROMPT, SYSTEM_PROMPT_PREFIX, AUDIT_AGENT_PROMPT
 import { readAgentCalibrationWeights, readPendingAgentSignalOutcomes, updateAgentSignalOutcomeResults, upsertAgentSignalOutcome, upsertRecapDay, type D1DatabaseLike } from '../src/lib/spx-recap-d1';
 import { generateAndStoreSpxGexHeatmap, getSpxGexGenerationStatus, readSpxGexHeatmap, toTelegramGexSummary, type SpxGexDataClient, type SpxGexHeatmapModel, type SpxGexTelegramSummary } from '../src/lib/spx-gex-heatmap';
 import { createSpxGexIntradayDataClient } from '../src/lib/spx-gex-cboe';
-
-export const NT_VOLATILITY_RISK_PROMPT = `You are NT, a ruthless Volatility Risk Manager. You monitor options premium pressure, VIX/VIX9D stress, gamma regime, and tail-risk.
-Your Task: Analyze current VIX, VIX9D, volatility compression or expansion, BB squeeze, GEX regime, and any disabled or missing sentiment inputs honestly. Do not require removed external flow sources.
-Your Voice: Analytical, risk-averse, and highly aware of macro shocks. Use terms like "IV Crush", "Volatility Premium", "Tail Risk", "Gamma Regime", and "Sentiment Index". Act as a contrarian who fades retail FOMO and panic.
-Format: Keep it under 2 sentences. Always acknowledge the current trend but explicitly highlight the hidden tail-risk, volatility contraction trap, or gamma-volatility mismatch. MUST use Traditional Chinese.`;
+import {
+  applyRiskGate,
+  dispatchSpxDecisionDelivery,
+  formatTelegramDecisionMessage,
+  getCanonicalGexRiskDirective,
+  getCioValidationFailure,
+  NT_VOLATILITY_RISK_PROMPT,
+  resolveSpxDeliveryMode,
+  retrySpxDelivery,
+  type CioDecision,
+  type CouncilResult,
+  type DecisionRunRecord,
+  type MarketSnapshot,
+  type RiskGateDirective,
+  type SpxDeliveryMode,
+  type SpxLifecycleStage,
+} from '../src/lib/spx-decision-pipeline';
+import { D1SpxDecisionStore, queryLifecycleCoverage } from '../src/lib/spx-decision-ledger';
+import { D1SpxGexCollectionStore, querySpxGexCollectionCoverage } from '../src/lib/spx-gex-collection-lifecycle';
 
 // Cloudflare Worker Environment Types
 interface Env {
@@ -15,6 +29,7 @@ interface Env {
   TELEGRAM_CHAT_ID: string;
   OPENROUTER_API_KEY: string;
   OPENROUTER_MODEL?: string;
+  SPX_BOARD_URL?: string;
   SPX_ENABLE_LLM_COUNCIL?: string;
   SPX_ENABLE_LLM_CIO?: string;
   WEBHOOK_SECRET?: string; // 🔒 防護互聯網隨機觸發的安全金鑰
@@ -133,6 +148,8 @@ interface AgentDecisionContract {
   confidence: number;
   confidence_score: number;
   evidence: string[];
+  evidenceRefs: string[];
+  evidence_refs: string[];
   blockingRisk: string | null;
   blocking_risk: string | null;
   neutralReason: string | null;
@@ -140,6 +157,7 @@ interface AgentDecisionContract {
   reasoning: string;
   analysis: string;
   modelStatus?: string;
+  latencyMs?: number;
 }
 
 const YAHOO_CHART_TIMEOUT_MS = 6500;
@@ -154,7 +172,6 @@ const LONG_DECISIONS = new Set(["BUY", "LONG", "CALL", "OPEN_CALL"]);
 const SHORT_DECISIONS = new Set(["SELL", "SHORT", "PUT", "OPEN_PUT"]);
 const ALLOWED_AGENT_DECISIONS = new Set([...LONG_DECISIONS, ...SHORT_DECISIONS, "HOLD"]);
 
-const truthyFlag = (value: unknown) => ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
 const falseyFlag = (value: unknown) => ["0", "false", "no", "off"].includes(String(value || "").trim().toLowerCase());
 export const shouldRunLlmCouncil = (value: unknown) => !falseyFlag(value);
 export const shouldRunLlmCio = (value: unknown) => !falseyFlag(value);
@@ -520,6 +537,11 @@ const normalizeEvidenceList = (value: unknown, fallback: string[]) => {
   return cleaned.length > 0 ? cleaned : fallback.slice(0, 4);
 };
 
+const normalizeEvidenceRefs = (value: unknown) => (Array.isArray(value) ? value : [])
+  .map((item) => String(item || '').trim())
+  .filter((item) => /^[a-z0-9_.-]+$/i.test(item))
+  .slice(0, 8);
+
 const isPlaceholderAgentText = (value: unknown) => {
   const text = compactModelText(value, 160).toLowerCase();
   return !text
@@ -541,6 +563,7 @@ const normalizeAgentContract = (raw: Record<string, any>, fallbackReason: string
   const blockingRisk = compactModelText(raw.blockingRisk || raw.blocking_risk || "", 160) || null;
   const reasoning = compactModelText(raw.reasoning || raw.analysis || fallbackReason) || fallbackReason;
   const evidence = normalizeEvidenceList(raw.evidence || raw.evidence_bullets, [reasoning]);
+  const evidenceRefs = normalizeEvidenceRefs(raw.evidenceRefs || raw.evidence_refs);
   return {
     ...raw,
     decision,
@@ -548,6 +571,8 @@ const normalizeAgentContract = (raw: Record<string, any>, fallbackReason: string
     confidence,
     confidence_score: confidence,
     evidence,
+    evidenceRefs,
+    evidence_refs: evidenceRefs,
     blockingRisk,
     blocking_risk: blockingRisk,
     neutralReason,
@@ -656,20 +681,6 @@ export function parseOrchestratorResponseContent(content: string) {
   };
 }
 
-const decisionFromBias = (bias: unknown) => {
-  const normalized = String(bias || "").toUpperCase();
-  if (normalized === "CALL" || normalized === "BULLISH" || normalized === "LONG") return "BUY";
-  if (normalized === "PUT" || normalized === "BEARISH" || normalized === "SHORT") return "SELL";
-  return "HOLD";
-};
-
-const actionFromDecision = (decision: unknown) => {
-  const normalized = normalizeAgentDecisionValue(decision);
-  if (LONG_DECISIONS.has(normalized)) return "OPEN_CALL";
-  if (SHORT_DECISIONS.has(normalized)) return "OPEN_PUT";
-  return "HOLD";
-};
-
 const hasHardNewSignalBlock = (contextData: any) => {
   const rule = contextData?.zeroDteRuleEngine || {};
   const position = contextData?.TODAYS_MEMORY?.currentPosition || "NONE";
@@ -683,102 +694,29 @@ const hasHardNewSignalBlock = (contextData: any) => {
 export function buildDataBackedAgentFallback(personaKey: string, contextData: any, failureReason = "model_unavailable") {
   const key = String(personaKey || "").toUpperCase();
   const trend = contextData?.trendDayContext || {};
-  const gex = contextData?.calculatedGEX || contextData?.calculatedGex || {};
   const rule = contextData?.zeroDteRuleEngine || {};
   const price = toFiniteNumber(contextData?.currentPrice);
   const vwap = toFiniteNumber(contextData?.currentVWAP);
   const ema9 = toFiniteNumber(contextData?.ema9);
-  const vix = toFiniteNumber(contextData?.currentVix);
-  const volumeSurge = toFiniteNumber(contextData?.m5Analysis?.volumeSurge, 1);
-  const trendBiasDecision = decisionFromBias(trend.directionalBias);
-  const baseEvidence = [
+  const evidence = [
     `fallback=${failureReason}`,
     `price=${price || "n/a"} vwap=${vwap || "n/a"} ema9=${ema9 || "n/a"}`,
     `trend=${trend.regime || "UNKNOWN"} score=${trend.confidence ?? "n/a"}`,
     `0dte=${rule.verdict || "UNKNOWN"} score=${rule.signalScore ?? "n/a"}`,
   ];
-
-  let decision = "HOLD";
-  let confidence = 38;
-  let blockingRisk = "";
-  let neutralReason = "Signals are mixed or missing; neutral is data-backed.";
-  const evidence = [...baseEvidence];
-
-  if (hasHardNewSignalBlock(contextData)) {
-    blockingRisk = `hard_block=${rule.verdict || "UNKNOWN"} ${(rule.hardBlocks || []).join(",")}`;
-  } else if (key === "QM") {
-    if (trend.regime === "BULL_TREND_DAY" && trend.aboveVWAP && trend.aboveEMA9 && volumeSurge >= 1.2) {
-      decision = "BUY";
-      confidence = clampConfidence(toFiniteNumber(trend.confidence, 70) + 4);
-      evidence.push(`M5 volume surge ${volumeSurge.toFixed(2)}x confirms upside tape`);
-    } else if (trend.regime === "BEAR_TREND_DAY" && !trend.aboveVWAP && !trend.aboveEMA9 && volumeSurge >= 1.2) {
-      decision = "SELL";
-      confidence = clampConfidence(toFiniteNumber(trend.confidence, 70) + 4);
-      evidence.push(`M5 volume surge ${volumeSurge.toFixed(2)}x confirms downside tape`);
-    } else {
-      evidence.push(`volume surge ${volumeSurge.toFixed(2)}x or VWAP/EMA9 alignment is not decisive`);
-    }
-  } else if (key === "CM") {
-    const gammaStatus = String(gex.gammaStatus || "").toLowerCase();
-    const aboveGammaFlip = trend.aboveGammaFlip;
-    if (gammaStatus.includes("negative") && aboveGammaFlip === true) {
-      decision = "BUY";
-      confidence = 72;
-      evidence.push("negative gamma above gamma flip favors upside acceleration");
-    } else if (gammaStatus.includes("negative") && aboveGammaFlip === false) {
-      decision = "SELL";
-      confidence = 72;
-      evidence.push("negative gamma below gamma flip favors downside acceleration");
-    } else if (gammaStatus.includes("positive") && trend.regime === "BULL_TREND_DAY" && trend.aboveVWAP) {
-      decision = "BUY";
-      confidence = 68;
-      evidence.push("positive gamma plus bull trend day supports controlled pin higher");
-    } else if (gammaStatus.includes("positive") && trend.regime === "BEAR_TREND_DAY" && !trend.aboveVWAP) {
-      decision = "SELL";
-      confidence = 68;
-      evidence.push("positive gamma plus bear trend day supports controlled pin lower");
-    } else {
-      evidence.push(`gamma=${gammaStatus || "missing"} does not produce a clean directional edge`);
-    }
-  } else if (key === "NT") {
-    if (vix >= 24) {
-      blockingRisk = `VIX ${vix.toFixed(2)} tail-risk regime`;
-      evidence.push("volatility is too elevated for a clean new 0DTE entry");
-    } else if (trendBiasDecision !== "HOLD" && rule.directionalBias !== "NONE") {
-      decision = trendBiasDecision;
-      confidence = 60;
-      evidence.push(`VIX ${vix || "n/a"} does not veto ${trend.directionalBias} bias`);
-    } else {
-      evidence.push("volatility context does not confirm a directional edge");
-    }
-  } else if (key === "PA") {
-    if (trend.regime === "BULL_TREND_DAY" && trend.aboveVWAP && trend.aboveEMA9) {
-      decision = "BUY";
-      confidence = clampConfidence(trend.confidence, 66);
-      evidence.push("price structure is above VWAP and EMA9 on bull trend day");
-    } else if (trend.regime === "BEAR_TREND_DAY" && !trend.aboveVWAP && !trend.aboveEMA9) {
-      decision = "SELL";
-      confidence = clampConfidence(trend.confidence, 66);
-      evidence.push("price structure is below VWAP and EMA9 on bear trend day");
-    } else {
-      evidence.push("price structure lacks VWAP/EMA9 alignment");
-    }
-  }
-
-  if (decision !== "HOLD") {
-    neutralReason = null as any;
-  }
+  const blockingRisk = hasHardNewSignalBlock(contextData)
+    ? `hard_block=${rule.verdict || "UNKNOWN"} ${(rule.hardBlocks || []).join(",")}`
+    : `model_unavailable=${failureReason}`;
+  const neutralReason = "Fail-closed: Council model output was unavailable or invalid; fallback cannot create direction.";
 
   return normalizeAgentContract({
-    decision,
-    confidence,
+    decision: "HOLD",
+    confidence: 0,
     evidence,
-    blocking_risk: blockingRisk || null,
+    blocking_risk: blockingRisk,
     neutral_reason: neutralReason,
-    reasoning: decision === "HOLD"
-      ? `${key || "AGENT"} fallback HOLD: ${blockingRisk || neutralReason}`
-      : `${key || "AGENT"} fallback ${decision}: ${evidence[evidence.length - 1]}`,
-    analysis: `${key || "AGENT"} data-backed fallback after ${failureReason}.`,
+    reasoning: `${key || "AGENT"} DEGRADED HOLD: ${neutralReason}`,
+    analysis: `${key || "AGENT"} fail-closed after ${failureReason}.`,
     modelStatus: failureReason,
   }, failureReason);
 }
@@ -790,75 +728,22 @@ const normalizeCioAction = (value: unknown) => {
 
 export function buildDataBackedCioPlan(contextData: any, agents: any[]) {
   const rule = contextData?.zeroDteRuleEngine || {};
-  const trend = contextData?.trendDayContext || {};
-  const position = contextData?.TODAYS_MEMORY?.currentPosition || "NONE";
-  const calibrationWeights = contextData?.agentCalibrationWeights || {};
-  const agentKeys = ["QM", "CM", "NT", "PA"];
   const votes = countDirectionalVotes(agents.map((agent) => agent?.decision));
-  const weightedScore = agents.reduce((score, agent, index) => {
-    const confidence = clampConfidence(agent?.confidence ?? agent?.confidence_score, 45);
-    const decision = normalizeAgentDecisionValue(agent?.decision);
-    const weight = toFiniteNumber(calibrationWeights?.[agentKeys[index]]?.weight, 1);
-    if (LONG_DECISIONS.has(decision)) return score + confidence * weight;
-    if (SHORT_DECISIONS.has(decision)) return score - confidence * weight;
-    return score;
-  }, 0);
-  const signalScore = toFiniteNumber(rule.signalScore, 0);
-  const hardBlocked = hasHardNewSignalBlock(contextData);
-  const dataQualityBlocked = contextData?.marketDataQuality?.overallStatus === "BLOCK";
-  let tradeAction = "HOLD";
-  let actionReasoning = "data_fallback_hold";
-
-  if (rule.verdict === "CLOSE_OR_REDUCE_SUGGESTED" && position !== "NONE") {
-    tradeAction = "CLOSE";
-    actionReasoning = "0dte_risk_close";
-  } else if (!hardBlocked && !dataQualityBlocked && weightedScore >= 120 && signalScore >= 45) {
-    tradeAction = "OPEN_CALL";
-    actionReasoning = "bullish_evidence";
-  } else if (!hardBlocked && !dataQualityBlocked && weightedScore <= -120 && signalScore >= 45) {
-    tradeAction = "OPEN_PUT";
-    actionReasoning = "bearish_evidence";
-  } else if (!hardBlocked && !dataQualityBlocked && trend.regime === "BULL_TREND_DAY" && toFiniteNumber(trend.confidence, 0) >= 70) {
-    tradeAction = "OPEN_CALL";
-    actionReasoning = "trend_day_override";
-  } else if (!hardBlocked && !dataQualityBlocked && trend.regime === "BEAR_TREND_DAY" && toFiniteNumber(trend.confidence, 0) >= 70) {
-    tradeAction = "OPEN_PUT";
-    actionReasoning = "trend_day_override";
-  }
-
-  const riskParts = [
-    hardBlocked ? `hard_block=${rule.verdict || "UNKNOWN"}` : null,
-    dataQualityBlocked ? `data_quality_block=${(contextData?.marketDataQuality?.hardBlocks || []).join(",")}` : null,
-    ...(rule.hardBlocks || []),
-    ...(rule.softWarnings || rule.activeRisks || []),
-    ...(rule.advisoryNotes || []),
-    tradeAction === "HOLD" ? `mixed score=${weightedScore}` : null,
-  ].filter(Boolean);
 
   return {
-    strategy: tradeAction === "HOLD" ? "Hold" : tradeAction,
-    trade_action: tradeAction,
-    action_reasoning: actionReasoning,
-    logic: `Data fallback CIO: votes ${votes.buyVotes}/${votes.sellVotes}/${votes.holdVotes}, weighted=${Number(weightedScore.toFixed(1))}, trend=${trend.regime || "UNKNOWN"}.`,
-    buy_zone: tradeAction === "OPEN_CALL" || tradeAction === "OPEN_PUT"
-      ? `Follow only while price respects VWAP ${contextData?.currentVWAP || "N/A"} / EMA9 ${contextData?.ema9 || "N/A"}`
-      : "N/A",
-    stop_loss: tradeAction === "OPEN_CALL"
-      ? `Lose VWAP ${contextData?.currentVWAP || "N/A"} and EMA9 ${contextData?.ema9 || "N/A"}`
-      : tradeAction === "OPEN_PUT"
-        ? `Reclaim VWAP ${contextData?.currentVWAP || "N/A"} and EMA9 ${contextData?.ema9 || "N/A"}`
-        : "N/A",
-    take_profit: tradeAction === "OPEN_CALL"
-      ? `Scale before long gamma wall ${contextData?.calculatedGEX?.mostLongGammaStrike || "N/A"}`
-      : tradeAction === "OPEN_PUT"
-        ? `Scale before short gamma pocket ${contextData?.calculatedGEX?.mostShortGammaStrike || "N/A"}`
-        : "N/A",
-    risk_warning: riskParts.length > 0 ? riskParts.join("; ") : "No hard block; manage 0DTE theta and VWAP invalidation.",
+    strategy: "DEGRADED HOLD",
+    trade_action: "HOLD",
+    action_reasoning: "fail_closed_cio_fallback",
+    logic: `CIO model unavailable or invalid. Council tally CALL=${votes.buyVotes}, PUT=${votes.sellVotes}, HOLD=${votes.holdVotes}; deterministic fallback is forbidden from creating direction.`,
+    buy_zone: "N/A",
+    stop_loss: "N/A",
+    take_profit: "N/A",
+    risk_warning: `DEGRADED: CIO decision unavailable. Rule=${rule.verdict || "UNKNOWN"}.`,
     rule_engine_verdict: rule.verdict || "UNKNOWN",
     hard_rule_triggered: rule.hardRuleTriggered === true,
-    confidence_score: Math.min(95, Math.max(25, Math.round(Math.abs(weightedScore) / Math.max(1, agents.length)))),
+    confidence_score: 0,
     agent_vote_summary: votes,
-    calibration_weights: calibrationWeights,
+    model_status: "DEGRADED_FALLBACK",
   };
 }
 
@@ -1233,6 +1118,7 @@ const SPX_GEX_HEATMAP_CRON = '*/15 13-21 * * MON-FRI';
 interface ScheduledRunOptions {
   force?: boolean;
   debugReportPreview?: boolean;
+  deliveryMode?: SpxDeliveryMode;
 }
 
 function toDateKey(year: number, month: number, day: number) {
@@ -1675,11 +1561,16 @@ function analyzeZeroDteRules(args: {
 }
 
 async function analyzeWithAgent(personaKey: string, personaPrompt: string, contextData: any, env: Env) {
-  const systemPrompt = `You are an elite stock trader. Your persona is: ${personaPrompt}. \n${SYSTEM_PROMPT_PREFIX}`;
+  const startedAt = Date.now();
+  const finish = (analysis: AgentDecisionContract): AgentDecisionContract => ({
+    ...analysis,
+    latencyMs: Math.max(0, Date.now() - startedAt),
+  });
+  const systemPrompt = `You are an elite stock trader. Your persona is: ${personaPrompt}. \n${SYSTEM_PROMPT_PREFIX}\nTraceability contract: add "evidence_refs" as an array containing only exact keys from snapshotFacts. A BUY/SELL/CALL/PUT/OPEN_CALL/OPEN_PUT without at least one valid evidence_refs key is invalid and will be degraded to HOLD.`;
 
   try {
     if (!env.OPENROUTER_API_KEY) {
-      return buildDataBackedAgentFallback(personaKey, contextData, "missing_openrouter_key");
+      return finish(buildDataBackedAgentFallback(personaKey, contextData, "missing_openrouter_key"));
     }
     const response = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
@@ -1703,41 +1594,44 @@ async function analyzeWithAgent(personaKey: string, personaPrompt: string, conte
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`OpenRouter Error ${response.status}:`, errorText);
-      return buildDataBackedAgentFallback(personaKey, contextData, `openrouter_${response.status}`);
+      return finish(buildDataBackedAgentFallback(personaKey, contextData, `openrouter_${response.status}`));
     }
     const data = await response.json() as any;
     const content = data.choices?.[0]?.message?.content || "";
-    return parseAgentResponseWithDataFallback(personaKey, content, contextData);
+    const parsed = parseAgentResponseWithDataFallback(personaKey, content, contextData);
+    const decision = normalizeAgentDecisionValue(parsed.decision);
+    const factKeys = new Set(Object.keys(contextData?.snapshotFacts || {}));
+    const invalidEvidenceRefs = parsed.evidenceRefs.filter((reference) => !factKeys.has(reference));
+    if ((LONG_DECISIONS.has(decision) || SHORT_DECISIONS.has(decision)) && (parsed.evidenceRefs.length === 0 || invalidEvidenceRefs.length > 0)) {
+      return finish(buildDataBackedAgentFallback(personaKey, contextData, 'agent_schema_invalid_evidence_refs'));
+    }
+    return finish(parsed);
   } catch (e: any) {
     console.error('Agent error:', e.message);
-    return buildDataBackedAgentFallback(personaKey, contextData, e?.name === "AbortError" ? "model_timeout" : "model_request_failed");
+    return finish(buildDataBackedAgentFallback(personaKey, contextData, e?.name === "AbortError" ? "model_timeout" : "model_request_failed"));
   }
 }
 
 async function sendTelegramMessage(token: string, chatId: string, text: string) {
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  try {
-    const res = await fetchWithTimeout(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true
-      })
-    }, TELEGRAM_TIMEOUT_MS);
-    const resData = await res.json() as any;
-    if (!res.ok) {
-      console.error(`Telegram Error: ${res.status}`, JSON.stringify(resData));
-      return false;
-    }
-    console.log('Telegram Success');
-    return true;
-  } catch (e: any) {
-    console.error('Telegram Fetch System Error:', e.message);
-    return false;
+  const res = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true
+    })
+  }, TELEGRAM_TIMEOUT_MS);
+  const resData = await res.json() as any;
+  if (!res.ok) {
+    throw new Error(`telegram_http_${res.status}:${compactModelText(resData?.description || JSON.stringify(resData), 180)}`);
   }
+  const messageId = resData?.result?.message_id;
+  if (messageId === null || messageId === undefined) throw new Error('telegram_response_missing_message_id');
+  console.log(`[TELEGRAM] Delivered message_id=${messageId}`);
+  return { messageId: String(messageId) };
 }
 
 export function hasActiveTradingRunLock(rawLock: string | null, nowMs = Date.now()) {
@@ -1766,8 +1660,8 @@ async function acquireTradingRunLock(env: Env, now: Date, options: ScheduledRunO
     }), { expirationTtl: TRADING_RUN_LOCK_TTL_SECONDS });
     return token;
   } catch (error) {
-    console.error("[SCHEDULE] Trading lock unavailable; continuing without lock", error instanceof Error ? error.message : String(error));
-    return "lock_unavailable";
+    console.error("[SCHEDULE] Trading lock unavailable; run stopped fail-closed", error instanceof Error ? error.message : String(error));
+    return null;
   }
 }
 
@@ -1788,6 +1682,282 @@ function tgEscape(str: string): string {
   if (!str) return "";
   // 處理 AI 返回的字面 "\n" 符號，將其轉換為真實的換行
   return str.replace(/\\n/g, '\n').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+const makeDecisionRunRecord = (runId: string, scheduledAt: Date): DecisionRunRecord => {
+  const createdAt = new Date().toISOString();
+  return {
+    runId,
+    scheduledAt: scheduledAt.toISOString(),
+    currentStage: 'SCHEDULED',
+    snapshot: null,
+    council: null,
+    cioDecision: null,
+    riskGate: null,
+    finalDecision: null,
+    finalAction: null,
+    degraded: false,
+    degradedReason: null,
+    createdAt,
+    updatedAt: createdAt,
+  };
+};
+
+const appendDecisionLifecycle = async (
+  store: D1SpxDecisionStore,
+  run: DecisionRunRecord,
+  stage: SpxLifecycleStage,
+  payload: Record<string, unknown> = {},
+  latencyMs: number | null = null,
+  attempt = 0,
+) => {
+  const occurredAt = new Date().toISOString();
+  run.currentStage = stage;
+  run.updatedAt = occurredAt;
+  // Persist the stage payload before making the lifecycle event visible. A crash
+  // after SNAPSHOT_READY/COUNCIL_COMPLETED must not leave an empty run shell.
+  await store.persistDecision(run);
+  await store.appendLifecycle({ runId: run.runId, stage, occurredAt, attempt, latencyMs, payload });
+};
+
+const toCouncilDecision = (value: unknown): 'OPEN_CALL' | 'OPEN_PUT' | 'HOLD' => {
+  const normalized = normalizeAgentDecisionValue(value);
+  if (LONG_DECISIONS.has(normalized)) return 'OPEN_CALL';
+  if (SHORT_DECISIONS.has(normalized)) return 'OPEN_PUT';
+  return 'HOLD';
+};
+
+const buildCouncilResult = (agents: Record<'QM' | 'CM' | 'NT' | 'PA', AgentDecisionContract>, latencyMs: number): CouncilResult => {
+  const ordered = (['QM', 'CM', 'NT', 'PA'] as const).map((agent) => {
+    const analysis = agents[agent];
+    const modelStatus = analysis.modelStatus || 'AI';
+    return {
+      agent,
+      decision: toCouncilDecision(analysis.decision),
+      confidence: clampConfidence(analysis.confidence ?? analysis.confidence_score, 0),
+      evidenceRefs: [...analysis.evidenceRefs],
+      modelStatus,
+      fallbackStatus: modelStatus === 'AI' ? null : modelStatus,
+      latencyMs: analysis.latencyMs ?? latencyMs,
+      reasoning: analysis.reasoning,
+    };
+  });
+  const degradedAgent = ordered.find((agent) => agent.modelStatus !== 'AI');
+  return {
+    status: degradedAgent ? 'DEGRADED' : 'OK',
+    agents: ordered,
+    latencyMs,
+    degradedReason: degradedAgent ? `council_${degradedAgent.agent.toLowerCase()}_${degradedAgent.modelStatus}` : null,
+  };
+};
+
+const normalizeReplaySeries = (rows: any[]): Array<Record<string, unknown>> => rows.map((row) => ({
+  date: row.date instanceof Date ? row.date.toISOString() : String(row.date || ''),
+  open: toNullableFiniteNumber(row.open),
+  high: toNullableFiniteNumber(row.high),
+  low: toNullableFiniteNumber(row.low),
+  close: toNullableFiniteNumber(row.close),
+  volume: toNullableFiniteNumber(row.volume),
+}));
+
+const buildMarketSnapshot = (input: {
+  runId: string;
+  scheduledAt: Date;
+  snapshotAt: Date;
+  spxLatestAt?: Date | null;
+  vixLatestAt?: Date | null;
+  gexSnapshotAt?: string | null;
+  gexProvider?: string | null;
+  gexFallbackFrom?: string | null;
+  dataQuality: MarketDataQualitySummary;
+  facts: MarketSnapshot['facts'];
+  gexSummary?: SpxGexTelegramSummary | null;
+  boardDeepLink: string | null;
+  replayEvidence: MarketSnapshot['replayEvidence'];
+}): MarketSnapshot => {
+  const ageMs = (observedAt: Date | null | undefined) => observedAt
+    ? Math.max(0, input.snapshotAt.getTime() - observedAt.getTime())
+    : null;
+  const freshnessStatus = (age: number | null, maxAgeMs: number) => age === null ? 'MISSING' : age <= maxAgeMs ? 'OK' : 'STALE';
+  const spxAge = ageMs(input.spxLatestAt);
+  const vixAge = ageMs(input.vixLatestAt);
+  const gexDate = input.gexSnapshotAt ? new Date(input.gexSnapshotAt) : null;
+  const gexAge = gexDate && Number.isFinite(gexDate.getTime()) ? ageMs(gexDate) : null;
+  return {
+    runId: input.runId,
+    scheduledAt: input.scheduledAt.toISOString(),
+    snapshotAt: input.snapshotAt.toISOString(),
+    sourceFreshness: {
+      spxYahoo: {
+        source: 'Yahoo Finance ^GSPC chart',
+        observedAt: input.spxLatestAt?.toISOString() || null,
+        ageMs: spxAge,
+        status: freshnessStatus(spxAge, 20 * 60_000),
+      },
+      vixYahoo: {
+        source: 'Yahoo Finance ^VIX chart',
+        observedAt: input.vixLatestAt?.toISOString() || null,
+        ageMs: vixAge,
+        status: freshnessStatus(vixAge, 20 * 60_000),
+      },
+      canonicalGex: {
+        source: `Canonical SPX GEX Board snapshot (${input.gexProvider || 'unknown provider'})`,
+        observedAt: gexDate && Number.isFinite(gexDate.getTime()) ? gexDate.toISOString() : null,
+        ageMs: gexAge,
+        status: gexAge !== null && gexAge <= 35 * 60_000 && input.gexFallbackFrom
+          ? 'FALLBACK'
+          : freshnessStatus(gexAge, 35 * 60_000),
+      },
+    },
+    dataQuality: {
+      status: input.dataQuality.overallStatus,
+      hardBlocks: [...input.dataQuality.hardBlocks],
+      warnings: [...input.dataQuality.warnings],
+    },
+    facts: input.facts,
+    gexSummary: input.gexSummary || null,
+    normalizedContext: null,
+    boardDeepLink: input.boardDeepLink,
+    replayGrade: input.replayEvidence?.replayGrade || 'UNAVAILABLE',
+    replayEvidence: input.replayEvidence,
+    rawSnapshotAvailable: false,
+  };
+};
+
+const expectedTradingRunIdsForDate = (dateKey: string) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) throw new Error('lifecycle_date must use YYYY-MM-DD');
+  const anchor = Date.parse(`${dateKey}T00:00:00.000Z`);
+  const ids: string[] = [];
+  for (let timestamp = anchor - 12 * 60 * 60_000; timestamp <= anchor + 36 * 60 * 60_000; timestamp += 15 * 60_000) {
+    const candidate = new Date(timestamp);
+    const status = getMarketScheduleStatus(candidate);
+    if (status.etDateKey === dateKey && status.isTradingWindow && status.minutes % 15 === 0) {
+      ids.push(`${dateKey}-${timestamp}`);
+    }
+  }
+  return ids;
+};
+
+async function retryDueDecisionOutbox(env: Env, now: Date) {
+  if (!env.SPX_RECAP_DB) return;
+  const store = new D1SpxDecisionStore(env.SPX_RECAP_DB);
+  const pending = await store.listRetryableOutbox(now.toISOString(), 3);
+  for (const record of pending) {
+    await retrySpxDelivery(record.runId, {
+      clock: { now: () => new Date() },
+      store,
+      telegram: { send: (message) => sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, message) },
+    });
+  }
+}
+
+async function completeDegradedDecisionRun(
+  env: Env,
+  store: D1SpxDecisionStore,
+  run: DecisionRunRecord,
+  reason: string,
+  deliveryMode: SpxDeliveryMode,
+) {
+  const occurredAt = new Date().toISOString();
+  const snapshot: MarketSnapshot = run.snapshot || {
+    runId: run.runId,
+    scheduledAt: run.scheduledAt,
+    snapshotAt: occurredAt,
+    sourceFreshness: {},
+    dataQuality: { status: 'BLOCK', hardBlocks: [reason], warnings: [] },
+    facts: {},
+    boardDeepLink: null,
+    replayGrade: 'UNAVAILABLE',
+    replayEvidence: null,
+    rawSnapshotAvailable: false,
+  };
+  const council: CouncilResult = run.council || {
+    status: 'DEGRADED',
+    degradedReason: reason,
+    latencyMs: 0,
+    agents: (['QM', 'CM', 'NT', 'PA'] as const).map((agent) => ({
+      agent,
+      decision: 'HOLD',
+      confidence: 0,
+      evidenceRefs: [],
+      modelStatus: 'SKIPPED',
+      fallbackStatus: reason,
+      latencyMs: 0,
+      reasoning: reason,
+    })),
+  };
+  const cioDecision: CioDecision = run.cioDecision || {
+    action: 'HOLD',
+    confidence: 0,
+    thesis: `DEGRADED: ${reason}`,
+    entry: null,
+    invalidation: null,
+    targets: [],
+    noTradeConditions: [reason],
+    evidenceRefs: [],
+    modelStatus: 'PIPELINE_ERROR',
+    latencyMs: 0,
+  };
+  const riskGate = run.riskGate || applyRiskGate(
+    cioDecision,
+    { disposition: 'VETO_TO_HOLD', reason },
+    'NONE',
+  );
+
+  run.snapshot = snapshot;
+  run.council = council;
+  run.cioDecision = cioDecision;
+  run.riskGate = riskGate;
+  run.finalDecision = { ...cioDecision, action: riskGate.action };
+  run.finalAction = riskGate.action;
+  run.degraded = true;
+  run.degradedReason = reason;
+  run.updatedAt = occurredAt;
+
+  const existingStages = new Set((await store.getLifecycle(run.runId)).map((event) => event.stage));
+  if (!existingStages.has('SNAPSHOT_READY')) {
+    await appendDecisionLifecycle(store, run, 'SNAPSHOT_READY', {
+      snapshotAt: snapshot.snapshotAt,
+      sourceFreshness: snapshot.sourceFreshness,
+      dataQuality: snapshot.dataQuality,
+      replayGrade: snapshot.replayGrade,
+      replayEvidencePersisted: Boolean(snapshot.replayEvidence),
+      vendorRawPayloadsPersisted: snapshot.rawSnapshotAvailable,
+    });
+  }
+  if (!existingStages.has('COUNCIL_COMPLETED')) {
+    await appendDecisionLifecycle(store, run, 'COUNCIL_COMPLETED', {
+      status: council.status,
+      degradedReason: reason,
+      agents: council.agents,
+    });
+  }
+  if (!existingStages.has('CIO_DECIDED')) {
+    await appendDecisionLifecycle(store, run, 'CIO_DECIDED', { decision: cioDecision });
+  }
+  if (!existingStages.has('RISK_GATED')) {
+    await appendDecisionLifecycle(store, run, 'RISK_GATED', { riskGate, finalAction: riskGate.action });
+  }
+  await store.persistDecision(run);
+  if (!existingStages.has('PERSISTED')) {
+    await appendDecisionLifecycle(store, run, 'PERSISTED', {
+      finalAction: run.finalAction,
+      degraded: true,
+      degradedReason: reason,
+    });
+  }
+  await store.persistDecision(run);
+
+  const message = tgEscape(formatTelegramDecisionMessage({ run, snapshot, council, cioDecision, riskGate }));
+  return dispatchSpxDecisionDelivery({
+    runId: run.runId,
+    message,
+    mode: deliveryMode,
+  }, {
+    clock: { now: () => new Date() },
+    store,
+    telegram: { send: (payload) => sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, payload) },
+  });
 }
 
 // --- 主要執行邏輯 ---
@@ -1884,6 +2054,9 @@ async function persistAgentSignalJournal(env: Env, args: {
 
 async function runTradingAgents(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}) {
   let runLockToken: string | null = null;
+  let decisionStore: D1SpxDecisionStore | null = null;
+  let decisionRun: DecisionRunRecord | null = null;
+  const deliveryMode = options.deliveryMode || (options.debugReportPreview ? 'PREVIEW' : 'SEND');
   try {
     const marketStatus = getMarketScheduleStatus(now);
     if (!options.force && !marketStatus.isTradingWindow) {
@@ -1896,24 +2069,54 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       throw new Error(`環境變量缺失: TOKEN=${!!env.TELEGRAM_TOKEN}, CHAT=${!!env.TELEGRAM_CHAT_ID}`);
     }
 
-    runLockToken = await acquireTradingRunLock(env, now, options);
-    if (!runLockToken) return;
-
-    if (options.force || options.debugReportPreview) {
-      console.log('[DEBUG] Manual diagnostic run started: sending heartbeat...');
-      await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, "💓 <b>系統心跳：手動診斷任務已啟動...</b>\n正在獲取市場數據中...");
-    }
-
-    // Memory Fetch
+    if (!env.SPX_RECAP_DB) throw new Error('SPX_RECAP_DB is required for traceable decision runs');
     const etNow = marketStatus.etNow;
     const etDateStr = etNow.getFullYear() + "-" + (etNow.getMonth() + 1).toString().padStart(2, '0') + "-" + etNow.getDate().toString().padStart(2, '0');
-    const memoryKey = `spx_memory_${etDateStr}`;
-
     const etTime = new Intl.DateTimeFormat('zh-TW', {
       timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
     }).format(now);
     const runId = `${etDateStr}-${now.getTime()}`;
+    decisionStore = new D1SpxDecisionStore(env.SPX_RECAP_DB);
+    decisionRun = makeDecisionRunRecord(runId, now);
+
+    const isNewRun = await decisionStore.beginRun(decisionRun);
+    if (!isNewRun) {
+      const existingOutbox = await decisionStore.getOutbox(runId);
+      if (deliveryMode === 'SEND' && existingOutbox && existingOutbox.status !== 'DELIVERED') {
+        await retrySpxDelivery(runId, {
+          clock: { now: () => new Date() },
+          store: decisionStore,
+          telegram: { send: (message) => sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, message) },
+        });
+      }
+      if (deliveryMode === 'PREVIEW') {
+        console.log(`[DELIVERY_PREVIEW] run_id=${runId} duplicate run; Telegram retry suppressed.`);
+      }
+      console.log(`[RUN] Duplicate run_id=${runId}; analysis skipped and outbox handled idempotently.`);
+      return;
+    }
+    await appendDecisionLifecycle(decisionStore, decisionRun, 'SCHEDULED', { scheduledAt: now.toISOString() });
+
+    runLockToken = await acquireTradingRunLock(env, now, options);
+    if (!runLockToken) {
+      decisionRun.degraded = true;
+      decisionRun.degradedReason = 'lock_not_acquired';
+      await decisionStore.persistDecision(decisionRun);
+      return;
+    }
+    await appendDecisionLifecycle(decisionStore, decisionRun, 'LOCK_ACQUIRED');
+
+    if (deliveryMode === 'SEND') {
+      await retryDueDecisionOutbox(env, now);
+    }
+
+    if (options.force || options.debugReportPreview) {
+      console.log('[DEBUG] Manual diagnostic run started; no pre-ledger heartbeat is sent.');
+    }
+
+    // Memory Fetch
+    const memoryKey = `spx_memory_${etDateStr}`;
 
     // 並行讀取日內記憶
     const rawMemory = await env.SPX_MEMORY.get(memoryKey);
@@ -2046,6 +2249,66 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       })
       : null;
 
+    const snapshotAt = new Date();
+    const snapshotFacts: MarketSnapshot['facts'] = {
+      'spx.last': spxInd.currentClose,
+      'spx.vwap': spxInd.currentVWAP,
+      'spx.ema9': spxInd.ema9 ?? null,
+      'spx.rsi14': spxInd.currentRSI,
+      'spx.dayChangePct': trendDayContext.dayChangePct,
+      'spx.fromOpenPct': trendDayContext.fromOpenPct,
+      'spx.rangePositionPct': trendDayContext.rangePositionPct,
+      'm5.volumeSurge': m5Analysis.volumeSurge,
+      'vix.last': currentVix ?? null,
+      'vix9d.last': currentVix9d ?? null,
+      'options.pcr': pcrValue ?? null,
+      'gex.gammaStatus': calculatedGex?.gammaStatus || null,
+      'gex.gammaFlip': calculatedGex?.gammaFlipLevel ?? null,
+      'gex.totalNet': calculatedGex?.totalNetGex ?? null,
+      'trend.regime': trendDayContext.regime,
+    };
+    const canonicalGex = canonicalHeatmap?.canonical || calculatedGex?.canonical || null;
+    const boardRoot = env.SPX_BOARD_URL || 'https://sius-ai-workshop.pages.dev/#/work/spx-gex-heatmap';
+    const boardDeepLink = canonicalGex
+      ? `${boardRoot}?date=${encodeURIComponent(canonicalGex.tradingDate)}&snapshot=${canonicalGex.snapshotMinuteEt}`
+      : boardRoot;
+    const replayEvidence: MarketSnapshot['replayEvidence'] = {
+      replayGrade: canonicalGex ? 'NORMALIZED_CANONICAL' : 'PARTIAL_NORMALIZED',
+      vendorRawPayloadsPersisted: false,
+      gex: canonicalGex ? {
+        snapshotId: canonicalGex.snapshotId,
+        payloadHash: canonicalGex.payloadHash,
+        schemaVersion: canonicalGex.schemaVersion,
+        provider: canonicalGex.provider,
+        fallbackFrom: canonicalGex.fallbackFrom,
+        sourceTimestamp: canonicalGex.sourceTimestamp,
+        facts: Object.fromEntries(Object.entries(snapshotFacts).filter(([key]) => key.startsWith('gex.'))),
+        dataQuality: canonicalGex.dataQuality,
+      } : null,
+      normalizedSeries: {
+        spx15m: normalizeReplaySeries(spxQuotes),
+        spx5m: normalizeReplaySeries(m5QuotesValid),
+        spxD1: normalizeReplaySeries(spxQuotesD1),
+        spxH1: normalizeReplaySeries(spxQuotesH1),
+        vix15m: normalizeReplaySeries(vixQuotes),
+        vix9d: normalizeReplaySeries(vixQuotes9d),
+      },
+    };
+    const marketSnapshot = buildMarketSnapshot({
+      runId,
+      scheduledAt: now,
+      snapshotAt,
+      spxLatestAt: spxQuotes[spxQuotes.length - 1]?.date || null,
+      vixLatestAt: vixQuotes[vixQuotes.length - 1]?.date || null,
+      gexSnapshotAt: calculatedGex?.generatedAt || null,
+      gexProvider: canonicalGex?.provider || null,
+      gexFallbackFrom: canonicalGex?.fallbackFrom || null,
+      dataQuality: marketDataQuality,
+      facts: snapshotFacts,
+      gexSummary: calculatedGex,
+      boardDeepLink,
+      replayEvidence,
+    });
     const extendedContext = {
       currentTime: etTime,
       ...context,
@@ -2068,6 +2331,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       marketDataQuality,
       agentCalibrationWeights,
       calculatedGEX: calculatedGexContext,
+      snapshotFacts: marketSnapshot.facts,
       priceActionContext,
       TODAYS_MEMORY: {
         currentPosition: dailyMemory.currentPosition,
@@ -2075,20 +2339,41 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
         recentActions: dailyMemory.actionLog.slice(-3),
       }
     };
+    marketSnapshot.normalizedContext = extendedContext;
+    decisionRun!.snapshot = marketSnapshot;
+    await appendDecisionLifecycle(decisionStore!, decisionRun!, 'SNAPSHOT_READY', {
+      snapshotAt: marketSnapshot.snapshotAt,
+      sourceFreshness: marketSnapshot.sourceFreshness,
+      dataQuality: marketSnapshot.dataQuality,
+      facts: marketSnapshot.facts,
+      normalizedContextPersisted: true,
+      replayGrade: marketSnapshot.replayGrade,
+      replayEvidencePersisted: Boolean(marketSnapshot.replayEvidence),
+      vendorRawPayloadsPersisted: marketSnapshot.rawSnapshotAvailable,
+    });
 
-    console.log('[DEBUG] Step 3: Triggering 4 AI council agents (QM/CM/NT/PA). Per-agent deterministic fallback enabled...');
+    console.log('[DEBUG] Step 3: Triggering 4 AI council agents (QM/CM/NT/PA). Fail-closed HOLD on any model/schema failure...');
+    const councilStartedAt = Date.now();
     let [agent1, agent2, agent3, agent4] = ['QM', 'CM', 'NT', 'PA'].map((key) =>
-      buildDataBackedAgentFallback(key, extendedContext, 'deterministic_rules')
+      buildDataBackedAgentFallback(key, extendedContext, 'council_not_run')
     );
-    if (shouldRunLlmCouncil(env.SPX_ENABLE_LLM_COUNCIL)) {
+    if (marketDataQuality.overallStatus !== 'BLOCK' && shouldRunLlmCouncil(env.SPX_ENABLE_LLM_COUNCIL)) {
       [agent1, agent2, agent3, agent4] = await Promise.all([
         analyzeWithAgent('QM', PERSONAS.QM_MOMENTUM_SNIPER, extendedContext, env),
         analyzeWithAgent('CM', PERSONAS.CM_OPTIONS_MAKER, extendedContext, env),
         analyzeWithAgent('NT', NT_VOLATILITY_RISK_PROMPT, extendedContext, env),
         analyzeWithAgent('PA', PERSONAS.PA_PRICE_ACTION, extendedContext, env)
       ]);
+    } else if (marketDataQuality.overallStatus === 'BLOCK') {
+      [agent1, agent2, agent3, agent4] = ['QM', 'CM', 'NT', 'PA'].map((key) =>
+        buildDataBackedAgentFallback(key, extendedContext, 'market_data_block')
+      );
+      console.error(`[COUNCIL] Required market data unavailable: ${marketDataQuality.hardBlocks.join(',')}`);
     } else {
-      console.log('[DEBUG] AI council explicitly disabled by SPX_ENABLE_LLM_COUNCIL; using deterministic fallback agents.');
+      [agent1, agent2, agent3, agent4] = ['QM', 'CM', 'NT', 'PA'].map((key) =>
+        buildDataBackedAgentFallback(key, extendedContext, 'council_disabled')
+      );
+      console.log('[COUNCIL] LLM council disabled; final run is DEGRADED HOLD.');
     }
 
     const normalizeDecision = (d: string) => d ? d.toString().trim().toUpperCase() : "HOLD";
@@ -2096,6 +2381,17 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     const d2 = normalizeDecision(agent2.decision);
     const d3 = normalizeDecision(agent3.decision);
     const d4 = normalizeDecision(agent4.decision);
+    const councilResult = buildCouncilResult({ QM: agent1, CM: agent2, NT: agent3, PA: agent4 }, Date.now() - councilStartedAt);
+    decisionRun!.council = councilResult;
+    if (councilResult.status === 'DEGRADED') {
+      decisionRun!.degraded = true;
+      decisionRun!.degradedReason = councilResult.degradedReason || 'council_degraded';
+    }
+    await appendDecisionLifecycle(decisionStore!, decisionRun!, 'COUNCIL_COMPLETED', {
+      status: councilResult.status,
+      degradedReason: councilResult.degradedReason || null,
+      agents: councilResult.agents,
+    }, councilResult.latencyMs);
     await persistAgentSignalJournal(env, {
       runId,
       date: etDateStr,
@@ -2105,23 +2401,12 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       dataQuality: marketDataQuality,
       agents: { QM: agent1, CM: agent2, NT: agent3, PA: agent4 },
     });
-    const formatAgentDecision = (decision: string) => {
-      if (['BUY', 'LONG', 'CALL', 'OPEN_CALL'].includes(decision)) return '🟢 [做多]';
-      if (['SELL', 'SHORT', 'PUT', 'OPEN_PUT'].includes(decision)) return '🔴 [做空]';
-      return '⚪ [觀望]';
-    };
-
-    const voteSummary = countDirectionalVotes([d1, d2, d3, d4]);
-    const buyVotes = voteSummary.buyVotes;
-    const sellVotes = voteSummary.sellVotes;
-    const holdVotes = voteSummary.holdVotes;
-    let consensusVote = buyVotes > sellVotes ? 'LONG 📈' : sellVotes > buyVotes ? 'SHORT 📉' : 'NEUTRAL ⚖️';
-
     console.log('[DEBUG] Step 4: Triggering Orchestrator...');
+    const cioStartedAt = Date.now();
     const fallbackOrchestratorPlan = buildDataBackedCioPlan(extendedContext, [agent1, agent2, agent3, agent4]);
-    let orchestratorPlan: any = { strategy: '觀望 (Hold)', logic: '無法取得總結邏輯', risk_management: '嚴控風險。' };
-    orchestratorPlan = fallbackOrchestratorPlan;
-    if (shouldRunLlmCio(env.SPX_ENABLE_LLM_CIO)) {
+    let orchestratorPlan: any = fallbackOrchestratorPlan;
+    let cioModelStatus = councilResult.status === 'DEGRADED' ? 'COUNCIL_DEGRADED' : 'NOT_RUN';
+    if (councilResult.status === 'OK' && marketDataQuality.overallStatus !== 'BLOCK' && shouldRunLlmCio(env.SPX_ENABLE_LLM_CIO)) {
       try {
         if (!env.OPENROUTER_API_KEY) throw new Error('missing_openrouter_key');
         const orchRes = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
@@ -2135,7 +2420,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
             temperature: 0.1,
             max_tokens: 360,
             messages: [
-              { role: 'system', content: ORCHESTRATOR_PROMPT },
+              { role: 'system', content: `${ORCHESTRATOR_PROMPT}\nTraceability contract: also return "logic", "targets" (string array), "no_trade_conditions" (string array), and "evidence_refs" (array of exact snapshotFacts keys). Directional actions without valid evidence_refs, entry, invalidation, and targets are invalid.` },
               { role: 'user', content: `Market Context: ${JSON.stringify(extendedContext)}\nQM (Momentum): ${JSON.stringify(agent1)}\nCM (GEX): ${JSON.stringify(agent2)}\nNT (Sentiment): ${JSON.stringify(agent3)}\nPA (Price Action): ${JSON.stringify(agent4)}` }
             ]
           })
@@ -2143,97 +2428,117 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
         if (orchRes.ok) {
           const orchData = await orchRes.json() as any;
           const content = orchData.choices?.[0]?.message?.content || "";
-          const parsedPlan = parseOrchestratorResponseContent(content);
-          orchestratorPlan = {
-            ...fallbackOrchestratorPlan,
-            ...parsedPlan,
-            trade_action: normalizeCioAction((parsedPlan as any).trade_action),
-            risk_warning: (parsedPlan as any).risk_warning || (fallbackOrchestratorPlan as any).risk_warning,
-          };
+          const parsedPlan = parseLooseJsonObject(content);
+          if (!parsedPlan) throw new Error('cio_schema_invalid_json');
+          orchestratorPlan = { ...parsedPlan, trade_action: normalizeCioAction(parsedPlan.trade_action) };
+          cioModelStatus = 'AI';
         } else {
+          cioModelStatus = `OPENROUTER_${orchRes.status}`;
           console.error(`[ERR] Orchestrator OpenRouter ${orchRes.status}`, await orchRes.text());
         }
-      } catch (e) {
+      } catch (e: any) {
+        cioModelStatus = e?.name === 'AbortError' || /timeout|timed out/i.test(String(e?.message || e))
+          ? 'TIMEOUT'
+          : /schema/i.test(String(e?.message || e)) ? 'INVALID_SCHEMA' : 'REQUEST_FAILED';
         console.error('[ERR] Orchestrator error', e);
       }
+    } else if (marketDataQuality.overallStatus === 'BLOCK') {
+      cioModelStatus = 'DATA_BLOCK';
+    } else if (councilResult.status === 'DEGRADED') {
+      cioModelStatus = 'COUNCIL_DEGRADED';
     } else {
-      console.log('[DEBUG] CIO AI agent explicitly disabled by SPX_ENABLE_LLM_CIO; using deterministic data-backed plan.');
+      cioModelStatus = 'DISABLED';
+      console.log('[CIO] LLM CIO disabled; final run is DEGRADED HOLD.');
     }
 
-    const callTargetGuide = intradayStructure.repeatedResistance
-      ? `先在重複阻力 ${intradayStructure.repeatedResistance.level} 前分段止盈；有效接受其上方後才看下一道 GEX wall。`
-      : (calculatedGex?.mostLongStrike ? `先看 SG_High / long wall ${calculatedGex.mostLongStrike}，突破後用 M5 higher-low trailing。` : '用 M5 higher-low trailing，失去 VWAP 即撤。');
-    const putTargetGuide = intradayStructure.repeatedSupport
-      ? `先在重複支撐 ${intradayStructure.repeatedSupport.level} 前分段止盈；有效接受其下方後才看下一道 GEX pocket。`
-      : (calculatedGex?.mostShortStrike ? `先看 SG_Low / short pocket ${calculatedGex.mostShortStrike}，跌破後用 M5 lower-high trailing。` : '用 M5 lower-high trailing，收復 VWAP 即撤。');
-
-    if (
-      dailyMemory.currentPosition === 'NONE' &&
-      isBeforeEtCutoff(etNow, 15, 30) &&
-      trendDayContext.regime === 'BULL_TREND_DAY' &&
-      (((orchestratorPlan as any).trade_action || 'HOLD') === 'HOLD' || (orchestratorPlan as any).trade_action === 'OPEN_PUT')
-    ) {
-      orchestratorPlan = {
-        ...(orchestratorPlan as any),
-        trade_action: 'OPEN_CALL',
-        action_reasoning: '順勢追蹤',
-        logic: trendDayContext.rationale,
-        buy_zone: `單邊上升日 override：現價 ${spxInd.currentClose.toFixed(2)} 附近跟隨 CALL；必須守住 VWAP ${spxInd.currentVWAP.toFixed(2)} / EMA9 ${spxInd.ema9?.toFixed(2) ?? 'N/A'}。`,
-        stop_loss: `跌回 VWAP ${spxInd.currentVWAP.toFixed(2)} 並失守 EMA9，單邊日假設失效。`,
-        take_profit: callTargetGuide,
-        risk_warning: '主要風險係尾盤追高同 VWAP 假跌破；但原本 HOLD 會錯失單邊趨勢。'
-      };
-    } else if (
-      dailyMemory.currentPosition === 'NONE' &&
-      isBeforeEtCutoff(etNow, 15, 30) &&
-      trendDayContext.regime === 'BEAR_TREND_DAY' &&
-      (((orchestratorPlan as any).trade_action || 'HOLD') === 'HOLD' || (orchestratorPlan as any).trade_action === 'OPEN_CALL')
-    ) {
-      orchestratorPlan = {
-        ...(orchestratorPlan as any),
-        trade_action: 'OPEN_PUT',
-        action_reasoning: '順勢追蹤',
-        logic: trendDayContext.rationale,
-        buy_zone: `單邊下跌日 override：現價 ${spxInd.currentClose.toFixed(2)} 附近跟隨 PUT；必須壓在 VWAP ${spxInd.currentVWAP.toFixed(2)} / EMA9 ${spxInd.ema9?.toFixed(2) ?? 'N/A'} 下方。`,
-        stop_loss: `站回 VWAP ${spxInd.currentVWAP.toFixed(2)} 並收復 EMA9，單邊日假設失效。`,
-        take_profit: putTargetGuide,
-        risk_warning: '主要風險係尾盤追空同 VWAP 假收復；但原本 HOLD 會錯失單邊趨勢。'
+    const toStringArray = (value: unknown) => (Array.isArray(value) ? value : [])
+      .map((item) => compactModelText(item, 180))
+      .filter(Boolean);
+    let cioDecision: CioDecision = {
+      action: normalizeCioAction((orchestratorPlan as any).trade_action) as CioDecision['action'],
+      confidence: clampConfidence((orchestratorPlan as any).confidence_score, 0),
+      thesis: compactModelText((orchestratorPlan as any).logic || (orchestratorPlan as any).action_reasoning, 320),
+      entry: compactModelText((orchestratorPlan as any).buy_zone, 180) || null,
+      invalidation: compactModelText((orchestratorPlan as any).stop_loss, 180) || null,
+      targets: toStringArray((orchestratorPlan as any).targets).length
+        ? toStringArray((orchestratorPlan as any).targets)
+        : compactModelText((orchestratorPlan as any).take_profit, 180) && (orchestratorPlan as any).take_profit !== 'N/A'
+          ? [compactModelText((orchestratorPlan as any).take_profit, 180)]
+          : [],
+      noTradeConditions: toStringArray((orchestratorPlan as any).no_trade_conditions),
+      evidenceRefs: normalizeEvidenceRefs((orchestratorPlan as any).evidence_refs),
+      modelStatus: cioModelStatus,
+      latencyMs: Date.now() - cioStartedAt,
+    };
+    const cioValidationFailure = getCioValidationFailure(cioDecision, marketSnapshot);
+    if (cioValidationFailure) {
+      const degradedReason = decisionRun!.degradedReason || (cioModelStatus === 'TIMEOUT' ? 'cio_timeout' : cioValidationFailure);
+      decisionRun!.degraded = true;
+      decisionRun!.degradedReason = degradedReason;
+      orchestratorPlan = fallbackOrchestratorPlan;
+      cioDecision = {
+        action: 'HOLD',
+        confidence: 0,
+        thesis: `DEGRADED: ${degradedReason}`,
+        entry: null,
+        invalidation: null,
+        targets: [],
+        noTradeConditions: [degradedReason],
+        evidenceRefs: [],
+        modelStatus: cioModelStatus,
+        latencyMs: Date.now() - cioStartedAt,
       };
     }
+    decisionRun!.cioDecision = cioDecision;
+    await appendDecisionLifecycle(decisionStore!, decisionRun!, 'CIO_DECIDED', { decision: cioDecision }, cioDecision.latencyMs);
 
-    const plannedTradeAction = ((orchestratorPlan as any).trade_action || 'HOLD').toString().toUpperCase();
+    const plannedTradeAction = cioDecision.action;
     const mustBlockNewDirectionalSignal =
       zeroDteRuleEngine.hardRuleTriggered ||
       zeroDteRuleEngine.verdict === 'FREEZE_NEW_SIGNALS' ||
       (zeroDteRuleEngine.verdict === 'NO_TRADE' && zeroDteRuleEngine.signalScore < 45) ||
       (zeroDteRuleEngine.gammaPinningDetected && trendDayContext.regime === 'RANGE_OR_MIXED') ||
       zeroDteRuleEngine.directionalBias === 'NONE';
+    const canonicalGexDirective = getCanonicalGexRiskDirective(marketSnapshot, cioDecision);
+    let riskDirective: RiskGateDirective = { disposition: 'PASS', reason: 'No safety veto.' };
     if (zeroDteRuleEngine.verdict === 'CLOSE_OR_REDUCE_SUGGESTED' && dailyMemory.currentPosition !== 'NONE') {
-      orchestratorPlan = {
-        ...(orchestratorPlan as any),
-        trade_action: 'CLOSE',
-        action_reasoning: '0DTE風控',
-        buy_zone: 'N/A',
-        stop_loss: '0DTE rule engine: 15分鐘內無順向跟進，Theta decay 風險升高。',
-        take_profit: '先退出或減倉，等待下一個高分 setup。',
-        risk_warning: `Hard rule triggered: ${zeroDteRuleEngine.hardBlocks.join(', ') || 'position_timeout'}`
+      riskDirective = {
+        disposition: 'REQUIRE_CLOSE',
+        reason: `0DTE safety close: ${zeroDteRuleEngine.hardBlocks.join(', ') || 'position_timeout'}`,
       };
+    } else if (canonicalGexDirective) {
+      riskDirective = canonicalGexDirective;
+      decisionRun!.degraded = true;
+      decisionRun!.degradedReason = canonicalGexDirective.reason;
     } else if (
       dailyMemory.currentPosition === 'NONE' &&
       ['OPEN_CALL', 'OPEN_PUT'].includes(plannedTradeAction) &&
       zeroDteRuleEngine.verdict !== 'TRADE_ALLOWED' &&
       mustBlockNewDirectionalSignal
     ) {
-      orchestratorPlan = {
-        ...(orchestratorPlan as any),
-        trade_action: 'HOLD',
-        action_reasoning: '0DTE禁開',
-        buy_zone: 'N/A',
-        stop_loss: 'N/A',
-        take_profit: 'N/A',
-        risk_warning: `0DTE rule engine hard-blocked new signal: ${zeroDteRuleEngine.verdict}. ${zeroDteRuleEngine.hardBlocks.join(', ') || zeroDteRuleEngine.activeRisks.join(', ') || 'score_not_enough'}`
+      riskDirective = {
+        disposition: 'VETO_TO_HOLD',
+        reason: `0DTE veto: ${zeroDteRuleEngine.verdict}. ${zeroDteRuleEngine.hardBlocks.join(', ') || zeroDteRuleEngine.activeRisks.join(', ') || 'score_not_enough'}`,
       };
     }
+
+    const riskGateResult = applyRiskGate(cioDecision, riskDirective, dailyMemory.currentPosition);
+    orchestratorPlan = {
+      ...(orchestratorPlan as any),
+      trade_action: riskGateResult.action,
+      risk_warning: riskDirective.disposition === 'PASS'
+        ? (orchestratorPlan as any).risk_warning || 'No Risk Gate veto.'
+        : riskDirective.reason,
+    };
+    decisionRun!.riskGate = riskGateResult;
+    decisionRun!.finalAction = riskGateResult.action;
+    decisionRun!.finalDecision = { ...cioDecision, action: riskGateResult.action };
+    await appendDecisionLifecycle(decisionStore!, decisionRun!, 'RISK_GATED', {
+      cioAction: cioDecision.action,
+      finalAction: riskGateResult.action,
+      disposition: riskGateResult.disposition,
+      reason: riskGateResult.reason,
+    });
 
     const finalPlannedAction = ((orchestratorPlan as any).trade_action || 'HOLD').toString().toUpperCase();
     if (finalPlannedAction === 'OPEN_PUT' && intradayStructure.repeatedSupport) {
@@ -2299,91 +2604,48 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     await env.SPX_MEMORY.put(dbKey, JSON.stringify(dailyMemory));
     await persistRecapDayToD1(env, etNowDateStr, dailyMemory);
 
-    const toM = (val: number) => (val / 1000000).toFixed(1) + 'M';
-    let displayAction = tradeAction;
-    if (tradeAction === 'OPEN_CALL') displayAction = '買入 Call';
-    else if (tradeAction === 'OPEN_PUT') displayAction = '買入 Put';
-    else if (tradeAction === 'CLOSE') displayAction = '平倉了結';
-    else if (tradeAction === 'HOLD') displayAction = dailyMemory.currentPosition !== 'NONE' ? '持倉續抱' : '觀望空倉';
+    await decisionStore!.persistDecision(decisionRun!);
+    await appendDecisionLifecycle(decisionStore!, decisionRun!, 'PERSISTED', {
+      finalAction: decisionRun!.finalAction,
+      degraded: decisionRun!.degraded,
+      degradedReason: decisionRun!.degradedReason,
+    });
+    await decisionStore!.persistDecision(decisionRun!);
 
-    const actionReasoning = safeVisibleAgentText((orchestratorPlan as any).action_reasoning, "策略執行", 40);
-    const finalDisplayAction = `${displayAction} (${actionReasoning})`;
-    const displayBuyZone = safeVisibleAgentText((orchestratorPlan as any).buy_zone, "N/A", 240) || "N/A";
-    const displayStopLoss = safeVisibleAgentText((orchestratorPlan as any).stop_loss, "N/A", 240) || "N/A";
-    const displayTakeProfit = safeVisibleAgentText((orchestratorPlan as any).take_profit, "N/A", 260) || "N/A";
-    const displayRiskWarning = safeVisibleAgentText((orchestratorPlan as any).risk_warning, "N/A", 260) || "N/A";
-    const dataQualitySummary = [
-      `狀態=${marketDataQuality.overallStatus}`,
-      marketDataQuality.hardBlocks.length ? `Hard=${marketDataQuality.hardBlocks.join(',')}` : null,
-      marketDataQuality.warnings.length ? `Warn=${marketDataQuality.warnings.slice(0, 4).join(',')}` : null,
-    ].filter(Boolean).join(' | ');
-    const cioDecisionSummary = [
-      `Action=${tradeAction}`,
-      `Confidence=${clampConfidence((orchestratorPlan as any).confidence_score, 45)}/100`,
-      `Rule=${zeroDteRuleEngine.verdict}`,
-      zeroDteRuleEngine.softWarnings.length ? `Soft=${zeroDteRuleEngine.softWarnings.slice(0, 3).join(',')}` : null,
-    ].filter(Boolean).join(' | ');
-
-    // IC summary for display
-    const icDisplay = ``;
-
-
-    const message = `SPX: ${context.currentPrice} 操作：${displayAction}
-⏱️ <b>美東時間：${etTime} ET</b> | <b>標的：SPX</b>
-
-📡 <b>[期權 GEX 訊號]</b>${calculatedGex ? ` (${calculatedGex.generatedAt})` : ' 數據缺失'}
-${calculatedGex ? `來源：<code>${calculatedGex.source || 'Canonical D1 SPX GEX heatmap'}</code>
-系統態勢：<b>${calculatedGex.gammaStatus === 'positive_gamma' ? '✅ Positive Gamma — 橡皮筋模式（做市商吸收波動）' : '⚠️ Negative Gamma — 滑滑梯模式（波動放大）'}</b>
-🔄 Gamma Flip (ZG)：<code>${calculatedGex.gammaFlipLevel}</code> (${(spxInd.currentClose > (calculatedGex.gammaFlipLevel || 0)) ? '在 Flip 之上↑ 多方有利' : '在 Flip 之下↓ 空方佔優'})
-🟢 最強多方 (SG_High)：<code>${calculatedGex.mostLongStrike}</code> (${calculatedGex.mostLongGex}) | 🔴 最強空方 (SG_Low)：<code>${calculatedGex.mostShortStrike}</code> (${calculatedGex.mostShortGex})
-📊 Long Walls：${calculatedGex.longWalls?.slice(0, 3).map((w: any) => `${w.strike}(${w.gex})`).join(' ► ') || 'N/A'}
-📉 Short Pockets：${calculatedGex.shortPockets?.slice(0, 3).map((p: any) => `${p.strike}(${p.gex})`).join(' ► ') || 'N/A'}` : '⚠️ 數據抓取失敗'}
-
-🧪 <b>[Data Quality]</b>
-<code>${tgEscape(dataQualitySummary)}</code>
-
-⚖️ <b>[理事會決議 · 專家辯論]</b> (4 directional agents)
-🟢 <code>${buyVotes}</code> | 🔴 <code>${sellVotes}</code> | ⚪ <code>${holdVotes}</code> [🔥 核心共識: <b>${consensusVote}</b>]
-🗣️ <b>專家深度腦爆</b> (Expert Rapid-Fire)
-
-🦁 <b>QM: ${formatAgentDecision(d1)} (Momentum)</b>:
-${tgEscape(formatAgentTelegramBrief('QM', agent1))}
-
-🌊 <b>CM: ${formatAgentDecision(d2)} (GEX Decision)</b>:
-${tgEscape(formatAgentTelegramBrief('CM', agent2))}
-
-🦢 <b>NT: ${formatAgentDecision(d3)} (Sentiment)</b>:
-${tgEscape(formatAgentTelegramBrief('NT', agent3))}
-
-🏛️ <b>PA: ${formatAgentDecision(d4)} (Price Action)</b>:
-${tgEscape(formatAgentTelegramBrief('PA', agent4))}
-
-🧠 <b>[CIO Decision]</b>
-<code>${tgEscape(cioDecisionSummary)}</code>
-
-🛡️ <b>[雷霆一擊 · 終極執行]</b> (Thor Execution Plan)
-<b>操作：</b> <code>${tgEscape(finalDisplayAction)}</code>
-<b>買點：</b> ${tgEscape(displayBuyZone)}
-<b>止損：</b> ${tgEscape(displayStopLoss)}
-<b>止盈：</b> ${tgEscape(displayTakeProfit)}
-<b>風控：</b> ${tgEscape(displayRiskWarning)}
-
-<pre>-- CF Worker v4.0.0 | lean Telegram output | IC disabled --</pre>
-`;
+    const message = tgEscape(formatTelegramDecisionMessage({
+      run: decisionRun!,
+      snapshot: marketSnapshot,
+      council: councilResult,
+      cioDecision,
+      riskGate: riskGateResult,
+    }));
 
     if (options.debugReportPreview) {
       console.log(`[DEBUG_FINAL_REPORT]\n${message.trim()}`);
     }
-    console.log('[DEBUG] Step 6: Sending Final Report...');
-    const success = await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, message.trim());
-    if (!success) {
-      console.error('[ERR] Final send failed');
+    const delivery = await dispatchSpxDecisionDelivery({
+      runId,
+      message: message.trim(),
+      mode: deliveryMode,
+    }, {
+      clock: { now: () => new Date() },
+      store: decisionStore!,
+      telegram: { send: (payload) => sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, payload) },
+    });
+    if (delivery) {
+      console.log(`[DELIVERY] run_id=${runId} status=${delivery.status} message_id=${delivery.telegramMessageId || 'none'} attempts=${delivery.attemptCount}`);
+    } else {
+      console.log(`[DELIVERY_PREVIEW] run_id=${runId} Telegram enqueue/send suppressed.`);
     }
 
   } catch (e: any) {
     console.error('CRITICAL BOT ERROR:', e.message);
-    const errorMsg = `⚠️ <b>[系統預警] 專家分析中斷</b>\n市場數據仍可讀取。\nError: ${tgEscape(e.message)}`;
-    await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, errorMsg);
+    if (decisionStore && decisionRun) {
+      const reason = `pipeline_error:${compactModelText(e?.message || String(e), 180)}`;
+      await completeDegradedDecisionRun(env, decisionStore, decisionRun, reason, deliveryMode).catch((persistError) => {
+        console.error('[LEDGER] Failed to complete degraded pipeline run', persistError);
+      });
+    }
   } finally {
     await releaseTradingRunLock(env, runLockToken);
   }
@@ -2482,16 +2744,42 @@ async function runSpxGexHeatmapGeneration(env: Env, now: Date = new Date(), opti
     return;
   }
 
+  const generationStatus = getSpxGexGenerationStatus(now);
+  const collectionStore = new D1SpxGexCollectionStore(env.SPX_RECAP_DB);
+  const slotId = `${generationStatus.etDateKey}:${generationStatus.snapshotMinuteEt}`;
+  await collectionStore.scheduleDate(generationStatus.etDateKey, now.toISOString());
+
   try {
     const result = await generateAndStoreSpxGexHeatmap({
       db: env.SPX_RECAP_DB,
       dataClient: createSpxGexIntradayDataClient({ db: env.SPX_RECAP_DB, now }),
       now,
-      force: options.force
+      force: options.force,
+      onStage: (stage, payload) => collectionStore.appendStage(slotId, stage, payload, new Date().toISOString()),
     });
+    if (result.status === 'skipped_existing') {
+      const existing = await readSpxGexHeatmap(env.SPX_RECAP_DB, result.date, result.snapshotMinuteEt);
+      const current = await collectionStore.getSlot(slotId);
+      if (current?.currentStage === 'SCHEDULED' || current?.currentStage === 'FAILED') {
+        await collectionStore.appendStage(slotId, 'FETCHED', { reusedExistingSnapshot: true }, new Date().toISOString());
+      }
+      if (current?.currentStage === 'SCHEDULED' || current?.currentStage === 'FETCHED' || current?.currentStage === 'FAILED') {
+        await collectionStore.appendStage(slotId, 'NORMALIZED', { reusedExistingSnapshot: true }, new Date().toISOString());
+      }
+      if (current?.currentStage !== 'PERSISTED') {
+        await collectionStore.appendStage(slotId, 'PERSISTED', {
+          reusedExistingSnapshot: true,
+          snapshotId: existing?.canonical?.snapshotId || null,
+          payloadHash: existing?.canonical?.payloadHash || null,
+          provider: existing?.canonical?.provider || null,
+          fallbackFrom: existing?.canonical?.fallbackFrom || null,
+        }, new Date().toISOString());
+      }
+    }
     console.log(`[SPX_GEX_HEATMAP] ${result.status} ${result.date}${'reason' in result ? ` ${result.reason}` : ''}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    await collectionStore.appendStage(slotId, 'FAILED', { error: message }, new Date().toISOString());
     console.error('[SPX_GEX_HEATMAP] Generation failed', message);
   }
 }
@@ -2540,6 +2828,49 @@ export default {
 
     const forceManualRun = url.searchParams.has('force');
 
+    if (url.searchParams.has('run_id')) {
+      if (!env.SPX_RECAP_DB) return new Response('SPX_RECAP_DB unavailable', { status: 503 });
+      const runId = url.searchParams.get('run_id') || '';
+      const store = new D1SpxDecisionStore(env.SPX_RECAP_DB);
+      const [run, lifecycle, outbox] = await Promise.all([
+        store.getRun(runId),
+        store.getLifecycle(runId),
+        store.getOutbox(runId),
+      ]);
+      return Response.json({ run, lifecycle, outbox }, { status: run ? 200 : 404 });
+    }
+
+    if (url.searchParams.has('retry_run_id')) {
+      if (!env.SPX_RECAP_DB) return new Response('SPX_RECAP_DB unavailable', { status: 503 });
+      const runId = url.searchParams.get('retry_run_id') || '';
+      const store = new D1SpxDecisionStore(env.SPX_RECAP_DB);
+      const delivery = await retrySpxDelivery(runId, {
+        clock: { now: () => new Date() },
+        store,
+        telegram: { send: (message) => sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, message) },
+      });
+      return Response.json({ runId, delivery });
+    }
+
+    if (url.searchParams.has('lifecycle_date')) {
+      if (!env.SPX_RECAP_DB) return new Response('SPX_RECAP_DB unavailable', { status: 503 });
+      const dateKey = url.searchParams.get('lifecycle_date') || '';
+      const expectedRunIds = expectedTradingRunIdsForDate(dateKey);
+      const coverage = await queryLifecycleCoverage(env.SPX_RECAP_DB, expectedRunIds);
+      return Response.json({ date: dateKey, expectedRunCount: expectedRunIds.length, ...coverage });
+    }
+
+    if (url.searchParams.has('gex_lifecycle_date')) {
+      if (!env.SPX_RECAP_DB) return new Response('SPX_RECAP_DB unavailable', { status: 503 });
+      const dateKey = url.searchParams.get('gex_lifecycle_date') || '';
+      const currentStatus = getSpxGexGenerationStatus(new Date());
+      const asOfCollectedMinuteEt = dateKey === currentStatus.etDateKey
+        ? currentStatus.collectedMinuteEt
+        : 16 * 60 + 15;
+      const coverage = await querySpxGexCollectionCoverage(env.SPX_RECAP_DB, dateKey, asOfCollectedMinuteEt);
+      return Response.json({ date: dateKey, asOfCollectedMinuteEt, ...coverage });
+    }
+
     // ?audit — 手動觸發盤後審計報告
     if (url.searchParams.has('audit')) {
       ctx.waitUntil(runEndOfDayAudit(env, new Date(), { force: forceManualRun }));
@@ -2559,7 +2890,11 @@ export default {
       console.error = (...args) => logs.push(`[ERR] ${args.join(' ')}`);
 
       try {
-        await runTradingAgents(env, new Date(), { force: forceManualRun, debugReportPreview: true });
+        await runTradingAgents(env, new Date(), {
+          force: forceManualRun,
+          debugReportPreview: true,
+          deliveryMode: resolveSpxDeliveryMode({ trigger: 'MANUAL', debugPreview: true }),
+        });
         return new Response(`DEBUG COMPLETE.\n\nLOGS:\n${logs.join('\n')}`);
       } catch (e: any) {
         return new Response(`DEBUG ERROR: ${e.message}\n${e.stack}\n\nLOGS:\n${logs.join('\n')}`, { status: 500 });
@@ -2568,7 +2903,13 @@ export default {
         console.error = originalError;
       }
     }
-    ctx.waitUntil(runTradingAgents(env, new Date(), { force: forceManualRun }));
-    return new Response('Analysis triggered.');
+    const deliveryMode = resolveSpxDeliveryMode({
+      trigger: 'MANUAL',
+      explicitDelivery: url.searchParams.has('deliver'),
+    });
+    ctx.waitUntil(runTradingAgents(env, new Date(), { force: forceManualRun, deliveryMode }));
+    return new Response(deliveryMode === 'SEND'
+      ? 'Analysis delivery triggered.'
+      : 'Analysis preview triggered; Telegram delivery suppressed. Add ?deliver to send explicitly.');
   }
 };

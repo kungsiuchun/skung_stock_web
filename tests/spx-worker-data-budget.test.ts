@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { NT_VOLATILITY_RISK_PROMPT } from "../scripts/worker-spx-bot";
+import { NT_VOLATILITY_RISK_PROMPT } from "../src/lib/spx-decision-pipeline";
 
 const workerSource = readFileSync(new URL("../scripts/worker-spx-bot.ts", import.meta.url), "utf8");
 const promptsSource = readFileSync(new URL("../scripts/prompts.ts", import.meta.url), "utf8");
@@ -38,4 +38,45 @@ test("NT sentiment persona does not require removed ETF flow or fake VIX3M input
 
 test("SPX bot prompt sources stay ASCII-safe and free of mojibake markers", () => {
   assert.equal(mojibakeMarkers.test(promptsSource), false);
+});
+
+test("SPX Worker contains no post-CIO trend-day directional override", () => {
+  assert.equal(workerSource.includes("trend_day_override"), false);
+  assert.equal(workerSource.includes("單邊上升日 override"), false);
+  assert.equal(workerSource.includes("單邊下跌日 override"), false);
+});
+
+test("SPX Worker persists normalized replay context without claiming raw source payloads", () => {
+  assert.match(workerSource, /marketSnapshot\.normalizedContext\s*=\s*extendedContext/);
+  assert.match(workerSource, /replayGrade:\s*canonicalGex\s*\?\s*'NORMALIZED_CANONICAL'\s*:\s*'PARTIAL_NORMALIZED'/);
+  for (const series of ["spx15m", "spx5m", "spxD1", "spxH1", "vix15m", "vix9d"]) {
+    assert.match(workerSource, new RegExp(`${series}:\\s*normalizeReplaySeries`));
+  }
+  assert.match(workerSource, /snapshotId:\s*canonicalGex\.snapshotId/);
+  assert.match(workerSource, /payloadHash:\s*canonicalGex\.payloadHash/);
+  assert.equal(workerSource.includes("rawSnapshotAvailable: true"), false);
+  assert.match(workerSource, /vendorRawPayloadsPersisted:\s*marketSnapshot\.rawSnapshotAvailable/);
+  assert.equal(workerSource.includes("rawSourcePayloadsPersisted:"), false);
+});
+
+test("Telegram GEX section is wired from the canonical Board summary", () => {
+  assert.match(workerSource, /const calculatedGex = canonicalGexSnapshot\.calculatedGex/);
+  assert.match(workerSource, /gexSummary:\s*calculatedGex/);
+  assert.match(workerSource, /calculatedGex:\s*heatmap\s*\?\s*toTelegramGexSummary\(heatmap\)\s*:\s*null/);
+});
+
+test("manual and debug Worker triggers are preview-only unless delivery is explicit", () => {
+  assert.match(
+    workerSource,
+    /resolveSpxDeliveryMode\(\{\s*trigger:\s*'MANUAL',\s*debugPreview:\s*true\s*\}\)/,
+  );
+  assert.match(
+    workerSource,
+    /explicitDelivery:\s*url\.searchParams\.has\('deliver'\)/,
+  );
+  assert.match(
+    workerSource,
+    /deliveryMode === 'SEND'[\s\S]*?await retryDueDecisionOutbox\(env, now\)/,
+  );
+  assert.match(workerSource, /Telegram enqueue\/send suppressed/);
 });
