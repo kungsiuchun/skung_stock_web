@@ -14,6 +14,7 @@ const DEFAULT_STRIKE_RANGE_PCT = 0.05;
 const SIDE_IV_MODEL = "black_scholes_gamma_exposure";
 const BLENDED_IV_MODEL = "black_scholes_gamma_exposure_blended_iv";
 const BLENDED_IV_SOURCE_NOTE = "New snapshots use blended per-strike IV for gamma; raw call/put IV retained for audit. Snapshots without per-cell audit inputs are rejected as no data.";
+export const SPX_GEX_SNAPSHOT_SCHEMA_VERSION = 1 as const;
 
 export interface SpxGexQuote {
   ticker: string;
@@ -253,8 +254,12 @@ export interface SpxGexHeatmapModel {
     zeroDteTool: string;
     gexTopRows: number;
     note: string;
+    provider?: string;
+    fallbackFrom?: string | null;
+    sourceTimestamp?: string | null;
   };
   dataQuality?: SpxGexDataQualitySummary;
+  canonical?: CanonicalSpxGexSnapshotEnvelope;
 }
 
 export interface SpxGexDataQualitySummary {
@@ -304,6 +309,23 @@ export interface SpxGexDataClient {
   getMarketContext?: () => Promise<SpxGexMarketContext>;
 }
 
+export interface CanonicalSpxGexSnapshotEnvelope {
+  snapshotId: string;
+  schemaVersion: typeof SPX_GEX_SNAPSHOT_SCHEMA_VERSION;
+  replayGrade: "NORMALIZED_CANONICAL";
+  generatedAt: string;
+  tradingDate: string;
+  snapshotMinuteEt: number;
+  snapshotTimeEt: string;
+  collectedMinuteEt: number;
+  collectedTimeEt: string;
+  provider: string;
+  fallbackFrom: string | null;
+  sourceTimestamp: string | null;
+  payloadHash: string;
+  dataQuality: SpxGexDataQualitySummary | null;
+}
+
 export interface SpxGexTelegramSummary {
   spot?: number;
   gammaFlipLevel?: number;
@@ -322,11 +344,13 @@ export interface SpxGexTelegramSummary {
   netFlowLower?: { strike: number; gex: string };
   putCallIvSkew?: number;
   generatedAt?: string;
+  displayTimeLabel?: string;
   parsedAt?: string;
   source?: string;
   snapshotTimeEt?: string;
   collectedTimeEt?: string;
   selectedExpiry?: string;
+  canonical?: CanonicalSpxGexSnapshotEnvelope;
 }
 
 export type SpxGexGenerationResult =
@@ -593,6 +617,106 @@ const finiteNumberOrUndefined = (value: number | null | undefined) =>
 const telegramWallFromProfile = (profile: SpxGexStrikeProfile | null | undefined) =>
   profile ? { strike: profile.strike, gex: formatSpxGexCompactExposure(profile.netGex, { signed: true }) } : undefined;
 
+const stableJsonStringify = (value: unknown): string => {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return `[${value.map(stableJsonStringify).join(",")}]`;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const entries = Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJsonStringify(record[key])}`);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+};
+
+const fnv1a64 = (value: string) => {
+  let hash = 0xcbf29ce484222325n;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= BigInt(value.charCodeAt(index));
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+  }
+  return `fnv1a64:${hash.toString(16).padStart(16, "0")}`;
+};
+
+const toIsoSourceTimestamp = (value: string | null | undefined) => {
+  if (!value?.trim()) return null;
+  const trimmed = value.trim();
+  const withZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(trimmed)
+    ? trimmed
+    : `${trimmed.replace(" ", "T")}Z`;
+  const parsed = new Date(withZone);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+};
+
+const canonicalSourceMetadata = (source: SpxGexHeatmapModel["source"]) => {
+  const timestampFromNote = source.note.match(/Source timestamp:\s*([^.]*)\./i)?.[1] || null;
+  const provider = source.provider
+    || (/cboe/i.test(source.note) ? "cboe" : /yahoo/i.test(source.note) ? "yahoo" : source.gexTool);
+  const fallbackFrom = source.fallbackFrom
+    ?? (/yahoo.*fallback|fallback.*yahoo/i.test(source.note) ? "Cboe delayed" : null);
+  return {
+    ...source,
+    provider,
+    fallbackFrom,
+    sourceTimestamp: toIsoSourceTimestamp(source.sourceTimestamp || timestampFromNote),
+  };
+};
+
+export const buildCanonicalSpxGexSnapshotEnvelope = (
+  heatmap: SpxGexHeatmapModel,
+): CanonicalSpxGexSnapshotEnvelope => {
+  const generatedDate = new Date(heatmap.generatedAt);
+  if (Number.isNaN(generatedDate.getTime())) {
+    throw new Error(`SPX GEX generatedAt must be an ISO timestamp, received: ${heatmap.generatedAt}`);
+  }
+  const generatedAt = generatedDate.toISOString();
+  const session = heatmap.session ?? buildSessionMeta(generatedAt, heatmap.quote.last);
+  const normalizedSource = canonicalSourceMetadata(heatmap.source);
+  const replayPayload = {
+    schemaVersion: SPX_GEX_SNAPSHOT_SCHEMA_VERSION,
+    generatedAt,
+    quote: heatmap.quote,
+    session,
+    selectedExpiries: heatmap.selectedExpiries,
+    strikeRange: heatmap.strikeRange,
+    strikes: heatmap.strikes,
+    cells: heatmap.cells,
+    totals: heatmap.totals,
+    strikeProfiles: heatmap.strikeProfiles,
+    zeroDte: heatmap.zeroDte,
+    source: normalizedSource,
+    dataQuality: heatmap.dataQuality ?? null,
+  };
+  const payloadHash = fnv1a64(stableJsonStringify(replayPayload));
+
+  return {
+    snapshotId: `spx-gex:${session.tradingDate}:${session.snapshotMinuteEt}:${payloadHash}`,
+    schemaVersion: SPX_GEX_SNAPSHOT_SCHEMA_VERSION,
+    replayGrade: "NORMALIZED_CANONICAL",
+    generatedAt,
+    tradingDate: session.tradingDate,
+    snapshotMinuteEt: session.snapshotMinuteEt,
+    snapshotTimeEt: session.snapshotTimeEt,
+    collectedMinuteEt: session.collectedMinuteEt,
+    collectedTimeEt: session.collectedTimeEt,
+    provider: normalizedSource.provider,
+    fallbackFrom: normalizedSource.fallbackFrom,
+    sourceTimestamp: normalizedSource.sourceTimestamp,
+    payloadHash,
+    dataQuality: heatmap.dataQuality ?? null,
+  };
+};
+
+export const withCanonicalSpxGexSnapshotEnvelope = (
+  heatmap: SpxGexHeatmapModel,
+): SpxGexHeatmapModel => {
+  const { canonical: _staleCanonical, ...base } = heatmap;
+  const normalized = base as SpxGexHeatmapModel;
+  return { ...normalized, canonical: buildCanonicalSpxGexSnapshotEnvelope(normalized) };
+};
+
 export const toTelegramGexSummary = (heatmap: SpxGexHeatmapModel): SpxGexTelegramSummary | null => {
   const profiles = [...(heatmap.strikeProfiles || [])].filter((row) =>
     Number.isFinite(row.strike) && Number.isFinite(row.netGex)
@@ -627,12 +751,14 @@ export const toTelegramGexSummary = (heatmap: SpxGexHeatmapModel): SpxGexTelegra
     shortPockets: sortedShort.slice(0, 3).map((row) => ({ strike: row.strike, gex: formatSpxGexCompactExposure(row.netGex, { signed: true }) })),
     netFlowUpper: telegramWallFromProfile(aboveSpot[0]),
     netFlowLower: telegramWallFromProfile(belowSpot[0]),
-    generatedAt: sessionText,
+    generatedAt: heatmap.generatedAt,
+    displayTimeLabel: sessionText,
     parsedAt: heatmap.generatedAt,
     source: `Canonical D1 SPX GEX heatmap (${heatmap.source.gexTool})`,
     snapshotTimeEt: heatmap.session?.snapshotTimeEt,
     collectedTimeEt: heatmap.session?.collectedTimeEt,
     selectedExpiry: heatmap.zeroDte.expiry,
+    canonical: heatmap.canonical ?? buildCanonicalSpxGexSnapshotEnvelope(heatmap),
   };
 };
 
@@ -1688,14 +1814,17 @@ export const buildSpxGexHeatmapFromOptionChains = (input: BuildSpxGexHeatmapFrom
       zeroDteTool: "black_scholes_exposure_engine",
       gexTopRows: input.maxStrikes ?? DEFAULT_MAX_STRIKES,
       note: `${sourceLabel} option chains are transformed into Black-Scholes GEX, DEX, VEX (vanna), and CEX (charm) approximations.${sourceTimestamp} Missing IV/OI is not substituted; zero IV is repaired only from safe bid/ask mid or labelled unpriced. ${formatDataQualitySummary(dataQuality)} ${BLENDED_IV_SOURCE_NOTE}`,
+      provider: chainSource?.provider || "yahoo",
+      fallbackFrom: chainSource?.fallbackFrom ?? null,
+      sourceTimestamp: toIsoSourceTimestamp(chainSource?.timestamp),
     },
     dataQuality,
   };
 
-  return {
+  return withCanonicalSpxGexSnapshotEnvelope({
     ...heatmapWithoutInterpretation,
     premarketInterpretation: buildSpxGexPremarketInterpretation(heatmapWithoutInterpretation, input.marketContext),
-  };
+  });
 };
 
 const buildStrikeProfileFromLegacyCells = (heatmap: Omit<SpxGexHeatmapModel, "premarketInterpretation">) =>
@@ -1988,6 +2117,7 @@ const rowToIntradayHeatmap = (row: D1SpxGexIntradayRow): SpxGexHeatmapModel | nu
   };
   const baseHeatmap: Omit<SpxGexHeatmapModel, "premarketInterpretation"> = {
     ...parsed,
+    source: canonicalSourceMetadata(parsed.source),
     strikeProfiles: parsed.strikeProfiles?.length ? parsed.strikeProfiles : [],
   };
   const strikeProfiles = parsed.strikeProfiles?.length
@@ -1995,10 +2125,13 @@ const rowToIntradayHeatmap = (row: D1SpxGexIntradayRow): SpxGexHeatmapModel | nu
     : addKeyLevelAnnotations(buildStrikeProfileFromLegacyCells(baseHeatmap), parsed.zeroDte, parsed.quote.last);
   const normalized = normalizeBlendedIvExposure({
     ...parsed,
+    source: canonicalSourceMetadata(parsed.source),
     strikeProfiles,
     session,
   });
-  return normalized.cells.some(isAuditedBlendedCell) ? normalized : null;
+  return normalized.cells.some(isAuditedBlendedCell)
+    ? withCanonicalSpxGexSnapshotEnvelope(normalized)
+    : null;
 };
 
 const isMissingIntradayTable = (error: unknown) => /spx_gex_intraday_snapshots|no such table/i.test(error instanceof Error ? error.message : String(error));
@@ -2080,6 +2213,7 @@ export const upsertSpxGexIntradaySnapshot = async (
   options: { retentionTradingDays?: number } = {},
 ) => {
   if (!heatmap.session) throw new Error("Intraday heatmap snapshot requires session metadata.");
+  const canonicalHeatmap = withCanonicalSpxGexSnapshotEnvelope(heatmap);
   const retentionTradingDays = options.retentionTradingDays ?? 7;
   const upsert = db.prepare(`
     INSERT INTO spx_gex_intraday_snapshots (
@@ -2087,23 +2221,17 @@ export const upsertSpxGexIntradaySnapshot = async (
       snapshot_json, created_at, updated_at
     )
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(trading_date, snapshot_minute_et) DO UPDATE SET
-      snapshot_time_et = excluded.snapshot_time_et,
-      generated_at = excluded.generated_at,
-      ticker = excluded.ticker,
-      spot = excluded.spot,
-      snapshot_json = excluded.snapshot_json,
-      updated_at = excluded.updated_at
+    ON CONFLICT(trading_date, snapshot_minute_et) DO NOTHING
   `).bind(
-    heatmap.session.tradingDate,
-    heatmap.session.snapshotMinuteEt,
-    heatmap.session.snapshotTimeEt,
-    heatmap.generatedAt,
-    heatmap.ticker,
-    heatmap.quote.last,
-    JSON.stringify(heatmap),
-    heatmap.generatedAt,
-    heatmap.generatedAt,
+    canonicalHeatmap.session!.tradingDate,
+    canonicalHeatmap.session!.snapshotMinuteEt,
+    canonicalHeatmap.session!.snapshotTimeEt,
+    canonicalHeatmap.generatedAt,
+    canonicalHeatmap.ticker,
+    canonicalHeatmap.quote.last,
+    JSON.stringify(canonicalHeatmap),
+    canonicalHeatmap.generatedAt,
+    canonicalHeatmap.generatedAt,
   );
   const prune = db.prepare(`
     DELETE FROM spx_gex_intraday_snapshots
@@ -2134,6 +2262,7 @@ const buildFromStructuredChains = async (options: {
   dataClient: SpxGexDataClient;
   now: Date;
   marketContext: SpxGexMarketContext | null;
+  onFetched?: (payload: Record<string, unknown>) => Promise<void> | void;
 }) => {
   if (!options.dataClient.getOptionsChain) {
     throw new Error("SPX GEX heatmap requires structured option-chain data; legacy markdown path is disabled.");
@@ -2147,6 +2276,13 @@ const buildFromStructuredChains = async (options: {
     throw new Error(`Expected ${DEFAULT_EXPIRY_COUNT} active expiries from front expiry ${frontExpiry}, got ${selectedExpiries.length}.`);
   }
   const chains = await Promise.all(selectedExpiries.map((expiry) => options.dataClient.getOptionsChain!(expiry)));
+  const source = chains.find((chain) => chain.source)?.source;
+  await options.onFetched?.({
+    expiryCount: chains.length,
+    provider: source?.provider || "unknown",
+    fallbackFrom: source?.fallbackFrom || null,
+    sourceTimestamp: source?.timestamp || null,
+  });
   return buildSpxGexHeatmapFromOptionChains({
     generatedAt: options.now.toISOString(),
     quoteText,
@@ -2161,6 +2297,10 @@ export const generateAndStoreSpxGexHeatmap = async (options: {
   dataClient: SpxGexDataClient;
   now?: Date;
   force?: boolean;
+  onStage?: (
+    stage: "FETCHED" | "NORMALIZED" | "PERSISTED",
+    payload: Record<string, unknown>,
+  ) => Promise<void> | void;
 }): Promise<SpxGexGenerationResult> => {
   const now = options.now || new Date();
   const generationStatus = getSpxGexGenerationStatus(now);
@@ -2171,7 +2311,7 @@ export const generateAndStoreSpxGexHeatmap = async (options: {
   }
 
   const existing = await readSpxGexIntradaySnapshot(options.db, date, generationStatus.snapshotMinuteEt);
-  if (existing && !options.force) {
+  if (existing) {
     return {
       status: "skipped_existing",
       date,
@@ -2197,9 +2337,31 @@ export const generateAndStoreSpxGexHeatmap = async (options: {
     }
   }
 
-  const heatmap = await buildFromStructuredChains({ dataClient: options.dataClient, now, marketContext });
+  const heatmap = await buildFromStructuredChains({
+    dataClient: options.dataClient,
+    now,
+    marketContext,
+    onFetched: (payload) => options.onStage?.("FETCHED", payload),
+  });
+  await options.onStage?.("NORMALIZED", {
+    snapshotId: heatmap.canonical?.snapshotId || null,
+    payloadHash: heatmap.canonical?.payloadHash || null,
+    schemaVersion: heatmap.canonical?.schemaVersion || null,
+    provider: heatmap.canonical?.provider || null,
+    fallbackFrom: heatmap.canonical?.fallbackFrom || null,
+    sourceTimestamp: heatmap.canonical?.sourceTimestamp || null,
+    dataQuality: heatmap.dataQuality || null,
+    cellCount: heatmap.cells.length,
+    expiryCount: heatmap.selectedExpiries.length,
+  });
 
   await upsertSpxGexHeatmap(options.db, date, heatmap, { retentionTradingDays: 7 });
+  await options.onStage?.("PERSISTED", {
+    snapshotId: heatmap.canonical?.snapshotId || null,
+    payloadHash: heatmap.canonical?.payloadHash || null,
+    provider: heatmap.canonical?.provider || null,
+    fallbackFrom: heatmap.canonical?.fallbackFrom || null,
+  });
   return {
     status: "generated",
     date,

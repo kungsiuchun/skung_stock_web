@@ -99,7 +99,7 @@ test("agent output parser strips screenshot-style raw contract fragments", () =>
   assert.equal(parsed.reasoning.includes("Market is pinned"), true);
 });
 
-test("copied zero-confidence agent schema falls back to data-backed direction", () => {
+test("copied zero-confidence agent schema fails closed to HOLD", () => {
   const bullishContext = {
     currentPrice: "7420",
     currentVWAP: "7398",
@@ -134,8 +134,9 @@ test("copied zero-confidence agent schema falls back to data-backed direction", 
     reasoning: "short analysis",
   }), bullishContext);
 
-  assert.equal(parsed.decision, "BUY");
-  assert.equal(parsed.rating, "bullish");
+  assert.equal(parsed.decision, "HOLD");
+  assert.equal(parsed.rating, "neutral");
+  assert.equal(parsed.confidence, 0);
   assert.equal(parsed.modelStatus, "model_copied_schema_zero_confidence");
 });
 
@@ -228,7 +229,7 @@ test("agent output parser normalizes the decision contract fields", () => {
   assert.equal(parsed.neutralReason, null);
 });
 
-test("data-backed fallback agents and CIO are directional for bullish and bearish fixtures", () => {
+test("deterministic Council and CIO fallbacks cannot create direction", () => {
   const bullishContext = {
     currentPrice: "7420",
     currentVWAP: "7398",
@@ -299,13 +300,13 @@ test("data-backed fallback agents and CIO are directional for bullish and bearis
     buildDataBackedAgentFallback(key, bearishContext, "model_timeout"),
   );
 
-  assert.ok(bullishAgents.some((agent) => agent.rating === "bullish"));
-  assert.ok(bearishAgents.some((agent) => agent.rating === "bearish"));
-  assert.equal(buildDataBackedCioPlan(bullishContext, bullishAgents).trade_action, "OPEN_CALL");
-  assert.equal(buildDataBackedCioPlan(bearishContext, bearishAgents).trade_action, "OPEN_PUT");
+  assert.ok(bullishAgents.every((agent) => agent.decision === "HOLD" && agent.confidence === 0));
+  assert.ok(bearishAgents.every((agent) => agent.decision === "HOLD" && agent.confidence === 0));
+  assert.equal(buildDataBackedCioPlan(bullishContext, bullishAgents).trade_action, "HOLD");
+  assert.equal(buildDataBackedCioPlan(bearishContext, bearishAgents).trade_action, "HOLD");
 });
 
-test("data-backed CIO stays neutral only when fixture signals are mixed or hard-blocked", () => {
+test("data-backed CIO always degrades to HOLD when the model is unavailable", () => {
   const mixedContext = {
     currentPrice: "7405",
     currentVWAP: "7404",
@@ -343,7 +344,7 @@ test("data-backed CIO stays neutral only when fixture signals are mixed or hard-
   const plan = buildDataBackedCioPlan(mixedContext, agents);
 
   assert.equal(plan.trade_action, "HOLD");
-  assert.match(plan.risk_warning, /volume_not_confirmed|mixed/i);
+  assert.match(plan.risk_warning, /DEGRADED|WAIT_AND_OBSERVE/i);
 });
 
 test("market data quality blocks only required missing feeds and warns on optional feeds", () => {
@@ -379,7 +380,7 @@ test("market data quality blocks only required missing feeds and warns on option
   assert.ok(usable.warnings.includes("cboe_gex_missing"));
 });
 
-test("CIO does not treat soft warnings as hard vetoes but blocks required data failure", () => {
+test("fallback CIO never opens a trade regardless of soft warnings or required data failure", () => {
   const context = {
     currentPrice: "7420",
     currentVWAP: "7398",
@@ -409,7 +410,7 @@ test("CIO does not treat soft warnings as hard vetoes but blocks required data f
   };
   const agents = ["QM", "CM", "NT", "PA"].map((key) => buildDataBackedAgentFallback(key, context, "model_timeout"));
 
-  assert.equal(buildDataBackedCioPlan(context, agents).trade_action, "OPEN_CALL");
+  assert.equal(buildDataBackedCioPlan(context, agents).trade_action, "HOLD");
   assert.equal(
     buildDataBackedCioPlan({ ...context, marketDataQuality: { overallStatus: "BLOCK", hardBlocks: ["spx_15m_missing"] } }, agents).trade_action,
     "HOLD",

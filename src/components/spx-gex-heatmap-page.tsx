@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, ArrowLeft, CalendarDays, Gauge, Pause, Play, RefreshCw, Waves } from "lucide-react";
 import { buildSpxGexHeatmapReadingContext, formatSpxGexCompactExposure, type SpxGexHeatmapCell, type SpxGexHeatmapModel, type SpxGexHeatmapReadingRule, type SpxGexSessionSummary, type SpxGexStrikeProfile } from "@/lib/spx-gex-heatmap";
+import type { SpxDecisionCockpitProjection } from "@/lib/spx-decision-ledger";
+import type { SpxGexCollectionRecord } from "@/lib/spx-gex-collection-lifecycle";
 import { SpxPriceActionCompass } from "./spx-price-action-compass";
 
 interface SpxGexHeatmapResponse {
@@ -9,6 +11,8 @@ interface SpxGexHeatmapResponse {
   sessions: SpxGexSessionSummary[];
   selectedSnapshot: SpxGexSessionSummary | null;
   heatmap: SpxGexHeatmapModel | null;
+  decision: SpxDecisionCockpitProjection | null;
+  collection: SpxGexCollectionRecord | null;
   warnings: string[];
 }
 
@@ -22,6 +26,8 @@ const emptyPayload: SpxGexHeatmapResponse = {
   sessions: [],
   selectedSnapshot: null,
   heatmap: null,
+  decision: null,
+  collection: null,
   warnings: [],
 };
 
@@ -158,10 +164,22 @@ const parseHeatmapResponse = async (response: Response, requestUrl: string) => {
   }
 };
 
+const initialBoardSelection = () => {
+  if (typeof window === "undefined") return { date: "", snapshot: null as number | null };
+  const query = window.location.hash.split("?", 2)[1] || "";
+  const params = new URLSearchParams(query);
+  const snapshot = Number(params.get("snapshot"));
+  return {
+    date: params.get("date") || "",
+    snapshot: Number.isInteger(snapshot) ? snapshot : null,
+  };
+};
+
 export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
+  const initialSelection = useMemo(initialBoardSelection, []);
   const [data, setData] = useState<SpxGexHeatmapResponse>(emptyPayload);
-  const [selectedDate, setSelectedDate] = useState("");
-  const [selectedMinute, setSelectedMinute] = useState<number | null>(null);
+  const [selectedDate, setSelectedDate] = useState(initialSelection.date);
+  const [selectedMinute, setSelectedMinute] = useState<number | null>(initialSelection.snapshot);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -187,6 +205,13 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
       setData(payload);
       setSelectedDate(payload.selectedDate || "");
       setSelectedMinute(payload.selectedSnapshot?.snapshotMinuteEt ?? null);
+      if (payload.selectedDate && payload.selectedSnapshot?.snapshotMinuteEt !== undefined) {
+        window.history.replaceState(
+          null,
+          "",
+          `#/work/spx-gex-heatmap?date=${encodeURIComponent(payload.selectedDate)}&snapshot=${payload.selectedSnapshot.snapshotMinuteEt}`,
+        );
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "SPX GEX heatmap failed");
       setPlaying(false);
@@ -196,7 +221,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   };
 
   useEffect(() => {
-    void loadHeatmap();
+    void loadHeatmap(initialSelection.date || undefined, initialSelection.snapshot);
   }, []);
 
   useEffect(() => {
@@ -347,6 +372,55 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                   </p>
                 </div>
                 <div className="shrink-0 sm:self-end">{snapshotControls}</div>
+              </div>
+            </section>
+
+            <section className="border border-[#123142] bg-[#06111a] p-3" data-spx-decision-cockpit="true">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200/70">Decision cockpit</div>
+                  <div className="mt-1 text-sm font-black leading-6 text-white">
+                    {readingContext?.headline || "Market judgement unavailable for this snapshot."}
+                  </div>
+                </div>
+                <div className="font-mono text-[10px] text-zinc-500">
+                  GEX collection: <span className="font-black text-cyan-100">{data.collection?.currentStage || "NOT_RECORDED"}</span>
+                </div>
+              </div>
+
+              {data.decision ? (
+                <>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-6">
+                    <CockpitMetric label="Run ID" value={data.decision.runId} />
+                    <CockpitMetric
+                      label="Council"
+                      value={`C ${data.decision.councilTally.OPEN_CALL} / P ${data.decision.councilTally.OPEN_PUT} / H ${data.decision.councilTally.HOLD}`}
+                    />
+                    <CockpitMetric label="CIO" value={`${data.decision.cio.action || "NOT_RUN"} · ${data.decision.cio.confidence}/100`} />
+                    <CockpitMetric label="Risk Gate" value={`${data.decision.riskGate.disposition} · ${data.decision.riskGate.action || "N/A"}`} />
+                    <CockpitMetric label="Run stage" value={data.decision.currentStage} />
+                    <CockpitMetric label="Delivery" value={`${data.decision.delivery.status}${data.decision.delivery.telegramMessageId ? ` · ${data.decision.delivery.telegramMessageId}` : ""}`} />
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1 font-mono text-[9px] font-black uppercase text-zinc-400" data-spx-run-lifecycle="true">
+                    {data.decision.lifecycle.map((event) => (
+                      <span key={`${event.stage}-${event.attempt}`} className="border border-white/10 bg-black/20 px-2 py-1">
+                        {event.stage}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="mt-2 text-xs leading-5 text-zinc-400">
+                    Risk reason: {data.decision.riskGate.reason} · Replay {data.decision.replayGrade}
+                    {data.decision.degraded ? ` · DEGRADED: ${data.decision.degradedReason || "unspecified"}` : ""}
+                  </div>
+                </>
+              ) : (
+                <div className="mt-3 border border-dashed border-white/10 bg-black/15 px-3 py-2 text-xs text-zinc-500">
+                  No decision run is linked to this canonical snapshot. GEX truth remains available; CIO and delivery status are not inferred.
+                </div>
+              )}
+
+              <div className="mt-2 break-all font-mono text-[9px] leading-4 text-zinc-600">
+                Snapshot {heatmap.canonical?.snapshotId || "legacy/no-id"} · {heatmap.canonical?.payloadHash || "hash unavailable"} · provider {heatmap.canonical?.provider || "unknown"}
               </div>
             </section>
 
@@ -576,6 +650,13 @@ const Metric = ({ label, value }: { label: string; value: string }) => (
   <div className="w-[42vw] min-w-[150px] max-w-[190px] shrink-0 snap-start border border-[#123142] bg-black/20 px-3 py-2 sm:w-auto sm:min-w-0 sm:max-w-none sm:shrink">
     <div className="text-[10px] font-black uppercase tracking-[0.16em] text-zinc-500">{label}</div>
     <div className="mt-1 truncate font-mono text-lg font-black text-white">{value}</div>
+  </div>
+);
+
+const CockpitMetric = ({ label, value }: { label: string; value: string }) => (
+  <div className="min-w-0 border border-[#123142] bg-black/20 px-2.5 py-2">
+    <div className="font-mono text-[9px] font-black uppercase tracking-[0.14em] text-zinc-500">{label}</div>
+    <div className="mt-1 truncate font-mono text-[11px] font-black text-cyan-50" title={value}>{value}</div>
   </div>
 );
 

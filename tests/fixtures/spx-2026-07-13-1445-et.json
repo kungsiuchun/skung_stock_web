@@ -1,0 +1,74 @@
+{
+  "runId": "2026-07-13-1783968339000",
+  "scheduledAt": "2026-07-13T18:45:39.000Z",
+  "timeEt": "14:45",
+  "source": "production D1 spx_callouts row 2026-07-13-012",
+  "rawSnapshotAvailable": false,
+  "replayLimit": "The historical callout saved derived values and agent votes, but not the complete Yahoo/CBOE raw market snapshot used by the trading run.",
+  "boardSnapshotEvidence": {
+    "snapshotId": "spx-gex:2026-07-13:870:fnv1a64:005c35ebfd5c5a90",
+    "payloadHash": "fnv1a64:005c35ebfd5c5a90",
+    "schemaVersion": 1,
+    "replayGrade": "NORMALIZED_CANONICAL",
+    "representedTimeEt": "14:30",
+    "collectedTimeEt": "14:45",
+    "generatedAt": "2026-07-13T18:45:39.000Z",
+    "sourceTimestamp": "2026-07-13T18:45:36.000Z",
+    "provider": "cboe",
+    "fallbackFrom": null,
+    "spot": 7516.04,
+    "snapshotBytes": 551140,
+    "cellCount": 480,
+    "expiryCount": 5,
+    "dataQuality": {
+      "total": 480,
+      "priced": 428,
+      "repaired": 4,
+      "partial": 48,
+      "unpriced": 0,
+      "excluded": 48
+    },
+    "evidenceSource": "production D1 spx_gex_intraday_snapshots; normalized snapshot retained, complete raw vendor body not retained"
+  },
+  "snapshot": {
+    "snapshotAt": "2026-07-13T18:45:39.000Z",
+    "facts": {
+      "spx.last": 7523.9599609375,
+      "spx.vwap": 7540.03,
+      "spx.ema9": 7525.19,
+      "spx.dayChangePct": -0.68,
+      "spx.fromOpenPct": -0.31,
+      "spx.rangePositionPct": 18
+    },
+    "sourceFreshness": {
+      "spx": {
+        "source": "production D1 derived callout",
+        "observedAt": "2026-07-13T18:45:39.000Z",
+        "ageMs": 0,
+        "status": "OK"
+      },
+      "rawYahooCboe": {
+        "source": "not persisted",
+        "observedAt": null,
+        "ageMs": null,
+        "status": "MISSING"
+      }
+    },
+    "dataQuality": {
+      "status": "WARN",
+      "hardBlocks": [],
+      "warnings": ["historical_raw_snapshot_missing"]
+    }
+  },
+  "council": [
+    { "agent": "QM", "decision": "HOLD", "confidence": 65, "modelStatus": "AI" },
+    { "agent": "CM", "decision": "HOLD", "confidence": 65, "modelStatus": "AI" },
+    { "agent": "NT", "decision": "HOLD", "confidence": 67, "modelStatus": "AI" },
+    { "agent": "PA", "decision": "HOLD", "confidence": 65, "modelStatus": "AI" }
+  ],
+  "observedFinal": {
+    "action": "OPEN_PUT",
+    "source": "post-CIO trend-day override",
+    "riskGateVerdict": "TRADE_ALLOWED"
+  }
+}

@@ -7,8 +7,9 @@
  */
 
 import type { ToolDefinition } from "../types";
-import { runAlgorithmicStrategy, StrategyContext, BuySignal } from "../strategies/engine";
+import { buildStrategyContext, rankStrategyResults, runAlgorithmicStrategy, selectRecommendedTrade, type StrategyBar } from "../strategies/engine";
 import { TechnicalIndicators } from "../strategies/indicators";
+import { getStrategyResearchPolicy, isQuantStrategyId } from "../strategies/research-policy";
 
 // ── Tool 1: analyze_trend ──────────────────────────────────────────
 
@@ -148,77 +149,56 @@ async function handleRunAlgorithmicStrategy(args: Record<string, any>): Promise<
 
   console.log(`[Tool:run_algorithmic_strategy] Executing ${strategyName} for ${symbol}`);
 
-  // 1. Fetch data (Reusing logic from analyze_trend but encapsulated)
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=60d`;
-  const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-  if (!res.ok) return { error: `Yahoo Finance API returned ${res.status}` };
+  const chartUrl = (ticker: string) => `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=2y`;
+  const [stockResponse, benchmarkResponse] = await Promise.all([
+    fetch(chartUrl(symbol), { headers: { "User-Agent": "Mozilla/5.0" } }),
+    fetch(chartUrl("SPY"), { headers: { "User-Agent": "Mozilla/5.0" } }),
+  ]);
+  if (!stockResponse.ok) return { error: `Yahoo Finance API returned ${stockResponse.status}` };
 
-  const data = await res.json();
-  const result = data.chart?.result?.[0];
-  if (!result) return { error: `No data for ${symbol}` };
-
-  const quote = result.indicators?.quote?.[0] || {};
-  const validIndices: number[] = [];
-  const closes: number[] = [];
-  (quote.close || []).forEach((c: any, idx: number) => {
-    if (c !== null) {
-      closes.push(c);
-      validIndices.push(idx);
+  const toCompletedBars = (payload: any): StrategyBar[] => {
+    const result = payload.chart?.result?.[0];
+    if (!result) return [];
+    const quote = result.indicators?.quote?.[0] || {};
+    const timestamps = result.timestamp || [];
+    const regularEnd = Number(result.meta?.currentTradingPeriod?.regular?.end);
+    const isRegularSessionOpen = Number.isFinite(regularEnd) && Date.now() / 1000 < regularEnd;
+    const regularDate = Number.isFinite(regularEnd) ? new Date(regularEnd * 1000).toISOString().slice(0, 10) : "";
+    const bars: StrategyBar[] = [];
+    for (let index = 0; index < timestamps.length; index += 1) {
+      const close = Number(quote.close?.[index]);
+      const open = Number(quote.open?.[index]);
+      const high = Number(quote.high?.[index]);
+      const low = Number(quote.low?.[index]);
+      const volume = Number(quote.volume?.[index]);
+      const date = new Date(Number(timestamps[index]) * 1000).toISOString().slice(0, 10);
+      if (isRegularSessionOpen && date === regularDate) continue;
+      if (![open, high, low, close, volume].every(Number.isFinite)) continue;
+      bars.push({ date, open, high, low, close, volume });
     }
-  });
-  const opens: number[] = validIndices.map(i => quote.open[i] || closes[validIndices.indexOf(i)]);
-  const highs: number[] = validIndices.map(i => quote.high[i] || closes[validIndices.indexOf(i)]);
-  const lows: number[] = validIndices.map(i => quote.low[i] || closes[validIndices.indexOf(i)]);
-  const volumes: number[] = validIndices.map(i => quote.volume[i] || 0);
-  
-  if (closes.length < 30) {
-    return { error: "Insufficient data for algorithmic strategy (need at least 30 days)" };
-  }
-
-  // 2. Calculate Indicators using helper
-  const currentPrice = closes[closes.length - 1];
-  const high60d = Math.max(...closes);
-  const low60d = Math.min(...closes);
-
-  const ma5 = TechnicalIndicators.SMA(closes, 5);
-  const ma10 = TechnicalIndicators.SMA(closes, 10);
-  const ma20 = TechnicalIndicators.SMA(closes, 20);
-  const rsi14 = TechnicalIndicators.RSI(closes, 14);
-
-  // Volume Ratio
-  const currentVolume = volumes[volumes.length - 1] || 0;
-  const avgVol30 = volumes.slice(Math.max(0, volumes.length - 31), volumes.length - 1).reduce((a, b) => a + b, 0) / 30;
-  const volumeRatio = currentVolume / (avgVol30 || 1);
-
-  // MA Alignment string for engine
-  let maAlignment = "Mixed";
-  if (ma5 && ma10 && ma20) {
-    if (currentPrice > ma5 && ma5 > ma10 && ma10 > ma20) maAlignment = "Strong Bullish";
-    else if (currentPrice < ma5 && ma5 < ma10 && ma10 < ma20) maAlignment = "Strong Bearish";
-  }
-
-  // 3. Prepare Context & Run Strategy
-  const context: StrategyContext = {
-    symbol,
-    currentPrice,
-    ma5,
-    ma10,
-    ma20,
-    rsi14,
-    maAlignment,
-    currentVolume,
-    averageVolume30d: avgVol30,
-    volumeRatio,
-    high60d,
-    low60d,
-    ohlc: {
-      open: opens,
-      high: highs,
-      low: lows,
-      close: closes,
-      volume: volumes
-    }
+    return bars;
   };
+
+  const stockPayload = await stockResponse.json();
+  const benchmarkPayload = benchmarkResponse.ok ? await benchmarkResponse.json() : null;
+  const bars = toCompletedBars(stockPayload);
+  const benchmarkBars = benchmarkPayload ? toCompletedBars(benchmarkPayload) : [];
+  let context;
+  try {
+    context = buildStrategyContext({ symbol, bars, benchmarkBars });
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+
+  const chartData = bars.slice(-30).map((bar) => ({
+    date: new Date(`${bar.date}T00:00:00.000Z`).toLocaleDateString([], { month: "short", day: "numeric" }),
+    date_iso: bar.date,
+    price: Number(bar.close.toFixed(2)),
+    open: Number(bar.open.toFixed(2)),
+    high: Number(bar.high.toFixed(2)),
+    low: Number(bar.low.toFixed(2)),
+    volume: bar.volume,
+  }));
 
   if (strategyName === "all") {
     const allStrategies = [
@@ -228,31 +208,26 @@ async function handleRunAlgorithmicStrategy(args: Record<string, any>): Promise<
       "one_yang_three_yin", "bottom_volume"
     ];
     
-    // Sort highest score first, filtering out errors if any
-    const results = allStrategies
+    const results = rankStrategyResults(allStrategies
       .map(name => runAlgorithmicStrategy(name, context))
-      .filter(r => r !== null)
-      .sort((a, b) => (b as any).score - (a as any).score);
+      .filter((result): result is NonNullable<typeof result> => result !== null));
+    const recommendedTrade = selectRecommendedTrade(results);
 
     return {
       symbol,
       strategies_evaluated: results.length,
       signals: results,
+      recommended_trade: recommendedTrade,
+      market_snapshot: {
+        as_of: context.asOf,
+        daily_bars: bars.length,
+        atr14: Number(context.atr14?.toFixed(2)),
+        relative_volume_20d: Number(context.volumeRatio?.toFixed(2)),
+        relative_strength_vs_spy_20d: context.relativeStrength20 === null ? null : Number(context.relativeStrength20.toFixed(2)),
+        partial_session_excluded: true,
+      },
       timestamp: new Date().toISOString(),
-      chart_data: closes.slice(-30).map((c, i) => {
-        const vIndex = validIndices[validIndices.length - closes.slice(-30).length + i];
-        const ts = result.timestamp?.[vIndex] || 0;
-        const d = new Date(ts * 1000);
-        return {
-          date: d.toLocaleDateString([], { month: 'short', day: 'numeric' }),
-          date_iso: d.toISOString().split('T')[0],
-          price: Number(c.toFixed(2)),
-          open: Number((quote.open?.[vIndex] || c).toFixed(2)),
-          high: Number((quote.high?.[vIndex] || c).toFixed(2)),
-          low: Number((quote.low?.[vIndex] || c).toFixed(2)),
-          volume: Number(quote.volume?.[vIndex] || 0)
-        };
-      })
+      chart_data: chartData,
     };
   }
 
@@ -263,21 +238,16 @@ async function handleRunAlgorithmicStrategy(args: Record<string, any>): Promise<
 
   return {
     ...strategyResult,
+    market_snapshot: {
+      as_of: context.asOf,
+      daily_bars: bars.length,
+      atr14: Number(context.atr14?.toFixed(2)),
+      relative_volume_20d: Number(context.volumeRatio?.toFixed(2)),
+      relative_strength_vs_spy_20d: context.relativeStrength20 === null ? null : Number(context.relativeStrength20.toFixed(2)),
+      partial_session_excluded: true,
+    },
     timestamp: new Date().toISOString(),
-    chart_data: closes.slice(-30).map((c, i) => {
-      const vIndex = validIndices[validIndices.length - closes.slice(-30).length + i];
-      const ts = result.timestamp?.[vIndex] || 0;
-      const d = new Date(ts * 1000);
-      return {
-        date: d.toLocaleDateString([], { month: 'short', day: 'numeric' }),
-        date_iso: d.toISOString().split('T')[0],
-        price: Number(c.toFixed(2)),
-        open: Number((quote.open?.[vIndex] || c).toFixed(2)),
-        high: Number((quote.high?.[vIndex] || c).toFixed(2)),
-        low: Number((quote.low?.[vIndex] || c).toFixed(2)),
-        volume: Number(quote.volume?.[vIndex] || 0)
-      };
-    })
+    chart_data: chartData,
   };
 }
 
@@ -348,6 +318,22 @@ async function handleReadFinancialTheory(args: Record<string, any>): Promise<Rec
     return { error: `Strategy '${strategyName}' not found. Available: ${available}` };
   }
 
+  const researchStatus = (() => {
+    if (isQuantStrategyId(strategyName)) {
+      const policy = getStrategyResearchPolicy(strategyName);
+      return {
+        ...policy,
+        institutional_gate: policy.classification === "DISCRETIONARY_FRAMEWORK" ? "NOT_ELIGIBLE" : "NOT_EVALUATED",
+      };
+    }
+    return {
+      classification: "ANALYSIS_FRAMEWORK",
+      liveTradingEligible: false,
+      institutional_gate: "NOT_APPLICABLE",
+      rationale: "financial_expert is a fundamental/options analysis framework, not a quantitative trading strategy.",
+    };
+  })();
+
   console.log(`[Tool:read_financial_theory] Loading theory for: ${strategyName}`);
   return {
     strategy_name: spec.name,
@@ -356,12 +342,13 @@ async function handleReadFinancialTheory(args: Record<string, any>): Promise<Rec
     description: spec.description,
     methodology: spec.instructions,
     required_tools: spec.required_tools,
+    research_status: researchStatus,
   };
 }
 
 const readFinancialTheoryTool: ToolDefinition = {
   name: "read_financial_theory",
-  description: "Load the detailed methodology and analysis framework for a specific quantitative trading strategy. Call this BEFORE executing run_algorithmic_strategy so you understand the theory behind the strategy. Available strategies: bull_trend, ma_golden_cross, shrink_pullback, box_oscillation, volume_breakout, dragon_head, emotion_cycle, chan_theory, wave_theory, one_yang_three_yin, bottom_volume, financial_expert.",
+  description: "Load a strategy methodology and its research-only status. A theory is not validated alpha: only a future declared-data walk-forward PASS can support an institutional research claim. Available strategies: bull_trend, ma_golden_cross, shrink_pullback, box_oscillation, volume_breakout, dragon_head, emotion_cycle, chan_theory, wave_theory, one_yang_three_yin, bottom_volume, financial_expert.",
   parameters: [
     {
       name: "strategy_name",

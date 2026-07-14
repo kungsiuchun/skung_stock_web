@@ -192,6 +192,13 @@ OPENROUTER_MODEL=...
 ADANOS_API_KEY=...
 ```
 
+## Market Data Cache
+
+- Watcher and Finance Analyzer use the optional `MARKET_CACHE_DB` D1 binding as a 60-second shared market snapshot cache; `migrations/0009_market_data_cache.sql` owns its schema.
+- Keep `MARKET_CACHE_DB` separate from `SPX_RECAP_DB`. The latter is an SPX decision/audit ledger, not a general cache.
+- Without the binding (local development before provisioning), API responses explicitly report `cache.status="bypassed"`; never claim a shared-cache hit.
+- Expired entries may be shown only as visibly stale data with the refresh failure reason. Do not recreate a demo fallback for market-source failures.
+
 ---
 
 ## AlphaEar Skills Available
@@ -206,3 +213,20 @@ ADANOS_API_KEY=...
 | `alphaear-predictor` | Kronos time-series forecasting |
 | `alphaear-reporter` | Structured finance report generation |
 | `alphaear-deepear-lite` | DeepEar high-frequency signals |
+
+---
+
+## SPX Telegram Decision Pipeline
+
+- Trading runs use one immutable `run_id` and this authority chain: Market Snapshot -> Council (QM/CM/NT/PA analysis only) -> CIO (the only component allowed to create `OPEN_CALL`, `OPEN_PUT`, `HOLD`, or `CLOSE`) -> Risk Gate (PASS, veto to HOLD, or require CLOSE only) -> D1 Decision Ledger -> Telegram Outbox.
+- Never add a post-CIO directional override. Deterministic/model/data fallbacks must fail closed to explicit `DEGRADED HOLD`; they cannot manufacture a trade direction.
+- Lifecycle evidence is stored in D1 tables `spx_decision_runs`, append-only `spx_run_lifecycle_events`, and `spx_delivery_outbox` from migration `0007_spx_decision_pipeline.sql`.
+- Authenticated Worker diagnostics: `?run_id=<run_id>`, `?retry_run_id=<run_id>`, and `?lifecycle_date=YYYY-MM-DD`. Delivery is successful only when a Telegram `message_id` is persisted; a console log is not delivery evidence.
+- Manual and `?debug` decision runs are preview-only by default. Telegram enqueue/send requires an explicit `?deliver`; scheduled cron runs remain `SEND`. A delivered `message_id` proves transport only, not message readability.
+- Telegram is a compact push adapter: degraded/HOLD output must use human-readable Traditional Chinese, omit non-applicable entry/invalidation/target fields, and never expose internal fallback codes. Directional output must retain snapshot-backed evidence and executable levels.
+- Telegram includes a compact GEX section derived only from the canonical Board `SpxGexTelegramSummary`: snapshot/collection time, provider engine, gamma regime/flip, SG High/Low, long walls, and short pockets. Persist that summary inside `MarketSnapshot`; never re-fetch or recalculate GEX in the formatter. If absent, state that the canonical snapshot is missing instead of fabricating levels.
+- The normalized model context and traceable snapshot facts are persisted for new runs. Raw Yahoo/CBOE response payloads are not persisted and must not be described as available.
+- The SPX Intraday GEX Board is the canonical GEX source for both Board and Telegram. `generatedAt` is always an ISO timestamp; display text belongs in `displayTimeLabel`. Canonical evidence uses immutable `snapshotId`, schema version, provider/fallback metadata, source timestamp, normalized payload hash, and `replayGrade=NORMALIZED_CANONICAL`.
+- GEX collection slots use migration `0008_spx_gex_collection_lifecycle.sql` with `SCHEDULED -> FETCHED -> NORMALIZED -> PERSISTED` or explicit `FAILED`. A directional CIO action that cites missing, schema-mismatched, or older-than-35-minute canonical GEX must be vetoed to `DEGRADED HOLD`.
+- Regression command: `node --import tsx --test tests\spx-decision-pipeline.test.ts tests\spx-worker-agent-output.test.ts tests\spx-worker-data-budget.test.ts`.
+- Production migration or Worker deploy requires explicit user authorization. Apply remote D1 migrations 0007 and 0008 before deploying code that depends on the new tables.

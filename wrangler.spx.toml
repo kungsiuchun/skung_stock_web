@@ -22,6 +22,7 @@ database_id = "00a4729d-1792-42d1-bd86-ed58dfe1f95f"
 [vars]
 # Non-sensitive default variables.
 OPENROUTER_MODEL = "google/gemma-4-26b-a4b-it"
+SPX_BOARD_URL = "https://sius-ai-workshop.pages.dev/#/work/spx-gex-heatmap"
 
 # Sensitive values (TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, OPENROUTER_API_KEY)
 # should be set with `wrangler secret put`, not committed here.

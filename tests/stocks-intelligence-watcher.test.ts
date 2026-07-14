@@ -818,10 +818,12 @@ test("POST endpoint keeps the native tool-call contract", async () => {
     tool: string;
     text: string;
     raw: { symbols: string[]; stocks?: unknown };
+    cache: { status: string };
   };
 
   assert.equal(response.status, 200);
   assert.equal(payload.ok, true);
+  assert.equal(payload.cache.status, "bypassed");
   assert.equal(payload.tool, "get_watchlist");
   assert.deepEqual(payload.raw.symbols.slice(0, 6), ["NVDA", "GOOG", "GOOGL", "AAPL", "MSFT", "AMZN"]);
   assert.equal(payload.raw.symbols.length, 51);

@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   buildSpxGexHeatmapReadingContext,
+  buildCanonicalSpxGexSnapshotEnvelope,
   buildSpxGexHeatmapFromOptionChains,
   buildSpxGexHeatmapFromToolText,
   calculateBlackScholesExposures,
@@ -1012,7 +1013,44 @@ describe("SPX GEX exposure board model", () => {
     assert.equal(summary.mostShortStrike, mostShort.strike);
     assert.equal(summary.longWalls?.[0]?.strike, mostLong.strike);
     assert.equal(summary.shortPockets?.[0]?.strike, mostShort.strike);
-    assert.equal(summary.generatedAt, "09:30 ET snapshot / collected 09:45 ET");
+    assert.equal(summary.generatedAt, heatmap.generatedAt);
+    assert.equal(new Date(summary.generatedAt).toISOString(), heatmap.generatedAt);
+    assert.equal(summary.displayTimeLabel, "09:30 ET snapshot / collected 09:45 ET");
+  });
+
+  it("builds a stable replayable canonical snapshot envelope from normalized inputs", () => {
+    const heatmap = buildSpxGexHeatmapFromOptionChains({
+      generatedAt: "2026-07-13T18:45:00.000Z",
+      chains: expiries.map((expiry) => ({
+        ...buildOptionChain(expiry, 7516.04),
+        source: {
+          provider: "cboe",
+          label: "Cboe delayed",
+          timestamp: "2026-07-13 18:30:00",
+          fallbackFrom: "yahoo",
+        },
+      })),
+      selectedExpiries: expiries,
+      maxStrikes: 5,
+    });
+
+    const canonical = buildCanonicalSpxGexSnapshotEnvelope(heatmap);
+    const replayed = buildCanonicalSpxGexSnapshotEnvelope(JSON.parse(JSON.stringify(heatmap)));
+    const changed = buildCanonicalSpxGexSnapshotEnvelope({
+      ...heatmap,
+      cells: heatmap.cells.map((cell, index) => index === 0 ? { ...cell, netGex: Number(cell.netGex || 0) + 1 } : cell),
+    });
+
+    assert.equal(canonical.schemaVersion, 1);
+    assert.equal(canonical.replayGrade, "NORMALIZED_CANONICAL");
+    assert.equal(canonical.generatedAt, "2026-07-13T18:45:00.000Z");
+    assert.equal(canonical.sourceTimestamp, "2026-07-13T18:30:00.000Z");
+    assert.equal(canonical.provider, "cboe");
+    assert.equal(canonical.fallbackFrom, "yahoo");
+    assert.deepEqual(canonical.dataQuality, heatmap.dataQuality);
+    assert.equal(canonical.payloadHash, replayed.payloadHash);
+    assert.equal(canonical.snapshotId, replayed.snapshotId);
+    assert.notEqual(canonical.payloadHash, changed.payloadHash);
   });
 
   it("keeps dense SPX strike coverage near spot instead of collapsing to a sparse mock-table", () => {
@@ -1235,6 +1273,18 @@ class ThrowingD1 {
   }
 }
 
+class MissingPipelineTablesD1 extends MemoryD1 {
+  override prepare(query: string) {
+    if (query.includes("spx_decision_run_health")) {
+      throw new Error("no such table: spx_decision_run_health");
+    }
+    if (query.includes("spx_gex_collection_runs")) {
+      throw new Error("no such table: spx_gex_collection_runs");
+    }
+    return super.prepare(query);
+  }
+}
+
 const seedLegacyHeatmapRow = (db: MemoryD1, date: string, heatmap: SpxGexHeatmapModel) => {
   db.legacy.set(date, {
     date,
@@ -1335,6 +1385,26 @@ describe("SPX GEX intraday D1 storage", () => {
 });
 
 describe("SPX GEX heatmap API", () => {
+  it("keeps Board truth available and exposes explicit warnings before pipeline migrations land", async () => {
+    const db = new MissingPipelineTablesD1();
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T13:45:00.000Z", 6000));
+
+    const response = await getSpxGexHeatmapApi({
+      request: new Request("https://example.com/api/spx-gex-heatmap?date=2026-05-27&snapshot=570"),
+      env: { SPX_RECAP_DB: db },
+    });
+    const payload = (await response.json()) as { heatmap: SpxGexHeatmapModel; decision: null; collection: null; warnings: string[] };
+
+    assert.equal(response.status, 200, JSON.stringify(payload));
+    assert.equal(payload.heatmap.quote.last, 6000);
+    assert.equal(payload.decision, null);
+    assert.equal(payload.collection, null);
+    assert.deepEqual(payload.warnings, [
+      "SPX decision pipeline migration is not applied yet.",
+      "GEX collection lifecycle migration is not applied yet.",
+    ]);
+  });
+
   it("returns dates, sessions, selected latest snapshot, and supports explicit snapshot selection", async () => {
     const db = new MemoryD1();
     await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T13:45:00.000Z", 6000));
@@ -1449,16 +1519,24 @@ describe("SPX GEX intraday automation runner", () => {
   it("generates once per 15-minute slot and skips only the same slot", async () => {
     const db = new MemoryD1();
     const { client, calls } = createFakeDataClient();
+    const lifecycleStages: string[] = [];
 
     const firstRun = await generateAndStoreSpxGexHeatmap({
       db,
       dataClient: client,
       now: new Date("2026-05-27T13:45:00Z"),
+      onStage: async (stage) => { lifecycleStages.push(stage); },
     });
     const sameSlot = await generateAndStoreSpxGexHeatmap({
       db,
       dataClient: client,
       now: new Date("2026-05-27T13:45:00Z"),
+    });
+    const forcedSameSlot = await generateAndStoreSpxGexHeatmap({
+      db,
+      dataClient: client,
+      now: new Date("2026-05-27T13:45:00Z"),
+      force: true,
     });
     const nextSlot = await generateAndStoreSpxGexHeatmap({
       db,
@@ -1468,10 +1546,12 @@ describe("SPX GEX intraday automation runner", () => {
 
     assert.deepEqual(firstRun, { status: "generated", date: "2026-05-27", snapshotMinuteEt: 570, snapshotTimeEt: "09:30", collectedMinuteEt: 585, collectedTimeEt: "09:45" });
     assert.deepEqual(sameSlot, { status: "skipped_existing", date: "2026-05-27", snapshotMinuteEt: 570, snapshotTimeEt: "09:30", collectedMinuteEt: 585, collectedTimeEt: "09:45" });
+    assert.deepEqual(forcedSameSlot, sameSlot);
     assert.deepEqual(nextSlot, { status: "generated", date: "2026-05-27", snapshotMinuteEt: 585, snapshotTimeEt: "09:45", collectedMinuteEt: 600, collectedTimeEt: "10:00" });
     assert.equal((await listSpxGexHeatmapSessions(db, "2026-05-27")).length, 2);
     assert.equal(calls.filter((call) => call === "get_quotes").length, 2);
     assert.equal(calls.filter((call) => call.startsWith("get_options_chain")).length, 12);
+    assert.deepEqual(lifecycleStages, ["FETCHED", "NORMALIZED", "PERSISTED"]);
   });
 
   it("generates and stores the canonical heatmap before building Telegram GEX when cache is newer but snapshot is missing", async () => {

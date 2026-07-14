@@ -29,6 +29,15 @@ import { ALL_ALPHAEAR_TOOLS } from "../agent/tools/alphaear-tools";
 import { ALL_RETAIL_TOOLS } from "../agent/tools/retail-tools";
 import { macroTools } from "../agent/tools/macro-tools";
 import { SkillManager } from "../agent/skills/base";
+import { dashboardDecisionTool } from "../agent/tools/dashboard-decision-tool";
+import {
+  DASHBOARD_DECISION_TOOL_NAME,
+  deriveDashboardDecisionFromAgentSteps,
+} from "../../../src/lib/finance-dashboard-ai-decision";
+import {
+  getDashboardNarrativeStatus,
+  validateDashboardNarrative,
+} from "../../../src/lib/finance-dashboard-narrative";
 
 interface Env {
   OPENROUTER_API_KEY: string;
@@ -96,6 +105,7 @@ ${message}`;
       registry.registerAll(onlyAllowedDashboardTools(ALL_STOCK_TOOLS));
       registry.registerAll(onlyAllowedDashboardTools(ALL_ANALYSIS_TOOLS));
       registry.registerAll(onlyAllowedDashboardTools(ALL_ALPHAEAR_TOOLS));
+      registry.register(dashboardDecisionTool);
     } else {
       registry.registerAll(ALL_STOCK_TOOLS);
       registry.registerAll(ALL_ANALYSIS_TOOLS);
@@ -121,8 +131,10 @@ ${message}`;
     const adapter = new OpenRouterAdapter({ apiKey, model });
     const executor = new AgentExecutor(registry, adapter, { 
       maxSteps: isFinanceDashboard ? 6 : 10,
+      requiredFinalToolName: isFinanceDashboard ? DASHBOARD_DECISION_TOOL_NAME : undefined,
+      requiredFinalContentValidator: isFinanceDashboard ? validateDashboardNarrative : undefined,
       skillInstructions: skillInstructions + memoryContext + (isFinanceDashboard
-        ? "\nDashboard surface rule: use only the registered dashboard tools. Do not delegate to subagents, do not save user memory, do not request macro/search/retail tools, and label missing data instead of inventing fallback data."
+        ? "\nDashboard surface rule: use only the registered dashboard tools. First call get_realtime_quote, get_options_chain, and run_algorithmic_strategy with strategy_name=all. After all three successful results, call record_dashboard_decision exactly once with a schema-valid AI verdict. The decision must cite at least two distinct source types from quote/options/quant and must not invent facts. Do not invent entry, stop, target, support, or resistance levels: only describe levels returned by the deterministic strategy tool or the options chain, and state when a strategy is WAIT, NO_TRADE, or RESEARCH_ONLY. Do not delegate to subagents, do not save user memory, do not request macro/search/retail tools, and label missing data instead of inventing fallback data. After the decision tool succeeds, your final response must be a complete Traditional Chinese Markdown report using exactly these sections: 即時行情、期權鏈分析、量化策略分析、綜合分析結論、交易建議. Include quote price/change/volume or market state, call/put open interest and support/resistance, the highest and lowest scoring results from all 11 deterministic strategies, strategy conflicts, key reasons/risks, and how the evidence supports the recorded Trend/Action. Do not make the final response a tool confirmation, a JSON dump, or a short decision summary; the UI renders this final response as the main AI Key Insights narrative."
         : "")
     });
 
@@ -143,11 +155,28 @@ ${message}`;
       { role: "assistant", content: result.content },
     ];
 
-    const replyContent = result.content && result.content.trim() ? result.content : "I couldn't generate a response. Please try rephrasing your question.";
+    const rawReply = result.content?.trim() || "";
+    const dashboardNarrative = isFinanceDashboard
+      ? result.success
+        ? getDashboardNarrativeStatus(rawReply)
+        : { status: "unavailable" as const, reason: result.error || "AI narrative was not returned by the API." }
+      : undefined;
+    const replyContent = rawReply || (isFinanceDashboard ? "" : "I couldn't generate a response. Please try rephrasing your question.");
+    const dashboardDecision = isFinanceDashboard
+      ? deriveDashboardDecisionFromAgentSteps(result.steps)
+      : undefined;
+    if (dashboardDecision) {
+      console.log(
+        `[FinanceDashboardDecision] status=${dashboardDecision.status}${dashboardDecision.status === "unavailable" ? ` reason=${dashboardDecision.reason}` : ""}`,
+      );
+    }
+
     return jsonResponse({
       success: result.success,
       reply: replyContent,
       steps: result.steps,
+      dashboardDecision,
+      dashboardNarrative,
       history: updatedHistory,
       new_memories: result.new_memories,
       meta: {

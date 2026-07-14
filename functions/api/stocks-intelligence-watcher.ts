@@ -1,8 +1,7 @@
-import {
-  buildDemoStocksWatcherSnapshot,
-  buildStocksWatcherSnapshotFromNative,
-} from "../../src/lib/stocks-intelligence-watcher";
+import { buildStocksWatcherSnapshotFromNative } from "../../src/lib/stocks-intelligence-watcher";
 import { NativeStocksYahooClient, normalizeStocksWatcherSymbol } from "../../src/lib/stocks-native-yahoo";
+import { resolveMarketCache } from "../../src/lib/market-data-cache";
+import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
 
 const json = (body: unknown, init: ResponseInit = {}) =>
   new Response(JSON.stringify(body), {
@@ -31,27 +30,45 @@ const normalizeParams = (value: unknown) => {
   return value as Record<string, unknown>;
 };
 
-const callNativeTool = async (tool: string, params: Record<string, unknown>) => {
-  const client = new NativeStocksYahooClient();
-  const result = await client.callTool(tool, params);
+interface Env {
+  MARKET_CACHE_DB?: D1DatabaseLike;
+}
+
+const toolSymbol = (params: Record<string, unknown>) =>
+  normalizeStocksWatcherSymbol(String(params.ticker || params.stock_code || params.symbol || "MARKET"));
+
+const callNativeTool = async (tool: string, params: Record<string, unknown>, env: Env) => {
+  const resolved = await resolveMarketCache({
+    db: env.MARKET_CACHE_DB,
+    scope: "stocks-watcher-tool",
+    symbol: toolSymbol(params),
+    params: { tool, ...params },
+    load: async () => {
+      const client = new NativeStocksYahooClient();
+      const result = await client.callTool(tool, params);
+      return { text: result.text, raw: result.raw };
+    },
+  });
   return json({
     ok: true,
     tool,
     params,
-    text: result.text,
-    raw: result.raw,
+    text: resolved.value.text,
+    raw: resolved.value.raw,
     calledAt: new Date().toISOString(),
+    cache: resolved.cache,
   });
 };
 
-export async function onRequest(context: { request: Request }) {
+export async function onRequest(context: { request: Request; env?: Env }) {
   const url = new URL(context.request.url);
   const symbol = normalizeSymbol(url.searchParams.get("symbol"));
+  const env = context.env || {};
 
   if (context.request.method === "POST") {
     try {
       const body = await context.request.json() as { tool?: unknown; params?: unknown };
-      return await callNativeTool(normalizeToolName(body.tool), normalizeParams(body.params));
+      return await callNativeTool(normalizeToolName(body.tool), normalizeParams(body.params), env);
     } catch (error) {
       return json(
         {
@@ -64,13 +81,20 @@ export async function onRequest(context: { request: Request }) {
   }
 
   try {
-    const snapshot = await buildStocksWatcherSnapshotFromNative(symbol, new NativeStocksYahooClient());
-    return json(snapshot);
+    const resolved = await resolveMarketCache({
+      db: env.MARKET_CACHE_DB,
+      scope: "stocks-watcher-snapshot",
+      symbol,
+      params: { symbol },
+      sourceAsOf: (snapshot) => snapshot.generatedAt,
+      load: () => buildStocksWatcherSnapshotFromNative(symbol, new NativeStocksYahooClient()),
+    });
+    return json({ ...resolved.value, cache: resolved.cache }, { status: resolved.cache.status === "stale" ? 206 : 200 });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return json(
-      buildDemoStocksWatcherSnapshot(symbol, `Native Yahoo data failed, using demo fallback: ${message}`),
-      { status: 206 },
+      { ok: false, error: message },
+      { status: 502 },
     );
   }
 }
