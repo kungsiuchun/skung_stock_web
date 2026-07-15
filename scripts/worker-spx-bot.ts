@@ -3108,9 +3108,7 @@ export async function runSpxUatLlm(
   if (deliveryMode === 'SEND' && !env.SPX_RECAP_DB) throw new Error('SPX_RECAP_DB unavailable');
   const probe = await runSpxGpt5CompatibilityProbe(env, options);
   if (!probe.ok) {
-    const error = new Error(`gpt5_probe_${probe.failureStatus || 'failed'}`);
-    (error as Error & { probe?: typeof probe }).probe = probe;
-    throw error;
+    return { runId, message: '', result: null, probe };
   }
   const previewStore = new InMemorySpxDecisionStore();
   const store = deliveryMode === 'SEND' ? new D1SpxDecisionStore(env.SPX_RECAP_DB!) : previewStore;
@@ -3161,7 +3159,7 @@ export async function runSpxUatLlm(
         : { messageId: 'uat-llm-preview' };
     } },
   });
-  return { runId, message, result };
+  return { runId, message, result, probe };
 }
 
 async function runTradingAgents(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}) {
@@ -4044,6 +4042,15 @@ export default {
         : `uat-llm-20260713-1445-${Date.now()}`;
       try {
         const outcome = await runSpxUatLlm(env, runId, deliveryMode);
+        if (!outcome.result) {
+          return Response.json({
+            runId,
+            deliveryMode,
+            probe: 'FAILED',
+            failureStatus: outcome.probe.failureStatus || 'UAT_RUNTIME_FAILURE',
+            attempts: outcome.probe.attempts,
+          }, { status: 502 });
+        }
         return Response.json({
           runId,
           deliveryMode,
@@ -4053,14 +4060,13 @@ export default {
           degraded: outcome.result.run.degraded,
         });
       } catch (error) {
-        const probe = (error as Error & { probe?: Awaited<ReturnType<typeof runSpxGpt5CompatibilityProbe>> }).probe;
         console.error('[SPX_UAT_LLM]', error);
         return Response.json({
           runId,
           deliveryMode,
           probe: 'FAILED',
-          failureStatus: probe?.failureStatus || 'UAT_RUNTIME_FAILURE',
-          attempts: probe?.attempts || [],
+          failureStatus: 'UAT_RUNTIME_FAILURE',
+          attempts: [],
         }, { status: 502 });
       }
     }
