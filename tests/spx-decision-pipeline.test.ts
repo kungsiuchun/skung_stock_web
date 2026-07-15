@@ -139,7 +139,7 @@ test("Telegram starts with SPX price, final action, and scheduled ET time", asyn
 
   assert.deepEqual((sent[0] || "").split("\n").slice(0, 2), [
     "SPX: 7523.96 操作：觀望",
-    "⏱ 美東時間：2026/07/13 14:45:39 ET｜標的：SPX",
+    "⏱️ 美東時間：2026/07/13 14:45:39 ET｜標的：SPX",
   ]);
 });
 
@@ -181,15 +181,15 @@ test("Telegram lists four Council agents with reasoning and excludes invalid vot
   }, dependencies);
 
   const message = sent[0] || "";
-  assert.match(message, /判斷｜Council 未完整：QM 模型輸出不是有效 JSON；CIO 按契約未執行。/);
-  assert.match(message, /議會｜Call 0 · Put 0 · 觀望 3 · 無效 1/);
-  assert.match(message, /QM｜無效 · 信心 0% · 無效票\n理由｜模型輸出不是有效 JSON；重試後仍無法驗證。/);
-  assert.match(message, /CM｜觀望 · 信心 60% · AI\n理由｜Gamma Flip 上下訊號互相抵銷。/);
-  assert.match(message, /NT｜觀望 · 信心 60% · AI\n理由｜事件風險未形成可驗證方向。/);
-  assert.match(message, /PA｜觀望 · 信心 60% · AI\n理由｜K 線結構未出現有效突破。/);
-  assert.ok(message.indexOf("QM｜") < message.indexOf("CM｜"));
-  assert.ok(message.indexOf("CM｜") < message.indexOf("NT｜"));
-  assert.ok(message.indexOf("NT｜") < message.indexOf("PA｜"));
+  assert.match(message, /⚠️ 降級｜Council 未完整：QM 模型輸出不是有效 JSON；CIO 按契約未執行。/);
+  assert.match(message, /🟢 Call 0｜🔴 Put 0｜⚪ 觀望 3｜⚫ 無效 1/);
+  assert.match(message, /📈 QM｜⚫ 無效 — 模型輸出不是有效 JSON；重試後仍無法驗證。/);
+  assert.match(message, /🧲 CM｜⚪ 觀望 · 60% — Gamma Flip 上下訊號互相抵銷。/);
+  assert.match(message, /🌪️ NT｜⚪ 觀望 · 60% — 事件風險未形成可驗證方向。/);
+  assert.match(message, /🕯️ PA｜⚪ 觀望 · 60% — K 線結構未出現有效突破。/);
+  assert.ok(message.indexOf("📈 QM｜") < message.indexOf("🧲 CM｜"));
+  assert.ok(message.indexOf("🧲 CM｜") < message.indexOf("🌪️ NT｜"));
+  assert.ok(message.indexOf("🌪️ NT｜") < message.indexOf("🕯️ PA｜"));
   assert.doesNotMatch(message, /model_output_not_json|council_qm_/);
   assert.ok(message.length < 4096, `Telegram message must stay below 4096 characters; got ${message.length}`);
 });
@@ -221,8 +221,8 @@ test("Telegram explains Council input-budget failures without leaking internal s
   }, dependencies);
 
   const message = sent[0] || "";
-  assert.match(message, /判斷｜Council 未完整：QM 模型輸入超出預算；CIO 按契約未執行。/);
-  assert.match(message, /理由｜模型輸入超出預算；重試後仍無法驗證。/);
+  assert.match(message, /⚠️ 降級｜Council 未完整：QM 模型輸入超出預算；CIO 按契約未執行。/);
+  assert.match(message, /📈 QM｜⚫ 無效 — 模型輸入超出預算；重試後仍無法驗證。/);
   assert.doesNotMatch(message, /input_budget_exceeded|council_qm_/);
 });
 
@@ -253,8 +253,8 @@ test("Telegram explains upstream Council failures without pretending they are sc
   }, dependencies);
 
   const message = sent[0] || "";
-  assert.match(message, /判斷｜Council 未完整：CM 上游模型服務失敗；CIO 按契約未執行。/);
-  assert.match(message, /CM｜無效 · 信心 0% · 無效票\n理由｜上游模型服務失敗；重試後仍無法驗證。/);
+  assert.match(message, /⚠️ 降級｜Council 未完整：CM 上游模型服務失敗；CIO 按契約未執行。/);
+  assert.match(message, /🧲 CM｜⚫ 無效 — 上游模型服務失敗；重試後仍無法驗證。/);
   assert.doesNotMatch(message, /model_upstream_error|模型回應格式無效/);
 });
 
@@ -285,8 +285,8 @@ test("Telegram explains an unapproved Council provider without leaking the contr
   }, dependencies);
 
   const message = sent[0] || "";
-  assert.match(message, /判斷｜Council 未完整：PA 模型供應商不在批准清單；CIO 按契約未執行。/);
-  assert.match(message, /PA｜無效 · 信心 0% · 無效票\n理由｜模型供應商不在批准清單；重試後仍無法驗證。/);
+  assert.match(message, /⚠️ 降級｜Council 未完整：PA 模型供應商不在批准清單；CIO 按契約未執行。/);
+  assert.match(message, /🕯️ PA｜⚫ 無效 — 模型供應商不在批准清單；重試後仍無法驗證。/);
   assert.doesNotMatch(message, /model_unapproved_provider|UNAPPROVED_PROVIDER/);
 });
 
@@ -358,11 +358,11 @@ test("degraded HOLD Telegram is concise, human-readable, and never leaks interna
   }, dependencies);
 
   const message = sent[0] || "";
-  assert.match(message, /^⚠️ SPX｜降級觀望/m);
-  assert.match(message, /議會｜Call 0 · Put 0 · 觀望 0 · 無效 4/);
-  assert.match(message, /判斷｜Council 未完整：QM 模型分析未啟用、CM 模型分析未啟用、NT 模型分析未啟用、PA 模型分析未啟用；CIO 按契約未執行。/);
-  assert.match(message, /CIO｜HOLD · 0% · 未完成/);
-  assert.match(message, /計劃｜不開倉/);
+  assert.match(message, /^SPX: 7523\.96 操作：觀望/m);
+  assert.match(message, /🟢 Call 0｜🔴 Put 0｜⚪ 觀望 0｜⚫ 無效 4/);
+  assert.match(message, /⚠️ 降級｜Council 未完整：QM 模型分析未啟用、CM 模型分析未啟用、NT 模型分析未啟用、PA 模型分析未啟用；CIO 按契約未執行。/);
+  assert.match(message, /🧠 CIO｜🟡 HOLD · 0%/);
+  assert.match(message, /⏸️ 計劃｜不開倉/);
   assert.match(message, /🛰️ GEX｜Canonical snapshot 缺失；本輪不引用 GEX。/);
   assert.doesNotMatch(message, /council_qm_council_disabled|Evidence none|Entry N\/A|Invalidation N\/A|Targets N\/A/);
 });
@@ -431,7 +431,7 @@ test("Telegram restores the compact GEX section from the canonical Board summary
   assert.match(message, /Short Pockets｜7,495 \(-3\.29B\) › 7,480 \(-1\.86B\) › 7,525 \(-1\.77B\)/);
 });
 
-test("directional Telegram keeps data-backed evidence and executable levels", async () => {
+test("directional Telegram is a compact decision card with Council votes and executable levels", async () => {
   const directionalCouncil: CouncilResult = {
     ...allHoldCouncil,
     agents: allHoldCouncil.agents.map((agent, index) => ({
@@ -465,15 +465,15 @@ test("directional Telegram keeps data-backed evidence and executable levels", as
   }, dependencies);
 
   const message = sent[0] || "";
-  assert.match(message, /^🟢 SPX｜CALL 機會/m);
-  assert.match(message, /議會｜Call 3 · Put 0 · 觀望 1/);
-  assert.match(message, /CIO｜OPEN_CALL · 78% · 完成/);
-  assert.match(message, /依據｜SPX 7,523\.96 · VWAP 7,540\.03/);
-  assert.match(message, /進場｜7524–7528/);
-  assert.match(message, /失效｜15m close below 7518/);
-  assert.match(message, /目標｜7540 · 7552/);
-  assert.match(message, /不交易｜VWAP rejection persists/);
-  assert.doesNotMatch(message, /N\/A|Evidence none/);
+  assert.match(message, /📊 Council/);
+  assert.match(message, /🟢 Call 3｜🔴 Put 0｜⚪ 觀望 1｜⚫ 無效 0/);
+  assert.match(message, /📈 QM｜🟢 Call · \d+% — /);
+  assert.match(message, /🧠 CIO｜🟢 OPEN_CALL · 78%/);
+  assert.match(message, /🎯 進場｜7524–7528/);
+  assert.match(message, /🛑 失效｜15m close below 7518/);
+  assert.match(message, /🏁 目標｜7540 · 7552/);
+  assert.match(message, /🚫 不交易｜VWAP rejection persists/);
+  assert.doesNotMatch(message, /🟢 SPX｜CALL 機會|判斷｜|依據｜|CIO｜OPEN_CALL · 78% · 完成/);
 });
 
 test("manual preview never enqueues or sends Telegram without explicit delivery", async () => {
@@ -869,9 +869,9 @@ test("Board cockpit and Telegram projection expose the same run, CIO action, and
     { agent: "NT", valid: true, reasoning: "NT found no snapshot-backed entry edge." },
     { agent: "PA", valid: true, reasoning: "PA found no snapshot-backed entry edge." },
   ]);
-  assert.match(sent[0] || "", /Run｜board-telegram-same-run/);
-  assert.match(sent[0] || "", /CIO｜HOLD/);
-  assert.match(sent[0] || "", /風控｜PASS/);
+  assert.match(sent[0] || "", /🔎 Run｜board-telegram-same-run/);
+  assert.match(sent[0] || "", /🧠 CIO｜🟡 HOLD/);
+  assert.match(sent[0] || "", /🛡️ 風控｜PASS/);
 });
 
 test("Board cockpit normalizes legacy OPEN_* Council votes without corrupting tally", () => {

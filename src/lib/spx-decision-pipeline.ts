@@ -580,22 +580,30 @@ const formatCouncilAgentLines = (council: CouncilResult) => {
     PUT: "Put",
     HOLD: "觀望",
   };
-  return expectedCouncilAgents.flatMap((agentName) => {
+  const decisionEmoji: Record<CouncilAgentAnalysis["decision"], string> = {
+    CALL: "🟢",
+    PUT: "🔴",
+    HOLD: "⚪",
+  };
+  const agentEmoji: Record<string, string> = {
+    QM: "📈",
+    CM: "🧲",
+    NT: "🌪️",
+    PA: "🕯️",
+  };
+  const compactReason = (value: string) => value.replace(/\s+/g, " ").trim().slice(0, 96);
+  return expectedCouncilAgents.map((agentName) => {
     const agent = council.agents.find((candidate) => candidate.agent === agentName);
     if (!agent) {
-      return [
-        `${agentName}｜無效 · 信心 0% · 無效票`,
-        "理由｜Council agent 結果缺失。",
-      ];
+      return `${agentEmoji[agentName]} ${agentName}｜⚫ 無效 — Council agent 結果缺失。`;
     }
     const valid = councilAgentIsValid(agent);
     const reasoning = valid
-      ? String(agent.reasoning || "未提供可審計 reasoning。").replace(/\s+/g, " ").trim().slice(0, 180)
+      ? compactReason(String(agent.reasoning || "未提供可審計 reasoning。"))
       : `${humanizeModelFailure(agent.fallbackStatus || agent.modelStatus || agent.reasoning)}；重試後仍無法驗證。`;
-    return [
-      `${agent.agent}｜${valid ? decisionLabel[agent.decision] : "無效"} · 信心 ${safeConfidence(agent.confidence)}% · ${valid ? agent.modelStatus === "FIXTURE_REPLAY" ? "固定重播" : "AI" : "無效票"}`,
-      `理由｜${reasoning}`,
-    ];
+    return valid
+      ? `${agentEmoji[agent.agent]} ${agent.agent}｜${decisionEmoji[agent.decision]} ${decisionLabel[agent.decision]} · ${safeConfidence(agent.confidence)}% — ${reasoning}`
+      : `${agentEmoji[agent.agent]} ${agent.agent}｜⚫ 無效 — ${compactReason(reasoning)}`;
   });
 };
 
@@ -606,25 +614,6 @@ export function formatTelegramDecisionMessage(input: TelegramDecisionMessageInpu
     result[bucket] = (result[bucket] || 0) + 1;
     return result;
   }, {} as Record<string, number>);
-  const factLabels: Record<string, string> = {
-    "spx.last": "SPX",
-    "spx.vwap": "VWAP",
-    "spx.ema9": "EMA9",
-    "gex.gammaFlip": "Gamma Flip",
-    "gex.callWall": "Call Wall",
-    "gex.putWall": "Put Wall",
-    "gex.netGex": "Net GEX",
-    "gex.totalNet": "Net GEX",
-  };
-  const evidence = cioDecision.evidenceRefs
-    .filter((reference) => reference in snapshot.facts)
-    .map((reference) => `${factLabels[reference] || reference} ${formatDisplayNumber(snapshot.facts[reference])}`);
-  const actionHeader: Record<SpxDecisionAction, string> = {
-    OPEN_CALL: "🟢 SPX｜CALL 機會",
-    OPEN_PUT: "🔴 SPX｜PUT 機會",
-    HOLD: "🟡 SPX｜觀望",
-    CLOSE: "⚪ SPX｜平倉",
-  };
   const actionLabel: Record<SpxDecisionAction, string> = {
     OPEN_CALL: "買入 Call",
     OPEN_PUT: "買入 Put",
@@ -644,7 +633,12 @@ export function formatTelegramDecisionMessage(input: TelegramDecisionMessageInpu
   const scheduledEt = Object.fromEntries(scheduledEtParts.map((part) => [part.type, part.value]));
   const spxLast = Number(snapshot.facts["spx.last"]);
   const spxLabel = Number.isFinite(spxLast) ? spxLast.toFixed(2) : "N/A";
-  const modelComplete = cioDecision.modelStatus === "AI" || cioDecision.modelStatus === "FIXTURE_REPLAY";
+  const actionEmoji: Record<SpxDecisionAction, string> = {
+    OPEN_CALL: "🟢",
+    OPEN_PUT: "🔴",
+    HOLD: "🟡",
+    CLOSE: "⚪",
+  };
   const dataLabel = snapshot.dataQuality.status === "OK"
     ? "正常"
     : snapshot.dataQuality.status === "WARN" ? "警告" : "阻擋";
@@ -661,37 +655,36 @@ export function formatTelegramDecisionMessage(input: TelegramDecisionMessageInpu
     if (riskGate.disposition === "REQUIRE_CLOSE") return "安全條件要求關閉現有持倉";
     return "安全條件未通過，方向性交易已否決";
   })();
+  const compactPlanText = (value: string) => value.replace(/\s+/g, " ").trim().slice(0, 150);
   const lines: Array<string | null> = [
     run.runMode === "UAT_LLM" ? "SYSTEM UAT｜非即時訊號｜不可交易" : null,
     `SPX: ${spxLabel} 操作：${actionLabel[riskGate.action]}`,
-    `⏱ 美東時間：${scheduledEt.year}/${scheduledEt.month}/${scheduledEt.day} ${scheduledEt.hour}:${scheduledEt.minute}:${scheduledEt.second} ET｜標的：SPX`,
+    `⏱️ 美東時間：${scheduledEt.year}/${scheduledEt.month}/${scheduledEt.day} ${scheduledEt.hour}:${scheduledEt.minute}:${scheduledEt.second} ET｜標的：SPX`,
     run.runMode === "UAT_REPLAY" ? "🧪 UAT REPLAY｜非即時訊號，只用固定歷史 fixture 驗證流水線。" : null,
-    run.degraded ? "⚠️ SPX｜降級觀望" : actionHeader[riskGate.action],
-    `判斷｜${run.degraded ? councilFailureSummary(council, cioDecision) : cioDecision.thesis}`,
     ...formatTelegramGexSection(snapshot),
-    `議會｜Call ${tally.CALL || 0} · Put ${tally.PUT || 0} · 觀望 ${tally.HOLD || 0} · 無效 ${tally.INVALID || 0}`,
+    "📊 Council",
+    `🟢 Call ${tally.CALL || 0}｜🔴 Put ${tally.PUT || 0}｜⚪ 觀望 ${tally.HOLD || 0}｜⚫ 無效 ${tally.INVALID || 0}`,
     ...formatCouncilAgentLines(council),
-    `CIO｜${cioDecision.action} · ${safeConfidence(cioDecision.confidence)}% · ${cioDecision.modelStatus === "FIXTURE_REPLAY" ? "固定重播" : modelComplete ? "完成" : "未完成"}`,
-    evidence.length ? `依據｜${evidence.join(" · ")}` : null,
+    run.degraded ? `⚠️ 降級｜${councilFailureSummary(council, cioDecision)}` : null,
+    `🧠 CIO｜${actionEmoji[cioDecision.action]} ${cioDecision.action} · ${safeConfidence(cioDecision.confidence)}%`,
   ];
 
   if (riskGate.action === "HOLD") {
-    lines.push(`計劃｜不開倉；${run.degraded ? "等待下一個完整決策週期。" : "等待條件成立。"}`);
+    lines.push(`⏸️ 計劃｜不開倉；${run.degraded ? "等待下一個完整決策週期。" : "等待條件成立。"}`);
   } else if (riskGate.action === "CLOSE") {
-    lines.push("計劃｜關閉現有持倉，不建立反方向倉位。");
+    lines.push("⏸️ 計劃｜關閉現有持倉，不建立反方向倉位。");
   } else {
-    if (cioDecision.entry) lines.push(`進場｜${cioDecision.entry}`);
-    if (cioDecision.invalidation) lines.push(`失效｜${cioDecision.invalidation}`);
-    if (cioDecision.targets.length) lines.push(`目標｜${cioDecision.targets.join(" · ")}`);
-    if (cioDecision.noTradeConditions.length) lines.push(`不交易｜${cioDecision.noTradeConditions.join(" · ")}`);
+    if (cioDecision.entry) lines.push(`🎯 進場｜${compactPlanText(cioDecision.entry)}`);
+    if (cioDecision.invalidation) lines.push(`🛑 失效｜${compactPlanText(cioDecision.invalidation)}`);
+    if (cioDecision.targets.length) lines.push(`🏁 目標｜${cioDecision.targets.slice(0, 2).map(compactPlanText).join(" · ")}`);
+    if (cioDecision.noTradeConditions.length) lines.push(`🚫 不交易｜${compactPlanText(cioDecision.noTradeConditions[0])}`);
   }
 
   lines.push(
-    `風控｜${riskGate.disposition} · ${riskReason}`,
-    `資料｜${dataLabel} · ${replayLabel[snapshot.replayGrade]}`,
-    `狀態｜${run.runMode === "UAT_REPLAY" ? "UAT_REPLAY · 非即時訊號" : run.degraded ? "DEGRADED · 分析未完整" : "NORMAL"}`,
-    `Run｜${run.runId}`,
-    snapshot.boardDeepLink ? `Board｜${snapshot.boardDeepLink}` : null,
+    riskGate.disposition === "PASS" ? "🛡️ 風控｜PASS" : `🛡️ 風控｜${riskGate.disposition} · ${riskReason}`,
+    snapshot.dataQuality.status === "OK" ? null : `⚠️ 資料｜${dataLabel} · ${replayLabel[snapshot.replayGrade]}`,
+    `🔎 Run｜${run.runId}`,
+    snapshot.boardDeepLink ? `🔗 Board｜${snapshot.boardDeepLink}` : null,
   );
   return lines.filter((line): line is string => Boolean(line)).join("\n");
 }

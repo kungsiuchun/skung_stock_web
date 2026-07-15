@@ -1209,8 +1209,9 @@ test("off-hours UAT replay uses the fixed historical fixture without model or Te
   assert.equal(preview.result.finalDecision.action, "HOLD");
   assert.equal(preview.result.run.runMode, "UAT_REPLAY");
   assert.match(preview.message, /UAT REPLAY｜非即時訊號/);
-  assert.match(preview.message, /QM｜觀望 · 信心 65% · 固定重播/);
-  assert.match(preview.message, /CIO｜HOLD · 65% · 固定重播/);
+  assert.match(preview.message, /📈 QM｜⚪ 觀望 · 65% — QM 固定歷史分析票為觀望/);
+  assert.match(preview.message, /🧠 CIO｜🟡 HOLD · 65%/);
+  assert.match(preview.message, /⏸️ 計劃｜不開倉；等待條件成立。/);
   assert.equal(preview.result.run.council?.agents.every((agent) => agent.attempts?.length === 0), true);
 });
 
