@@ -20,6 +20,8 @@ import {
   runCouncilAnalyses,
   runStructuredOpenRouterRequest,
   runSpxUatReplay,
+  resolveAttemptTimeoutMs,
+  SPX_COUNCIL_TIMING_POLICY,
   shouldRunLlmCio,
   shouldRunLlmCouncil,
 } from "../scripts/worker-spx-bot";
@@ -46,6 +48,25 @@ function assertCleanVisibleReasoning(text: string) {
   assert.equal(/^\s*[)\]}]/.test(text), false, "visible reasoning starts with parser debris");
   assert.equal(/[{"}\])]\s*$/.test(text), false, "visible reasoning ends with parser debris");
 }
+
+test("production Council timing policy allows two full 45-second attempts inside 100 seconds", () => {
+  assert.deepEqual(SPX_COUNCIL_TIMING_POLICY, {
+    attemptTimeoutMs: 45_000,
+    absoluteDeadlineMs: 100_000,
+  });
+  assert.equal(
+    SPX_COUNCIL_TIMING_POLICY.absoluteDeadlineMs
+      >= SPX_COUNCIL_TIMING_POLICY.attemptTimeoutMs * 2,
+    true,
+  );
+});
+
+test("Council retry keeps a full 45-second timeout while the shared deadline has enough budget", () => {
+  assert.equal(resolveAttemptTimeoutMs(45_000, 100_000), 45_000);
+  assert.equal(resolveAttemptTimeoutMs(45_000, 55_000), 45_000);
+  assert.equal(resolveAttemptTimeoutMs(45_000, 10_000), 10_000);
+  assert.equal(resolveAttemptTimeoutMs(45_000, null), 45_000);
+});
 
 test("M5 analysis excludes the in-progress and zero-volume phantom candles", () => {
   const bars = [

@@ -319,6 +319,10 @@ export const buildStructuredOpenRouterBody = (
   };
 };
 
+export const resolveAttemptTimeoutMs = (timeoutMs: number, deadlineRemainingMs: number | null) => (
+  deadlineRemainingMs === null ? timeoutMs : Math.min(timeoutMs, deadlineRemainingMs)
+);
+
 export async function runStructuredOpenRouterRequest(input: {
   callKind: StructuredOpenRouterCallKind;
   apiKey: string;
@@ -428,7 +432,7 @@ export async function runStructuredOpenRouterRequest(input: {
       routingPolicy: input.callKind === "agent" ? "throughput_same_model_fallbacks" : "parameters_only",
     };
     const controller = new AbortController();
-    const attemptTimeoutMs = deadlineRemainingMs === null ? timeoutMs : Math.min(timeoutMs, deadlineRemainingMs);
+    const attemptTimeoutMs = resolveAttemptTimeoutMs(timeoutMs, deadlineRemainingMs);
     const timeout = setTimeout(() => controller.abort(), attemptTimeoutMs);
     try {
       const response = await fetcher("https://openrouter.ai/api/v1/chat/completions", {
@@ -569,8 +573,10 @@ export async function runStructuredOpenRouterRequest(input: {
 
 const YAHOO_CHART_TIMEOUT_MS = 6500;
 const OPTIONAL_MARKET_DATA_TIMEOUT_MS = 6500;
-const AGENT_MODEL_TIMEOUT_MS = 15000;
-const COUNCIL_DEADLINE_MS = 30000;
+export const SPX_COUNCIL_TIMING_POLICY = Object.freeze({
+  attemptTimeoutMs: 45_000,
+  absoluteDeadlineMs: 100_000,
+});
 const AGENT_PROJECTION_MAX_BYTES = 8 * 1024;
 const CIO_MODEL_TIMEOUT_MS = 12000;
 const TELEGRAM_TIMEOUT_MS = 6000;
@@ -2157,7 +2163,7 @@ export async function analyzeWithAgent(
       { role: "user", content: `Normalized ${personaKey} projection: ${projectionJson}` },
     ],
     fetcher: options.fetcher,
-    timeoutMs: AGENT_MODEL_TIMEOUT_MS,
+    timeoutMs: SPX_COUNCIL_TIMING_POLICY.attemptTimeoutMs,
     allowedEvidenceRefs: Object.keys(projection.snapshotFacts),
     projectionBytes,
     factCount: Object.keys(projection.snapshotFacts).length,
@@ -2184,7 +2190,7 @@ export async function runCouncilAnalyses(
   env: Env,
   options: { fetcher?: typeof fetch; deadlineMs?: number } = {},
 ) {
-  const deadlineAtMs = Date.now() + (options.deadlineMs ?? COUNCIL_DEADLINE_MS);
+  const deadlineAtMs = Date.now() + (options.deadlineMs ?? SPX_COUNCIL_TIMING_POLICY.absoluteDeadlineMs);
   return Promise.all([
     analyzeWithAgent("QM", PERSONAS.QM_MOMENTUM_SNIPER, contextData, env, { fetcher: options.fetcher, deadlineAtMs }),
     analyzeWithAgent("CM", PERSONAS.CM_OPTIONS_MAKER, contextData, env, { fetcher: options.fetcher, deadlineAtMs }),
