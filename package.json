@@ -16,6 +16,7 @@
     "spx:backfill:dry": "tsx scripts/backfill-spx-recap.ts --dry-run",
     "spx:backfill": "tsx scripts/backfill-spx-recap.ts --apply",
     "test:spx-gex": "node --import tsx --test tests/spx-gex-heatmap.test.ts",
+    "test:spx-gex-playback:uat": "node tests/spx-gex-playback.uat.cjs",
     "test:spx-pa": "node --import tsx --test tests/spx-price-action-compass.test.ts",
     "test:finance-agent-tools-smoke": "node --import tsx --test tests/finance-agent-tools-smoke.test.ts",
     "test:quant-strategies": "node --import tsx --test tests/quant-strategies.test.ts",
