@@ -105,7 +105,7 @@ export interface ModelAttemptMetadata {
   resolvedModel?: string | null;
   provider?: string | null;
   responseId?: string | null;
-  status: "SUCCESS" | "TIMEOUT" | "HTTP_ERROR" | "SCHEMA_INVALID" | "OUTPUT_TRUNCATED" | "DEADLINE_EXCEEDED" | "INPUT_BUDGET_EXCEEDED" | "REQUEST_FAILED";
+  status: "SUCCESS" | "TIMEOUT" | "HTTP_ERROR" | "UPSTREAM_ERROR" | "MISSING_CHOICE" | "EMPTY_CONTENT" | "OUTPUT_NOT_JSON" | "SCHEMA_INVALID" | "OUTPUT_TRUNCATED" | "DEADLINE_EXCEEDED" | "INPUT_BUDGET_EXCEEDED" | "REQUEST_FAILED";
   latencyMs: number;
   httpStatus: number | null;
   errorCategory: string | null;
@@ -124,6 +124,16 @@ export interface ModelAttemptMetadata {
   maxOutputTokens?: number;
   deadlineRemainingMs?: number | null;
   routingPolicy?: string;
+  providerOrder?: string[];
+  responseShape?: "COMPLETION" | "ERROR_ENVELOPE" | "CHOICE_ERROR" | "MISSING_CHOICE" | "EMPTY_CONTENT" | "NON_JSON" | "SCHEMA_INVALID" | "OUTPUT_TRUNCATED" | "REQUEST_FAILED";
+  choiceCount?: number;
+  selectedProvider?: string | null;
+  attemptedProviders?: string[];
+  generationId?: string | null;
+  errorType?: string | null;
+  upstreamErrorCode?: number | null;
+  providerCode?: string | null;
+  errorMessageHash?: string | null;
 }
 
 export interface CouncilResult {
@@ -519,9 +529,12 @@ const councilAgentIsValid = (agent: CouncilAgentAnalysis) => agent.valid
 const humanizeModelFailure = (value: string | null | undefined) => {
   const reason = String(value || "").toLowerCase();
   if (reason.includes("input_budget_exceeded")) return "模型輸入超出預算";
+  if (reason.includes("upstream_error")) return "上游模型服務失敗";
+  if (reason.includes("missing_choice") || reason.includes("empty_content")) return "上游模型服務未產生內容";
   if (reason.includes("output_truncated")) return "模型輸出被截斷";
   if (reason.includes("deadline_exceeded")) return "Council 時間預算耗盡";
-  if (reason.includes("output_not_json") || reason.includes("schema") || reason.includes("format")) {
+  if (reason.includes("output_not_json")) return "模型輸出不是有效 JSON";
+  if (reason.includes("schema") || reason.includes("format")) {
     return "模型回應格式無效";
   }
   if (reason.includes("timeout") || reason.includes("timed out")) return "模型逾時";

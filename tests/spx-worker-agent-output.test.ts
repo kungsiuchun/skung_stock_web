@@ -126,7 +126,7 @@ test("OpenRouter request profiles keep Gemma Council deterministic and omit temp
   assert.equal(council.temperature, 0);
   assert.equal(council.max_tokens, 512);
   assert.equal(council.provider.require_parameters, true);
-  assert.equal(council.provider.sort, "throughput");
+  assert.deepEqual(council.provider.order, ["deepinfra", "parasail", "nextbit", "google-vertex"]);
   assert.equal(council.provider.allow_fallbacks, true);
   assert.deepEqual(
     Object.keys(council.response_format.json_schema.schema.properties),
@@ -201,6 +201,90 @@ test("compact Council contract rejects legacy duplicated fields", async () => {
 
   assert.equal(result.ok, false);
   assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["SCHEMA_INVALID", "SCHEMA_INVALID"]);
+});
+
+test("HTTP 200 OpenRouter error envelopes are classified as upstream errors with safe evidence", async () => {
+  const requestBodies: any[] = [];
+  const fetcher: typeof fetch = async (_input, init) => {
+    requestBodies.push(JSON.parse(String(init?.body || "{}")));
+    return new Response(JSON.stringify({
+      error: {
+        code: 502,
+        message: "Upstream returned an invalid or empty response",
+        metadata: {
+          error_type: "provider_unavailable",
+          provider_code: "empty_response",
+        },
+      },
+      openrouter_metadata: {
+        requested: "google/gemma-4-26b-a4b-it",
+        attempt: 1,
+        endpoints: {
+          available: [{ provider: "DeepInfra", selected: true }],
+        },
+      },
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  const result = await runStructuredOpenRouterRequest({
+    callKind: "agent",
+    apiKey: "test-key",
+    model: "google/gemma-4-26b-a4b-it",
+    messages: [],
+    fetcher,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.failureStatus, "model_upstream_error");
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["UPSTREAM_ERROR", "UPSTREAM_ERROR"]);
+  assert.equal(result.attempts[0].errorType, "provider_unavailable");
+  assert.equal(result.attempts[0].upstreamErrorCode, 502);
+  assert.equal(result.attempts[0].providerCode, "empty_response");
+  assert.equal(result.attempts[0].responseShape, "ERROR_ENVELOPE");
+  assert.equal(result.attempts[0].choiceCount, 0);
+  assert.equal(result.attempts[0].selectedProvider, "DeepInfra");
+  assert.equal(result.attempts[0].errorMessageHash?.length, 64);
+  assert.equal("errorMessage" in result.attempts[0], false);
+  assert.deepEqual(requestBodies[0].provider.order, ["deepinfra", "parasail", "nextbit", "google-vertex"]);
+  assert.deepEqual(requestBodies[1].provider.order, ["parasail", "nextbit", "google-vertex"]);
+  assert.deepEqual(requestBodies[1].provider.ignore, ["deepinfra"]);
+});
+
+test("missing choices and empty model content retry as distinct recoverable failures", async () => {
+  const validContent = JSON.stringify({
+    decision: "HOLD",
+    confidence_score: 55,
+    evidence_refs: ["spx.last"],
+    blocking_risk: null,
+    reasoning: "No confirmed entry edge.",
+  });
+  const missingChoice = await runStructuredOpenRouterRequest({
+    callKind: "agent",
+    apiKey: "test-key",
+    model: "google/gemma-4-26b-a4b-it",
+    messages: [],
+    fetcher: async () => new Response(JSON.stringify({ id: "gen-missing", choices: [] }), { status: 200 }),
+  });
+  assert.equal(missingChoice.failureStatus, "model_missing_choice");
+  assert.deepEqual(missingChoice.attempts.map((attempt) => attempt.status), ["MISSING_CHOICE", "MISSING_CHOICE"]);
+  assert.equal(missingChoice.attempts[0].responseShape, "MISSING_CHOICE");
+
+  let emptyCall = 0;
+  const emptyContent = await runStructuredOpenRouterRequest({
+    callKind: "agent",
+    apiKey: "test-key",
+    model: "google/gemma-4-26b-a4b-it",
+    messages: [],
+    fetcher: async () => {
+      emptyCall += 1;
+      return new Response(JSON.stringify({
+        choices: [{ finish_reason: "stop", message: { content: emptyCall === 1 ? "" : validContent } }],
+      }), { status: 200 });
+    },
+  });
+  assert.equal(emptyContent.ok, true);
+  assert.deepEqual(emptyContent.attempts.map((attempt) => attempt.status), ["EMPTY_CONTENT", "SUCCESS"]);
+  assert.equal(emptyContent.attempts[0].responseShape, "EMPTY_CONTENT");
 });
 
 test("agent output parser preserves prose instead of showing analysis failure", () => {
@@ -428,7 +512,7 @@ test("Council classifies length truncation and retries the same model with a lar
   assert.equal(requestBodies[0].max_tokens, 512);
   assert.equal(requestBodies[1].max_tokens, 640);
   assert.equal(requestBodies[0].provider.require_parameters, true);
-  assert.equal(requestBodies[0].provider.sort, "throughput");
+  assert.deepEqual(requestBodies[0].provider.order, ["deepinfra", "parasail", "nextbit", "google-vertex"]);
   assert.equal(requestBodies[0].provider.allow_fallbacks, true);
   assert.equal(requestBodies[0].response_format.type, "json_schema");
   assert.equal(requestBodies[0].response_format.json_schema.strict, true);
@@ -439,7 +523,7 @@ test("Council classifies length truncation and retries the same model with a lar
   assert.equal(result.attempts[0].factCount, 1);
   assert.equal(result.attempts[0].maxOutputTokens, 512);
   assert.equal(result.attempts[1].maxOutputTokens, 640);
-  assert.equal(result.attempts[0].routingPolicy, "throughput_same_model_fallbacks");
+  assert.equal(result.attempts[0].routingPolicy, "ordered_same_model_fallbacks");
   assert.equal(typeof result.attempts[0].deadlineRemainingMs, "number");
   assert.ok(result.attempts[0].requestHash);
   assert.ok(result.attempts[1].responseHash);
@@ -486,7 +570,7 @@ test("Council retries only its failed call and sends a role-specific normalized 
     evidenceRefs: ["spx.last", "spx.vwap"],
     evidence_refs: ["spx.last", "spx.vwap"],
   }]);
-  assert.deepEqual(result.attempts?.map((attempt) => attempt.status), ["SCHEMA_INVALID", "SUCCESS"]);
+  assert.deepEqual(result.attempts?.map((attempt) => attempt.status), ["OUTPUT_NOT_JSON", "SUCCESS"]);
   assert.equal(requestBodies.length, 2);
   const sentProjection = requestBodies[1].messages[1].content;
   assert.match(sentProjection, /spx\.last/);
@@ -545,7 +629,7 @@ test("four Council agents run concurrently under one absolute deadline", async (
   assert.equal(agents.every((agent) => agent.attempts?.[0].deadlineRemainingMs! <= 60), true);
 });
 
-test("CIO strict schema retries once and then reports a traceable failure", async () => {
+test("CIO non-JSON output retries once and then reports a traceable failure", async () => {
   const requestBodies: any[] = [];
   const fetcher: typeof fetch = async (_input, init) => {
     requestBodies.push(JSON.parse(String(init?.body || "{}")));
@@ -563,11 +647,11 @@ test("CIO strict schema retries once and then reports a traceable failure", asyn
   });
 
   assert.equal(result.ok, false);
-  assert.equal(result.failureStatus, "cio_schema_invalid");
+  assert.equal(result.failureStatus, "cio_output_not_json");
   assert.equal(requestBodies.length, 2);
   assert.equal(requestBodies[0].max_tokens, 520);
   assert.equal(requestBodies[0].temperature, 0);
-  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["SCHEMA_INVALID", "SCHEMA_INVALID"]);
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["OUTPUT_NOT_JSON", "OUTPUT_NOT_JSON"]);
 });
 
 test("CIO two-attempt schema failure returns fail-closed HOLD with attempt evidence", async () => {
@@ -593,12 +677,12 @@ test("CIO two-attempt schema failure returns fail-closed HOLD with attempt evide
     OPENROUTER_MODEL: "google/gemma-4-26b-a4b-it",
   } as any, { fetcher });
 
-  assert.equal(result.modelStatus, "INVALID_SCHEMA");
+  assert.equal(result.modelStatus, "INVALID_OUTPUT");
   assert.equal(result.plan.trade_action, "HOLD");
-  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["SCHEMA_INVALID", "SCHEMA_INVALID"]);
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["OUTPUT_NOT_JSON", "OUTPUT_NOT_JSON"]);
 });
 
-test("OpenRouter retry policy retries 429 and 5xx but fails fast on 401 and 403", async () => {
+test("OpenRouter retry policy retries 429 and 5xx but fails fast on 401, 402, and 403", async () => {
   let rateLimitedCalls = 0;
   const validAgentContent = JSON.stringify({
     decision: "HOLD",
@@ -652,6 +736,21 @@ test("OpenRouter retry policy retries 429 and 5xx but fails fast on 401 and 403"
   assert.equal(unauthorized.ok, false);
   assert.equal(unauthorizedCalls, 1);
   assert.equal(unauthorized.attempts[0].errorCategory, "HTTP_401");
+
+  let paymentRequiredCalls = 0;
+  const paymentRequired = await runStructuredOpenRouterRequest({
+    callKind: "agent",
+    apiKey: "test-key",
+    model: "same-model",
+    messages: [],
+    fetcher: async () => {
+      paymentRequiredCalls += 1;
+      return new Response("payment required", { status: 402 });
+    },
+  });
+  assert.equal(paymentRequired.ok, false);
+  assert.equal(paymentRequiredCalls, 1);
+  assert.equal(paymentRequired.attempts[0].errorCategory, "HTTP_402");
 
   let forbiddenCalls = 0;
   const forbidden = await runStructuredOpenRouterRequest({

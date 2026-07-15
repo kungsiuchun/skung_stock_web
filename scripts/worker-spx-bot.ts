@@ -292,11 +292,43 @@ const sha256Text = async (value: string) => {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 };
 
+export const SPX_COUNCIL_PROVIDER_ORDER = ["deepinfra", "parasail", "nextbit", "google-vertex"] as const;
+
+const rotateCouncilProviderOrder = (attempt: number) => {
+  const offset = Math.max(0, attempt - 1) % SPX_COUNCIL_PROVIDER_ORDER.length;
+  return [...SPX_COUNCIL_PROVIDER_ORDER.slice(offset), ...SPX_COUNCIL_PROVIDER_ORDER.slice(0, offset)];
+};
+
+const councilProviderSlug = (value: unknown) => {
+  const provider = String(value || "").trim().toLowerCase();
+  if (provider === "google" || provider === "google vertex" || provider === "google-vertex") return "google-vertex";
+  if (provider === "deepinfra" || provider === "parasail" || provider === "nextbit") return provider;
+  return null;
+};
+
+const nullableString = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
+
+const providerNamesFrom = (value: unknown) => Array.from(new Set(
+  (Array.isArray(value) ? value : [])
+    .map((item: any) => nullableString(item?.provider))
+    .filter((provider): provider is string => Boolean(provider)),
+));
+
+const isRetryableOpenRouterError = (code: number | null, errorType: string | null) => {
+  if ([401, 402, 403].includes(code || 0)) return false;
+  return code === 408
+    || code === 429
+    || (code !== null && code >= 500)
+    || ["provider_unavailable", "provider_overloaded", "rate_limit_exceeded", "timeout", "server", "unmapped"].includes(errorType || "");
+};
+
 export const buildStructuredOpenRouterBody = (
   callKind: StructuredOpenRouterCallKind,
   model: string,
   messages: Array<{ role: string; content: string }>,
   maxOutputTokens = callKind === "agent" ? 512 : 520,
+  councilProviderOrder: readonly string[] = SPX_COUNCIL_PROVIDER_ORDER,
+  ignoredCouncilProviders: readonly string[] = [],
 ) => {
   const isGpt5 = /^openai\/gpt-5(?:-|$)/i.test(model);
   return {
@@ -305,7 +337,12 @@ export const buildStructuredOpenRouterBody = (
     ? { max_completion_tokens: maxOutputTokens }
     : { temperature: 0, max_tokens: maxOutputTokens }),
   provider: callKind === "agent"
-    ? { require_parameters: true, sort: "throughput", allow_fallbacks: true }
+    ? {
+      require_parameters: true,
+      order: [...councilProviderOrder],
+      allow_fallbacks: true,
+      ...(ignoredCouncilProviders.length ? { ignore: [...ignoredCouncilProviders] } : {}),
+    }
     : { require_parameters: true },
   response_format: {
     type: "json_schema",
@@ -346,6 +383,7 @@ export async function runStructuredOpenRouterRequest(input: {
   const attempts: ModelAttemptMetadata[] = [];
   let failureStatus: string | null = null;
   let maxOutputTokens = input.callKind === "agent" ? 512 : 520;
+  let retryIgnoredProviders: string[] = [];
   const unavailableResponseMetadata = {
     requestedModel: input.model,
     resolvedModel: null,
@@ -387,7 +425,8 @@ export async function runStructuredOpenRouterRequest(input: {
         deadlineRemainingMs: input.deadlineAtMs === undefined
           ? null
           : Math.max(0, input.deadlineAtMs - Date.now()),
-        routingPolicy: input.callKind === "agent" ? "throughput_same_model_fallbacks" : "parameters_only",
+        routingPolicy: input.callKind === "agent" ? "ordered_same_model_fallbacks" : "parameters_only",
+        providerOrder: input.callKind === "agent" ? [...SPX_COUNCIL_PROVIDER_ORDER] : [],
       }],
     };
   }
@@ -416,11 +455,22 @@ export async function runStructuredOpenRouterRequest(input: {
         requestHash: null,
         maxOutputTokens,
         deadlineRemainingMs,
-        routingPolicy: input.callKind === "agent" ? "throughput_same_model_fallbacks" : "parameters_only",
+        routingPolicy: input.callKind === "agent" ? "ordered_same_model_fallbacks" : "parameters_only",
+        providerOrder: input.callKind === "agent" ? [...SPX_COUNCIL_PROVIDER_ORDER] : [],
       });
       break;
     }
-    const body = buildStructuredOpenRouterBody(input.callKind, input.model, input.messages, maxOutputTokens);
+    const providerOrder = input.callKind === "agent"
+      ? rotateCouncilProviderOrder(attempt).filter((provider) => !retryIgnoredProviders.includes(provider))
+      : [];
+    const body = buildStructuredOpenRouterBody(
+      input.callKind,
+      input.model,
+      input.messages,
+      maxOutputTokens,
+      providerOrder,
+      retryIgnoredProviders,
+    );
     const requestBody = JSON.stringify(body);
     const requestMetadata = {
       requestBytes: new TextEncoder().encode(requestBody).byteLength,
@@ -429,7 +479,8 @@ export async function runStructuredOpenRouterRequest(input: {
       requestHash: await sha256Text(requestBody),
       maxOutputTokens,
       deadlineRemainingMs,
-      routingPolicy: input.callKind === "agent" ? "throughput_same_model_fallbacks" : "parameters_only",
+      routingPolicy: input.callKind === "agent" ? "ordered_same_model_fallbacks" : "parameters_only",
+      providerOrder,
     };
     const controller = new AbortController();
     const attemptTimeoutMs = resolveAttemptTimeoutMs(timeoutMs, deadlineRemainingMs);
@@ -442,18 +493,35 @@ export async function runStructuredOpenRouterRequest(input: {
           "Content-Type": "application/json",
           "HTTP-Referer": "https://spx-trading-pua.kungsiuchun0.workers.dev",
           "X-OpenRouter-Title": "SPX Decision Pipeline",
+          "X-OpenRouter-Metadata": "enabled",
         },
         body: requestBody,
         signal: controller.signal,
       });
       if (!response.ok) {
         const responseText = await response.text();
+        let responseData: any = null;
+        try {
+          responseData = JSON.parse(responseText);
+        } catch {
+          responseData = null;
+        }
+        const upstreamError = responseData?.error && typeof responseData.error === "object" ? responseData.error : null;
+        const routerMetadata = responseData?.openrouter_metadata;
+        const selectedProvider = nullableString(routerMetadata?.endpoints?.available?.find((endpoint: any) => endpoint?.selected)?.provider)
+          || nullableString(responseData?.provider);
+        const errorType = nullableString(upstreamError?.metadata?.error_type);
+        const providerCode = nullableString(upstreamError?.metadata?.provider_code);
+        const upstreamErrorCode = toNullableFiniteNumber(upstreamError?.code);
+        const errorMessage = nullableString(upstreamError?.message);
         const retryable = response.status === 429 || response.status >= 500;
         failureStatus = `openrouter_${response.status}`;
         attempts.push({
           attempt,
           model: input.model,
           ...unavailableResponseMetadata,
+          provider: selectedProvider,
+          responseId: nullableString(responseData?.id),
           status: "HTTP_ERROR",
           latencyMs: Math.max(0, Date.now() - startedAt),
           httpStatus: response.status,
@@ -461,27 +529,125 @@ export async function runStructuredOpenRouterRequest(input: {
           finishReason: null,
           contentLength: responseText.length,
           responseHash: responseText ? await sha256Text(responseText) : null,
+          responseShape: "ERROR_ENVELOPE",
+          choiceCount: Array.isArray(responseData?.choices) ? responseData.choices.length : 0,
+          selectedProvider,
+          attemptedProviders: providerNamesFrom(routerMetadata?.attempts),
+          generationId: response.headers.get("X-Generation-Id") || nullableString(responseData?.id),
+          errorType,
+          upstreamErrorCode,
+          providerCode,
+          errorMessageHash: errorMessage ? await sha256Text(errorMessage) : null,
           ...requestMetadata,
         });
         if (!retryable || attempt === 2) break;
+        retryIgnoredProviders = Array.from(new Set(
+          [selectedProvider, ...providerNamesFrom(routerMetadata?.attempts)]
+            .map(councilProviderSlug)
+            .filter((provider): provider is string => Boolean(provider)),
+        ));
         continue;
       }
 
       const responseData = await response.json() as any;
-      const choice = responseData?.choices?.[0];
+      const choices = Array.isArray(responseData?.choices) ? responseData.choices : [];
+      const choice = choices[0];
       const usage = responseData?.usage || {};
+      const routerMetadata = responseData?.openrouter_metadata;
+      const attemptedProviders = providerNamesFrom(routerMetadata?.attempts);
+      const selectedProvider = nullableString(routerMetadata?.endpoints?.available?.find((endpoint: any) => endpoint?.selected)?.provider)
+        || nullableString(responseData?.provider);
+      const upstreamError = responseData?.error && typeof responseData.error === "object"
+        ? responseData.error
+        : choice?.error && typeof choice.error === "object"
+          ? choice.error
+          : null;
+      const errorType = nullableString(upstreamError?.metadata?.error_type);
+      const providerCode = nullableString(upstreamError?.metadata?.provider_code);
+      const upstreamErrorCode = toNullableFiniteNumber(upstreamError?.code);
+      const errorMessage = nullableString(upstreamError?.message);
       const responseMetadata = {
         requestedModel: input.model,
         resolvedModel: typeof responseData?.model === "string" ? responseData.model : input.model,
-        provider: typeof responseData?.provider === "string" ? responseData.provider : null,
+        provider: selectedProvider,
         responseId: typeof responseData?.id === "string" ? responseData.id : null,
         promptTokens: toNullableFiniteNumber(usage.prompt_tokens),
         completionTokens: toNullableFiniteNumber(usage.completion_tokens),
         reasoningTokens: toNullableFiniteNumber(usage?.completion_tokens_details?.reasoning_tokens),
         totalTokens: toNullableFiniteNumber(usage.total_tokens),
         cost: toNullableFiniteNumber(usage.cost),
+        choiceCount: choices.length,
+        selectedProvider,
+        attemptedProviders,
+        generationId: response.headers.get("X-Generation-Id") || (typeof responseData?.id === "string" ? responseData.id : null),
+        errorType,
+        upstreamErrorCode,
+        providerCode,
+        errorMessageHash: errorMessage ? await sha256Text(errorMessage) : null,
       };
       const content = typeof choice?.message?.content === "string" ? choice.message.content : "";
+      if (upstreamError || choice?.finish_reason === "error") {
+        failureStatus = input.callKind === "agent" ? "model_upstream_error" : "cio_upstream_error";
+        attempts.push({
+          attempt,
+          model: input.model,
+          ...responseMetadata,
+          status: "UPSTREAM_ERROR",
+          latencyMs: Math.max(0, Date.now() - startedAt),
+          httpStatus: response.status,
+          errorCategory: "UPSTREAM_ERROR",
+          finishReason: choice?.finish_reason || "error",
+          contentLength: content.length,
+          responseHash: content ? await sha256Text(content) : null,
+          responseShape: upstreamError && choice ? "CHOICE_ERROR" : "ERROR_ENVELOPE",
+          ...requestMetadata,
+        });
+        if (!isRetryableOpenRouterError(upstreamErrorCode, errorType) || attempt === 2) break;
+        retryIgnoredProviders = Array.from(new Set(
+          [selectedProvider, ...attemptedProviders]
+            .map(councilProviderSlug)
+            .filter((provider): provider is string => Boolean(provider)),
+        ));
+        continue;
+      }
+      if (!choice) {
+        failureStatus = input.callKind === "agent" ? "model_missing_choice" : "cio_missing_choice";
+        attempts.push({
+          attempt,
+          model: input.model,
+          ...responseMetadata,
+          status: "MISSING_CHOICE",
+          latencyMs: Math.max(0, Date.now() - startedAt),
+          httpStatus: response.status,
+          errorCategory: "MISSING_CHOICE",
+          finishReason: null,
+          contentLength: 0,
+          responseHash: null,
+          responseShape: "MISSING_CHOICE",
+          ...requestMetadata,
+        });
+        if (attempt === 2) break;
+        continue;
+      }
+      if (!content.trim()) {
+        failureStatus = input.callKind === "agent" ? "model_empty_content" : "cio_empty_content";
+        attempts.push({
+          attempt,
+          model: input.model,
+          ...responseMetadata,
+          status: "EMPTY_CONTENT",
+          latencyMs: Math.max(0, Date.now() - startedAt),
+          httpStatus: response.status,
+          errorCategory: "EMPTY_CONTENT",
+          finishReason: choice?.finish_reason || null,
+          contentLength: 0,
+          responseHash: null,
+          responseShape: "EMPTY_CONTENT",
+          ...requestMetadata,
+        });
+        if (attempt === 2) break;
+        continue;
+      }
       if (choice?.finish_reason === "length") {
         failureStatus = input.callKind === "agent" ? "model_output_truncated" : "cio_output_truncated";
         attempts.push({
@@ -495,6 +661,7 @@ export async function runStructuredOpenRouterRequest(input: {
           finishReason: "length",
           contentLength: content.length,
           responseHash: content ? await sha256Text(content) : null,
+          responseShape: "OUTPUT_TRUNCATED",
           ...requestMetadata,
         });
         if (attempt === 2) break;
@@ -502,10 +669,30 @@ export async function runStructuredOpenRouterRequest(input: {
         continue;
       }
       let value: any = null;
+      let outputIsJson = true;
       try {
         value = JSON.parse(content);
       } catch {
-        value = null;
+        outputIsJson = false;
+      }
+      if (!outputIsJson) {
+        failureStatus = input.callKind === "agent" ? "model_output_not_json" : "cio_output_not_json";
+        attempts.push({
+          attempt,
+          model: input.model,
+          ...responseMetadata,
+          status: "OUTPUT_NOT_JSON",
+          latencyMs: Math.max(0, Date.now() - startedAt),
+          httpStatus: response.status,
+          errorCategory: "OUTPUT_NOT_JSON",
+          finishReason: choice?.finish_reason || null,
+          contentLength: content.length,
+          responseHash: await sha256Text(content),
+          responseShape: "NON_JSON",
+          ...requestMetadata,
+        });
+        if (attempt === 2) break;
+        continue;
       }
       if (!isStructuredOutputValid(input.callKind, value, input.allowedEvidenceRefs ? new Set(input.allowedEvidenceRefs) : undefined)) {
         failureStatus = input.callKind === "agent" ? "model_output_schema_invalid" : "cio_schema_invalid";
@@ -520,6 +707,7 @@ export async function runStructuredOpenRouterRequest(input: {
           finishReason: choice?.finish_reason || null,
           contentLength: content.length,
           responseHash: content ? await sha256Text(content) : null,
+          responseShape: "SCHEMA_INVALID",
           ...requestMetadata,
         });
         if (attempt === 2) break;
@@ -537,6 +725,7 @@ export async function runStructuredOpenRouterRequest(input: {
         finishReason: choice?.finish_reason || null,
         contentLength: content.length,
         responseHash: content ? await sha256Text(content) : null,
+        responseShape: "COMPLETION",
         ...requestMetadata,
       });
       return { ok: true, value, attempts, failureStatus: null };
@@ -561,6 +750,7 @@ export async function runStructuredOpenRouterRequest(input: {
         finishReason: null,
         contentLength: 0,
         responseHash: null,
+        responseShape: "REQUEST_FAILED",
         ...requestMetadata,
       });
       if (deadlineExceeded || !timedOut || attempt === 2) break;
@@ -1295,9 +1485,13 @@ export async function decideWithCio(
     ? "TIMEOUT"
     : result.failureStatus === "cio_schema_invalid"
       ? "INVALID_SCHEMA"
-      : result.failureStatus?.startsWith("openrouter_")
-        ? result.failureStatus.toUpperCase()
-        : "REQUEST_FAILED";
+      : result.failureStatus === "cio_output_not_json"
+        ? "INVALID_OUTPUT"
+        : result.failureStatus === "cio_upstream_error"
+          ? "UPSTREAM_ERROR"
+          : result.failureStatus?.startsWith("openrouter_")
+            ? result.failureStatus.toUpperCase()
+            : "REQUEST_FAILED";
   console.error(`[CIO] structured model failed after ${result.attempts.length} attempt(s): ${result.failureStatus}`);
   return { plan: fallbackPlan, modelStatus, attempts: result.attempts };
 }

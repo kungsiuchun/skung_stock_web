@@ -181,9 +181,9 @@ test("Telegram lists four Council agents with reasoning and excludes invalid vot
   }, dependencies);
 
   const message = sent[0] || "";
-  assert.match(message, /判斷｜Council 未完整：QM 模型格式無效；CIO 按契約未執行。/);
+  assert.match(message, /判斷｜Council 未完整：QM 模型輸出不是有效 JSON；CIO 按契約未執行。/);
   assert.match(message, /議會｜Call 0 · Put 0 · 觀望 3 · 無效 1/);
-  assert.match(message, /QM｜無效 · 信心 0% · 無效票\n理由｜模型回應格式無效；重試後仍無法驗證。/);
+  assert.match(message, /QM｜無效 · 信心 0% · 無效票\n理由｜模型輸出不是有效 JSON；重試後仍無法驗證。/);
   assert.match(message, /CM｜觀望 · 信心 60% · AI\n理由｜Gamma Flip 上下訊號互相抵銷。/);
   assert.match(message, /NT｜觀望 · 信心 60% · AI\n理由｜事件風險未形成可驗證方向。/);
   assert.match(message, /PA｜觀望 · 信心 60% · AI\n理由｜K 線結構未出現有效突破。/);
@@ -224,6 +224,90 @@ test("Telegram explains Council input-budget failures without leaking internal s
   assert.match(message, /判斷｜Council 未完整：QM 模型輸入超出預算；CIO 按契約未執行。/);
   assert.match(message, /理由｜模型輸入超出預算；重試後仍無法驗證。/);
   assert.doesNotMatch(message, /input_budget_exceeded|council_qm_/);
+});
+
+test("Telegram explains upstream Council failures without pretending they are schema errors", async () => {
+  const upstreamFailureCouncil: CouncilResult = {
+    status: "DEGRADED",
+    degradedReason: "council_cm_model_upstream_error",
+    latencyMs: 0,
+    agents: allHoldCouncil.agents.map((agent) => agent.agent === "CM"
+      ? {
+        ...agent,
+        valid: false,
+        confidence: 0,
+        modelStatus: "model_upstream_error",
+        fallbackStatus: "model_upstream_error",
+        reasoning: "model_upstream_error",
+      }
+      : agent),
+  };
+  const { dependencies, sent } = buildDependencies({
+    council: { analyze: async () => upstreamFailureCouncil },
+  });
+
+  await runSpxDecisionPipeline({
+    runId: "telegram-upstream-error-contract",
+    scheduledAt,
+    currentPosition: "NONE",
+  }, dependencies);
+
+  const message = sent[0] || "";
+  assert.match(message, /判斷｜Council 未完整：CM 上游模型服務失敗；CIO 按契約未執行。/);
+  assert.match(message, /CM｜無效 · 信心 0% · 無效票\n理由｜上游模型服務失敗；重試後仍無法驗證。/);
+  assert.doesNotMatch(message, /model_upstream_error|模型回應格式無效/);
+});
+
+test("run ledger and Board cockpit retain sanitized OpenRouter attempt evidence", async () => {
+  const attemptEvidence = {
+    attempt: 1,
+    model: "google/gemma-4-26b-a4b-it",
+    status: "UPSTREAM_ERROR" as const,
+    latencyMs: 21165,
+    httpStatus: 200,
+    errorCategory: "UPSTREAM_ERROR",
+    finishReason: "error",
+    contentLength: 0,
+    responseHash: null,
+    responseShape: "ERROR_ENVELOPE" as const,
+    choiceCount: 0,
+    selectedProvider: "DeepInfra",
+    attemptedProviders: ["DeepInfra"],
+    generationId: "gen-safe-evidence",
+    errorType: "provider_unavailable",
+    upstreamErrorCode: 502,
+    providerCode: "empty_response",
+    errorMessageHash: "a".repeat(64),
+  };
+  const degradedCouncil: CouncilResult = {
+    status: "DEGRADED",
+    degradedReason: "council_cm_model_upstream_error",
+    latencyMs: 0,
+    agents: allHoldCouncil.agents.map((agent) => agent.agent === "CM"
+      ? {
+        ...agent,
+        valid: false,
+        confidence: 0,
+        modelStatus: "model_upstream_error",
+        fallbackStatus: "model_upstream_error",
+        attempts: [attemptEvidence],
+      }
+      : agent),
+  };
+  const { dependencies, store } = buildDependencies({ council: { analyze: async () => degradedCouncil } });
+
+  await runSpxDecisionPipeline({
+    runId: "cockpit-upstream-evidence",
+    scheduledAt,
+    currentPosition: "NONE",
+  }, dependencies);
+
+  const run = store.getRun("cockpit-upstream-evidence");
+  assert.ok(run);
+  const cockpit = buildSpxDecisionCockpitProjection(run, store.getOutbox(run.runId), store.getLifecycle(run.runId));
+  const cm = cockpit.councilAgents.find((agent) => agent.agent === "CM");
+  assert.deepEqual(cm?.attempts[0], attemptEvidence);
+  assert.equal("errorMessage" in (cm?.attempts[0] || {}), false);
 });
 
 test("degraded HOLD Telegram is concise, human-readable, and never leaks internal fallback codes", async () => {
