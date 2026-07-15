@@ -134,7 +134,7 @@ export interface ModelAttemptMetadata {
   upstreamErrorCode?: number | null;
   providerCode?: string | null;
   errorMessageHash?: string | null;
-  contractError?: "INVALID_REQUEST" | "UNSUPPORTED_PARAMETER" | "INVALID_SCHEMA" | "INVALID_TOKEN_BUDGET" | "UNKNOWN_ROUTER_400" | null;
+  contractError?: "INVALID_REQUEST" | "UNSUPPORTED_PARAMETER" | "INVALID_SCHEMA" | "INVALID_TOKEN_BUDGET" | "UNKNOWN_ROUTER_400" | "PROVIDER_UNAVAILABLE" | null;
 }
 
 export interface CouncilResult {
@@ -533,6 +533,7 @@ const humanizeModelFailure = (value: string | null | undefined) => {
   if (reason.includes("unsupported_parameter")) return "GPT-5 請求參數不受 provider 支援";
   if (reason.includes("invalid_schema")) return "GPT-5 JSON schema 不被接受";
   if (reason.includes("invalid_request") || reason.includes("unknown_router_400")) return "GPT-5 請求契約被 Router 拒絕";
+  if (reason.includes("provider_unavailable") || reason.includes("openrouter_404")) return "Azure GPT-5 provider 目前不可用";
   if (reason.includes("input_budget_exceeded")) return "模型輸入超出預算";
   if (reason.includes("unapproved_provider")) return "模型供應商不在批准清單";
   if (reason.includes("upstream_error")) return "上游模型服務失敗";

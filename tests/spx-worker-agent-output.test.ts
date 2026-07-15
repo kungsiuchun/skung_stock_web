@@ -120,7 +120,7 @@ test("0DTE rules use VIX and VIX9D without a removed VIX3M penalty", () => {
   assert.equal(result.tradeEligibility.hardBlocked, false);
 });
 
-test("OpenRouter request profiles keep every GPT-5 Mini decision role OpenAI-only with minimal reasoning", () => {
+test("OpenRouter request profiles keep every GPT-5 Mini decision role Azure-only with minimal reasoning", () => {
   const council = buildStructuredOpenRouterBody("agent", "openai/gpt-5-mini", []);
   const cio = buildStructuredOpenRouterBody("cio", "openai/gpt-5-mini", []);
 
@@ -129,8 +129,8 @@ test("OpenRouter request profiles keep every GPT-5 Mini decision role OpenAI-onl
   assert.equal(council.max_completion_tokens, 1024);
   assert.deepEqual(council.reasoning, { effort: "minimal" });
   assert.equal(council.provider.require_parameters, true);
-  assert.deepEqual(council.provider.order, ["openai"]);
-  assert.deepEqual(council.provider.only, ["openai"]);
+  assert.deepEqual(council.provider.order, ["azure"]);
+  assert.deepEqual(council.provider.only, ["azure"]);
   assert.equal(council.provider.allow_fallbacks, false);
   assert.deepEqual(
     Object.keys(council.response_format.json_schema.schema.properties),
@@ -145,8 +145,8 @@ test("OpenRouter request profiles keep every GPT-5 Mini decision role OpenAI-onl
   assert.deepEqual(cio.reasoning, { effort: "minimal" });
   assert.deepEqual(cio.provider, {
     require_parameters: true,
-    order: ["openai"],
-    only: ["openai"],
+    order: ["azure"],
+    only: ["azure"],
     allow_fallbacks: false,
   });
 });
@@ -230,7 +230,7 @@ test("HTTP 200 OpenRouter error envelopes are classified as upstream errors with
         requested: "openai/gpt-5-mini",
         attempt: 1,
         endpoints: {
-          available: [{ provider: "OpenAI", selected: true }],
+          available: [{ provider: "Azure", selected: true }],
         },
       },
     }), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -252,14 +252,14 @@ test("HTTP 200 OpenRouter error envelopes are classified as upstream errors with
   assert.equal(result.attempts[0].providerCode, "empty_response");
   assert.equal(result.attempts[0].responseShape, "ERROR_ENVELOPE");
   assert.equal(result.attempts[0].choiceCount, 0);
-  assert.equal(result.attempts[0].selectedProvider, "OpenAI");
+  assert.equal(result.attempts[0].selectedProvider, "Azure");
   assert.equal(result.attempts[0].errorMessageHash?.length, 64);
   assert.equal("errorMessage" in result.attempts[0], false);
-  assert.deepEqual(requestBodies[0].provider, { require_parameters: true, order: ["openai"], only: ["openai"], allow_fallbacks: false });
-  assert.deepEqual(requestBodies[1].provider, { require_parameters: true, order: ["openai"], only: ["openai"], allow_fallbacks: false });
+  assert.deepEqual(requestBodies[0].provider, { require_parameters: true, order: ["azure"], only: ["azure"], allow_fallbacks: false });
+  assert.deepEqual(requestBodies[1].provider, { require_parameters: true, order: ["azure"], only: ["azure"], allow_fallbacks: false });
 });
 
-test("GPT-5 compatibility probe uses the exact OpenAI-only Council wire contract before UAT delivery", async () => {
+test("GPT-5 compatibility probe uses the exact Azure-only Council wire contract before UAT delivery", async () => {
   const requestBodies: any[] = [];
   const probe = await runSpxGpt5CompatibilityProbe({
     OPENROUTER_API_KEY: "test-key",
@@ -269,7 +269,7 @@ test("GPT-5 compatibility probe uses the exact OpenAI-only Council wire contract
       requestBodies.push(JSON.parse(String(init?.body || "{}")));
       return new Response(JSON.stringify({
         model: "openai/gpt-5-mini",
-        provider: "OpenAI",
+        provider: "Azure",
         choices: [{
           finish_reason: "stop",
           message: {
@@ -278,7 +278,7 @@ test("GPT-5 compatibility probe uses the exact OpenAI-only Council wire contract
               confidence_score: 55,
               evidence_refs: ["probe.status"],
               blocking_risk: null,
-              reasoning: "OpenAI strict schema compatibility confirmed.",
+              reasoning: "Azure strict schema compatibility confirmed.",
             }),
           },
         }],
@@ -293,8 +293,8 @@ test("GPT-5 compatibility probe uses the exact OpenAI-only Council wire contract
   assert.equal("temperature" in requestBodies[0], false);
   assert.deepEqual(requestBodies[0].provider, {
     require_parameters: true,
-    order: ["openai"],
-    only: ["openai"],
+    order: ["azure"],
+    only: ["azure"],
     allow_fallbacks: false,
   });
 });
@@ -339,7 +339,26 @@ test("HTTP 400 GPT-5 contract failures persist a safe canonical cause without ra
   assert.equal("errorMessage" in result.attempts[0], false);
 });
 
-test("GPT-5 Mini Council fail-closes when router reports an unapproved resolved provider", async () => {
+test("GPT-5 Azure provider 404 is traceable as provider unavailable, never as timeout or schema failure", async () => {
+  const result = await runStructuredOpenRouterRequest({
+    callKind: "agent",
+    apiKey: "test-key",
+    model: "openai/gpt-5-mini",
+    messages: [],
+    fetcher: async () => new Response(JSON.stringify({
+      error: { code: 404, message: "No endpoints found for Azure" },
+    }), { status: 404, headers: { "Content-Type": "application/json" } }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.failureStatus, "model_provider_unavailable");
+  assert.equal(result.attempts.length, 1);
+  assert.equal(result.attempts[0].errorCategory, "PROVIDER_UNAVAILABLE");
+  assert.equal(result.attempts[0].contractError, "PROVIDER_UNAVAILABLE");
+  assert.equal(result.attempts[0].status, "HTTP_ERROR");
+});
+
+test("GPT-5 Mini Council accepts Azure endpoint variants and rejects non-Azure providers", async () => {
   const content = JSON.stringify({
     decision: "HOLD",
     confidence_score: 58,
@@ -357,15 +376,14 @@ test("GPT-5 Mini Council fail-closes when router reports an unapproved resolved 
       id: "gen-unapproved-provider",
       choices: [{ finish_reason: "stop", message: { content } }],
       openrouter_metadata: {
-        endpoints: { available: [{ provider: "Azure", selected: true }] },
+        endpoints: { available: [{ provider: "Azure/eastus", selected: true }] },
       },
     }), { status: 200, headers: { "Content-Type": "application/json" } }),
   });
 
-  assert.equal(result.ok, false);
-  assert.equal(result.failureStatus, "model_unapproved_provider");
-  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["UNAPPROVED_PROVIDER"]);
-  assert.equal(result.attempts[0].selectedProvider, "Azure");
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["SUCCESS"]);
+  assert.equal(result.attempts[0].selectedProvider, "Azure/eastus");
 });
 
 test("Council preserves an unapproved provider contract violation from an HTTP error envelope", async () => {
@@ -377,7 +395,7 @@ test("Council preserves an unapproved provider contract violation from an HTTP e
     fetcher: async () => new Response(JSON.stringify({
       error: { code: 503, message: "unavailable" },
       openrouter_metadata: {
-        endpoints: { available: [{ provider: "Parasail", selected: true }] },
+        endpoints: { available: [{ provider: "OpenAI", selected: true }] },
       },
     }), { status: 503, headers: { "Content-Type": "application/json" } }),
   });
@@ -385,10 +403,10 @@ test("Council preserves an unapproved provider contract violation from an HTTP e
   assert.equal(result.ok, false);
   assert.equal(result.failureStatus, "model_unapproved_provider");
   assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["UNAPPROVED_PROVIDER"]);
-  assert.equal(result.attempts[0].selectedProvider, "Parasail");
+  assert.equal(result.attempts[0].selectedProvider, "OpenAI");
 });
 
-test("GPT-5 Mini CIO classifies a non-OpenAI resolved provider as a CIO contract violation", async () => {
+test("GPT-5 Mini CIO classifies a non-Azure resolved provider as a CIO contract violation", async () => {
   const result = await runStructuredOpenRouterRequest({
     callKind: "cio",
     apiKey: "test-key",
@@ -398,7 +416,7 @@ test("GPT-5 Mini CIO classifies a non-OpenAI resolved provider as a CIO contract
       id: "gen-cio-unapproved-provider",
       choices: [{ finish_reason: "stop", message: { content: "{}" } }],
       openrouter_metadata: {
-        endpoints: { available: [{ provider: "Azure", selected: true }] },
+        endpoints: { available: [{ provider: "OpenAI", selected: true }] },
       },
     }), { status: 200, headers: { "Content-Type": "application/json" } }),
   });
@@ -406,10 +424,10 @@ test("GPT-5 Mini CIO classifies a non-OpenAI resolved provider as a CIO contract
   assert.equal(result.ok, false);
   assert.equal(result.failureStatus, "cio_unapproved_provider");
   assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["UNAPPROVED_PROVIDER"]);
-  assert.equal(result.attempts[0].selectedProvider, "Azure");
+  assert.equal(result.attempts[0].selectedProvider, "OpenAI");
 });
 
-test("GPT-5 Mini OpenAI timeout retries only OpenAI and never falls back to another provider", async () => {
+test("GPT-5 Mini Azure timeout retries only Azure and never falls back to another provider", async () => {
   const requestBodies: any[] = [];
   const result = await runStructuredOpenRouterRequest({
     callKind: "agent",
@@ -426,11 +444,11 @@ test("GPT-5 Mini OpenAI timeout retries only OpenAI and never falls back to anot
   assert.equal(result.failureStatus, "model_timeout");
   assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["TIMEOUT", "TIMEOUT"]);
   assert.deepEqual(requestBodies.map((body) => body.provider), [
-    { require_parameters: true, order: ["openai"], only: ["openai"], allow_fallbacks: false },
-    { require_parameters: true, order: ["openai"], only: ["openai"], allow_fallbacks: false },
+    { require_parameters: true, order: ["azure"], only: ["azure"], allow_fallbacks: false },
+    { require_parameters: true, order: ["azure"], only: ["azure"], allow_fallbacks: false },
   ]);
-  assert.deepEqual(result.attempts.map((attempt) => attempt.providerOrder), [["openai"], ["openai"]]);
-  assert.deepEqual(result.attempts.map((attempt) => attempt.routingPolicy), ["openai_only", "openai_only"]);
+  assert.deepEqual(result.attempts.map((attempt) => attempt.providerOrder), [["azure"], ["azure"]]);
+  assert.deepEqual(result.attempts.map((attempt) => attempt.routingPolicy), ["azure_only", "azure_only"]);
 });
 
 test("missing choices and empty model content retry as distinct recoverable failures", async () => {
@@ -757,7 +775,7 @@ test("Council retries only its failed call and sends a role-specific normalized 
   assert.deepEqual(result.attempts?.map((attempt) => attempt.status), ["OUTPUT_NOT_JSON", "SUCCESS"]);
   assert.equal(requestBodies.length, 2);
   assert.equal(requestBodies[0].model, "openai/gpt-5-mini");
-  assert.deepEqual(requestBodies[0].provider, { require_parameters: true, order: ["openai"], only: ["openai"], allow_fallbacks: false });
+  assert.deepEqual(requestBodies[0].provider, { require_parameters: true, order: ["azure"], only: ["azure"], allow_fallbacks: false });
   const sentProjection = requestBodies[1].messages[1].content;
   assert.match(sentProjection, /spx\.last/);
   assert.doesNotMatch(sentProjection, /extendedOnlyPayload|mustNotBeSent|gex\.gammaFlip/);
@@ -837,7 +855,7 @@ test("CIO non-JSON output retries once and then reports a traceable failure", as
   assert.equal(requestBodies.length, 2);
   assert.equal(requestBodies[0].max_completion_tokens, 1536);
   assert.equal("temperature" in requestBodies[0], false);
-  assert.deepEqual(requestBodies[0].provider, { require_parameters: true, order: ["openai"], only: ["openai"], allow_fallbacks: false });
+  assert.deepEqual(requestBodies[0].provider, { require_parameters: true, order: ["azure"], only: ["azure"], allow_fallbacks: false });
   assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["OUTPUT_NOT_JSON", "OUTPUT_NOT_JSON"]);
 });
 
@@ -1214,7 +1232,7 @@ test("controlled GPT-5 UAT uses the fixture, calls Council and CIO, and labels t
           };
       return new Response(JSON.stringify({
       model: "openai/gpt-5-mini",
-      provider: "OpenAI",
+      provider: "Azure",
       choices: [{ finish_reason: "stop", message: { content: JSON.stringify(content) } }],
       usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
       }), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -1226,7 +1244,7 @@ test("controlled GPT-5 UAT uses the fixture, calls Council and CIO, and labels t
   assert.equal(preview.result.run.cioDecision?.modelStatus, "AI");
   assert.equal(preview.result.run.finalDecision.action, "HOLD");
   assert.match(preview.message, /^SYSTEM UAT｜非即時訊號｜不可交易/);
-  assert.equal(preview.result.run.council?.agents.every((agent) => agent.attempts?.[0]?.providerOrder?.[0] === "openai"), true);
+  assert.equal(preview.result.run.council?.agents.every((agent) => agent.attempts?.[0]?.providerOrder?.[0] === "azure"), true);
 });
 
 test("fallback CIO never opens a trade regardless of soft warnings or required data failure", () => {

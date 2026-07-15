@@ -294,7 +294,7 @@ const sha256Text = async (value: string) => {
 
 export const SPX_COUNCIL_PROVIDER_ORDER = ["deepinfra", "parasail"] as const;
 export const SPX_COUNCIL_PROVIDER_ALLOWLIST = SPX_COUNCIL_PROVIDER_ORDER;
-export const SPX_GPT5_OPENAI_PROVIDER_ORDER = ["openai"] as const;
+export const SPX_GPT5_AZURE_PROVIDER_ORDER = ["azure"] as const;
 const SPX_GPT5_COUNCIL_MAX_COMPLETION_TOKENS = 1024;
 const SPX_GPT5_CIO_MAX_COMPLETION_TOKENS = 1536;
 
@@ -311,19 +311,19 @@ const councilProviderSlug = (value: unknown) => {
   return null;
 };
 
-const openAiProviderSlug = (value: unknown) => {
+const azureProviderSlug = (value: unknown) => {
   const provider = String(value || "").trim().toLowerCase();
-  return provider === "openai" || provider.startsWith("openai/") ? "openai" : null;
+  return provider === "azure" || provider.startsWith("azure/") ? "azure" : null;
 };
 
 const isApprovedStructuredProvider = (callKind: StructuredOpenRouterCallKind, model: string, value: string | null) => {
   if (value === null) return true;
-  if (isGpt5Model(model)) return openAiProviderSlug(value) !== null;
+  if (isGpt5Model(model)) return azureProviderSlug(value) !== null;
   return callKind !== "agent" || councilProviderSlug(value) !== null;
 };
 
 const routingPolicyFor = (callKind: StructuredOpenRouterCallKind, model: string) => (
-  isGpt5Model(model) ? "openai_only" : callKind === "agent" ? "ordered_same_model_fallbacks" : "parameters_only"
+  isGpt5Model(model) ? "azure_only" : callKind === "agent" ? "ordered_same_model_fallbacks" : "parameters_only"
 );
 
 const providerOrderForAttempt = (
@@ -332,7 +332,7 @@ const providerOrderForAttempt = (
   attempt: number,
   ignoredCouncilProviders: readonly string[] = [],
 ) => {
-  if (isGpt5Model(model)) return [...SPX_GPT5_OPENAI_PROVIDER_ORDER];
+  if (isGpt5Model(model)) return [...SPX_GPT5_AZURE_PROVIDER_ORDER];
   return callKind === "agent"
     ? rotateCouncilProviderOrder(attempt).filter((provider) => !ignoredCouncilProviders.includes(provider))
     : [];
@@ -354,7 +354,8 @@ const isRetryableOpenRouterError = (code: number | null, errorType: string | nul
     || ["provider_unavailable", "provider_overloaded", "rate_limit_exceeded", "timeout", "server", "unmapped"].includes(errorType || "");
 };
 
-const classifyOpenRouterContractError = (httpStatus: number, errorType: string | null, errorMessage: string | null) => {
+const classifyOpenRouterRequestFailure = (httpStatus: number, errorType: string | null, errorMessage: string | null) => {
+  if (httpStatus === 404) return "PROVIDER_UNAVAILABLE" as const;
   if (httpStatus !== 400) return null;
   const evidence = `${errorType || ""} ${errorMessage || ""}`.toLowerCase();
   if (/max[_ ]?(completion[_ ]?)?tokens?|token budget|minimum token|at least \d+/.test(evidence)) return "INVALID_TOKEN_BUDGET" as const;
@@ -383,8 +384,8 @@ export const buildStructuredOpenRouterBody = (
   provider: isGpt5
     ? {
       require_parameters: true,
-      order: [...SPX_GPT5_OPENAI_PROVIDER_ORDER],
-      only: [...SPX_GPT5_OPENAI_PROVIDER_ORDER],
+      order: [...SPX_GPT5_AZURE_PROVIDER_ORDER],
+      only: [...SPX_GPT5_AZURE_PROVIDER_ORDER],
       allow_fallbacks: false,
     }
     : callKind === "agent"
@@ -566,7 +567,7 @@ export async function runStructuredOpenRouterRequest(input: {
         const providerCode = nullableString(upstreamError?.metadata?.provider_code);
         const upstreamErrorCode = toNullableFiniteNumber(upstreamError?.code);
         const errorMessage = nullableString(upstreamError?.message);
-        const contractError = classifyOpenRouterContractError(response.status, errorType, errorMessage);
+        const contractError = classifyOpenRouterRequestFailure(response.status, errorType, errorMessage);
         const unapprovedProvider = !isApprovedStructuredProvider(input.callKind, input.model, selectedProvider);
         const retryable = !unapprovedProvider && (response.status === 429 || response.status >= 500);
         failureStatus = unapprovedProvider
