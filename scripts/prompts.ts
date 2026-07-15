@@ -87,9 +87,7 @@ export const SYSTEM_PROMPT_PREFIX = `Based on the following market data, output 
   "decision": "CALL" | "PUT" | "HOLD",
   "confidence_score": 65,
   "evidence_refs": ["exact.snapshot.fact.key"],
-  "claims": [{"text": "one auditable claim", "evidence_refs": ["exact.snapshot.fact.key"]}],
   "blocking_risk": null,
-  "neutral_reason": null,
   "reasoning": "short analysis"
 }
 
@@ -98,9 +96,9 @@ Rules:
 2. reasoning must be a single string. Use literal \\n for newlines, never actual line breaks.
 3. Keep reasoning under 2 sentences.
 4. Cast only CALL, PUT, or HOLD. Never use OPEN_* execution language.
-5. For HOLD, neutral_reason must name the exact missing/conflicting data.
+5. For HOLD, reasoning must name the exact missing/conflicting data.
 6. If there is a blocking risk, put it in blocking_risk.
-7. evidence_refs and every claim must cite exact supplied snapshotFacts keys, including HOLD.
+7. evidence_refs must cite exact supplied snapshotFacts keys, including HOLD.
 8. confidence_score must be 1-100. Zero is reserved for pipeline-generated invalid/degraded results.
 
 GEX guide:

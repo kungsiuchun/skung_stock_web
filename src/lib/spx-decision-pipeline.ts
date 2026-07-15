@@ -3,7 +3,7 @@ import type { SpxGexTelegramSummary } from "./spx-gex-heatmap";
 export type SpxDecisionAction = "OPEN_CALL" | "OPEN_PUT" | "HOLD" | "CLOSE";
 export type SpxPosition = "NONE" | "CALL" | "PUT";
 export type SpxDeliveryMode = "SEND" | "PREVIEW";
-export type SpxRunMode = "LIVE" | "UAT_REPLAY";
+export type SpxRunMode = "LIVE" | "UAT_REPLAY" | "UAT_LLM";
 
 export const NT_VOLATILITY_RISK_PROMPT = `You are NT, a ruthless Volatility Risk Manager. You monitor options premium pressure, VIX/VIX9D stress, gamma regime, and tail-risk.
 Your Task: Analyze current VIX, VIX9D, volatility compression or expansion, BB squeeze, GEX regime, and any disabled or missing sentiment inputs honestly. Do not require removed external flow sources.
@@ -134,6 +134,7 @@ export interface ModelAttemptMetadata {
   upstreamErrorCode?: number | null;
   providerCode?: string | null;
   errorMessageHash?: string | null;
+  contractError?: "INVALID_REQUEST" | "UNSUPPORTED_PARAMETER" | "INVALID_SCHEMA" | "INVALID_TOKEN_BUDGET" | "UNKNOWN_ROUTER_400" | null;
 }
 
 export interface CouncilResult {
@@ -528,6 +529,10 @@ const councilAgentIsValid = (agent: CouncilAgentAnalysis) => agent.valid
 
 const humanizeModelFailure = (value: string | null | undefined) => {
   const reason = String(value || "").toLowerCase();
+  if (reason.includes("invalid_token_budget")) return "GPT-5 輸出／推理 token 預算無效";
+  if (reason.includes("unsupported_parameter")) return "GPT-5 請求參數不受 provider 支援";
+  if (reason.includes("invalid_schema")) return "GPT-5 JSON schema 不被接受";
+  if (reason.includes("invalid_request") || reason.includes("unknown_router_400")) return "GPT-5 請求契約被 Router 拒絕";
   if (reason.includes("input_budget_exceeded")) return "模型輸入超出預算";
   if (reason.includes("unapproved_provider")) return "模型供應商不在批准清單";
   if (reason.includes("upstream_error")) return "上游模型服務失敗";
@@ -656,6 +661,7 @@ export function formatTelegramDecisionMessage(input: TelegramDecisionMessageInpu
     return "安全條件未通過，方向性交易已否決";
   })();
   const lines: Array<string | null> = [
+    run.runMode === "UAT_LLM" ? "SYSTEM UAT｜非即時訊號｜不可交易" : null,
     `SPX: ${spxLabel} 操作：${actionLabel[riskGate.action]}`,
     `⏱ 美東時間：${scheduledEt.year}/${scheduledEt.month}/${scheduledEt.day} ${scheduledEt.hour}:${scheduledEt.minute}:${scheduledEt.second} ET｜標的：SPX`,
     run.runMode === "UAT_REPLAY" ? "🧪 UAT REPLAY｜非即時訊號，只用固定歷史 fixture 驗證流水線。" : null,

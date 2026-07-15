@@ -1,5 +1,5 @@
 import { RSI, BollingerBands, SMA, MACD, EMA } from 'technicalindicators';
-import { PERSONAS, ORCHESTRATOR_PROMPT, SYSTEM_PROMPT_PREFIX, AUDIT_AGENT_PROMPT } from './prompts';
+import { PERSONAS, ORCHESTRATOR_PROMPT, AUDIT_AGENT_PROMPT } from './prompts';
 import { readAgentCalibrationWeights, readPendingAgentSignalOutcomes, updateAgentSignalOutcomeResults, upsertAgentSignalOutcome, upsertRecapDay, type D1DatabaseLike } from '../src/lib/spx-recap-d1';
 import { generateAndStoreSpxGexHeatmap, getSpxGexGenerationStatus, readSpxGexHeatmap, toTelegramGexSummary, type SpxGexDataClient, type SpxGexHeatmapModel, type SpxGexTelegramSummary } from '../src/lib/spx-gex-heatmap';
 import { createSpxGexIntradayDataClient } from '../src/lib/spx-gex-cboe';
@@ -294,7 +294,9 @@ const sha256Text = async (value: string) => {
 
 export const SPX_COUNCIL_PROVIDER_ORDER = ["deepinfra", "parasail"] as const;
 export const SPX_COUNCIL_PROVIDER_ALLOWLIST = SPX_COUNCIL_PROVIDER_ORDER;
-export const SPX_GPT5_AZURE_PROVIDER_ORDER = ["azure"] as const;
+export const SPX_GPT5_OPENAI_PROVIDER_ORDER = ["openai"] as const;
+const SPX_GPT5_COUNCIL_MAX_COMPLETION_TOKENS = 1024;
+const SPX_GPT5_CIO_MAX_COMPLETION_TOKENS = 1536;
 
 const isGpt5Model = (model: string) => /^openai\/gpt-5(?:-|$)/i.test(model);
 
@@ -309,19 +311,19 @@ const councilProviderSlug = (value: unknown) => {
   return null;
 };
 
-const azureProviderSlug = (value: unknown) => {
+const openAiProviderSlug = (value: unknown) => {
   const provider = String(value || "").trim().toLowerCase();
-  return provider === "azure" || provider.startsWith("azure/") ? "azure" : null;
+  return provider === "openai" || provider.startsWith("openai/") ? "openai" : null;
 };
 
 const isApprovedStructuredProvider = (callKind: StructuredOpenRouterCallKind, model: string, value: string | null) => {
   if (value === null) return true;
-  if (isGpt5Model(model)) return azureProviderSlug(value) !== null;
+  if (isGpt5Model(model)) return openAiProviderSlug(value) !== null;
   return callKind !== "agent" || councilProviderSlug(value) !== null;
 };
 
 const routingPolicyFor = (callKind: StructuredOpenRouterCallKind, model: string) => (
-  isGpt5Model(model) ? "azure_only" : callKind === "agent" ? "ordered_same_model_fallbacks" : "parameters_only"
+  isGpt5Model(model) ? "openai_only" : callKind === "agent" ? "ordered_same_model_fallbacks" : "parameters_only"
 );
 
 const providerOrderForAttempt = (
@@ -330,7 +332,7 @@ const providerOrderForAttempt = (
   attempt: number,
   ignoredCouncilProviders: readonly string[] = [],
 ) => {
-  if (isGpt5Model(model)) return [...SPX_GPT5_AZURE_PROVIDER_ORDER];
+  if (isGpt5Model(model)) return [...SPX_GPT5_OPENAI_PROVIDER_ORDER];
   return callKind === "agent"
     ? rotateCouncilProviderOrder(attempt).filter((provider) => !ignoredCouncilProviders.includes(provider))
     : [];
@@ -352,11 +354,23 @@ const isRetryableOpenRouterError = (code: number | null, errorType: string | nul
     || ["provider_unavailable", "provider_overloaded", "rate_limit_exceeded", "timeout", "server", "unmapped"].includes(errorType || "");
 };
 
+const classifyOpenRouterContractError = (httpStatus: number, errorType: string | null, errorMessage: string | null) => {
+  if (httpStatus !== 400) return null;
+  const evidence = `${errorType || ""} ${errorMessage || ""}`.toLowerCase();
+  if (/max[_ ]?(completion[_ ]?)?tokens?|token budget|minimum token|at least \d+/.test(evidence)) return "INVALID_TOKEN_BUDGET" as const;
+  if (/unsupported|not supported|unknown parameter|unrecognized parameter|invalid parameter/.test(evidence)) return "UNSUPPORTED_PARAMETER" as const;
+  if (/json schema|response_format|structured output|schema/.test(evidence)) return "INVALID_SCHEMA" as const;
+  if (/invalid[_ ]?request/.test(evidence)) return "INVALID_REQUEST" as const;
+  return "UNKNOWN_ROUTER_400" as const;
+};
+
 export const buildStructuredOpenRouterBody = (
   callKind: StructuredOpenRouterCallKind,
   model: string,
   messages: Array<{ role: string; content: string }>,
-  maxOutputTokens = callKind === "agent" ? 512 : 520,
+  maxOutputTokens = isGpt5Model(model)
+    ? callKind === "agent" ? SPX_GPT5_COUNCIL_MAX_COMPLETION_TOKENS : SPX_GPT5_CIO_MAX_COMPLETION_TOKENS
+    : callKind === "agent" ? 512 : 520,
   councilProviderOrder: readonly string[] = SPX_COUNCIL_PROVIDER_ORDER,
   ignoredCouncilProviders: readonly string[] = [],
 ) => {
@@ -364,13 +378,13 @@ export const buildStructuredOpenRouterBody = (
   return {
   model,
   ...(isGpt5
-    ? { max_completion_tokens: maxOutputTokens }
+    ? { max_completion_tokens: maxOutputTokens, reasoning: { effort: "minimal" } }
     : { temperature: 0, max_tokens: maxOutputTokens }),
   provider: isGpt5
     ? {
       require_parameters: true,
-      order: [...SPX_GPT5_AZURE_PROVIDER_ORDER],
-      only: [...SPX_GPT5_AZURE_PROVIDER_ORDER],
+      order: [...SPX_GPT5_OPENAI_PROVIDER_ORDER],
+      only: [...SPX_GPT5_OPENAI_PROVIDER_ORDER],
       allow_fallbacks: false,
     }
     : callKind === "agent"
@@ -420,7 +434,9 @@ export async function runStructuredOpenRouterRequest(input: {
   const timeoutMs = input.timeoutMs ?? 12_000;
   const attempts: ModelAttemptMetadata[] = [];
   let failureStatus: string | null = null;
-  let maxOutputTokens = input.callKind === "agent" ? 512 : 520;
+  let maxOutputTokens = isGpt5Model(input.model)
+    ? input.callKind === "agent" ? SPX_GPT5_COUNCIL_MAX_COMPLETION_TOKENS : SPX_GPT5_CIO_MAX_COMPLETION_TOKENS
+    : input.callKind === "agent" ? 512 : 520;
   let retryIgnoredProviders: string[] = [];
   const unavailableResponseMetadata = {
     requestedModel: input.model,
@@ -550,11 +566,14 @@ export async function runStructuredOpenRouterRequest(input: {
         const providerCode = nullableString(upstreamError?.metadata?.provider_code);
         const upstreamErrorCode = toNullableFiniteNumber(upstreamError?.code);
         const errorMessage = nullableString(upstreamError?.message);
+        const contractError = classifyOpenRouterContractError(response.status, errorType, errorMessage);
         const unapprovedProvider = !isApprovedStructuredProvider(input.callKind, input.model, selectedProvider);
         const retryable = !unapprovedProvider && (response.status === 429 || response.status >= 500);
         failureStatus = unapprovedProvider
           ? input.callKind === "agent" ? "model_unapproved_provider" : "cio_unapproved_provider"
-          : `openrouter_${response.status}`;
+          : contractError
+            ? `${input.callKind === "agent" ? "model" : "cio"}_${contractError.toLowerCase()}`
+            : `openrouter_${response.status}`;
         attempts.push({
           attempt,
           model: input.model,
@@ -564,7 +583,7 @@ export async function runStructuredOpenRouterRequest(input: {
           status: unapprovedProvider ? "UNAPPROVED_PROVIDER" : "HTTP_ERROR",
           latencyMs: Math.max(0, Date.now() - startedAt),
           httpStatus: response.status,
-          errorCategory: unapprovedProvider ? "UNAPPROVED_PROVIDER" : `HTTP_${response.status}`,
+          errorCategory: unapprovedProvider ? "UNAPPROVED_PROVIDER" : contractError || `HTTP_${response.status}`,
           finishReason: null,
           contentLength: responseText.length,
           responseHash: responseText ? await sha256Text(responseText) : null,
@@ -577,6 +596,7 @@ export async function runStructuredOpenRouterRequest(input: {
           upstreamErrorCode,
           providerCode,
           errorMessageHash: errorMessage ? await sha256Text(errorMessage) : null,
+          contractError,
           ...requestMetadata,
         });
         if (!retryable || attempt === 2) break;
@@ -722,7 +742,7 @@ export async function runStructuredOpenRouterRequest(input: {
           ...requestMetadata,
         });
         if (attempt === 2) break;
-        maxOutputTokens = input.callKind === "agent" ? 640 : maxOutputTokens;
+        if (!isGpt5Model(input.model) && input.callKind === "agent") maxOutputTokens = 640;
         continue;
       }
       let value: any = null;
@@ -3045,6 +3065,101 @@ export async function runSpxUatReplay(
   return { runId, message, result };
 }
 
+const buildSpxUatLlmContext = (snapshot: MarketSnapshot) => ({
+  snapshotFacts: snapshot.facts,
+  marketDataQuality: {
+    overallStatus: snapshot.dataQuality.status,
+    hardBlocks: snapshot.dataQuality.hardBlocks,
+    warnings: snapshot.dataQuality.warnings,
+  },
+  TODAYS_MEMORY: { currentPosition: 'NONE', entryPrice: null, recentActions: [] },
+});
+
+export async function runSpxGpt5CompatibilityProbe(
+  env: Env,
+  options: { fetcher?: typeof fetch } = {},
+) {
+  const model = env.SPX_COUNCIL_MODEL || env.OPENROUTER_MODEL || DEFAULT_SPX_COUNCIL_MODEL;
+  if (!env.OPENROUTER_API_KEY) throw new Error('gpt5_probe_missing_openrouter_key');
+  const result = await runStructuredOpenRouterRequest({
+    callKind: 'agent',
+    apiKey: env.OPENROUTER_API_KEY,
+    model,
+    messages: [
+      { role: 'system', content: 'Return the strict JSON schema only. This is a provider compatibility probe, not market analysis.' },
+      { role: 'user', content: 'snapshotFacts: {"probe.status":"ok"}' },
+    ],
+    fetcher: options.fetcher,
+    timeoutMs: SPX_COUNCIL_TIMING_POLICY.attemptTimeoutMs,
+    allowedEvidenceRefs: ['probe.status'],
+    projectionBytes: 21,
+    factCount: 1,
+    maxProjectionBytes: AGENT_PROJECTION_MAX_BYTES,
+  });
+  if (!result.ok) throw new Error(`gpt5_probe_${result.failureStatus || 'failed'}`);
+  return result;
+}
+
+export async function runSpxUatLlm(
+  env: Env,
+  runId: string,
+  deliveryMode: SpxDeliveryMode,
+  options: { fetcher?: typeof fetch } = {},
+) {
+  if (deliveryMode === 'SEND' && !env.SPX_RECAP_DB) throw new Error('SPX_RECAP_DB unavailable');
+  await runSpxGpt5CompatibilityProbe(env, options);
+  const previewStore = new InMemorySpxDecisionStore();
+  const store = deliveryMode === 'SEND' ? new D1SpxDecisionStore(env.SPX_RECAP_DB!) : previewStore;
+  let message = '';
+  const result = await runSpxDecisionPipeline({
+    runId,
+    scheduledAt: SPX_UAT_REPLAY_SCHEDULED_AT,
+    currentPosition: 'NONE',
+    runMode: 'UAT_LLM',
+  }, {
+    clock: { now: () => new Date() },
+    marketData: { load: async () => ({
+      ...buildSpxUatReplaySnapshot(runId),
+      runMode: 'UAT_LLM' as const,
+      facts: { ...buildSpxUatReplaySnapshot(runId).facts, 'run.mode': 'UAT_LLM' },
+    }) },
+    council: { analyze: async (snapshot) => {
+      const context = buildSpxUatLlmContext(snapshot);
+      const startedAt = Date.now();
+      const [QM, CM, NT, PA] = await runCouncilAnalyses(context, env, { fetcher: options.fetcher });
+      return buildCouncilResult({ QM, CM, NT, PA }, Date.now() - startedAt);
+    } },
+    cio: { decide: async (snapshot, council) => {
+      const context = buildSpxUatLlmContext(snapshot);
+      const result = await decideWithCio(context, council.agents, env, { fetcher: options.fetcher });
+      const plan = result.plan as any;
+      return {
+        action: normalizeCioAction(plan?.trade_action),
+        confidence: clampConfidence(plan?.confidence_score, 0),
+        thesis: compactModelText(plan?.logic, 320),
+        entry: compactModelText(plan?.buy_zone, 180) || null,
+        invalidation: compactModelText(plan?.stop_loss, 180) || null,
+        targets: Array.isArray(plan?.targets) ? plan.targets.map((item: unknown) => compactModelText(item, 180)).filter(Boolean) : [],
+        noTradeConditions: Array.isArray(plan?.no_trade_conditions) ? plan.no_trade_conditions.map((item: unknown) => compactModelText(item, 180)).filter(Boolean) : [],
+        evidenceRefs: normalizeEvidenceRefs(plan?.evidence_refs),
+        claims: normalizeEvidenceClaims(plan?.claims).map((claim) => ({ text: claim.text, evidenceRefs: claim.evidenceRefs })),
+        modelStatus: result.modelStatus,
+        latencyMs: result.attempts.reduce((total, attempt) => total + attempt.latencyMs, 0),
+        attempts: result.attempts,
+      };
+    } },
+    riskGate: { evaluate: async () => ({ disposition: 'PASS', reason: 'No safety veto.' }) },
+    store,
+    telegram: { send: async (text) => {
+      message = text;
+      return deliveryMode === 'SEND'
+        ? sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, text)
+        : { messageId: 'uat-llm-preview' };
+    } },
+  });
+  return { runId, message, result };
+}
+
 async function runTradingAgents(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}) {
   let runLockToken: string | null = null;
   let decisionStore: D1SpxDecisionStore | null = null;
@@ -3911,6 +4026,27 @@ export default {
     if (url.searchParams.has('gex')) {
       ctx.waitUntil(runSpxGexHeatmapGeneration(env, new Date(), { force: forceManualRun }));
       return new Response('SPX GEX heatmap generation triggered.');
+    }
+
+    if (url.searchParams.has('uat_llm')) {
+      const deliveryMode = resolveSpxDeliveryMode({
+        trigger: 'MANUAL',
+        explicitDelivery: url.searchParams.has('deliver'),
+        debugPreview: url.searchParams.has('debug'),
+      });
+      const requestedRunId = url.searchParams.get('uat_run_id');
+      const runId = requestedRunId && /^[a-z0-9_.:-]{8,120}$/i.test(requestedRunId)
+        ? requestedRunId
+        : `uat-llm-20260713-1445-${Date.now()}`;
+      const outcome = await runSpxUatLlm(env, runId, deliveryMode);
+      return Response.json({
+        runId,
+        deliveryMode,
+        probe: 'SUCCESS',
+        delivery: outcome.result.delivery,
+        finalAction: outcome.result.finalDecision.action,
+        degraded: outcome.result.run.degraded,
+      });
     }
 
     const manualStatus = getMarketScheduleStatus(new Date());
