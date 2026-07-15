@@ -2,6 +2,7 @@ import type { D1DatabaseLike } from "./spx-recap-d1";
 import {
   SPX_LIFECYCLE_STAGES,
   type CioDecision,
+  type CouncilAgentAnalysis,
   type CouncilResult,
   type DecisionRunRecord,
   type LifecycleEvent,
@@ -60,7 +61,16 @@ export interface SpxDecisionCockpitProjection {
   runId: string;
   scheduledAt: string;
   currentStage: SpxLifecycleStage;
-  councilTally: { OPEN_CALL: number; OPEN_PUT: number; HOLD: number };
+  councilTally: { CALL: number; PUT: number; HOLD: number; INVALID: number };
+  councilAgents: Array<{
+    agent: CouncilAgentAnalysis["agent"];
+    decision: CouncilAgentAnalysis["decision"];
+    confidence: number;
+    reasoning: string;
+    valid: boolean;
+    modelStatus: string;
+    attempts: NonNullable<CouncilAgentAnalysis["attempts"]>;
+  }>;
   cio: {
     action: SpxDecisionAction | null;
     confidence: number;
@@ -143,13 +153,32 @@ export const buildSpxDecisionCockpitProjection = (
   outbox: OutboxRecord | null,
   lifecycle: LifecycleEvent[],
 ): SpxDecisionCockpitProjection => {
-  const councilTally = { OPEN_CALL: 0, OPEN_PUT: 0, HOLD: 0 };
-  for (const agent of run.council?.agents || []) councilTally[agent.decision] += 1;
+  const councilTally = { CALL: 0, PUT: 0, HOLD: 0, INVALID: 0 };
+  const councilAgents = (["QM", "CM", "NT", "PA"] as const).flatMap((agentName) => {
+    const agent = run.council?.agents.find((candidate) => candidate.agent === agentName);
+    if (!agent) return [];
+    const valid = agent.valid ?? (agent.modelStatus === "AI" && !agent.fallbackStatus);
+    const persistedDecision = String(agent.decision || "HOLD").toUpperCase();
+    const decision: CouncilAgentAnalysis["decision"] = persistedDecision === "OPEN_CALL"
+      ? "CALL"
+      : persistedDecision === "OPEN_PUT" ? "PUT" : persistedDecision === "CALL" || persistedDecision === "PUT" ? persistedDecision : "HOLD";
+    councilTally[valid ? decision : "INVALID"] += 1;
+    return [{
+      agent: agent.agent,
+      decision,
+      confidence: agent.confidence,
+      reasoning: agent.reasoning || "",
+      valid,
+      modelStatus: agent.modelStatus,
+      attempts: agent.attempts || [],
+    }];
+  });
   return {
     runId: run.runId,
     scheduledAt: run.scheduledAt,
     currentStage: run.currentStage,
     councilTally,
+    councilAgents,
     cio: {
       action: run.cioDecision?.action || null,
       confidence: run.cioDecision?.confidence || 0,

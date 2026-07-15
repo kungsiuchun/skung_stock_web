@@ -43,8 +43,12 @@ const allHoldCouncil: CouncilResult = {
   agents: replayFixture.council.map((agent: any) => ({
     ...agent,
     evidenceRefs: ["spx.last", "spx.vwap"],
+    claims: [{ text: `${agent.agent} found no snapshot-backed entry edge.`, evidenceRefs: ["spx.last", "spx.vwap"] }],
     fallbackStatus: null,
     latencyMs: 30,
+    valid: true,
+    attempts: [],
+    reasoning: `${agent.agent} found no snapshot-backed entry edge.`,
   })),
 };
 
@@ -75,6 +79,7 @@ function buildDependencies(overrides: Partial<SpxDecisionPipelineDependencies> =
         targets: [],
         noTradeConditions: ["Council tally remains four HOLD votes"],
         evidenceRefs: ["spx.last", "spx.vwap", "spx.ema9"],
+        claims: [{ text: "No entry edge is confirmed.", evidenceRefs: ["spx.last", "spx.vwap", "spx.ema9"] }],
         modelStatus: "AI",
         latencyMs: 80,
       }),
@@ -123,6 +128,72 @@ test("2026-07-13 14:45 ET replay: four HOLD votes cannot become a directional tr
   );
 });
 
+test("Telegram starts with SPX price, final action, and scheduled ET time", async () => {
+  const { dependencies, sent } = buildDependencies();
+
+  await runSpxDecisionPipeline({
+    runId: "telegram-header-contract",
+    scheduledAt,
+    currentPosition: "NONE",
+  }, dependencies);
+
+  assert.deepEqual((sent[0] || "").split("\n").slice(0, 2), [
+    "SPX: 7523.96 操作：觀望",
+    "⏱ 美東時間：2026/07/13 14:45:39 ET｜標的：SPX",
+  ]);
+});
+
+test("Telegram lists four Council agents with reasoning and excludes invalid votes from HOLD", async () => {
+  const agentReasoning = {
+    QM: "短線動能不足，價格仍貼近 VWAP。",
+    CM: "Gamma Flip 上下訊號互相抵銷。",
+    NT: "事件風險未形成可驗證方向。",
+    PA: "K 線結構未出現有效突破。",
+  } as const;
+  const partialCouncil: CouncilResult = {
+    status: "DEGRADED",
+    degradedReason: "council_qm_model_output_not_json",
+    latencyMs: 240,
+    agents: allHoldCouncil.agents.map((agent) => agent.agent === "QM"
+      ? {
+        ...agent,
+        valid: false,
+        confidence: 0,
+        modelStatus: "FAILED",
+        fallbackStatus: "model_output_not_json",
+        reasoning: "model_output_not_json",
+      }
+      : {
+        ...agent,
+        valid: true,
+        confidence: 60,
+        reasoning: agentReasoning[agent.agent],
+      }),
+  };
+  const { dependencies, sent } = buildDependencies({
+    council: { analyze: async () => partialCouncil },
+  });
+
+  await runSpxDecisionPipeline({
+    runId: "telegram-council-contract",
+    scheduledAt,
+    currentPosition: "NONE",
+  }, dependencies);
+
+  const message = sent[0] || "";
+  assert.match(message, /判斷｜Council 未完整：QM 模型格式無效；CIO 按契約未執行。/);
+  assert.match(message, /議會｜Call 0 · Put 0 · 觀望 3 · 無效 1/);
+  assert.match(message, /QM｜無效 · 信心 0% · 無效票\n理由｜模型回應格式無效；重試後仍無法驗證。/);
+  assert.match(message, /CM｜觀望 · 信心 60% · AI\n理由｜Gamma Flip 上下訊號互相抵銷。/);
+  assert.match(message, /NT｜觀望 · 信心 60% · AI\n理由｜事件風險未形成可驗證方向。/);
+  assert.match(message, /PA｜觀望 · 信心 60% · AI\n理由｜K 線結構未出現有效突破。/);
+  assert.ok(message.indexOf("QM｜") < message.indexOf("CM｜"));
+  assert.ok(message.indexOf("CM｜") < message.indexOf("NT｜"));
+  assert.ok(message.indexOf("NT｜") < message.indexOf("PA｜"));
+  assert.doesNotMatch(message, /model_output_not_json|council_qm_/);
+  assert.ok(message.length < 4096, `Telegram message must stay below 4096 characters; got ${message.length}`);
+});
+
 test("degraded HOLD Telegram is concise, human-readable, and never leaks internal fallback codes", async () => {
   const { dependencies, sent } = buildDependencies({
     council: {
@@ -140,7 +211,8 @@ test("degraded HOLD Telegram is concise, human-readable, and never leaks interna
 
   const message = sent[0] || "";
   assert.match(message, /^⚠️ SPX｜降級觀望/m);
-  assert.match(message, /議會｜Call 0 · Put 0 · 觀望 4/);
+  assert.match(message, /議會｜Call 0 · Put 0 · 觀望 0 · 無效 4/);
+  assert.match(message, /判斷｜Council 未完整：QM 模型分析未啟用、CM 模型分析未啟用、NT 模型分析未啟用、PA 模型分析未啟用；CIO 按契約未執行。/);
   assert.match(message, /CIO｜HOLD · 0% · 未完成/);
   assert.match(message, /計劃｜不開倉/);
   assert.match(message, /🛰️ GEX｜Canonical snapshot 缺失；本輪不引用 GEX。/);
@@ -216,7 +288,7 @@ test("directional Telegram keeps data-backed evidence and executable levels", as
     ...allHoldCouncil,
     agents: allHoldCouncil.agents.map((agent, index) => ({
       ...agent,
-      decision: index < 3 ? "OPEN_CALL" : "HOLD",
+      decision: index < 3 ? "CALL" : "HOLD",
     })),
   };
   const { dependencies, sent } = buildDependencies({
@@ -231,6 +303,7 @@ test("directional Telegram keeps data-backed evidence and executable levels", as
         targets: ["7540", "7552"],
         noTradeConditions: ["VWAP rejection persists"],
         evidenceRefs: ["spx.last", "spx.vwap"],
+        claims: [{ text: "Momentum is directional.", evidenceRefs: ["spx.last", "spx.vwap"] }],
         modelStatus: "AI",
         latencyMs: 40,
       }),
@@ -331,6 +404,7 @@ test("Risk Gate can pass, veto to HOLD, or require CLOSE, but cannot create/reve
     targets: ["7550"],
     noTradeConditions: [],
     evidenceRefs: ["spx.last"],
+    claims: [{ text: "Price supports the direction.", evidenceRefs: ["spx.last"] }],
     modelStatus: "AI" as const,
     latencyMs: 20,
   };
@@ -394,6 +468,7 @@ test("directional CIO evidence that cites stale canonical GEX is vetoed to DEGRA
         targets: ["7550"],
         noTradeConditions: ["Lose gamma flip"],
         evidenceRefs: ["gex.gammaFlip"],
+        claims: [{ text: "Gamma flip supports the direction.", evidenceRefs: ["gex.gammaFlip"] }],
         modelStatus: "AI",
         latencyMs: 20,
       }),
@@ -424,6 +499,7 @@ test("canonical GEX gate exposes missing/schema mismatch and permits a fresh fal
     targets: ["7480"],
     noTradeConditions: [],
     evidenceRefs: ["gex.gammaFlip"],
+    claims: [{ text: "Gamma flip supports the direction.", evidenceRefs: ["gex.gammaFlip"] }],
     modelStatus: "AI",
     latencyMs: 10,
   };
@@ -536,6 +612,7 @@ test("invalid directional CIO evidence schema degrades to HOLD", async () => {
         targets: ["7500"],
         noTradeConditions: [],
         evidenceRefs: ["invented.signal"],
+        claims: [{ text: "Invented evidence must fail.", evidenceRefs: ["invented.signal"] }],
         modelStatus: "AI",
         latencyMs: 10,
       }),
@@ -633,8 +710,44 @@ test("Board cockpit and Telegram projection expose the same run, CIO action, and
   assert.equal(cockpit.cio.action, "HOLD");
   assert.equal(cockpit.finalAction, "HOLD");
   assert.equal(cockpit.riskGate.disposition, "PASS");
-  assert.deepEqual(cockpit.councilTally, { OPEN_CALL: 0, OPEN_PUT: 0, HOLD: 4 });
+  assert.deepEqual(cockpit.councilTally, { CALL: 0, PUT: 0, HOLD: 4, INVALID: 0 });
+  assert.deepEqual(cockpit.councilAgents.map((agent) => ({
+    agent: agent.agent,
+    valid: agent.valid,
+    reasoning: agent.reasoning,
+  })), [
+    { agent: "QM", valid: true, reasoning: "QM found no snapshot-backed entry edge." },
+    { agent: "CM", valid: true, reasoning: "CM found no snapshot-backed entry edge." },
+    { agent: "NT", valid: true, reasoning: "NT found no snapshot-backed entry edge." },
+    { agent: "PA", valid: true, reasoning: "PA found no snapshot-backed entry edge." },
+  ]);
   assert.match(sent[0] || "", /Run｜board-telegram-same-run/);
   assert.match(sent[0] || "", /CIO｜HOLD/);
   assert.match(sent[0] || "", /風控｜PASS/);
+});
+
+test("Board cockpit normalizes legacy OPEN_* Council votes without corrupting tally", () => {
+  const legacyRun = {
+    runId: "legacy-council-votes",
+    scheduledAt: scheduledAt.toISOString(),
+    currentStage: "PERSISTED",
+    snapshot,
+    council: {
+      ...allHoldCouncil,
+      agents: allHoldCouncil.agents.map((agent, index) => ({
+        ...agent,
+        decision: index === 0 ? "OPEN_CALL" : index === 1 ? "OPEN_PUT" : "HOLD",
+      })),
+    },
+    cioDecision: null,
+    riskGate: null,
+    finalDecision: null,
+    finalAction: "HOLD",
+    degraded: false,
+    degradedReason: null,
+    createdAt: scheduledAt.toISOString(),
+    updatedAt: scheduledAt.toISOString(),
+  } as any;
+  const cockpit = buildSpxDecisionCockpitProjection(legacyRun, null, []);
+  assert.deepEqual(cockpit.councilTally, { CALL: 1, PUT: 1, HOLD: 2, INVALID: 0 });
 });

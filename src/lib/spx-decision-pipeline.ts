@@ -3,6 +3,7 @@ import type { SpxGexTelegramSummary } from "./spx-gex-heatmap";
 export type SpxDecisionAction = "OPEN_CALL" | "OPEN_PUT" | "HOLD" | "CLOSE";
 export type SpxPosition = "NONE" | "CALL" | "PUT";
 export type SpxDeliveryMode = "SEND" | "PREVIEW";
+export type SpxRunMode = "LIVE" | "UAT_REPLAY";
 
 export const NT_VOLATILITY_RISK_PROMPT = `You are NT, a ruthless Volatility Risk Manager. You monitor options premium pressure, VIX/VIX9D stress, gamma regime, and tail-risk.
 Your Task: Analyze current VIX, VIX9D, volatility compression or expansion, BB squeeze, GEX regime, and any disabled or missing sentiment inputs honestly. Do not require removed external flow sources.
@@ -75,17 +76,47 @@ export interface MarketSnapshot {
   replayGrade: SpxReplayGrade;
   replayEvidence: SpxDecisionReplayEvidence | null;
   rawSnapshotAvailable: boolean;
+  runMode?: SpxRunMode;
 }
 
 export interface CouncilAgentAnalysis {
   agent: "QM" | "CM" | "NT" | "PA";
-  decision: "OPEN_CALL" | "OPEN_PUT" | "HOLD";
+  decision: "CALL" | "PUT" | "HOLD";
   confidence: number;
   evidenceRefs: string[];
+  claims: SpxEvidenceClaim[];
   modelStatus: string;
   fallbackStatus: string | null;
   latencyMs: number;
   reasoning?: string;
+  valid?: boolean;
+  attempts?: ModelAttemptMetadata[];
+}
+
+export interface SpxEvidenceClaim {
+  text: string;
+  evidenceRefs: string[];
+}
+
+export interface ModelAttemptMetadata {
+  attempt: number;
+  model: string;
+  requestedModel?: string;
+  resolvedModel?: string | null;
+  provider?: string | null;
+  responseId?: string | null;
+  status: "SUCCESS" | "TIMEOUT" | "HTTP_ERROR" | "SCHEMA_INVALID" | "REQUEST_FAILED";
+  latencyMs: number;
+  httpStatus: number | null;
+  errorCategory: string | null;
+  finishReason: string | null;
+  contentLength: number;
+  responseHash: string | null;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+  reasoningTokens?: number | null;
+  totalTokens?: number | null;
+  cost?: number | null;
 }
 
 export interface CouncilResult {
@@ -104,8 +135,10 @@ export interface CioDecision {
   targets: string[];
   noTradeConditions: string[];
   evidenceRefs: string[];
+  claims: SpxEvidenceClaim[];
   modelStatus: string;
   latencyMs: number;
+  attempts?: ModelAttemptMetadata[];
 }
 
 export type RiskGateDisposition = "PASS" | "VETO_TO_HOLD" | "REQUIRE_CLOSE";
@@ -145,6 +178,7 @@ export interface DecisionRunRecord {
   degradedReason: string | null;
   createdAt: string;
   updatedAt: string;
+  runMode?: SpxRunMode;
 }
 
 export interface OutboxRecord {
@@ -209,6 +243,7 @@ export interface SpxDecisionPipelineInput {
   runId: string;
   scheduledAt: Date;
   currentPosition: SpxPosition;
+  runMode?: SpxRunMode;
 }
 
 export interface SpxDecisionPipelineResult {
@@ -268,37 +303,58 @@ const holdDecision = (reason: string, modelStatus: string): CioDecision => ({
   targets: [],
   noTradeConditions: [reason],
   evidenceRefs: [],
+  claims: [],
   modelStatus,
   latencyMs: 0,
 });
 
-const validateCouncil = (council: CouncilResult) => {
+const validateCouncil = (council: CouncilResult, snapshot: MarketSnapshot) => {
   if (council.status !== "OK") return council.degradedReason || "council_degraded";
   if (council.agents.length !== expectedCouncilAgents.length) return "council_agent_count_invalid";
   const observed = new Set(council.agents.map((agent) => agent.agent));
   if (expectedCouncilAgents.some((agent) => !observed.has(agent as CouncilAgentAnalysis["agent"]))) {
     return "council_agent_set_invalid";
   }
-  const failedAgent = council.agents.find((agent) => agent.modelStatus !== "AI" || Boolean(agent.fallbackStatus));
+  const failedAgent = council.agents.find((agent) => !councilAgentIsValid(agent));
   if (failedAgent) return `council_${failedAgent.agent.toLowerCase()}_${failedAgent.fallbackStatus || failedAgent.modelStatus}`;
+  for (const agent of council.agents) {
+    if (!(["CALL", "PUT", "HOLD"] as const).includes(agent.decision)) return `council_${agent.agent.toLowerCase()}_decision_invalid`;
+    if (!Number.isFinite(agent.confidence) || agent.confidence < 1 || agent.confidence > 100) {
+      return `council_${agent.agent.toLowerCase()}_confidence_invalid`;
+    }
+    if (!Array.isArray(agent.evidenceRefs) || agent.evidenceRefs.length === 0) return `council_${agent.agent.toLowerCase()}_evidence_missing`;
+    if (!Array.isArray(agent.claims) || agent.claims.length === 0 || agent.claims.some((claim) => !claim.text.trim() || claim.evidenceRefs.length === 0)) {
+      return `council_${agent.agent.toLowerCase()}_claims_invalid`;
+    }
+    const evidenceRefs = [...agent.evidenceRefs, ...agent.claims.flatMap((claim) => claim.evidenceRefs)];
+    const missingEvidence = evidenceRefs.filter((reference) => !(reference in snapshot.facts));
+    if (missingEvidence.length > 0) return `council_${agent.agent.toLowerCase()}_evidence_not_in_snapshot:${missingEvidence.join(",")}`;
+  }
   return null;
 };
 
 const validateCioDecision = (decision: CioDecision, snapshot: MarketSnapshot) => {
   if (!decision || !allowedCioActions.has(decision.action)) return "cio_schema_invalid_action";
-  if (!Number.isFinite(Number(decision.confidence))) return "cio_schema_invalid_confidence";
+  if (!Number.isFinite(Number(decision.confidence)) || decision.confidence < 1 || decision.confidence > 100) return "cio_schema_invalid_confidence";
   if (typeof decision.thesis !== "string" || !decision.thesis.trim()) return "cio_schema_invalid_thesis";
-  if (!Array.isArray(decision.evidenceRefs) || !Array.isArray(decision.targets) || !Array.isArray(decision.noTradeConditions)) {
+  if (!Array.isArray(decision.evidenceRefs) || !Array.isArray(decision.claims) || !Array.isArray(decision.targets) || !Array.isArray(decision.noTradeConditions)) {
     return "cio_schema_invalid_arrays";
   }
-  if (decision.modelStatus !== "AI") return `cio_model_${decision.modelStatus || "unknown"}`;
+  if (decision.modelStatus !== "AI" && !(snapshot.runMode === "UAT_REPLAY" && decision.modelStatus === "FIXTURE_REPLAY")) {
+    return `cio_model_${decision.modelStatus || "unknown"}`;
+  }
+  if (decision.evidenceRefs.length === 0 || decision.claims.length === 0) return "cio_evidence_missing";
+  if (decision.claims.some((claim) => !claim.text.trim() || claim.evidenceRefs.length === 0)) return "cio_claims_invalid";
+  const allEvidenceRefs = [...decision.evidenceRefs, ...decision.claims.flatMap((claim) => claim.evidenceRefs)];
+  const missingEvidence = allEvidenceRefs.filter((reference) => !(reference in snapshot.facts));
+  if (missingEvidence.length > 0) return `cio_evidence_not_in_snapshot:${missingEvidence.join(",")}`;
   if (directionalActions.has(decision.action)) {
-    if (decision.evidenceRefs.length === 0) return "cio_direction_missing_evidence";
-    const missingEvidence = decision.evidenceRefs.filter((reference) => !(reference in snapshot.facts));
-    if (missingEvidence.length > 0) return `cio_evidence_not_in_snapshot:${missingEvidence.join(",")}`;
     if (!decision.entry || !decision.invalidation || decision.targets.length === 0) {
       return "cio_direction_missing_trade_levels";
     }
+  }
+  if (decision.action === "HOLD" && (decision.entry !== null || decision.invalidation !== null || decision.targets.length > 0)) {
+    return "cio_hold_has_trade_levels";
   }
   return null;
 };
@@ -391,6 +447,7 @@ const lifecyclePayloadForCouncil = (council: CouncilResult) => ({
     modelStatus: agent.modelStatus,
     fallbackStatus: agent.fallbackStatus,
     evidenceRefs: agent.evidenceRefs,
+    claims: agent.claims,
     latencyMs: agent.latencyMs,
   })),
 });
@@ -449,10 +506,74 @@ const formatTelegramGexSection = (snapshot: MarketSnapshot): string[] => {
   return lines;
 };
 
+const councilAgentIsValid = (agent: CouncilAgentAnalysis) => agent.valid
+  ?? (agent.modelStatus === "AI" && !agent.fallbackStatus);
+
+const humanizeModelFailure = (value: string | null | undefined) => {
+  const reason = String(value || "").toLowerCase();
+  if (reason.includes("output_not_json") || reason.includes("schema") || reason.includes("format")) {
+    return "模型回應格式無效";
+  }
+  if (reason.includes("timeout") || reason.includes("timed out")) return "模型逾時";
+  if (reason.includes("429") || reason.includes("rate_limit")) return "模型服務限流";
+  if (reason.includes("401") || reason.includes("403") || reason.includes("unauthorized") || reason.includes("forbidden")) {
+    return "模型授權失敗";
+  }
+  if (reason.includes("5xx") || /http_5\d\d/.test(reason)) return "模型服務暫時失敗";
+  if (reason.includes("disabled") || reason.includes("skipped")) return "模型分析未啟用";
+  if (reason.includes("market_data") || reason.includes("snapshot")) return "必要市場資料不足";
+  return "模型分析失敗";
+};
+
+const councilFailureSummary = (council: CouncilResult, cioDecision: CioDecision) => {
+  const invalidAgents = expectedCouncilAgents
+    .map((agentName) => council.agents.find((agent) => agent.agent === agentName))
+    .filter((agent): agent is CouncilAgentAnalysis => Boolean(agent) && !councilAgentIsValid(agent as CouncilAgentAnalysis));
+  if (invalidAgents.length) {
+    const failures = invalidAgents
+      .map((agent) => `${agent.agent} ${humanizeModelFailure(agent.fallbackStatus || agent.modelStatus || agent.reasoning).replace("模型回應格式無效", "模型格式無效")}`)
+      .join("、");
+    return `Council 未完整：${failures}；CIO 按契約未執行。`;
+  }
+  if (council.agents.length !== expectedCouncilAgents.length) {
+    return "Council 未完整：agent 數量或身份不符；CIO 按契約未執行。";
+  }
+  if (cioDecision.modelStatus !== "AI") {
+    return `CIO 未完成：${humanizeModelFailure(cioDecision.modelStatus)}；按契約保持觀望。`;
+  }
+  return "必要市場資料未完整；Council 與 CIO 按契約未執行。";
+};
+
+const formatCouncilAgentLines = (council: CouncilResult) => {
+  const decisionLabel: Record<CouncilAgentAnalysis["decision"], string> = {
+    CALL: "Call",
+    PUT: "Put",
+    HOLD: "觀望",
+  };
+  return expectedCouncilAgents.flatMap((agentName) => {
+    const agent = council.agents.find((candidate) => candidate.agent === agentName);
+    if (!agent) {
+      return [
+        `${agentName}｜無效 · 信心 0% · 無效票`,
+        "理由｜Council agent 結果缺失。",
+      ];
+    }
+    const valid = councilAgentIsValid(agent);
+    const reasoning = valid
+      ? String(agent.reasoning || "未提供可審計 reasoning。").replace(/\s+/g, " ").trim().slice(0, 180)
+      : `${humanizeModelFailure(agent.fallbackStatus || agent.modelStatus || agent.reasoning)}；重試後仍無法驗證。`;
+    return [
+      `${agent.agent}｜${valid ? decisionLabel[agent.decision] : "無效"} · 信心 ${safeConfidence(agent.confidence)}% · ${valid ? agent.modelStatus === "FIXTURE_REPLAY" ? "固定重播" : "AI" : "無效票"}`,
+      `理由｜${reasoning}`,
+    ];
+  });
+};
+
 export function formatTelegramDecisionMessage(input: TelegramDecisionMessageInput) {
   const { run, snapshot, council, cioDecision, riskGate } = input;
   const tally = council.agents.reduce((result, agent) => {
-    result[agent.decision] = (result[agent.decision] || 0) + 1;
+    const bucket = councilAgentIsValid(agent) ? agent.decision : "INVALID";
+    result[bucket] = (result[bucket] || 0) + 1;
     return result;
   }, {} as Record<string, number>);
   const factLabels: Record<string, string> = {
@@ -474,7 +595,26 @@ export function formatTelegramDecisionMessage(input: TelegramDecisionMessageInpu
     HOLD: "🟡 SPX｜觀望",
     CLOSE: "⚪ SPX｜平倉",
   };
-  const modelComplete = cioDecision.modelStatus === "AI";
+  const actionLabel: Record<SpxDecisionAction, string> = {
+    OPEN_CALL: "買入 Call",
+    OPEN_PUT: "買入 Put",
+    HOLD: "觀望",
+    CLOSE: "平倉",
+  };
+  const scheduledEtParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(run.scheduledAt));
+  const scheduledEt = Object.fromEntries(scheduledEtParts.map((part) => [part.type, part.value]));
+  const spxLast = Number(snapshot.facts["spx.last"]);
+  const spxLabel = Number.isFinite(spxLast) ? spxLast.toFixed(2) : "N/A";
+  const modelComplete = cioDecision.modelStatus === "AI" || cioDecision.modelStatus === "FIXTURE_REPLAY";
   const dataLabel = snapshot.dataQuality.status === "OK"
     ? "正常"
     : snapshot.dataQuality.status === "WARN" ? "警告" : "阻擋";
@@ -492,11 +632,15 @@ export function formatTelegramDecisionMessage(input: TelegramDecisionMessageInpu
     return "安全條件未通過，方向性交易已否決";
   })();
   const lines: Array<string | null> = [
+    `SPX: ${spxLabel} 操作：${actionLabel[riskGate.action]}`,
+    `⏱ 美東時間：${scheduledEt.year}/${scheduledEt.month}/${scheduledEt.day} ${scheduledEt.hour}:${scheduledEt.minute}:${scheduledEt.second} ET｜標的：SPX`,
+    run.runMode === "UAT_REPLAY" ? "🧪 UAT REPLAY｜非即時訊號，只用固定歷史 fixture 驗證流水線。" : null,
     run.degraded ? "⚠️ SPX｜降級觀望" : actionHeader[riskGate.action],
-    `判斷｜${run.degraded ? "本輪分析未完整，按契約保持觀望。" : cioDecision.thesis}`,
+    `判斷｜${run.degraded ? councilFailureSummary(council, cioDecision) : cioDecision.thesis}`,
     ...formatTelegramGexSection(snapshot),
-    `議會｜Call ${tally.OPEN_CALL || 0} · Put ${tally.OPEN_PUT || 0} · 觀望 ${tally.HOLD || 0}`,
-    `CIO｜${cioDecision.action} · ${safeConfidence(cioDecision.confidence)}% · ${modelComplete ? "完成" : "未完成"}`,
+    `議會｜Call ${tally.CALL || 0} · Put ${tally.PUT || 0} · 觀望 ${tally.HOLD || 0} · 無效 ${tally.INVALID || 0}`,
+    ...formatCouncilAgentLines(council),
+    `CIO｜${cioDecision.action} · ${safeConfidence(cioDecision.confidence)}% · ${cioDecision.modelStatus === "FIXTURE_REPLAY" ? "固定重播" : modelComplete ? "完成" : "未完成"}`,
     evidence.length ? `依據｜${evidence.join(" · ")}` : null,
   ];
 
@@ -514,7 +658,7 @@ export function formatTelegramDecisionMessage(input: TelegramDecisionMessageInpu
   lines.push(
     `風控｜${riskGate.disposition} · ${riskReason}`,
     `資料｜${dataLabel} · ${replayLabel[snapshot.replayGrade]}`,
-    `狀態｜${run.degraded ? "DEGRADED · 分析未完整" : "NORMAL"}`,
+    `狀態｜${run.runMode === "UAT_REPLAY" ? "UAT_REPLAY · 非即時訊號" : run.degraded ? "DEGRADED · 分析未完整" : "NORMAL"}`,
     `Run｜${run.runId}`,
     snapshot.boardDeepLink ? `Board｜${snapshot.boardDeepLink}` : null,
   );
@@ -530,10 +674,13 @@ const buildEmptyCouncil = (reason: string): CouncilResult => ({
     decision: "HOLD",
     confidence: 0,
     evidenceRefs: [],
+    claims: [],
     modelStatus: "SKIPPED",
     fallbackStatus: reason,
     latencyMs: 0,
     reasoning: reason,
+    valid: false,
+    attempts: [],
   })),
 });
 
@@ -551,6 +698,7 @@ const makeRunRecord = (input: SpxDecisionPipelineInput, at: string): DecisionRun
   degradedReason: null,
   createdAt: at,
   updatedAt: at,
+  runMode: input.runMode || "LIVE",
 });
 
 const resultFromExisting = async (
@@ -617,6 +765,7 @@ export async function runSpxDecisionPipeline(
   let snapshot: MarketSnapshot;
   try {
     snapshot = await dependencies.marketData.load(input.runId, input.scheduledAt);
+    snapshot.runMode = input.runMode || snapshot.runMode || "LIVE";
   } catch (error) {
     const reason = `market_data_${isTimeoutError(error) ? "timeout" : "failed"}:${asErrorMessage(error)}`;
     snapshot = {
@@ -630,6 +779,7 @@ export async function runSpxDecisionPipeline(
       replayGrade: "UNAVAILABLE",
       replayEvidence: null,
       rawSnapshotAvailable: false,
+      runMode: input.runMode || "LIVE",
     };
   }
   if (snapshot.runId !== input.runId) {
@@ -659,7 +809,7 @@ export async function runSpxDecisionPipeline(
       council = buildEmptyCouncil(reason);
     }
   }
-  const councilFailure = validateCouncil(council);
+  const councilFailure = validateCouncil(council, snapshot);
   if (councilFailure) {
     council = { ...council, status: "DEGRADED", degradedReason: councilFailure };
     run.degraded = true;

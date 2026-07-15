@@ -6,6 +6,9 @@ import type { SpxGexCollectionRecord } from "@/lib/spx-gex-collection-lifecycle"
 import { SpxPriceActionCompass } from "./spx-price-action-compass";
 
 interface SpxGexHeatmapResponse {
+  status: "READY" | "EMPTY" | "BINDING_MISSING" | "STORAGE_UNAVAILABLE" | "ERROR";
+  errorCode: string | null;
+  error?: string;
   availableDates: string[];
   selectedDate: string | null;
   sessions: SpxGexSessionSummary[];
@@ -21,6 +24,8 @@ interface SPXGexHeatmapPageProps {
 }
 
 const emptyPayload: SpxGexHeatmapResponse = {
+  status: "EMPTY",
+  errorCode: null,
   availableDates: [],
   selectedDate: null,
   sessions: [],
@@ -29,6 +34,24 @@ const emptyPayload: SpxGexHeatmapResponse = {
   decision: null,
   collection: null,
   warnings: [],
+};
+
+type BoardRequestPhase = "LOADING" | "READY" | "EMPTY" | "ERROR";
+
+interface BoardRequestState {
+  phase: BoardRequestPhase;
+  requestUrl: string;
+  httpStatus: number | null;
+  errorCode: string | null;
+  message: string | null;
+}
+
+const sourceModeLabel = () => {
+  const mode = (import.meta as ImportMeta & { env?: { MODE?: string } }).env?.MODE;
+  if (mode === "spx-uat") return "LOCAL FIXTURE";
+  if (mode === "spx-live") return "LIVE PRODUCTION READ-ONLY";
+  if (typeof window !== "undefined" && ["localhost", "127.0.0.1"].includes(window.location.hostname)) return "LOCAL D1";
+  return "LIVE PRODUCTION READ-ONLY";
 };
 
 const formatCompact = (value: number | null | undefined) => {
@@ -164,15 +187,20 @@ const parseHeatmapResponse = async (response: Response, requestUrl: string) => {
   }
 };
 
-const initialBoardSelection = () => {
-  if (typeof window === "undefined") return { date: "", snapshot: null as number | null };
-  const query = window.location.hash.split("?", 2)[1] || "";
+export const parseSpxGexBoardSelection = (hash: string) => {
+  const query = hash.split("?", 2)[1] || "";
   const params = new URLSearchParams(query);
-  const snapshot = Number(params.get("snapshot"));
+  const rawSnapshot = params.get("snapshot");
+  const snapshot = rawSnapshot === null || rawSnapshot.trim() === "" ? Number.NaN : Number(rawSnapshot);
   return {
     date: params.get("date") || "",
     snapshot: Number.isInteger(snapshot) ? snapshot : null,
   };
+};
+
+const initialBoardSelection = () => {
+  if (typeof window === "undefined") return { date: "", snapshot: null as number | null };
+  return parseSpxGexBoardSelection(window.location.hash);
 };
 
 export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
@@ -181,7 +209,13 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const [selectedDate, setSelectedDate] = useState(initialSelection.date);
   const [selectedMinute, setSelectedMinute] = useState<number | null>(initialSelection.snapshot);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [requestState, setRequestState] = useState<BoardRequestState>({
+    phase: "LOADING",
+    requestUrl: "/api/spx-gex-heatmap",
+    httpStatus: null,
+    errorCode: null,
+    message: null,
+  });
   const [playing, setPlaying] = useState(false);
   const [speedMs, setSpeedMs] = useState(900);
   const [rowRangeMode, setRowRangeMode] = useState<RowRangeMode>("auto");
@@ -192,17 +226,34 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     options: { bypassCache?: boolean } = {},
   ) => {
     setLoading(true);
-    setError(null);
     try {
       const params = new URLSearchParams();
       if (date) params.set("date", date);
       if (snapshotMinute !== null && snapshotMinute !== undefined) params.set("snapshot", String(snapshotMinute));
       if (options.bypassCache) params.set("_", String(Date.now()));
       const requestUrl = `/api/spx-gex-heatmap${params.toString() ? `?${params.toString()}` : ""}`;
-      const response = await fetch(requestUrl, options.bypassCache ? { cache: "no-store" } : undefined);
+      setRequestState({ phase: "LOADING", requestUrl, httpStatus: null, errorCode: null, message: null });
+      const response = await fetch(requestUrl, { cache: "no-store" });
       const payload = await parseHeatmapResponse(response, requestUrl);
-      if (!response.ok) throw new Error(payload.error || "SPX GEX heatmap API failed");
       setData(payload);
+      if (!response.ok) {
+        setRequestState({
+          phase: "ERROR",
+          requestUrl,
+          httpStatus: response.status,
+          errorCode: payload.errorCode,
+          message: payload.error || "SPX GEX heatmap API failed",
+        });
+        setPlaying(false);
+        return;
+      }
+      setRequestState({
+        phase: payload.status === "READY" || payload.heatmap ? "READY" : "EMPTY",
+        requestUrl,
+        httpStatus: response.status,
+        errorCode: payload.errorCode,
+        message: payload.status === "EMPTY" ? "No retained canonical SPX GEX snapshots found." : null,
+      });
       setSelectedDate(payload.selectedDate || "");
       setSelectedMinute(payload.selectedSnapshot?.snapshotMinuteEt ?? null);
       if (payload.selectedDate && payload.selectedSnapshot?.snapshotMinuteEt !== undefined) {
@@ -213,7 +264,11 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
         );
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "SPX GEX heatmap failed");
+      setRequestState((current) => ({
+        ...current,
+        phase: "ERROR",
+        message: err instanceof Error ? err.message : "SPX GEX heatmap failed",
+      }));
       setPlaying(false);
     } finally {
       setLoading(false);
@@ -338,6 +393,9 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
             </button>
             <div className="flex flex-wrap items-center gap-3">
               <h1 className="text-2xl font-black tracking-normal text-white sm:text-4xl">SPX Market Structure Board</h1>
+              <span className="border border-amber-300/30 bg-amber-300/10 px-2 py-1 font-mono text-[10px] font-black tracking-[0.12em] text-amber-100">
+                {sourceModeLabel()}
+              </span>
               {heatmap && (
                 <span className="border border-cyan-300/25 bg-cyan-300/10 px-2 py-1 font-mono text-xs font-black text-cyan-100">
                   Spot ${heatmap.quote.last.toFixed(2)}
@@ -351,8 +409,15 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
 
         </header>
 
-        {error && <Notice tone="red" text={error} />}
+        {requestState.phase === "ERROR" && requestState.message && <Notice tone="red" text={requestState.message} />}
         {data.warnings.length > 0 && <Notice tone="amber" text={data.warnings.join(" ")} />}
+        <div className="flex flex-wrap gap-x-4 gap-y-1 border border-white/10 bg-black/20 px-3 py-2 font-mono text-[10px] text-zinc-500" data-spx-gex-request-state={requestState.phase}>
+          <span>STATE <strong className="text-zinc-200">{requestState.phase}</strong></span>
+          <span>SOURCE <strong className="text-zinc-200">{sourceModeLabel()}</strong></span>
+          <span>HTTP <strong className="text-zinc-200">{requestState.httpStatus ?? "PENDING"}</strong></span>
+          <span>CODE <strong className="text-zinc-200">{requestState.errorCode || "NONE"}</strong></span>
+          <span className="break-all">REQUEST <strong className="text-zinc-200">{requestState.requestUrl}</strong></span>
+        </div>
 
         <SpxPriceActionCompass />
 
@@ -394,13 +459,28 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                     <CockpitMetric label="Run ID" value={data.decision.runId} />
                     <CockpitMetric
                       label="Council"
-                      value={`C ${data.decision.councilTally.OPEN_CALL} / P ${data.decision.councilTally.OPEN_PUT} / H ${data.decision.councilTally.HOLD}`}
+                      value={`C ${data.decision.councilTally.CALL} / P ${data.decision.councilTally.PUT} / H ${data.decision.councilTally.HOLD} / X ${data.decision.councilTally.INVALID ?? 0}`}
                     />
                     <CockpitMetric label="CIO" value={`${data.decision.cio.action || "NOT_RUN"} · ${data.decision.cio.confidence}/100`} />
                     <CockpitMetric label="Risk Gate" value={`${data.decision.riskGate.disposition} · ${data.decision.riskGate.action || "N/A"}`} />
                     <CockpitMetric label="Run stage" value={data.decision.currentStage} />
                     <CockpitMetric label="Delivery" value={`${data.decision.delivery.status}${data.decision.delivery.telegramMessageId ? ` · ${data.decision.delivery.telegramMessageId}` : ""}`} />
                   </div>
+                  {(data.decision.councilAgents || []).length > 0 && (
+                    <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-4" data-spx-council-agents="true">
+                      {(data.decision.councilAgents || []).map((agent) => (
+                        <div key={agent.agent} className="border border-white/10 bg-black/20 px-3 py-2">
+                          <div className="flex items-center justify-between gap-2 font-mono text-[10px] font-black uppercase tracking-[0.08em]">
+                            <span className={agent.valid ? "text-cyan-100" : "text-red-200"}>
+                              {agent.agent} · {agent.valid ? agent.decision : "INVALID"} · {agent.confidence}/100
+                            </span>
+                            <span className="text-zinc-600">{agent.attempts.length} attempt{agent.attempts.length === 1 ? "" : "s"}</span>
+                          </div>
+                          <p className="mt-1 text-xs leading-5 text-zinc-400">{agent.reasoning || "No auditable reasoning persisted."}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   <div className="mt-2 flex flex-wrap gap-1 font-mono text-[9px] font-black uppercase text-zinc-400" data-spx-run-lifecycle="true">
                     {data.decision.lifecycle.map((event) => (
                       <span key={`${event.stage}-${event.attempt}`} className="border border-white/10 bg-black/20 px-2 py-1">
@@ -631,7 +711,13 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
         ) : (
           <div className="flex h-72 flex-col items-center justify-center gap-3 border border-white/10 bg-white/[0.03] text-center">
             <Waves className="h-8 w-8 text-zinc-600" />
-            <p className="text-sm text-zinc-500">No retained SPX GEX snapshots found.</p>
+            <p className="text-sm text-zinc-500">
+              {requestState.phase === "ERROR" ? requestState.message || "SPX GEX request failed." : "No retained canonical SPX GEX snapshots found."}
+            </p>
+            {snapshotControls}
+            <div className="max-w-4xl break-all font-mono text-[10px] leading-5 text-zinc-600">
+              {sourceModeLabel()} · {requestState.requestUrl} · HTTP {requestState.httpStatus ?? "n/a"} · {requestState.errorCode || "no error code"}
+            </div>
           </div>
         )}
       </div>

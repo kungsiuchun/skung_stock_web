@@ -19,12 +19,12 @@ const parseSnapshotMinute = (value: string | null) => {
   return Number.isInteger(minute) && minute >= 0 && minute <= 24 * 60 ? minute : null;
 };
 
-const json = (body: unknown, init: ResponseInit = {}) =>
+const json = (body: unknown, init: ResponseInit = {}, cacheControl = "no-store") =>
   new Response(JSON.stringify(body), {
     ...init,
     headers: {
       "Content-Type": "application/json",
-      "Cache-Control": "public, max-age=15",
+      "Cache-Control": cacheControl,
       ...(init.headers || {}),
     },
   });
@@ -75,6 +75,9 @@ export async function onRequest(context: { request: Request; env: Env }) {
 
   if (!context.env.SPX_RECAP_DB) {
     return json({
+      status: "BINDING_MISSING",
+      errorCode: "SPX_RECAP_DB_BINDING_MISSING",
+      error: "SPX_RECAP_DB binding is not configured.",
       availableDates: [],
       selectedDate: null,
       sessions: [],
@@ -83,10 +86,11 @@ export async function onRequest(context: { request: Request; env: Env }) {
       decision: null,
       collection: null,
       warnings: ["SPX_RECAP_DB binding is not configured."],
-    });
+    }, { status: 503 });
   }
 
   try {
+    await context.env.SPX_RECAP_DB.prepare("SELECT 1 FROM spx_gex_intraday_snapshots LIMIT 1").first();
     const availableDates = await listSpxGexHeatmapDates(context.env.SPX_RECAP_DB);
     const selectedDate = chooseSelectedDate(availableDates, url.searchParams.get("date"));
     const sessions = selectedDate ? await listSpxGexHeatmapSessions(context.env.SPX_RECAP_DB, selectedDate) : [];
@@ -102,7 +106,10 @@ export async function onRequest(context: { request: Request; env: Env }) {
       ),
     ]);
 
+    const status = heatmap ? "READY" : "EMPTY";
     return json({
+      status,
+      errorCode: null,
       availableDates,
       selectedDate,
       sessions,
@@ -111,10 +118,17 @@ export async function onRequest(context: { request: Request; env: Env }) {
       decision,
       collection,
       warnings,
-    });
+    }, {}, status === "READY" ? "public, max-age=15" : "no-store");
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const missingTable = /no such table:\s*spx_gex_intraday_snapshots/i.test(message);
     return json(
       {
+        status: missingTable ? "STORAGE_UNAVAILABLE" : "ERROR",
+        errorCode: missingTable ? "SPX_GEX_INTRADAY_TABLE_MISSING" : "SPX_GEX_D1_READ_FAILED",
+        error: missingTable
+          ? "SPX GEX intraday storage migration is not applied."
+          : `D1 read failed: ${message}`,
         availableDates: [],
         selectedDate: null,
         sessions: [],
@@ -122,9 +136,9 @@ export async function onRequest(context: { request: Request; env: Env }) {
         heatmap: null,
         decision: null,
         collection: null,
-        warnings: [`D1 read failed: ${error instanceof Error ? error.message : String(error)}`],
+        warnings: [missingTable ? "SPX GEX intraday storage migration is not applied." : `D1 read failed: ${message}`],
       },
-      { status: 500 },
+      { status: missingTable ? 503 : 500 },
     );
   }
 }

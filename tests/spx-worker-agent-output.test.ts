@@ -3,14 +3,22 @@ import test from "node:test";
 
 import {
   assessMarketDataQuality,
+  analyzeCompletedM5Bars,
+  analyzeZeroDteRules,
+  analyzeWithAgent,
+  applyRequiredSpxFreshnessGate,
   buildDataBackedAgentFallback,
   buildDataBackedCioPlan,
+  buildStructuredOpenRouterBody,
   countDirectionalVotes,
+  decideWithCio,
   formatAgentTelegramBrief,
   hasActiveTradingRunLock,
   parseAgentResponseWithDataFallback,
   parseAgentResponseContent,
   parseOrchestratorResponseContent,
+  runStructuredOpenRouterRequest,
+  runSpxUatReplay,
   shouldRunLlmCio,
   shouldRunLlmCouncil,
 } from "../scripts/worker-spx-bot";
@@ -37,6 +45,108 @@ function assertCleanVisibleReasoning(text: string) {
   assert.equal(/^\s*[)\]}]/.test(text), false, "visible reasoning starts with parser debris");
   assert.equal(/[{"}\])]\s*$/.test(text), false, "visible reasoning ends with parser debris");
 }
+
+test("M5 analysis excludes the in-progress and zero-volume phantom candles", () => {
+  const bars = [
+    ...Array.from({ length: 10 }, (_, index) => ({
+      date: new Date(Date.UTC(2026, 6, 14, 17, 35 + index * 5)),
+      high: 7540 + index,
+      low: 7538 + index,
+      close: 7539 + index,
+      volume: 18_000_000,
+    })),
+    { date: new Date("2026-07-14T18:25:00.000Z"), high: 7552.5, low: 7549.45, close: 7551.18, volume: 19_577_000 },
+    { date: new Date("2026-07-14T18:30:00.000Z"), high: 7551.67, low: 7550.38, close: 7550.55, volume: 4_157_000 },
+    { date: new Date("2026-07-14T18:31:00.000Z"), high: 7550.47, low: 7550.47, close: 7550.47, volume: 0 },
+  ];
+
+  const analysis = analyzeCompletedM5Bars(bars, new Date("2026-07-14T18:30:59.000Z"));
+
+  assert.equal(analysis.latestCompletedAt, "2026-07-14T18:25:00.000Z");
+  assert.equal(analysis.currentM5Vol, 19_577_000);
+  assert.equal(analysis.avgM5Vol, 18_000_000);
+  assert.equal(Number(analysis.volumeSurge.toFixed(3)), 1.088);
+});
+
+test("0DTE rules use VIX and VIX9D without a removed VIX3M penalty", () => {
+  const result = analyzeZeroDteRules({
+    etNow: new Date("2026-07-14T18:30:59.000Z"),
+    spxInd: {
+      currentClose: 7550.55,
+      ema9: 7548.26,
+      ema20: 7546,
+      currentVWAP: 7540.68,
+      macd: { histogram: 0.5 },
+    },
+    m5Analysis: { volumeSurge: 1.08, currentM5Vol: 19_577_000, avgM5Vol: 18_000_000 },
+    currentVix: 16.36,
+    currentVix9d: 13.51,
+    pcrValue: 1.04,
+    calculatedGex: null,
+    trendDayContext: { regime: "BULL_TREND_DAY", directionalBias: "CALL" },
+    intradayStructure: { repeatedSupport: null, repeatedResistance: null },
+    dailyMemory: { currentPosition: "NONE", entryPrice: null, entryTime: null, actionLog: [] },
+    sentimentData: { score: 0, label: "neutral", reason: "disabled" },
+    priceActionContext: { macroTrend: "UPTREND" },
+    marketDataQuality: { overallStatus: "OK", hardBlocks: [], warnings: [] },
+  } as any);
+
+  assert.equal(result.softWarnings.includes("vix_term_structure_missing"), false);
+  assert.equal(result.dataQuality.status, "OK");
+  assert.equal(result.tradeEligibility.hardBlocked, false);
+});
+
+test("OpenRouter request profiles keep Gemma Council deterministic and omit temperature for GPT-5 Mini CIO", () => {
+  const council = buildStructuredOpenRouterBody("agent", "google/gemma-4-26b-a4b-it", []);
+  const cio = buildStructuredOpenRouterBody("cio", "openai/gpt-5-mini", []);
+
+  assert.equal(council.model, "google/gemma-4-26b-a4b-it");
+  assert.equal(council.temperature, 0);
+  assert.equal(council.max_tokens, 420);
+  assert.equal(cio.model, "openai/gpt-5-mini");
+  assert.equal("temperature" in cio, false);
+  assert.equal("max_tokens" in cio, false);
+  assert.equal(cio.max_completion_tokens, 520);
+});
+
+test("valid AI Council output rejects zero confidence and invalid HOLD evidence references", async () => {
+  const responses = [
+    {
+      decision: "HOLD",
+      confidence_score: 0,
+      evidence_refs: ["spx.last"],
+      claims: [{ text: "No edge.", evidence_refs: ["spx.last"] }],
+      blocking_risk: null,
+      neutral_reason: "No edge.",
+      reasoning: "No edge.",
+    },
+    {
+      decision: "HOLD",
+      confidence_score: 55,
+      evidence_refs: ["marketDataQuality"],
+      claims: [{ text: "Quality is weak.", evidence_refs: ["marketDataQuality"] }],
+      blocking_risk: null,
+      neutral_reason: "Quality is weak.",
+      reasoning: "Quality is weak.",
+    },
+  ];
+  const fetcher: typeof fetch = async () => new Response(JSON.stringify({
+    choices: [{ finish_reason: "stop", message: { content: JSON.stringify(responses.shift()) } }],
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  const result = await runStructuredOpenRouterRequest({
+    callKind: "agent",
+    apiKey: "test-key",
+    model: "google/gemma-4-26b-a4b-it",
+    messages: [],
+    allowedEvidenceRefs: ["spx.last"],
+    fetcher,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.failureStatus, "model_output_schema_invalid");
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["SCHEMA_INVALID", "SCHEMA_INVALID"]);
+});
 
 test("agent output parser preserves prose instead of showing analysis failure", () => {
   const parsed = parseAgentResponseContent("BB Squeeze is active, volume is not confirming, stand down.");
@@ -173,11 +283,12 @@ test("telegram agent renderer never prints raw JSON contract fields", () => {
   assertCleanVisibleReasoning(line);
 });
 
-test("prompt examples do not teach the model to copy zero confidence or hard-block true", () => {
+test("prompts teach strict evidence claims without zero-confidence or Council execution language", () => {
   assert.equal(SYSTEM_PROMPT_PREFIX.includes('"confidence_score": 0'), false);
   assert.equal(ORCHESTRATOR_PROMPT.includes('"confidence_score": 0'), false);
-  assert.equal(ORCHESTRATOR_PROMPT.includes('"hard_rule_triggered": true'), false);
-  assert.match(ORCHESTRATOR_PROMPT, /copy zeroDteRuleEngine\.hardRuleTriggered/);
+  assert.equal(SYSTEM_PROMPT_PREFIX.includes('"OPEN_CALL"'), false);
+  assert.match(SYSTEM_PROMPT_PREFIX, /"claims"/);
+  assert.match(ORCHESTRATOR_PROMPT, /For HOLD, buy_zone and stop_loss MUST be null/);
 });
 
 test("trading run lock treats unexpired lock as active and expired lock as inactive", () => {
@@ -200,6 +311,206 @@ test("AI council and CIO are enabled by default and only falsey flags disable th
   assert.equal(shouldRunLlmCio("yes"), true);
   assert.equal(shouldRunLlmCio("off"), false);
   assert.equal(shouldRunLlmCio("no"), false);
+});
+
+test("Council OpenRouter call uses strict schema and recovers when the second same-model attempt is valid", async () => {
+  const requestBodies: any[] = [];
+  const responses = [
+    { choices: [{ finish_reason: "stop", message: { content: "not json" } }] },
+    {
+      id: "gen-uat-2",
+      model: "google/gemma-4-26b-a4b-it-202607",
+      provider: "Google",
+      usage: { prompt_tokens: 101, completion_tokens: 42, total_tokens: 143, cost: 0.00012 },
+      choices: [{
+        finish_reason: "stop",
+        message: {
+          content: JSON.stringify({
+            decision: "HOLD",
+            confidence_score: 62,
+            evidence_refs: ["spx.last"],
+            claims: [{ text: "Price remains pinned near VWAP.", evidence_refs: ["spx.last"] }],
+            blocking_risk: null,
+            neutral_reason: "No entry edge.",
+            reasoning: "Price remains pinned near VWAP.",
+          }),
+        },
+      }],
+    },
+  ];
+  const fetcher: typeof fetch = async (_input, init) => {
+    requestBodies.push(JSON.parse(String(init?.body || "{}")));
+    return new Response(JSON.stringify(responses.shift()), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  const result = await runStructuredOpenRouterRequest({
+    callKind: "agent",
+    apiKey: "test-key",
+    model: "google/gemma-4-26b-a4b-it",
+    messages: [{ role: "user", content: "normalized agent projection" }],
+    fetcher,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.value?.decision, "HOLD");
+  assert.equal(requestBodies.length, 2);
+  assert.equal(requestBodies[0].model, requestBodies[1].model);
+  assert.equal(result.attempts[1].requestedModel, "google/gemma-4-26b-a4b-it");
+  assert.equal(result.attempts[1].resolvedModel, "google/gemma-4-26b-a4b-it-202607");
+  assert.equal(result.attempts[1].provider, "Google");
+  assert.equal(result.attempts[1].totalTokens, 143);
+  assert.equal(result.attempts[1].cost, 0.00012);
+  assert.equal(requestBodies[0].temperature, 0);
+  assert.equal(requestBodies[0].max_tokens, 420);
+  assert.equal(requestBodies[0].provider.require_parameters, true);
+  assert.equal(requestBodies[0].response_format.type, "json_schema");
+  assert.equal(requestBodies[0].response_format.json_schema.strict, true);
+  assert.equal(requestBodies[0].response_format.json_schema.schema.additionalProperties, false);
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["SCHEMA_INVALID", "SUCCESS"]);
+  assert.ok(result.attempts[1].responseHash);
+});
+
+test("Council retries only its failed call and sends a role-specific normalized fact projection", async () => {
+  const requestBodies: any[] = [];
+  let callCount = 0;
+  const fetcher: typeof fetch = async (_input, init) => {
+    callCount += 1;
+    requestBodies.push(JSON.parse(String(init?.body || "{}")));
+    const content = callCount === 1
+      ? "invalid"
+      : JSON.stringify({
+        decision: "HOLD",
+        confidence_score: 58,
+        evidence_refs: ["spx.last", "spx.vwap"],
+        claims: [{ text: "SPX remains close to VWAP.", evidence_refs: ["spx.last", "spx.vwap"] }],
+        blocking_risk: null,
+        neutral_reason: "No momentum confirmation.",
+        reasoning: "SPX remains close to VWAP.",
+      });
+    return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content } }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  const result = await analyzeWithAgent("QM", "Momentum analyst", {
+    snapshotFacts: {
+      "spx.last": 7532.8,
+      "spx.vwap": 7531.2,
+      "gex.gammaFlip": 7527.7,
+    },
+    marketDataQuality: { overallStatus: "OK", hardBlocks: [], warnings: [] },
+    extendedOnlyPayload: { mustNotBeSent: true },
+  }, {
+    OPENROUTER_API_KEY: "test-key",
+    OPENROUTER_MODEL: "google/gemma-4-26b-a4b-it",
+  } as any, { fetcher });
+
+  assert.equal(result.modelStatus, "AI");
+  assert.equal(result.decision, "HOLD");
+  assert.deepEqual(result.attempts?.map((attempt) => attempt.status), ["SCHEMA_INVALID", "SUCCESS"]);
+  assert.equal(requestBodies.length, 2);
+  const sentProjection = requestBodies[1].messages[1].content;
+  assert.match(sentProjection, /spx\.last/);
+  assert.doesNotMatch(sentProjection, /extendedOnlyPayload|mustNotBeSent|gex\.gammaFlip/);
+});
+
+test("CIO strict schema retries once and then reports a traceable failure", async () => {
+  const requestBodies: any[] = [];
+  const fetcher: typeof fetch = async (_input, init) => {
+    requestBodies.push(JSON.parse(String(init?.body || "{}")));
+    return new Response(JSON.stringify({
+      choices: [{ finish_reason: "stop", message: { content: "not-json" } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  const result = await runStructuredOpenRouterRequest({
+    callKind: "cio",
+    apiKey: "test-key",
+    model: "google/gemma-4-26b-a4b-it",
+    messages: [{ role: "user", content: "normalized CIO projection" }],
+    fetcher,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.failureStatus, "cio_schema_invalid");
+  assert.equal(requestBodies.length, 2);
+  assert.equal(requestBodies[0].max_tokens, 520);
+  assert.equal(requestBodies[0].temperature, 0);
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["SCHEMA_INVALID", "SCHEMA_INVALID"]);
+});
+
+test("CIO two-attempt schema failure returns fail-closed HOLD with attempt evidence", async () => {
+  const fetcher: typeof fetch = async () => new Response(JSON.stringify({
+    choices: [{ finish_reason: "stop", message: { content: "not-json" } }],
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+  const agents = ["QM", "CM", "NT", "PA"].map((agent) => ({
+    agent,
+    decision: "HOLD",
+    confidence: 55,
+    evidenceRefs: ["spx.last"],
+    reasoning: `${agent} no edge`,
+    modelStatus: "AI",
+  }));
+
+  const result = await decideWithCio({
+    snapshotFacts: { "spx.last": 7532.8, "spx.vwap": 7531.2 },
+    marketDataQuality: { overallStatus: "OK", hardBlocks: [], warnings: [] },
+    TODAYS_MEMORY: { currentPosition: "NONE" },
+    extendedOnlyPayload: { mustNotBeSent: true },
+  }, agents as any, {
+    OPENROUTER_API_KEY: "test-key",
+    OPENROUTER_MODEL: "google/gemma-4-26b-a4b-it",
+  } as any, { fetcher });
+
+  assert.equal(result.modelStatus, "INVALID_SCHEMA");
+  assert.equal(result.plan.trade_action, "HOLD");
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["SCHEMA_INVALID", "SCHEMA_INVALID"]);
+});
+
+test("OpenRouter retry policy retries 429 but fails fast on 401", async () => {
+  let rateLimitedCalls = 0;
+  const validAgentContent = JSON.stringify({
+    decision: "HOLD",
+    confidence_score: 50,
+    evidence_refs: ["spx.last"],
+    claims: [{ text: "No confirmed edge.", evidence_refs: ["spx.last"] }],
+    blocking_risk: null,
+    neutral_reason: "Wait.",
+    reasoning: "No confirmed edge.",
+  });
+  const rateLimited = await runStructuredOpenRouterRequest({
+    callKind: "agent",
+    apiKey: "test-key",
+    model: "same-model",
+    messages: [],
+    fetcher: async () => {
+      rateLimitedCalls += 1;
+      return rateLimitedCalls === 1
+        ? new Response("rate limited", { status: 429 })
+        : new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: validAgentContent } }] }), { status: 200 });
+    },
+  });
+  assert.equal(rateLimited.ok, true);
+  assert.equal(rateLimitedCalls, 2);
+
+  let unauthorizedCalls = 0;
+  const unauthorized = await runStructuredOpenRouterRequest({
+    callKind: "agent",
+    apiKey: "test-key",
+    model: "same-model",
+    messages: [],
+    fetcher: async () => {
+      unauthorizedCalls += 1;
+      return new Response("unauthorized", { status: 401 });
+    },
+  });
+  assert.equal(unauthorized.ok, false);
+  assert.equal(unauthorizedCalls, 1);
+  assert.equal(unauthorized.attempts[0].errorCategory, "HTTP_401");
 });
 
 test("orchestrator output parser degrades without throwing on non-JSON text", () => {
@@ -378,6 +689,40 @@ test("market data quality blocks only required missing feeds and warns on option
   assert.equal(usable.overallStatus, "WARN");
   assert.deepEqual(usable.hardBlocks, []);
   assert.ok(usable.warnings.includes("cboe_gex_missing"));
+});
+
+test("stale required SPX data blocks LIVE but UAT replay is explicitly non-normal", () => {
+  const base = assessMarketDataQuality({
+    spxQuotes: [{}],
+    spxM5Quotes: [{}],
+  });
+  const freshness = {
+    spxYahoo: { status: "STALE" },
+    spxM5Yahoo: { status: "OK" },
+  } as any;
+
+  const live = applyRequiredSpxFreshnessGate(base, freshness, "LIVE");
+  assert.equal(live.overallStatus, "BLOCK");
+  assert.deepEqual(live.hardBlocks, ["spx_15m_stale"]);
+
+  const replay = applyRequiredSpxFreshnessGate(base, freshness, "UAT_REPLAY");
+  assert.equal(replay.overallStatus, "WARN");
+  assert.equal(replay.warnings.includes("uat_replay_non_live"), true);
+});
+
+test("off-hours UAT replay uses the fixed historical fixture without model or Telegram calls", async () => {
+  const preview = await runSpxUatReplay({
+    TELEGRAM_TOKEN: "unused",
+    TELEGRAM_CHAT_ID: "unused",
+    OPENROUTER_API_KEY: "unused",
+  } as any, "uat-replay-fixed-fixture-test", "PREVIEW");
+
+  assert.equal(preview.result.finalDecision.action, "HOLD");
+  assert.equal(preview.result.run.runMode, "UAT_REPLAY");
+  assert.match(preview.message, /UAT REPLAY｜非即時訊號/);
+  assert.match(preview.message, /QM｜觀望 · 信心 65% · 固定重播/);
+  assert.match(preview.message, /CIO｜HOLD · 65% · 固定重播/);
+  assert.equal(preview.result.run.council?.agents.every((agent) => agent.attempts?.length === 0), true);
 });
 
 test("fallback CIO never opens a trade regardless of soft warnings or required data failure", () => {

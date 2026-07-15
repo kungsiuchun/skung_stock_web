@@ -32,6 +32,32 @@ import {
 } from "../src/lib/spx-gex-cboe";
 import { loadCanonicalSpxGexForTelegram } from "../scripts/worker-spx-bot";
 import { onRequest as getSpxGexHeatmapApi } from "../functions/api/spx-gex-heatmap";
+import { buildSpxGexUatFixture } from "../src/lib/spx-gex-uat-fixture";
+import { parseSpxGexBoardSelection } from "../src/components/spx-gex-heatmap-page";
+
+it("does not turn a missing snapshot hash parameter into snapshot minute zero", () => {
+  assert.deepEqual(parseSpxGexBoardSelection("#/work/spx-gex-heatmap"), {
+    date: "",
+    snapshot: null,
+  });
+  assert.deepEqual(parseSpxGexBoardSelection("#/work/spx-gex-heatmap?date=2026-07-13&snapshot=870"), {
+    date: "2026-07-13",
+    snapshot: 870,
+  });
+});
+
+it("isolated UAT fixture pins the 2026-07-13 14:30 represented / 14:45 collected canonical board", () => {
+  const fixture = buildSpxGexUatFixture();
+  const replayed = buildSpxGexUatFixture();
+
+  assert.equal(fixture.session?.tradingDate, "2026-07-13");
+  assert.equal(fixture.session?.snapshotTimeEt, "14:30");
+  assert.equal(fixture.session?.collectedTimeEt, "14:45");
+  assert.equal(fixture.selectedExpiries.length, 5);
+  assert.equal(fixture.cells.length, 480);
+  assert.match(fixture.canonical?.payloadHash || "", /^fnv1a64:[a-f0-9]{16}$/);
+  assert.equal(replayed.canonical?.payloadHash, fixture.canonical?.payloadHash);
+});
 
 describe("SPX GEX intraday generation gate", () => {
   it("collects a 15-minute delayed feed from 09:45 through 16:15 ET on a trading day", () => {
@@ -1304,6 +1330,17 @@ const seedLegacyHeatmapRow = (db: MemoryD1, date: string, heatmap: SpxGexHeatmap
 };
 
 describe("SPX GEX intraday D1 storage", () => {
+  it("keeps canonical payload hash and snapshot id stable after audited D1 read normalization", async () => {
+    const db = new MemoryD1();
+    const fixture = buildSpxGexUatFixture();
+    await upsertSpxGexHeatmap(db, "2026-07-13", fixture);
+
+    const restored = await readSpxGexHeatmap(db, "2026-07-13", 14 * 60 + 30);
+
+    assert.equal(restored?.canonical?.payloadHash, fixture.canonical?.payloadHash);
+    assert.equal(restored?.canonical?.snapshotId, fixture.canonical?.snapshotId);
+  });
+
   it("stores multiple snapshots per date, reads latest or selected slot, and retains seven trading dates", async () => {
     const db = new MemoryD1();
     await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T13:45:00.000Z", 6000), { retentionTradingDays: 7 });
@@ -1385,6 +1422,41 @@ describe("SPX GEX intraday D1 storage", () => {
 });
 
 describe("SPX GEX heatmap API", () => {
+  it("returns 503 with an explicit status when the D1 binding is missing", async () => {
+    const response = await getSpxGexHeatmapApi({
+      request: new Request("https://example.com/api/spx-gex-heatmap"),
+      env: {},
+    });
+    const payload = (await response.json()) as { status: string; errorCode: string };
+
+    assert.equal(response.status, 503);
+    assert.equal(payload.status, "BINDING_MISSING");
+    assert.equal(payload.errorCode, "SPX_RECAP_DB_BINDING_MISSING");
+    assert.equal(response.headers.get("cache-control"), "no-store");
+  });
+
+  it("distinguishes a missing heatmap table from a D1 read failure", async () => {
+    const missingTableResponse = await getSpxGexHeatmapApi({
+      request: new Request("https://example.com/api/spx-gex-heatmap"),
+      env: { SPX_RECAP_DB: { prepare: () => { throw new Error("no such table: spx_gex_intraday_snapshots"); } } as any },
+    });
+    const missingPayload = (await missingTableResponse.json()) as { status: string; errorCode: string };
+    assert.equal(missingTableResponse.status, 503);
+    assert.equal(missingPayload.status, "STORAGE_UNAVAILABLE");
+    assert.equal(missingPayload.errorCode, "SPX_GEX_INTRADAY_TABLE_MISSING");
+    assert.equal(missingTableResponse.headers.get("cache-control"), "no-store");
+
+    const failedResponse = await getSpxGexHeatmapApi({
+      request: new Request("https://example.com/api/spx-gex-heatmap"),
+      env: { SPX_RECAP_DB: { prepare: () => { throw new Error("D1 transport unavailable"); } } as any },
+    });
+    const failedPayload = (await failedResponse.json()) as { status: string; errorCode: string };
+    assert.equal(failedResponse.status, 500);
+    assert.equal(failedPayload.status, "ERROR");
+    assert.equal(failedPayload.errorCode, "SPX_GEX_D1_READ_FAILED");
+    assert.equal(failedResponse.headers.get("cache-control"), "no-store");
+  });
+
   it("keeps Board truth available and exposes explicit warnings before pipeline migrations land", async () => {
     const db = new MissingPipelineTablesD1();
     await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T13:45:00.000Z", 6000));
@@ -1423,6 +1495,8 @@ describe("SPX GEX heatmap API", () => {
     };
 
     assert.equal(latestResponse.status, 200);
+    assert.equal((latestPayload as any).status, "READY");
+    assert.equal(latestResponse.headers.get("cache-control"), "public, max-age=15");
     assert.equal(latestPayload.selectedDate, "2026-05-27");
     assert.equal(latestPayload.sessions.length, 2);
     assert.equal(latestPayload.selectedSnapshot.snapshotMinuteEt, 9 * 60 + 45);
@@ -1469,6 +1543,8 @@ describe("SPX GEX heatmap API", () => {
     };
 
     assert.equal(response.status, 200);
+    assert.equal((payload as any).status, "EMPTY");
+    assert.equal(response.headers.get("cache-control"), "no-store");
     assert.deepEqual(payload.availableDates, []);
     assert.equal(payload.selectedDate, null);
     assert.deepEqual(payload.sessions, []);

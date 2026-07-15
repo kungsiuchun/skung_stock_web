@@ -12,10 +12,13 @@ import {
   NT_VOLATILITY_RISK_PROMPT,
   resolveSpxDeliveryMode,
   retrySpxDelivery,
+  runSpxDecisionPipeline,
+  InMemorySpxDecisionStore,
   type CioDecision,
   type CouncilResult,
   type DecisionRunRecord,
   type MarketSnapshot,
+  type ModelAttemptMetadata,
   type RiskGateDirective,
   type SpxDeliveryMode,
   type SpxLifecycleStage,
@@ -29,6 +32,8 @@ interface Env {
   TELEGRAM_CHAT_ID: string;
   OPENROUTER_API_KEY: string;
   OPENROUTER_MODEL?: string;
+  SPX_COUNCIL_MODEL?: string;
+  SPX_CIO_MODEL?: string;
   SPX_BOARD_URL?: string;
   SPX_ENABLE_LLM_COUNCIL?: string;
   SPX_ENABLE_LLM_CIO?: string;
@@ -138,6 +143,14 @@ interface ZeroDteRuleEngineResult {
   thetaDecayRiskHigh: boolean;
   gammaPinningDetected: boolean;
   liquidityRisk: "UNKNOWN";
+  dataQuality: {
+    status: MarketDataQualityOverall;
+    warnings: string[];
+  };
+  tradeEligibility: {
+    hardBlocked: boolean;
+    reasons: string[];
+  };
 }
 
 type AgentRating = "bullish" | "bearish" | "neutral";
@@ -150,6 +163,7 @@ interface AgentDecisionContract {
   evidence: string[];
   evidenceRefs: string[];
   evidence_refs: string[];
+  claims: Array<{ text: string; evidenceRefs: string[]; evidence_refs: string[] }>;
   blockingRisk: string | null;
   blocking_risk: string | null;
   neutralReason: string | null;
@@ -158,13 +172,301 @@ interface AgentDecisionContract {
   analysis: string;
   modelStatus?: string;
   latencyMs?: number;
+  attempts?: ModelAttemptMetadata[];
+}
+
+type StructuredOpenRouterCallKind = "agent" | "cio";
+export const DEFAULT_SPX_COUNCIL_MODEL = "google/gemma-4-26b-a4b-it";
+export const DEFAULT_SPX_CIO_MODEL = "openai/gpt-5-mini";
+
+const AGENT_RESPONSE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    decision: { type: "string", enum: ["CALL", "PUT", "HOLD"] },
+    confidence_score: { type: "number", minimum: 1, maximum: 100 },
+    evidence_refs: { type: "array", minItems: 1, items: { type: "string" } },
+    claims: {
+      type: "array",
+      minItems: 1,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          text: { type: "string" },
+          evidence_refs: { type: "array", minItems: 1, items: { type: "string" } },
+        },
+        required: ["text", "evidence_refs"],
+      },
+    },
+    blocking_risk: { type: ["string", "null"] },
+    neutral_reason: { type: ["string", "null"] },
+    reasoning: { type: "string" },
+  },
+  required: ["decision", "confidence_score", "evidence_refs", "claims", "blocking_risk", "neutral_reason", "reasoning"],
+} as const;
+
+const CIO_RESPONSE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    trade_action: { type: "string", enum: ["OPEN_CALL", "OPEN_PUT", "HOLD", "CLOSE"] },
+    confidence_score: { type: "number", minimum: 1, maximum: 100 },
+    logic: { type: "string" },
+    buy_zone: { type: ["string", "null"] },
+    stop_loss: { type: ["string", "null"] },
+    targets: { type: "array", items: { type: "string" } },
+    no_trade_conditions: { type: "array", items: { type: "string" } },
+    evidence_refs: { type: "array", items: { type: "string" } },
+    claims: {
+      type: "array",
+      minItems: 1,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          text: { type: "string" },
+          evidence_refs: { type: "array", minItems: 1, items: { type: "string" } },
+        },
+        required: ["text", "evidence_refs"],
+      },
+    },
+  },
+  required: ["trade_action", "confidence_score", "logic", "buy_zone", "stop_loss", "targets", "no_trade_conditions", "evidence_refs", "claims"],
+} as const;
+
+const stringArray = (value: unknown): value is string[] => Array.isArray(value)
+  && value.every((item) => typeof item === "string");
+
+const structuredClaimsValid = (value: unknown, allowedEvidenceRefs?: Set<string>) => Array.isArray(value)
+  && value.length > 0
+  && value.every((claim) => claim
+    && typeof claim === "object"
+    && typeof claim.text === "string"
+    && Boolean(claim.text.trim())
+    && stringArray(claim.evidence_refs)
+    && claim.evidence_refs.length > 0
+    && (!allowedEvidenceRefs || claim.evidence_refs.every((reference: string) => allowedEvidenceRefs.has(reference))));
+
+const isStructuredOutputValid = (
+  callKind: StructuredOpenRouterCallKind,
+  value: any,
+  allowedEvidenceRefs?: Set<string>,
+) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (callKind === "agent") {
+    const shapeValid = ["CALL", "PUT", "HOLD"].includes(value.decision)
+      && Number.isFinite(value.confidence_score) && value.confidence_score >= 1 && value.confidence_score <= 100
+      && stringArray(value.evidence_refs)
+      && value.evidence_refs.length > 0
+      && (!allowedEvidenceRefs || value.evidence_refs.every((reference: string) => allowedEvidenceRefs.has(reference)))
+      && structuredClaimsValid(value.claims, allowedEvidenceRefs)
+      && (typeof value.blocking_risk === "string" || value.blocking_risk === null)
+      && (typeof value.neutral_reason === "string" || value.neutral_reason === null)
+      && typeof value.reasoning === "string" && Boolean(value.reasoning.trim());
+    if (!shapeValid) return false;
+    return true;
+  }
+  const shapeValid = ["OPEN_CALL", "OPEN_PUT", "HOLD", "CLOSE"].includes(value.trade_action)
+    && Number.isFinite(value.confidence_score) && value.confidence_score >= 1 && value.confidence_score <= 100
+    && typeof value.logic === "string" && Boolean(value.logic.trim())
+    && (typeof value.buy_zone === "string" || value.buy_zone === null)
+    && (typeof value.stop_loss === "string" || value.stop_loss === null)
+    && stringArray(value.targets)
+    && stringArray(value.no_trade_conditions)
+    && stringArray(value.evidence_refs)
+    && value.evidence_refs.length > 0
+    && (!allowedEvidenceRefs || value.evidence_refs.every((reference: string) => allowedEvidenceRefs.has(reference)))
+    && structuredClaimsValid(value.claims, allowedEvidenceRefs);
+  if (!shapeValid) return false;
+  if (["OPEN_CALL", "OPEN_PUT"].includes(value.trade_action)) {
+    return Boolean(value.buy_zone && value.stop_loss)
+      && value.targets.length > 0
+      && value.evidence_refs.length > 0;
+  }
+  if (value.trade_action === "HOLD") {
+    return value.buy_zone === null && value.stop_loss === null && value.targets.length === 0;
+  }
+  return true;
+};
+
+const sha256Text = async (value: string) => {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+};
+
+export const buildStructuredOpenRouterBody = (
+  callKind: StructuredOpenRouterCallKind,
+  model: string,
+  messages: Array<{ role: string; content: string }>,
+) => {
+  const isGpt5 = /^openai\/gpt-5(?:-|$)/i.test(model);
+  return {
+  model,
+  ...(isGpt5
+    ? { max_completion_tokens: callKind === "agent" ? 420 : 520 }
+    : { temperature: 0, max_tokens: callKind === "agent" ? 420 : 520 }),
+  provider: { require_parameters: true },
+  response_format: {
+    type: "json_schema",
+    json_schema: {
+      name: callKind === "agent" ? "spx_council_agent_analysis" : "spx_cio_decision",
+      strict: true,
+      schema: callKind === "agent" ? AGENT_RESPONSE_SCHEMA : CIO_RESPONSE_SCHEMA,
+    },
+  },
+  messages,
+  };
+};
+
+export async function runStructuredOpenRouterRequest(input: {
+  callKind: StructuredOpenRouterCallKind;
+  apiKey: string;
+  model: string;
+  messages: Array<{ role: string; content: string }>;
+  fetcher?: typeof fetch;
+  timeoutMs?: number;
+  allowedEvidenceRefs?: string[];
+}): Promise<{
+  ok: boolean;
+  value: any | null;
+  attempts: ModelAttemptMetadata[];
+  failureStatus: string | null;
+}> {
+  const fetcher = input.fetcher || fetch;
+  const timeoutMs = input.timeoutMs ?? 12_000;
+  const attempts: ModelAttemptMetadata[] = [];
+  const body = buildStructuredOpenRouterBody(input.callKind, input.model, input.messages);
+  let failureStatus: string | null = null;
+  const unavailableResponseMetadata = {
+    requestedModel: input.model,
+    resolvedModel: null,
+    provider: null,
+    responseId: null,
+    promptTokens: null,
+    completionTokens: null,
+    reasoningTokens: null,
+    totalTokens: null,
+    cost: null,
+  };
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetcher("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${input.apiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://spx-trading-pua.kungsiuchun0.workers.dev",
+          "X-OpenRouter-Title": "SPX Decision Pipeline",
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const responseText = await response.text();
+        const retryable = response.status === 429 || response.status >= 500;
+        failureStatus = `openrouter_${response.status}`;
+        attempts.push({
+          attempt,
+          model: input.model,
+          ...unavailableResponseMetadata,
+          status: "HTTP_ERROR",
+          latencyMs: Math.max(0, Date.now() - startedAt),
+          httpStatus: response.status,
+          errorCategory: `HTTP_${response.status}`,
+          finishReason: null,
+          contentLength: responseText.length,
+          responseHash: responseText ? await sha256Text(responseText) : null,
+        });
+        if (!retryable || attempt === 2) break;
+        continue;
+      }
+
+      const responseData = await response.json() as any;
+      const choice = responseData?.choices?.[0];
+      const usage = responseData?.usage || {};
+      const responseMetadata = {
+        requestedModel: input.model,
+        resolvedModel: typeof responseData?.model === "string" ? responseData.model : input.model,
+        provider: typeof responseData?.provider === "string" ? responseData.provider : null,
+        responseId: typeof responseData?.id === "string" ? responseData.id : null,
+        promptTokens: toNullableFiniteNumber(usage.prompt_tokens),
+        completionTokens: toNullableFiniteNumber(usage.completion_tokens),
+        reasoningTokens: toNullableFiniteNumber(usage?.completion_tokens_details?.reasoning_tokens),
+        totalTokens: toNullableFiniteNumber(usage.total_tokens),
+        cost: toNullableFiniteNumber(usage.cost),
+      };
+      const content = typeof choice?.message?.content === "string" ? choice.message.content : "";
+      let value: any = null;
+      try {
+        value = JSON.parse(content);
+      } catch {
+        value = null;
+      }
+      if (!isStructuredOutputValid(input.callKind, value, input.allowedEvidenceRefs ? new Set(input.allowedEvidenceRefs) : undefined)) {
+        failureStatus = input.callKind === "agent" ? "model_output_schema_invalid" : "cio_schema_invalid";
+        attempts.push({
+          attempt,
+          model: input.model,
+          ...responseMetadata,
+          status: "SCHEMA_INVALID",
+          latencyMs: Math.max(0, Date.now() - startedAt),
+          httpStatus: response.status,
+          errorCategory: "SCHEMA_INVALID",
+          finishReason: choice?.finish_reason || null,
+          contentLength: content.length,
+          responseHash: content ? await sha256Text(content) : null,
+        });
+        if (attempt === 2) break;
+        continue;
+      }
+
+      attempts.push({
+        attempt,
+        model: input.model,
+        ...responseMetadata,
+        status: "SUCCESS",
+        latencyMs: Math.max(0, Date.now() - startedAt),
+        httpStatus: response.status,
+        errorCategory: null,
+        finishReason: choice?.finish_reason || null,
+        contentLength: content.length,
+        responseHash: content ? await sha256Text(content) : null,
+      });
+      return { ok: true, value, attempts, failureStatus: null };
+    } catch (error: any) {
+      const timedOut = error?.name === "AbortError" || /timeout|timed out/i.test(String(error?.message || error));
+      failureStatus = timedOut ? "model_timeout" : "model_request_failed";
+      attempts.push({
+        attempt,
+        model: input.model,
+        ...unavailableResponseMetadata,
+        status: timedOut ? "TIMEOUT" : "REQUEST_FAILED",
+        latencyMs: Math.max(0, Date.now() - startedAt),
+        httpStatus: null,
+        errorCategory: timedOut ? "TIMEOUT" : "REQUEST_FAILED",
+        finishReason: null,
+        contentLength: 0,
+        responseHash: null,
+      });
+      if (!timedOut || attempt === 2) break;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  return { ok: false, value: null, attempts, failureStatus };
 }
 
 const YAHOO_CHART_TIMEOUT_MS = 6500;
 const OPTIONAL_MARKET_DATA_TIMEOUT_MS = 6500;
-const AGENT_MODEL_TIMEOUT_MS = 8000;
-const CIO_MODEL_TIMEOUT_MS = 8000;
+const AGENT_MODEL_TIMEOUT_MS = 12000;
+const CIO_MODEL_TIMEOUT_MS = 12000;
 const TELEGRAM_TIMEOUT_MS = 6000;
+const M5_INTERVAL_MS = 5 * 60_000;
 const TRADING_RUN_LOCK_KEY = "spx_trading_run_lock";
 const TRADING_RUN_LOCK_TTL_SECONDS = 12 * 60;
 
@@ -542,6 +844,17 @@ const normalizeEvidenceRefs = (value: unknown) => (Array.isArray(value) ? value 
   .filter((item) => /^[a-z0-9_.-]+$/i.test(item))
   .slice(0, 8);
 
+const normalizeEvidenceClaims = (value: unknown) => (Array.isArray(value) ? value : [])
+  .map((claim) => {
+    const text = compactModelText(claim?.text, 180);
+    const evidenceRefs = normalizeEvidenceRefs(claim?.evidenceRefs || claim?.evidence_refs);
+    return text && evidenceRefs.length > 0
+      ? { text, evidenceRefs, evidence_refs: evidenceRefs }
+      : null;
+  })
+  .filter((claim): claim is { text: string; evidenceRefs: string[]; evidence_refs: string[] } => Boolean(claim))
+  .slice(0, 6);
+
 const isPlaceholderAgentText = (value: unknown) => {
   const text = compactModelText(value, 160).toLowerCase();
   return !text
@@ -564,6 +877,7 @@ const normalizeAgentContract = (raw: Record<string, any>, fallbackReason: string
   const reasoning = compactModelText(raw.reasoning || raw.analysis || fallbackReason) || fallbackReason;
   const evidence = normalizeEvidenceList(raw.evidence || raw.evidence_bullets, [reasoning]);
   const evidenceRefs = normalizeEvidenceRefs(raw.evidenceRefs || raw.evidence_refs);
+  const claims = normalizeEvidenceClaims(raw.claims);
   return {
     ...raw,
     decision,
@@ -573,6 +887,7 @@ const normalizeAgentContract = (raw: Record<string, any>, fallbackReason: string
     evidence,
     evidenceRefs,
     evidence_refs: evidenceRefs,
+    claims,
     blockingRisk,
     blocking_risk: blockingRisk,
     neutralReason,
@@ -745,6 +1060,129 @@ export function buildDataBackedCioPlan(contextData: any, agents: any[]) {
     agent_vote_summary: votes,
     model_status: "DEGRADED_FALLBACK",
   };
+}
+
+export function applyRequiredSpxFreshnessGate(
+  quality: MarketDataQualitySummary,
+  sourceFreshness: MarketSnapshot["sourceFreshness"],
+  runMode: "LIVE" | "UAT_REPLAY",
+): MarketDataQualitySummary {
+  const result: MarketDataQualitySummary = {
+    overallStatus: quality.overallStatus,
+    items: Object.fromEntries(Object.entries(quality.items).map(([key, item]) => [key, { ...item }])),
+    hardBlocks: [...quality.hardBlocks],
+    warnings: [...quality.warnings],
+  };
+  if (runMode === "UAT_REPLAY") {
+    result.warnings = [...new Set([...result.warnings, "uat_replay_non_live"] )];
+    result.overallStatus = result.hardBlocks.length > 0 ? "BLOCK" : "WARN";
+    return result;
+  }
+  const requiredSources = [
+    ["spxYahoo", "spx15m", "spx_15m"],
+    ["spxM5Yahoo", "spx5m", "spx_5m"],
+  ] as const;
+  for (const [sourceKey, itemKey, reasonPrefix] of requiredSources) {
+    const status = sourceFreshness[sourceKey]?.status || "MISSING";
+    if (status === "OK" || status === "FALLBACK") continue;
+    result.items[itemKey] = { ...(result.items[itemKey] || qualityItem(status, true, itemKey)), status };
+    result.hardBlocks.push(`${reasonPrefix}_${status.toLowerCase()}`);
+  }
+  result.hardBlocks = [...new Set(result.hardBlocks)];
+  result.overallStatus = result.hardBlocks.length > 0 ? "BLOCK" : result.warnings.length > 0 ? "WARN" : "OK";
+  return result;
+}
+
+export function analyzeCompletedM5Bars(quotes: any[], snapshotAt: Date) {
+  const snapshotMs = snapshotAt.getTime();
+  const completed = quotes
+    .filter((quote: any) => quote?.date instanceof Date && Number.isFinite(quote.date.getTime()))
+    .filter((quote: any) => quote.close !== null && quote.close !== undefined)
+    .filter((quote: any) => quote.date.getTime() + M5_INTERVAL_MS <= snapshotMs);
+  const completedWithVolume = completed.filter((quote: any) => Number(quote.volume) > 0);
+  const recent = completed.slice(-24);
+  const latestWithVolume = completedWithVolume.at(-1) || null;
+  const previousTenWithVolume = completedWithVolume.slice(-11, -1);
+  const avgM5Vol = previousTenWithVolume.length === 10
+    ? previousTenWithVolume.reduce((sum: number, quote: any) => sum + Number(quote.volume || 0), 0) / 10
+    : 0;
+  const currentM5Vol = Number(latestWithVolume?.volume || 0);
+
+  return {
+    completedBars: completed,
+    boxHigh: recent.length >= 24 ? Math.max(...recent.map((quote: any) => Number(quote.high))) : 0,
+    boxLow: recent.length >= 24 ? Math.min(...recent.map((quote: any) => Number(quote.low))) : 0,
+    volumeSurge: avgM5Vol > 0 ? currentM5Vol / avgM5Vol : 1,
+    currentM5Vol,
+    avgM5Vol,
+    latestCompletedAt: latestWithVolume?.date?.toISOString() || null,
+  };
+}
+
+export const buildCioContextProjection = (contextData: any, agents: any[]) => ({
+  snapshotFacts: { ...(contextData?.snapshotFacts || {}) },
+  marketDataQuality: {
+    overallStatus: contextData?.marketDataQuality?.overallStatus || "UNKNOWN",
+    hardBlocks: contextData?.marketDataQuality?.hardBlocks || [],
+    warnings: contextData?.marketDataQuality?.warnings || [],
+  },
+  currentPosition: contextData?.TODAYS_MEMORY?.currentPosition || "NONE",
+  council: agents.map((agent, index) => ({
+    agent: agent.agent || (["QM", "CM", "NT", "PA"][index] ?? null),
+    decision: normalizeAgentDecisionValue(agent.decision),
+    confidence: clampConfidence(agent.confidence ?? agent.confidence_score, 0),
+    evidenceRefs: normalizeEvidenceRefs(agent.evidenceRefs || agent.evidence_refs),
+    claims: normalizeEvidenceClaims(agent.claims).map((claim) => ({
+      text: claim.text,
+      evidence_refs: claim.evidenceRefs,
+    })),
+    reasoning: compactModelText(agent.reasoning, 180),
+    modelStatus: agent.modelStatus || "AI",
+  })),
+});
+
+export async function decideWithCio(
+  contextData: any,
+  agents: any[],
+  env: Env,
+  options: { fetcher?: typeof fetch } = {},
+) {
+  const fallbackPlan = buildDataBackedCioPlan(contextData, agents);
+  if (!env.OPENROUTER_API_KEY) {
+    return { plan: fallbackPlan, modelStatus: "MISSING_OPENROUTER_KEY", attempts: [] as ModelAttemptMetadata[] };
+  }
+  const projection = buildCioContextProjection(contextData, agents);
+  const result = await runStructuredOpenRouterRequest({
+    callKind: "cio",
+    apiKey: env.OPENROUTER_API_KEY,
+    model: env.SPX_CIO_MODEL || DEFAULT_SPX_CIO_MODEL,
+    messages: [
+      {
+        role: "system",
+        content: `${ORCHESTRATOR_PROMPT}\nYou are the sole direction authority. Return the strict JSON schema. Use only exact snapshotFacts keys in evidence_refs. Never infer facts outside this normalized projection.`,
+      },
+      { role: "user", content: `Normalized CIO projection: ${JSON.stringify(projection)}` },
+    ],
+    fetcher: options.fetcher,
+    timeoutMs: CIO_MODEL_TIMEOUT_MS,
+    allowedEvidenceRefs: Object.keys(contextData?.snapshotFacts || {}),
+  });
+  if (result.ok) {
+    return {
+      plan: { ...result.value, trade_action: normalizeCioAction(result.value.trade_action) },
+      modelStatus: "AI",
+      attempts: result.attempts,
+    };
+  }
+  const modelStatus = result.failureStatus === "model_timeout"
+    ? "TIMEOUT"
+    : result.failureStatus === "cio_schema_invalid"
+      ? "INVALID_SCHEMA"
+      : result.failureStatus?.startsWith("openrouter_")
+        ? result.failureStatus.toUpperCase()
+        : "REQUEST_FAILED";
+  console.error(`[CIO] structured model failed after ${result.attempts.length} attempt(s): ${result.failureStatus}`);
+  return { plan: fallbackPlan, modelStatus, attempts: result.attempts };
 }
 
 // --- 分析與邏輯函數 ---
@@ -1119,6 +1557,7 @@ interface ScheduledRunOptions {
   force?: boolean;
   debugReportPreview?: boolean;
   deliveryMode?: SpxDeliveryMode;
+  runMode?: "LIVE" | "UAT_REPLAY";
 }
 
 function toDateKey(year: number, month: number, day: number) {
@@ -1359,13 +1798,12 @@ function appendPlanSnapshot(
   };
 }
 
-function analyzeZeroDteRules(args: {
+export function analyzeZeroDteRules(args: {
   etNow: Date;
   spxInd: any;
   m5Analysis: { volumeSurge: number; currentM5Vol?: number; avgM5Vol?: number };
   currentVix: number | null | undefined;
   currentVix9d: number | null | undefined;
-  currentVix3m: number | null | undefined;
   pcrValue: number | null;
   calculatedGex: GexData | null;
   trendDayContext: TrendDayContext;
@@ -1381,7 +1819,6 @@ function analyzeZeroDteRules(args: {
     m5Analysis,
     currentVix,
     currentVix9d,
-    currentVix3m,
     pcrValue,
     calculatedGex,
     trendDayContext,
@@ -1455,21 +1892,9 @@ function analyzeZeroDteRules(args: {
     score -= 8;
     softWarnings.push("volume_follow_through_weak");
   }
-  if (calculatedGex) score += 8;
-  else {
-    score -= 12;
-    softWarnings.push("gex_missing");
-  }
-  if (currentVix && currentVix9d && currentVix3m) score += 6;
-  else {
-    score -= 10;
-    softWarnings.push("vix_term_structure_missing");
-  }
-  if (pcrValue != null) score += 4;
-  else {
-    score -= 5;
-    softWarnings.push("pcr_missing");
-  }
+  if (!calculatedGex) softWarnings.push("gex_missing");
+  if (!(currentVix && currentVix9d)) softWarnings.push("vix_term_structure_missing");
+  if (pcrValue == null) softWarnings.push("pcr_missing");
   if (gammaPinningDetected) {
     score -= 12;
     advisoryNotes.push("gamma_pinning_detected");
@@ -1556,60 +1981,85 @@ function analyzeZeroDteRules(args: {
     hardRuleTriggered: hardBlocks.length > 0,
     thetaDecayRiskHigh,
     gammaPinningDetected,
-    liquidityRisk: "UNKNOWN"
+    liquidityRisk: "UNKNOWN",
+    dataQuality: {
+      status: marketDataQuality?.overallStatus || "OK",
+      warnings: [...(marketDataQuality?.warnings || [])],
+    },
+    tradeEligibility: {
+      hardBlocked: hardBlocks.length > 0,
+      reasons: [...hardBlocks],
+    },
   };
 }
 
-async function analyzeWithAgent(personaKey: string, personaPrompt: string, contextData: any, env: Env) {
+export const buildAgentContextProjection = (personaKey: string, contextData: any) => {
+  const prefixByAgent: Record<string, string[]> = {
+    QM: ["spx.", "m5.", "trend.", "zeroDte.", "quality.", "freshness.spx"],
+    CM: ["spx.last", "spx.vwap", "spx.ema9", "gex.", "trend.", "quality.", "freshness.gex"],
+    NT: ["spx.bollingerBandwidthPct", "spx.isSqueeze", "vix.", "vix9d.", "gex.gammaStatus", "gex.zeroDteGammaStatus", "options.", "zeroDte.", "quality.", "freshness."],
+    PA: ["spx.last", "spx.vwap", "spx.ema9", "spx.ema20", "m5.", "trend.", "price.", "zeroDte.", "quality.", "freshness.spx"],
+  };
+  const allowedPrefixes = prefixByAgent[String(personaKey || "").toUpperCase()] || ["spx."];
+  const roleFacts = Object.fromEntries(Object.entries(contextData?.snapshotFacts || {})
+    .filter(([key]) => allowedPrefixes.some((prefix) => key === prefix || key.startsWith(prefix))));
+  return {
+    role: String(personaKey || "").toUpperCase(),
+    snapshotFacts: roleFacts,
+    marketDataQuality: {
+      overallStatus: contextData?.marketDataQuality?.overallStatus || "UNKNOWN",
+      hardBlocks: contextData?.marketDataQuality?.hardBlocks || [],
+      warnings: contextData?.marketDataQuality?.warnings || [],
+    },
+    currentPosition: contextData?.TODAYS_MEMORY?.currentPosition || "NONE",
+  };
+};
+
+export async function analyzeWithAgent(
+  personaKey: string,
+  personaPrompt: string,
+  contextData: any,
+  env: Env,
+  options: { fetcher?: typeof fetch } = {},
+) {
   const startedAt = Date.now();
   const finish = (analysis: AgentDecisionContract): AgentDecisionContract => ({
     ...analysis,
     latencyMs: Math.max(0, Date.now() - startedAt),
   });
-  const systemPrompt = `You are an elite stock trader. Your persona is: ${personaPrompt}. \n${SYSTEM_PROMPT_PREFIX}\nTraceability contract: add "evidence_refs" as an array containing only exact keys from snapshotFacts. A BUY/SELL/CALL/PUT/OPEN_CALL/OPEN_PUT without at least one valid evidence_refs key is invalid and will be degraded to HOLD.`;
-
-  try {
-    if (!env.OPENROUTER_API_KEY) {
-      return finish(buildDataBackedAgentFallback(personaKey, contextData, "missing_openrouter_key"));
-    }
-    const response = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://spx-trading-pua.kungsiuchun0.workers.dev',
-        'X-OpenRouter-Title': 'SPX PUA Agent'
-      },
-      body: JSON.stringify({
-        model: env.OPENROUTER_MODEL || 'google/gemma-4-26b-a4b-it:free',
-        temperature: 0.15,
-        max_tokens: 260,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: `Market Data Context: ${JSON.stringify(contextData)}` }
-        ]
-      })
-    }, AGENT_MODEL_TIMEOUT_MS);
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`OpenRouter Error ${response.status}:`, errorText);
-      return finish(buildDataBackedAgentFallback(personaKey, contextData, `openrouter_${response.status}`));
-    }
-    const data = await response.json() as any;
-    const content = data.choices?.[0]?.message?.content || "";
-    const parsed = parseAgentResponseWithDataFallback(personaKey, content, contextData);
-    const decision = normalizeAgentDecisionValue(parsed.decision);
-    const factKeys = new Set(Object.keys(contextData?.snapshotFacts || {}));
-    const invalidEvidenceRefs = parsed.evidenceRefs.filter((reference) => !factKeys.has(reference));
-    if ((LONG_DECISIONS.has(decision) || SHORT_DECISIONS.has(decision)) && (parsed.evidenceRefs.length === 0 || invalidEvidenceRefs.length > 0)) {
-      return finish(buildDataBackedAgentFallback(personaKey, contextData, 'agent_schema_invalid_evidence_refs'));
-    }
-    return finish(parsed);
-  } catch (e: any) {
-    console.error('Agent error:', e.message);
-    return finish(buildDataBackedAgentFallback(personaKey, contextData, e?.name === "AbortError" ? "model_timeout" : "model_request_failed"));
+  const systemPrompt = `You are an SPX council analyst with this role: ${personaPrompt}. Analyze only the supplied normalized snapshotFacts. Return CALL, PUT, or HOLD analysis, never OPEN_* execution language. confidence_score must be 1-100. Every claim and HOLD conflict must cite exact supplied snapshotFacts keys. You analyze; you never execute trades or override the CIO.`;
+  if (!env.OPENROUTER_API_KEY) {
+    return finish({
+      ...buildDataBackedAgentFallback(personaKey, contextData, "missing_openrouter_key"),
+      attempts: [],
+    });
   }
+  const projection = buildAgentContextProjection(personaKey, contextData);
+  const result = await runStructuredOpenRouterRequest({
+    callKind: "agent",
+    apiKey: env.OPENROUTER_API_KEY,
+    model: env.SPX_COUNCIL_MODEL || env.OPENROUTER_MODEL || DEFAULT_SPX_COUNCIL_MODEL,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: `Normalized ${personaKey} projection: ${JSON.stringify(projection)}` },
+    ],
+    fetcher: options.fetcher,
+    timeoutMs: AGENT_MODEL_TIMEOUT_MS,
+    allowedEvidenceRefs: Object.keys(projection.snapshotFacts),
+  });
+  if (!result.ok) {
+    console.error(`[COUNCIL:${personaKey}] structured model failed after ${result.attempts.length} attempt(s): ${result.failureStatus}`);
+    return finish({
+      ...buildDataBackedAgentFallback(personaKey, contextData, result.failureStatus || "model_request_failed"),
+      attempts: result.attempts,
+    });
+  }
+  const parsed = parseAgentResponseContent(JSON.stringify(result.value));
+  return finish({
+    ...parsed,
+    modelStatus: "AI",
+    attempts: result.attempts,
+  });
 }
 
 async function sendTelegramMessage(token: string, chatId: string, text: string) {
@@ -1684,7 +2134,7 @@ function tgEscape(str: string): string {
   return str.replace(/\\n/g, '\n').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-const makeDecisionRunRecord = (runId: string, scheduledAt: Date): DecisionRunRecord => {
+const makeDecisionRunRecord = (runId: string, scheduledAt: Date, runMode: "LIVE" | "UAT_REPLAY" = "LIVE"): DecisionRunRecord => {
   const createdAt = new Date().toISOString();
   return {
     runId,
@@ -1700,6 +2150,7 @@ const makeDecisionRunRecord = (runId: string, scheduledAt: Date): DecisionRunRec
     degradedReason: null,
     createdAt,
     updatedAt: createdAt,
+    runMode,
   };
 };
 
@@ -1720,10 +2171,10 @@ const appendDecisionLifecycle = async (
   await store.appendLifecycle({ runId: run.runId, stage, occurredAt, attempt, latencyMs, payload });
 };
 
-const toCouncilDecision = (value: unknown): 'OPEN_CALL' | 'OPEN_PUT' | 'HOLD' => {
+const toCouncilDecision = (value: unknown): 'CALL' | 'PUT' | 'HOLD' => {
   const normalized = normalizeAgentDecisionValue(value);
-  if (LONG_DECISIONS.has(normalized)) return 'OPEN_CALL';
-  if (SHORT_DECISIONS.has(normalized)) return 'OPEN_PUT';
+  if (LONG_DECISIONS.has(normalized)) return 'CALL';
+  if (SHORT_DECISIONS.has(normalized)) return 'PUT';
   return 'HOLD';
 };
 
@@ -1736,10 +2187,13 @@ const buildCouncilResult = (agents: Record<'QM' | 'CM' | 'NT' | 'PA', AgentDecis
       decision: toCouncilDecision(analysis.decision),
       confidence: clampConfidence(analysis.confidence ?? analysis.confidence_score, 0),
       evidenceRefs: [...analysis.evidenceRefs],
+      claims: analysis.claims.map((claim) => ({ text: claim.text, evidenceRefs: [...claim.evidenceRefs] })),
       modelStatus,
       fallbackStatus: modelStatus === 'AI' ? null : modelStatus,
       latencyMs: analysis.latencyMs ?? latencyMs,
       reasoning: analysis.reasoning,
+      valid: modelStatus === 'AI',
+      attempts: analysis.attempts || [],
     };
   });
   const degradedAgent = ordered.find((agent) => agent.modelStatus !== 'AI');
@@ -1765,6 +2219,7 @@ const buildMarketSnapshot = (input: {
   scheduledAt: Date;
   snapshotAt: Date;
   spxLatestAt?: Date | null;
+  spxM5LatestAt?: Date | null;
   vixLatestAt?: Date | null;
   gexSnapshotAt?: string | null;
   gexProvider?: string | null;
@@ -1780,6 +2235,7 @@ const buildMarketSnapshot = (input: {
     : null;
   const freshnessStatus = (age: number | null, maxAgeMs: number) => age === null ? 'MISSING' : age <= maxAgeMs ? 'OK' : 'STALE';
   const spxAge = ageMs(input.spxLatestAt);
+  const spxM5Age = ageMs(input.spxM5LatestAt);
   const vixAge = ageMs(input.vixLatestAt);
   const gexDate = input.gexSnapshotAt ? new Date(input.gexSnapshotAt) : null;
   const gexAge = gexDate && Number.isFinite(gexDate.getTime()) ? ageMs(gexDate) : null;
@@ -1793,6 +2249,12 @@ const buildMarketSnapshot = (input: {
         observedAt: input.spxLatestAt?.toISOString() || null,
         ageMs: spxAge,
         status: freshnessStatus(spxAge, 20 * 60_000),
+      },
+      spxM5Yahoo: {
+        source: 'Yahoo Finance ^GSPC 5m chart',
+        observedAt: input.spxM5LatestAt?.toISOString() || null,
+        ageMs: spxM5Age,
+        status: freshnessStatus(spxM5Age, 10 * 60_000),
       },
       vixYahoo: {
         source: 'Yahoo Finance ^VIX chart',
@@ -1880,10 +2342,13 @@ async function completeDegradedDecisionRun(
       decision: 'HOLD',
       confidence: 0,
       evidenceRefs: [],
+      claims: [],
       modelStatus: 'SKIPPED',
       fallbackStatus: reason,
       latencyMs: 0,
       reasoning: reason,
+      valid: false,
+      attempts: [],
     })),
   };
   const cioDecision: CioDecision = run.cioDecision || {
@@ -1895,8 +2360,10 @@ async function completeDegradedDecisionRun(
     targets: [],
     noTradeConditions: [reason],
     evidenceRefs: [],
+    claims: [],
     modelStatus: 'PIPELINE_ERROR',
     latencyMs: 0,
+    attempts: [],
   };
   const riskGate = run.riskGate || applyRiskGate(
     cioDecision,
@@ -2052,6 +2519,142 @@ async function persistAgentSignalJournal(env: Env, args: {
   }
 }
 
+const SPX_UAT_REPLAY_SCHEDULED_AT = new Date('2026-07-13T18:45:39.000Z');
+
+const buildSpxUatReplaySnapshot = (runId: string): MarketSnapshot => ({
+  runId,
+  scheduledAt: SPX_UAT_REPLAY_SCHEDULED_AT.toISOString(),
+  snapshotAt: SPX_UAT_REPLAY_SCHEDULED_AT.toISOString(),
+  runMode: 'UAT_REPLAY',
+  facts: {
+    'run.mode': 'UAT_REPLAY',
+    'spx.last': 7523.9599609375,
+    'spx.vwap': 7540.03,
+    'spx.ema9': 7525.19,
+    'spx.dayChangePct': -0.68,
+    'spx.fromOpenPct': -0.31,
+    'spx.rangePositionPct': 18,
+    'gex.gammaFlip': 7527.76,
+    'gex.gammaStatus': 'negative_gamma',
+    'quality.status': 'WARN',
+    'freshness.spx': 'FIXTURE',
+    'freshness.gex': 'FIXTURE',
+  },
+  sourceFreshness: {
+    spxYahoo: { source: 'saved normalized UAT fixture', observedAt: SPX_UAT_REPLAY_SCHEDULED_AT.toISOString(), ageMs: 0, status: 'OK' },
+    canonicalGex: { source: 'saved canonical Board fixture', observedAt: SPX_UAT_REPLAY_SCHEDULED_AT.toISOString(), ageMs: 0, status: 'OK' },
+  },
+  dataQuality: { status: 'WARN', hardBlocks: [], warnings: ['uat_replay_non_live', 'historical_raw_snapshot_missing'] },
+  gexSummary: {
+    spot: 7516.04,
+    gammaFlipLevel: 7527.76,
+    gammaStatus: 'negative_gamma',
+    generatedAt: SPX_UAT_REPLAY_SCHEDULED_AT.toISOString(),
+    displayTimeLabel: '14:30 ET snapshot / collected 14:45 ET',
+    snapshotTimeEt: '14:30',
+    collectedTimeEt: '14:45',
+    source: 'Canonical D1 SPX GEX heatmap (black_scholes_exposure_engine)',
+    canonical: {
+      snapshotId: 'spx-gex:2026-07-13:870:fnv1a64:005c35ebfd5c5a90',
+      replayGrade: 'NORMALIZED_CANONICAL',
+      tradingDate: '2026-07-13',
+      snapshotMinuteEt: 870,
+      snapshotTimeEt: '14:30',
+      collectedMinuteEt: 885,
+      collectedTimeEt: '14:45',
+      generatedAt: SPX_UAT_REPLAY_SCHEDULED_AT.toISOString(),
+      displayTimeLabel: '14:30 ET snapshot / collected 14:45 ET',
+      sourceTimestamp: '2026-07-13T18:45:36.000Z',
+      provider: 'cboe',
+      fallbackFrom: null,
+      schemaVersion: 1,
+      payloadHash: 'fnv1a64:005c35ebfd5c5a90',
+      dataQuality: { total: 480, priced: 428, repaired: 4, partial: 48, unpriced: 0, excluded: 48 },
+    },
+  },
+  normalizedContext: { fixture: 'spx-2026-07-13-1445-et', nonLive: true },
+  boardDeepLink: 'https://sius-ai-workshop.pages.dev/#/work/spx-gex-heatmap?date=2026-07-13&snapshot=870',
+  replayGrade: 'NORMALIZED_CANONICAL',
+  replayEvidence: {
+    replayGrade: 'NORMALIZED_CANONICAL',
+    vendorRawPayloadsPersisted: false,
+    gex: {
+      snapshotId: 'spx-gex:2026-07-13:870:fnv1a64:005c35ebfd5c5a90',
+      payloadHash: 'fnv1a64:005c35ebfd5c5a90',
+      schemaVersion: 1,
+      provider: 'cboe',
+      fallbackFrom: null,
+      sourceTimestamp: '2026-07-13T18:45:36.000Z',
+      facts: { 'gex.gammaFlip': 7527.76, 'gex.gammaStatus': 'negative_gamma' },
+      dataQuality: { total: 480, priced: 428, repaired: 4, partial: 48, unpriced: 0, excluded: 48 },
+    },
+    normalizedSeries: { spx15m: [], spx5m: [], spxD1: [], spxH1: [], vix15m: [], vix9d: [] },
+  },
+  rawSnapshotAvailable: false,
+});
+
+const buildSpxUatReplayCouncil = (): CouncilResult => ({
+  status: 'OK',
+  latencyMs: 0,
+  agents: (['QM', 'CM', 'NT', 'PA'] as const).map((agent) => ({
+    agent,
+    decision: 'HOLD',
+    confidence: 65,
+    evidenceRefs: ['spx.last', 'spx.vwap'],
+    claims: [{ text: `${agent} 固定歷史證據未形成可執行入場優勢。`, evidenceRefs: ['spx.last', 'spx.vwap'] }],
+    modelStatus: 'FIXTURE_REPLAY',
+    fallbackStatus: null,
+    latencyMs: 0,
+    reasoning: `${agent} 固定歷史分析票為觀望；本次重播沒有呼叫模型。`,
+    valid: true,
+    attempts: [],
+  })),
+});
+
+export async function runSpxUatReplay(
+  env: Env,
+  runId: string,
+  deliveryMode: SpxDeliveryMode,
+) {
+  if (deliveryMode === 'SEND' && !env.SPX_RECAP_DB) throw new Error('SPX_RECAP_DB unavailable');
+  const previewStore = new InMemorySpxDecisionStore();
+  const store = deliveryMode === 'SEND' ? new D1SpxDecisionStore(env.SPX_RECAP_DB!) : previewStore;
+  let message = '';
+  const result = await runSpxDecisionPipeline({
+    runId,
+    scheduledAt: SPX_UAT_REPLAY_SCHEDULED_AT,
+    currentPosition: 'NONE',
+    runMode: 'UAT_REPLAY',
+  }, {
+    clock: { now: () => new Date() },
+    marketData: { load: async () => buildSpxUatReplaySnapshot(runId) },
+    council: { analyze: async () => buildSpxUatReplayCouncil() },
+    cio: { decide: async () => ({
+      action: 'HOLD',
+      confidence: 65,
+      thesis: '固定歷史證據未形成可執行入場條件。',
+      entry: null,
+      invalidation: null,
+      targets: [],
+      noTradeConditions: ['UAT 重播並非即時訊號'],
+      evidenceRefs: ['spx.last', 'spx.vwap'],
+      claims: [{ text: '已保存 snapshot 顯示價格低於 VWAP。', evidenceRefs: ['spx.last', 'spx.vwap'] }],
+      modelStatus: 'FIXTURE_REPLAY',
+      latencyMs: 0,
+      attempts: [],
+    }) },
+    riskGate: { evaluate: async () => ({ disposition: 'PASS', reason: 'No safety veto.' }) },
+    store,
+    telegram: { send: async (text) => {
+      message = text;
+      return deliveryMode === 'SEND'
+        ? sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, text)
+        : { messageId: 'uat-preview' };
+    } },
+  });
+  return { runId, message, result };
+}
+
 async function runTradingAgents(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}) {
   let runLockToken: string | null = null;
   let decisionStore: D1SpxDecisionStore | null = null;
@@ -2059,6 +2662,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
   const deliveryMode = options.deliveryMode || (options.debugReportPreview ? 'PREVIEW' : 'SEND');
   try {
     const marketStatus = getMarketScheduleStatus(now);
+    const runMode = options.runMode || (options.force && !marketStatus.isTradingWindow ? 'UAT_REPLAY' : 'LIVE');
     if (!options.force && !marketStatus.isTradingWindow) {
       console.log(`[SCHEDULE] Skip trading run: ${marketStatus.skipReason || 'outside_trading_window'} ${marketStatus.etDateKey} ${marketStatus.minutes}`);
       return;
@@ -2078,7 +2682,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     }).format(now);
     const runId = `${etDateStr}-${now.getTime()}`;
     decisionStore = new D1SpxDecisionStore(env.SPX_RECAP_DB);
-    decisionRun = makeDecisionRunRecord(runId, now);
+    decisionRun = makeDecisionRunRecord(runId, now, runMode);
 
     const isNewRun = await decisionStore.beginRun(decisionRun);
     if (!isNewRun) {
@@ -2148,21 +2752,16 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     }
     await refreshPendingAgentSignalOutcomes(env, etDateStr, etTime, spxInd.currentClose);
 
-    const m5QuotesValid = spxQuotesM5.filter((q: any) => q.close !== null);
-    const m5QuotesWithVol = m5QuotesValid.filter((q: any) => (q.volume || 0) > 0);
-
-    let m5Analysis = { boxHigh: 0, boxLow: 0, volumeSurge: 1, currentM5Vol: 0, avgM5Vol: 0 };
-    if (m5QuotesValid.length >= 24) {
-      const last24 = m5QuotesValid.slice(-24); // 2 hours
-      m5Analysis.boxHigh = Math.max(...last24.map((q: any) => q.high));
-      m5Analysis.boxLow = Math.min(...last24.map((q: any) => q.low));
-    }
-    if (m5QuotesWithVol.length >= 11) {
-      const last10 = m5QuotesWithVol.slice(-11, -1);
-      m5Analysis.avgM5Vol = last10.reduce((sum: number, q: any) => sum + (q.volume || 0), 0) / 10;
-      m5Analysis.currentM5Vol = m5QuotesWithVol[m5QuotesWithVol.length - 1].volume || 0;
-      m5Analysis.volumeSurge = m5Analysis.avgM5Vol > 0 ? (m5Analysis.currentM5Vol / m5Analysis.avgM5Vol) : 1;
-    }
+    const snapshotAt = new Date();
+    const completedM5 = analyzeCompletedM5Bars(spxQuotesM5, snapshotAt);
+    const m5QuotesValid = completedM5.completedBars;
+    const m5Analysis = {
+      boxHigh: completedM5.boxHigh,
+      boxLow: completedM5.boxLow,
+      volumeSurge: completedM5.volumeSurge,
+      currentM5Vol: completedM5.currentM5Vol,
+      avgM5Vol: completedM5.avgM5Vol,
+    };
 
     const pcrStatus = !pcrValue ? '數據缺失' : (pcrValue > 1.25 ? '⚠️ 極度恐慌避險 (反轉契機)' : pcrValue < 0.8 ? '極度貪婪 (回調風險)' : '情緒中性');
 
@@ -2186,8 +2785,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     };
 
     const currentVix9d = vixQuotes9d[vixQuotes9d.length - 1]?.close;
-    const currentVix3m = null;
-    const marketDataQuality = assessMarketDataQuality({
+    let marketDataQuality = assessMarketDataQuality({
       spxQuotes,
       spxM5Quotes: m5QuotesValid,
       spxD1Quotes: spxQuotesD1,
@@ -2229,7 +2827,6 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       m5Analysis,
       currentVix,
       currentVix9d,
-      currentVix3m,
       pcrValue,
       calculatedGex,
       trendDayContext,
@@ -2249,24 +2846,59 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       })
       : null;
 
-    const snapshotAt = new Date();
     const snapshotFacts: MarketSnapshot['facts'] = {
       'spx.last': spxInd.currentClose,
       'spx.vwap': spxInd.currentVWAP,
       'spx.ema9': spxInd.ema9 ?? null,
+      'spx.ema20': spxInd.ema20 ?? null,
       'spx.rsi14': spxInd.currentRSI,
+      'spx.macdHistogram': spxInd.macd?.histogram ?? null,
+      'spx.bollingerBandwidthPct': spxInd.bandwidth ?? null,
+      'spx.isSqueeze': spxInd.isSqueeze === true,
       'spx.dayChangePct': trendDayContext.dayChangePct,
       'spx.fromOpenPct': trendDayContext.fromOpenPct,
       'spx.rangePositionPct': trendDayContext.rangePositionPct,
       'm5.volumeSurge': m5Analysis.volumeSurge,
+      'm5.currentVolume': m5Analysis.currentM5Vol,
+      'm5.averageVolume': m5Analysis.avgM5Vol,
+      'm5.latestCompletedAt': m5Analysis.latestCompletedAt,
+      'm5.boxHigh': m5Analysis.boxHigh,
+      'm5.boxLow': m5Analysis.boxLow,
+      'price.nearestSupport': intradayStructure.nearestSupport?.level ?? null,
+      'price.nearestResistance': intradayStructure.nearestResistance?.level ?? null,
+      'price.repeatedSupport': intradayStructure.repeatedSupport?.level ?? null,
+      'price.repeatedSupportTouches': intradayStructure.repeatedSupport?.touches ?? null,
+      'price.repeatedResistance': intradayStructure.repeatedResistance?.level ?? null,
+      'price.repeatedResistanceTouches': intradayStructure.repeatedResistance?.touches ?? null,
+      'price.macroTrend': priceActionContext?.macroTrend ?? null,
+      'price.recentBOS': priceActionContext?.recentBOS ?? null,
+      'price.recentCHoCH': priceActionContext?.recentCHoCH ?? null,
+      'price.nearestOB': priceActionContext?.nearestOB ?? null,
+      'price.nearestFVG': priceActionContext?.nearestFVG ?? null,
+      'price.fibGoldenPocket': priceActionContext?.fibGoldenPocket ?? null,
       'vix.last': currentVix ?? null,
       'vix9d.last': currentVix9d ?? null,
+      'vix.termSpread': currentVix != null && currentVix9d != null ? currentVix9d - currentVix : null,
       'options.pcr': pcrValue ?? null,
       'gex.gammaStatus': calculatedGex?.gammaStatus || null,
+      'gex.zeroDteGammaStatus': calculatedGex?.zeroDteGammaStatus || null,
       'gex.gammaFlip': calculatedGex?.gammaFlipLevel ?? null,
       'gex.totalNet': calculatedGex?.totalNetGex ?? null,
+      'gex.zeroDteNet': calculatedGex?.zeroDteNetGex ?? null,
+      'gex.strongestLongStrike': calculatedGex?.mostLongStrike ?? null,
+      'gex.strongestShortStrike': calculatedGex?.mostShortStrike ?? null,
       'trend.regime': trendDayContext.regime,
+      'zeroDte.verdict': zeroDteRuleEngine.verdict,
+      'zeroDte.signalScore': zeroDteRuleEngine.signalScore,
+      'zeroDte.dataQuality': zeroDteRuleEngine.dataQuality.status,
+      'zeroDte.tradeEligible': !zeroDteRuleEngine.tradeEligibility.hardBlocked,
     };
+    (calculatedGex?.longWalls || []).slice(0, 3).forEach((wall: any, index: number) => {
+      snapshotFacts[`gex.longWall${index + 1}`] = wall?.strike ?? null;
+    });
+    (calculatedGex?.shortPockets || []).slice(0, 3).forEach((pocket: any, index: number) => {
+      snapshotFacts[`gex.shortPocket${index + 1}`] = pocket?.strike ?? null;
+    });
     const canonicalGex = canonicalHeatmap?.canonical || calculatedGex?.canonical || null;
     const boardRoot = env.SPX_BOARD_URL || 'https://sius-ai-workshop.pages.dev/#/work/spx-gex-heatmap';
     const boardDeepLink = canonicalGex
@@ -2299,6 +2931,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       scheduledAt: now,
       snapshotAt,
       spxLatestAt: spxQuotes[spxQuotes.length - 1]?.date || null,
+      spxM5LatestAt: m5QuotesValid[m5QuotesValid.length - 1]?.date || null,
       vixLatestAt: vixQuotes[vixQuotes.length - 1]?.date || null,
       gexSnapshotAt: calculatedGex?.generatedAt || null,
       gexProvider: canonicalGex?.provider || null,
@@ -2309,6 +2942,31 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       boardDeepLink,
       replayEvidence,
     });
+    marketSnapshot.runMode = runMode;
+    marketDataQuality = applyRequiredSpxFreshnessGate(marketDataQuality, marketSnapshot.sourceFreshness, runMode);
+    marketSnapshot.dataQuality = {
+      status: marketDataQuality.overallStatus,
+      hardBlocks: [...marketDataQuality.hardBlocks],
+      warnings: [...marketDataQuality.warnings],
+    };
+    if (marketDataQuality.overallStatus === 'BLOCK') {
+      zeroDteRuleEngine.hardBlocks = [...new Set([...zeroDteRuleEngine.hardBlocks, ...marketDataQuality.hardBlocks])];
+      zeroDteRuleEngine.hardRuleTriggered = true;
+      zeroDteRuleEngine.allowNewSignal = false;
+      zeroDteRuleEngine.verdict = 'NO_TRADE';
+      zeroDteRuleEngine.dataQuality.status = 'BLOCK';
+      zeroDteRuleEngine.tradeEligibility = { hardBlocked: true, reasons: [...zeroDteRuleEngine.hardBlocks] };
+    }
+    marketSnapshot.facts['run.mode'] = runMode;
+    marketSnapshot.facts['zeroDte.verdict'] = zeroDteRuleEngine.verdict;
+    marketSnapshot.facts['zeroDte.dataQuality'] = zeroDteRuleEngine.dataQuality.status;
+    marketSnapshot.facts['zeroDte.tradeEligible'] = !zeroDteRuleEngine.tradeEligibility.hardBlocked;
+    marketSnapshot.facts['quality.status'] = marketSnapshot.dataQuality.status;
+    marketSnapshot.facts['quality.warningCount'] = marketSnapshot.dataQuality.warnings.length;
+    marketSnapshot.facts['freshness.spx'] = marketSnapshot.sourceFreshness.spxYahoo?.status || 'MISSING';
+    marketSnapshot.facts['freshness.spxM5'] = marketSnapshot.sourceFreshness.spxM5Yahoo?.status || 'MISSING';
+    marketSnapshot.facts['freshness.vix'] = marketSnapshot.sourceFreshness.vixYahoo?.status || 'MISSING';
+    marketSnapshot.facts['freshness.gex'] = marketSnapshot.sourceFreshness.canonicalGex?.status || 'MISSING';
     const extendedContext = {
       currentTime: etTime,
       ...context,
@@ -2406,42 +3064,12 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     const fallbackOrchestratorPlan = buildDataBackedCioPlan(extendedContext, [agent1, agent2, agent3, agent4]);
     let orchestratorPlan: any = fallbackOrchestratorPlan;
     let cioModelStatus = councilResult.status === 'DEGRADED' ? 'COUNCIL_DEGRADED' : 'NOT_RUN';
+    let cioAttempts: ModelAttemptMetadata[] = [];
     if (councilResult.status === 'OK' && marketDataQuality.overallStatus !== 'BLOCK' && shouldRunLlmCio(env.SPX_ENABLE_LLM_CIO)) {
-      try {
-        if (!env.OPENROUTER_API_KEY) throw new Error('missing_openrouter_key');
-        const orchRes = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            model: env.OPENROUTER_MODEL || 'google/gemma-4-26b-a4b-it:free',
-            temperature: 0.1,
-            max_tokens: 360,
-            messages: [
-              { role: 'system', content: `${ORCHESTRATOR_PROMPT}\nTraceability contract: also return "logic", "targets" (string array), "no_trade_conditions" (string array), and "evidence_refs" (array of exact snapshotFacts keys). Directional actions without valid evidence_refs, entry, invalidation, and targets are invalid.` },
-              { role: 'user', content: `Market Context: ${JSON.stringify(extendedContext)}\nQM (Momentum): ${JSON.stringify(agent1)}\nCM (GEX): ${JSON.stringify(agent2)}\nNT (Sentiment): ${JSON.stringify(agent3)}\nPA (Price Action): ${JSON.stringify(agent4)}` }
-            ]
-          })
-        }, CIO_MODEL_TIMEOUT_MS);
-        if (orchRes.ok) {
-          const orchData = await orchRes.json() as any;
-          const content = orchData.choices?.[0]?.message?.content || "";
-          const parsedPlan = parseLooseJsonObject(content);
-          if (!parsedPlan) throw new Error('cio_schema_invalid_json');
-          orchestratorPlan = { ...parsedPlan, trade_action: normalizeCioAction(parsedPlan.trade_action) };
-          cioModelStatus = 'AI';
-        } else {
-          cioModelStatus = `OPENROUTER_${orchRes.status}`;
-          console.error(`[ERR] Orchestrator OpenRouter ${orchRes.status}`, await orchRes.text());
-        }
-      } catch (e: any) {
-        cioModelStatus = e?.name === 'AbortError' || /timeout|timed out/i.test(String(e?.message || e))
-          ? 'TIMEOUT'
-          : /schema/i.test(String(e?.message || e)) ? 'INVALID_SCHEMA' : 'REQUEST_FAILED';
-        console.error('[ERR] Orchestrator error', e);
-      }
+      const cioResult = await decideWithCio(extendedContext, [agent1, agent2, agent3, agent4], env);
+      orchestratorPlan = cioResult.plan;
+      cioModelStatus = cioResult.modelStatus;
+      cioAttempts = cioResult.attempts;
     } else if (marketDataQuality.overallStatus === 'BLOCK') {
       cioModelStatus = 'DATA_BLOCK';
     } else if (councilResult.status === 'DEGRADED') {
@@ -2467,8 +3095,11 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
           : [],
       noTradeConditions: toStringArray((orchestratorPlan as any).no_trade_conditions),
       evidenceRefs: normalizeEvidenceRefs((orchestratorPlan as any).evidence_refs),
+      claims: normalizeEvidenceClaims((orchestratorPlan as any).claims)
+        .map((claim) => ({ text: claim.text, evidenceRefs: claim.evidenceRefs })),
       modelStatus: cioModelStatus,
       latencyMs: Date.now() - cioStartedAt,
+      attempts: cioAttempts,
     };
     const cioValidationFailure = getCioValidationFailure(cioDecision, marketSnapshot);
     if (cioValidationFailure) {
@@ -2484,9 +3115,11 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
         invalidation: null,
         targets: [],
         noTradeConditions: [degradedReason],
-        evidenceRefs: [],
+      evidenceRefs: [],
+      claims: [],
         modelStatus: cioModelStatus,
         latencyMs: Date.now() - cioStartedAt,
+        attempts: cioAttempts,
       };
     }
     decisionRun!.cioDecision = cioDecision;
@@ -2641,9 +3274,22 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
   } catch (e: any) {
     console.error('CRITICAL BOT ERROR:', e.message);
     if (decisionStore && decisionRun) {
-      const reason = `pipeline_error:${compactModelText(e?.message || String(e), 180)}`;
-      await completeDegradedDecisionRun(env, decisionStore, decisionRun, reason, deliveryMode).catch((persistError) => {
+      const failedStage = decisionRun.currentStage;
+      const reason = `pipeline_error:${failedStage}:${compactModelText(e?.message || String(e), 180)}`;
+      await completeDegradedDecisionRun(env, decisionStore, decisionRun, reason, deliveryMode).catch(async (persistError) => {
         console.error('[LEDGER] Failed to complete degraded pipeline run', persistError);
+        decisionRun!.degraded = true;
+        decisionRun!.degradedReason = reason;
+        decisionRun!.updatedAt = new Date().toISOString();
+        await decisionStore!.persistDecision(decisionRun!).catch(() => undefined);
+        await decisionStore!.appendLifecycle({
+          runId: decisionRun!.runId,
+          stage: failedStage,
+          occurredAt: decisionRun!.updatedAt,
+          attempt: 99,
+          latencyMs: null,
+          payload: { failed: true, failedStage, error: reason, recoveryFailed: true },
+        }).catch(() => undefined);
       });
     }
   } finally {
@@ -2880,6 +3526,25 @@ export default {
     if (url.searchParams.has('gex')) {
       ctx.waitUntil(runSpxGexHeatmapGeneration(env, new Date(), { force: forceManualRun }));
       return new Response('SPX GEX heatmap generation triggered.');
+    }
+
+    const manualStatus = getMarketScheduleStatus(new Date());
+    if (!manualStatus.isTradingWindow) {
+      const deliveryMode = resolveSpxDeliveryMode({
+        trigger: 'MANUAL',
+        explicitDelivery: url.searchParams.has('deliver'),
+        debugPreview: url.searchParams.has('debug'),
+      });
+      const requestedRunId = url.searchParams.get('uat_run_id');
+      const uatRunId = requestedRunId && /^[a-z0-9_.:-]{8,120}$/i.test(requestedRunId)
+        ? requestedRunId
+        : `uat-replay-20260713-1445-${Date.now()}`;
+      if (deliveryMode === 'PREVIEW') {
+        const preview = await runSpxUatReplay(env, uatRunId, 'PREVIEW');
+        return new Response(`UAT_REPLAY PREVIEW (non-live; no model call; Telegram suppressed)\n\n${preview.message}`);
+      }
+      ctx.waitUntil(runSpxUatReplay(env, uatRunId, 'SEND'));
+      return new Response(`UAT_REPLAY delivery triggered for run_id=${uatRunId}; fixed historical fixture, not a live signal.`);
     }
 
     if (url.searchParams.has('debug')) {

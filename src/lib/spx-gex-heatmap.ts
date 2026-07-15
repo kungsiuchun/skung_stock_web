@@ -1868,6 +1868,14 @@ const noteWithBlendedIv = (note: string) => (
     .replace(/Legacy snapshots may not have audit inputs and cannot be recomputed\.\s*/g, "")
 );
 
+const noteWithDataQuality = (note: string, summary: SpxGexDataQualitySummary) => {
+  const normalized = noteWithBlendedIv(note);
+  const priorSummary = /Data quality: priced \d+ · repaired \d+ · partial \d+ · unpriced \d+ · excluded \d+\./;
+  return priorSummary.test(normalized)
+    ? normalized.replace(priorSummary, formatDataQualitySummary(summary))
+    : `${normalized.trim()} ${formatDataQualitySummary(summary)}`;
+};
+
 const isAuditedBlendedCell = (cell: SpxGexHeatmapCell) => (
   cell.model === BLENDED_IV_MODEL
   && typeof cell.netGex === "number"
@@ -2033,7 +2041,7 @@ const normalizeBlendedIvExposure = (heatmap: SpxGexHeatmapModel): SpxGexHeatmapM
     strikeProfiles: annotatedStrikeProfiles,
     source: {
       ...heatmap.source,
-      note: `${noteWithBlendedIv(heatmap.source.note)} ${formatDataQualitySummary(dataQuality)}`,
+      note: noteWithDataQuality(heatmap.source.note, dataQuality),
     },
     dataQuality,
   };
