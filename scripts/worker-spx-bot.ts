@@ -185,25 +185,17 @@ const AGENT_RESPONSE_SCHEMA = {
   properties: {
     decision: { type: "string", enum: ["CALL", "PUT", "HOLD"] },
     confidence_score: { type: "number", minimum: 1, maximum: 100 },
-    evidence_refs: { type: "array", minItems: 1, items: { type: "string" } },
-    claims: {
+    evidence_refs: {
       type: "array",
       minItems: 1,
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          text: { type: "string" },
-          evidence_refs: { type: "array", minItems: 1, items: { type: "string" } },
-        },
-        required: ["text", "evidence_refs"],
-      },
+      maxItems: 4,
+      uniqueItems: true,
+      items: { type: "string" },
     },
-    blocking_risk: { type: ["string", "null"] },
-    neutral_reason: { type: ["string", "null"] },
-    reasoning: { type: "string" },
+    blocking_risk: { type: ["string", "null"], maxLength: 80 },
+    reasoning: { type: "string", minLength: 1, maxLength: 180 },
   },
-  required: ["decision", "confidence_score", "evidence_refs", "claims", "blocking_risk", "neutral_reason", "reasoning"],
+  required: ["decision", "confidence_score", "evidence_refs", "blocking_risk", "reasoning"],
 } as const;
 
 const CIO_RESPONSE_SCHEMA = {
@@ -255,15 +247,20 @@ const isStructuredOutputValid = (
 ) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   if (callKind === "agent") {
+    const allowedKeys = new Set(["decision", "confidence_score", "evidence_refs", "blocking_risk", "reasoning"]);
+    const hasOnlyContractKeys = Object.keys(value).length === allowedKeys.size
+      && Object.keys(value).every((key) => allowedKeys.has(key));
     const shapeValid = ["CALL", "PUT", "HOLD"].includes(value.decision)
+      && hasOnlyContractKeys
       && Number.isFinite(value.confidence_score) && value.confidence_score >= 1 && value.confidence_score <= 100
       && stringArray(value.evidence_refs)
-      && value.evidence_refs.length > 0
+      && value.evidence_refs.length > 0 && value.evidence_refs.length <= 4
+      && new Set(value.evidence_refs).size === value.evidence_refs.length
       && (!allowedEvidenceRefs || value.evidence_refs.every((reference: string) => allowedEvidenceRefs.has(reference)))
-      && structuredClaimsValid(value.claims, allowedEvidenceRefs)
       && (typeof value.blocking_risk === "string" || value.blocking_risk === null)
-      && (typeof value.neutral_reason === "string" || value.neutral_reason === null)
-      && typeof value.reasoning === "string" && Boolean(value.reasoning.trim());
+      && (value.blocking_risk === null || value.blocking_risk.length <= 80)
+      && typeof value.reasoning === "string" && Boolean(value.reasoning.trim())
+      && value.reasoning.length <= 180;
     if (!shapeValid) return false;
     return true;
   }
@@ -299,14 +296,17 @@ export const buildStructuredOpenRouterBody = (
   callKind: StructuredOpenRouterCallKind,
   model: string,
   messages: Array<{ role: string; content: string }>,
+  maxOutputTokens = callKind === "agent" ? 512 : 520,
 ) => {
   const isGpt5 = /^openai\/gpt-5(?:-|$)/i.test(model);
   return {
   model,
   ...(isGpt5
-    ? { max_completion_tokens: callKind === "agent" ? 420 : 520 }
-    : { temperature: 0, max_tokens: callKind === "agent" ? 420 : 520 }),
-  provider: { require_parameters: true },
+    ? { max_completion_tokens: maxOutputTokens }
+    : { temperature: 0, max_tokens: maxOutputTokens }),
+  provider: callKind === "agent"
+    ? { require_parameters: true, sort: "throughput", allow_fallbacks: true }
+    : { require_parameters: true },
   response_format: {
     type: "json_schema",
     json_schema: {
@@ -327,6 +327,10 @@ export async function runStructuredOpenRouterRequest(input: {
   fetcher?: typeof fetch;
   timeoutMs?: number;
   allowedEvidenceRefs?: string[];
+  projectionBytes?: number;
+  factCount?: number;
+  deadlineAtMs?: number;
+  maxProjectionBytes?: number;
 }): Promise<{
   ok: boolean;
   value: any | null;
@@ -336,8 +340,8 @@ export async function runStructuredOpenRouterRequest(input: {
   const fetcher = input.fetcher || fetch;
   const timeoutMs = input.timeoutMs ?? 12_000;
   const attempts: ModelAttemptMetadata[] = [];
-  const body = buildStructuredOpenRouterBody(input.callKind, input.model, input.messages);
   let failureStatus: string | null = null;
+  let maxOutputTokens = input.callKind === "agent" ? 512 : 520;
   const unavailableResponseMetadata = {
     requestedModel: input.model,
     resolvedModel: null,
@@ -350,10 +354,82 @@ export async function runStructuredOpenRouterRequest(input: {
     cost: null,
   };
 
+  if (input.maxProjectionBytes !== undefined
+    && input.projectionBytes !== undefined
+    && input.projectionBytes > input.maxProjectionBytes) {
+    const body = buildStructuredOpenRouterBody(input.callKind, input.model, input.messages, maxOutputTokens);
+    const requestBody = JSON.stringify(body);
+    const requestBytes = new TextEncoder().encode(requestBody).byteLength;
+    return {
+      ok: false,
+      value: null,
+      failureStatus: "input_budget_exceeded",
+      attempts: [{
+        attempt: 1,
+        model: input.model,
+        ...unavailableResponseMetadata,
+        status: "INPUT_BUDGET_EXCEEDED",
+        latencyMs: 0,
+        httpStatus: null,
+        errorCategory: "INPUT_BUDGET_EXCEEDED",
+        finishReason: null,
+        contentLength: 0,
+        responseHash: null,
+        requestBytes,
+        projectionBytes: input.projectionBytes,
+        factCount: input.factCount ?? null,
+        requestHash: await sha256Text(requestBody),
+        maxOutputTokens,
+        deadlineRemainingMs: input.deadlineAtMs === undefined
+          ? null
+          : Math.max(0, input.deadlineAtMs - Date.now()),
+        routingPolicy: input.callKind === "agent" ? "throughput_same_model_fallbacks" : "parameters_only",
+      }],
+    };
+  }
+
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const startedAt = Date.now();
+    const deadlineRemainingMs = input.deadlineAtMs === undefined
+      ? null
+      : Math.max(0, input.deadlineAtMs - startedAt);
+    if (deadlineRemainingMs === 0) {
+      failureStatus = "council_deadline_exceeded";
+      attempts.push({
+        attempt,
+        model: input.model,
+        ...unavailableResponseMetadata,
+        status: "DEADLINE_EXCEEDED",
+        latencyMs: 0,
+        httpStatus: null,
+        errorCategory: "DEADLINE_EXCEEDED",
+        finishReason: null,
+        contentLength: 0,
+        responseHash: null,
+        requestBytes: 0,
+        projectionBytes: input.projectionBytes ?? null,
+        factCount: input.factCount ?? null,
+        requestHash: null,
+        maxOutputTokens,
+        deadlineRemainingMs,
+        routingPolicy: input.callKind === "agent" ? "throughput_same_model_fallbacks" : "parameters_only",
+      });
+      break;
+    }
+    const body = buildStructuredOpenRouterBody(input.callKind, input.model, input.messages, maxOutputTokens);
+    const requestBody = JSON.stringify(body);
+    const requestMetadata = {
+      requestBytes: new TextEncoder().encode(requestBody).byteLength,
+      projectionBytes: input.projectionBytes ?? null,
+      factCount: input.factCount ?? null,
+      requestHash: await sha256Text(requestBody),
+      maxOutputTokens,
+      deadlineRemainingMs,
+      routingPolicy: input.callKind === "agent" ? "throughput_same_model_fallbacks" : "parameters_only",
+    };
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const attemptTimeoutMs = deadlineRemainingMs === null ? timeoutMs : Math.min(timeoutMs, deadlineRemainingMs);
+    const timeout = setTimeout(() => controller.abort(), attemptTimeoutMs);
     try {
       const response = await fetcher("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
@@ -363,7 +439,7 @@ export async function runStructuredOpenRouterRequest(input: {
           "HTTP-Referer": "https://spx-trading-pua.kungsiuchun0.workers.dev",
           "X-OpenRouter-Title": "SPX Decision Pipeline",
         },
-        body: JSON.stringify(body),
+        body: requestBody,
         signal: controller.signal,
       });
       if (!response.ok) {
@@ -381,6 +457,7 @@ export async function runStructuredOpenRouterRequest(input: {
           finishReason: null,
           contentLength: responseText.length,
           responseHash: responseText ? await sha256Text(responseText) : null,
+          ...requestMetadata,
         });
         if (!retryable || attempt === 2) break;
         continue;
@@ -401,6 +478,25 @@ export async function runStructuredOpenRouterRequest(input: {
         cost: toNullableFiniteNumber(usage.cost),
       };
       const content = typeof choice?.message?.content === "string" ? choice.message.content : "";
+      if (choice?.finish_reason === "length") {
+        failureStatus = input.callKind === "agent" ? "model_output_truncated" : "cio_output_truncated";
+        attempts.push({
+          attempt,
+          model: input.model,
+          ...responseMetadata,
+          status: "OUTPUT_TRUNCATED",
+          latencyMs: Math.max(0, Date.now() - startedAt),
+          httpStatus: response.status,
+          errorCategory: "OUTPUT_TRUNCATED",
+          finishReason: "length",
+          contentLength: content.length,
+          responseHash: content ? await sha256Text(content) : null,
+          ...requestMetadata,
+        });
+        if (attempt === 2) break;
+        maxOutputTokens = input.callKind === "agent" ? 640 : maxOutputTokens;
+        continue;
+      }
       let value: any = null;
       try {
         value = JSON.parse(content);
@@ -420,6 +516,7 @@ export async function runStructuredOpenRouterRequest(input: {
           finishReason: choice?.finish_reason || null,
           contentLength: content.length,
           responseHash: content ? await sha256Text(content) : null,
+          ...requestMetadata,
         });
         if (attempt === 2) break;
         continue;
@@ -436,24 +533,33 @@ export async function runStructuredOpenRouterRequest(input: {
         finishReason: choice?.finish_reason || null,
         contentLength: content.length,
         responseHash: content ? await sha256Text(content) : null,
+        ...requestMetadata,
       });
       return { ok: true, value, attempts, failureStatus: null };
     } catch (error: any) {
       const timedOut = error?.name === "AbortError" || /timeout|timed out/i.test(String(error?.message || error));
-      failureStatus = timedOut ? "model_timeout" : "model_request_failed";
+      const deadlineExceeded = timedOut
+        && input.deadlineAtMs !== undefined
+        && Date.now() >= input.deadlineAtMs - 5;
+      failureStatus = deadlineExceeded
+        ? "council_deadline_exceeded"
+        : timedOut
+          ? "model_timeout"
+          : "model_request_failed";
       attempts.push({
         attempt,
         model: input.model,
         ...unavailableResponseMetadata,
-        status: timedOut ? "TIMEOUT" : "REQUEST_FAILED",
+        status: deadlineExceeded ? "DEADLINE_EXCEEDED" : timedOut ? "TIMEOUT" : "REQUEST_FAILED",
         latencyMs: Math.max(0, Date.now() - startedAt),
         httpStatus: null,
-        errorCategory: timedOut ? "TIMEOUT" : "REQUEST_FAILED",
+        errorCategory: deadlineExceeded ? "DEADLINE_EXCEEDED" : timedOut ? "TIMEOUT" : "REQUEST_FAILED",
         finishReason: null,
         contentLength: 0,
         responseHash: null,
+        ...requestMetadata,
       });
-      if (!timedOut || attempt === 2) break;
+      if (deadlineExceeded || !timedOut || attempt === 2) break;
     } finally {
       clearTimeout(timeout);
     }
@@ -463,7 +569,9 @@ export async function runStructuredOpenRouterRequest(input: {
 
 const YAHOO_CHART_TIMEOUT_MS = 6500;
 const OPTIONAL_MARKET_DATA_TIMEOUT_MS = 6500;
-const AGENT_MODEL_TIMEOUT_MS = 12000;
+const AGENT_MODEL_TIMEOUT_MS = 15000;
+const COUNCIL_DEADLINE_MS = 30000;
+const AGENT_PROJECTION_MAX_BYTES = 8 * 1024;
 const CIO_MODEL_TIMEOUT_MS = 12000;
 const TELEGRAM_TIMEOUT_MS = 6000;
 const M5_INTERVAL_MS = 5 * 60_000;
@@ -878,6 +986,9 @@ const normalizeAgentContract = (raw: Record<string, any>, fallbackReason: string
   const evidence = normalizeEvidenceList(raw.evidence || raw.evidence_bullets, [reasoning]);
   const evidenceRefs = normalizeEvidenceRefs(raw.evidenceRefs || raw.evidence_refs);
   const claims = normalizeEvidenceClaims(raw.claims);
+  const traceableClaims = claims.length > 0 || evidenceRefs.length === 0
+    ? claims
+    : [{ text: reasoning, evidenceRefs, evidence_refs: evidenceRefs }];
   return {
     ...raw,
     decision,
@@ -887,7 +998,7 @@ const normalizeAgentContract = (raw: Record<string, any>, fallbackReason: string
     evidence,
     evidenceRefs,
     evidence_refs: evidenceRefs,
-    claims,
+    claims: traceableClaims,
     blockingRisk,
     blocking_risk: blockingRisk,
     neutralReason,
@@ -2020,14 +2131,14 @@ export async function analyzeWithAgent(
   personaPrompt: string,
   contextData: any,
   env: Env,
-  options: { fetcher?: typeof fetch } = {},
+  options: { fetcher?: typeof fetch; deadlineAtMs?: number } = {},
 ) {
   const startedAt = Date.now();
   const finish = (analysis: AgentDecisionContract): AgentDecisionContract => ({
     ...analysis,
     latencyMs: Math.max(0, Date.now() - startedAt),
   });
-  const systemPrompt = `You are an SPX council analyst with this role: ${personaPrompt}. Analyze only the supplied normalized snapshotFacts. Return CALL, PUT, or HOLD analysis, never OPEN_* execution language. confidence_score must be 1-100. Every claim and HOLD conflict must cite exact supplied snapshotFacts keys. You analyze; you never execute trades or override the CIO.`;
+  const systemPrompt = `You are an SPX council analyst with this role: ${personaPrompt}. Analyze only the supplied normalized snapshotFacts. Return CALL, PUT, or HOLD analysis, never OPEN_* execution language. confidence_score must be 1-100. Keep reasoning within 180 characters and cite 1-4 exact snapshotFacts keys in evidence_refs. For HOLD, state the concrete conflict in reasoning. You analyze; you never execute trades or override the CIO.`;
   if (!env.OPENROUTER_API_KEY) {
     return finish({
       ...buildDataBackedAgentFallback(personaKey, contextData, "missing_openrouter_key"),
@@ -2035,17 +2146,23 @@ export async function analyzeWithAgent(
     });
   }
   const projection = buildAgentContextProjection(personaKey, contextData);
+  const projectionJson = JSON.stringify(projection);
+  const projectionBytes = new TextEncoder().encode(projectionJson).byteLength;
   const result = await runStructuredOpenRouterRequest({
     callKind: "agent",
     apiKey: env.OPENROUTER_API_KEY,
     model: env.SPX_COUNCIL_MODEL || env.OPENROUTER_MODEL || DEFAULT_SPX_COUNCIL_MODEL,
     messages: [
       { role: "system", content: systemPrompt },
-      { role: "user", content: `Normalized ${personaKey} projection: ${JSON.stringify(projection)}` },
+      { role: "user", content: `Normalized ${personaKey} projection: ${projectionJson}` },
     ],
     fetcher: options.fetcher,
     timeoutMs: AGENT_MODEL_TIMEOUT_MS,
     allowedEvidenceRefs: Object.keys(projection.snapshotFacts),
+    projectionBytes,
+    factCount: Object.keys(projection.snapshotFacts).length,
+    maxProjectionBytes: AGENT_PROJECTION_MAX_BYTES,
+    deadlineAtMs: options.deadlineAtMs,
   });
   if (!result.ok) {
     console.error(`[COUNCIL:${personaKey}] structured model failed after ${result.attempts.length} attempt(s): ${result.failureStatus}`);
@@ -2060,6 +2177,20 @@ export async function analyzeWithAgent(
     modelStatus: "AI",
     attempts: result.attempts,
   });
+}
+
+export async function runCouncilAnalyses(
+  contextData: any,
+  env: Env,
+  options: { fetcher?: typeof fetch; deadlineMs?: number } = {},
+) {
+  const deadlineAtMs = Date.now() + (options.deadlineMs ?? COUNCIL_DEADLINE_MS);
+  return Promise.all([
+    analyzeWithAgent("QM", PERSONAS.QM_MOMENTUM_SNIPER, contextData, env, { fetcher: options.fetcher, deadlineAtMs }),
+    analyzeWithAgent("CM", PERSONAS.CM_OPTIONS_MAKER, contextData, env, { fetcher: options.fetcher, deadlineAtMs }),
+    analyzeWithAgent("NT", NT_VOLATILITY_RISK_PROMPT, contextData, env, { fetcher: options.fetcher, deadlineAtMs }),
+    analyzeWithAgent("PA", PERSONAS.PA_PRICE_ACTION, contextData, env, { fetcher: options.fetcher, deadlineAtMs }),
+  ]);
 }
 
 async function sendTelegramMessage(token: string, chatId: string, text: string) {
@@ -3016,12 +3147,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       buildDataBackedAgentFallback(key, extendedContext, 'council_not_run')
     );
     if (marketDataQuality.overallStatus !== 'BLOCK' && shouldRunLlmCouncil(env.SPX_ENABLE_LLM_COUNCIL)) {
-      [agent1, agent2, agent3, agent4] = await Promise.all([
-        analyzeWithAgent('QM', PERSONAS.QM_MOMENTUM_SNIPER, extendedContext, env),
-        analyzeWithAgent('CM', PERSONAS.CM_OPTIONS_MAKER, extendedContext, env),
-        analyzeWithAgent('NT', NT_VOLATILITY_RISK_PROMPT, extendedContext, env),
-        analyzeWithAgent('PA', PERSONAS.PA_PRICE_ACTION, extendedContext, env)
-      ]);
+      [agent1, agent2, agent3, agent4] = await runCouncilAnalyses(extendedContext, env);
     } else if (marketDataQuality.overallStatus === 'BLOCK') {
       [agent1, agent2, agent3, agent4] = ['QM', 'CM', 'NT', 'PA'].map((key) =>
         buildDataBackedAgentFallback(key, extendedContext, 'market_data_block')

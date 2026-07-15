@@ -194,6 +194,38 @@ test("Telegram lists four Council agents with reasoning and excludes invalid vot
   assert.ok(message.length < 4096, `Telegram message must stay below 4096 characters; got ${message.length}`);
 });
 
+test("Telegram explains Council input-budget failures without leaking internal status codes", async () => {
+  const inputBudgetCouncil: CouncilResult = {
+    status: "DEGRADED",
+    degradedReason: "council_qm_input_budget_exceeded",
+    latencyMs: 0,
+    agents: allHoldCouncil.agents.map((agent) => agent.agent === "QM"
+      ? {
+        ...agent,
+        valid: false,
+        confidence: 0,
+        modelStatus: "FAILED",
+        fallbackStatus: "input_budget_exceeded",
+        reasoning: "input_budget_exceeded",
+      }
+      : agent),
+  };
+  const { dependencies, sent } = buildDependencies({
+    council: { analyze: async () => inputBudgetCouncil },
+  });
+
+  await runSpxDecisionPipeline({
+    runId: "telegram-input-budget-contract",
+    scheduledAt,
+    currentPosition: "NONE",
+  }, dependencies);
+
+  const message = sent[0] || "";
+  assert.match(message, /判斷｜Council 未完整：QM 模型輸入超出預算；CIO 按契約未執行。/);
+  assert.match(message, /理由｜模型輸入超出預算；重試後仍無法驗證。/);
+  assert.doesNotMatch(message, /input_budget_exceeded|council_qm_/);
+});
+
 test("degraded HOLD Telegram is concise, human-readable, and never leaks internal fallback codes", async () => {
   const { dependencies, sent } = buildDependencies({
     council: {

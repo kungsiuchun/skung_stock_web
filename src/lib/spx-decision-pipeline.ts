@@ -105,7 +105,7 @@ export interface ModelAttemptMetadata {
   resolvedModel?: string | null;
   provider?: string | null;
   responseId?: string | null;
-  status: "SUCCESS" | "TIMEOUT" | "HTTP_ERROR" | "SCHEMA_INVALID" | "REQUEST_FAILED";
+  status: "SUCCESS" | "TIMEOUT" | "HTTP_ERROR" | "SCHEMA_INVALID" | "OUTPUT_TRUNCATED" | "DEADLINE_EXCEEDED" | "INPUT_BUDGET_EXCEEDED" | "REQUEST_FAILED";
   latencyMs: number;
   httpStatus: number | null;
   errorCategory: string | null;
@@ -117,6 +117,13 @@ export interface ModelAttemptMetadata {
   reasoningTokens?: number | null;
   totalTokens?: number | null;
   cost?: number | null;
+  requestBytes?: number;
+  projectionBytes?: number | null;
+  factCount?: number | null;
+  requestHash?: string | null;
+  maxOutputTokens?: number;
+  deadlineRemainingMs?: number | null;
+  routingPolicy?: string;
 }
 
 export interface CouncilResult {
@@ -511,6 +518,9 @@ const councilAgentIsValid = (agent: CouncilAgentAnalysis) => agent.valid
 
 const humanizeModelFailure = (value: string | null | undefined) => {
   const reason = String(value || "").toLowerCase();
+  if (reason.includes("input_budget_exceeded")) return "模型輸入超出預算";
+  if (reason.includes("output_truncated")) return "模型輸出被截斷";
+  if (reason.includes("deadline_exceeded")) return "Council 時間預算耗盡";
   if (reason.includes("output_not_json") || reason.includes("schema") || reason.includes("format")) {
     return "模型回應格式無效";
   }

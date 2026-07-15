@@ -17,6 +17,7 @@ import {
   parseAgentResponseWithDataFallback,
   parseAgentResponseContent,
   parseOrchestratorResponseContent,
+  runCouncilAnalyses,
   runStructuredOpenRouterRequest,
   runSpxUatReplay,
   shouldRunLlmCio,
@@ -102,11 +103,21 @@ test("OpenRouter request profiles keep Gemma Council deterministic and omit temp
 
   assert.equal(council.model, "google/gemma-4-26b-a4b-it");
   assert.equal(council.temperature, 0);
-  assert.equal(council.max_tokens, 420);
+  assert.equal(council.max_tokens, 512);
+  assert.equal(council.provider.require_parameters, true);
+  assert.equal(council.provider.sort, "throughput");
+  assert.equal(council.provider.allow_fallbacks, true);
+  assert.deepEqual(
+    Object.keys(council.response_format.json_schema.schema.properties),
+    ["decision", "confidence_score", "evidence_refs", "blocking_risk", "reasoning"],
+  );
+  assert.equal(council.response_format.json_schema.schema.properties.reasoning.maxLength, 180);
+  assert.equal(council.response_format.json_schema.schema.properties.evidence_refs.maxItems, 4);
   assert.equal(cio.model, "openai/gpt-5-mini");
   assert.equal("temperature" in cio, false);
   assert.equal("max_tokens" in cio, false);
   assert.equal(cio.max_completion_tokens, 520);
+  assert.deepEqual(cio.provider, { require_parameters: true });
 });
 
 test("valid AI Council output rejects zero confidence and invalid HOLD evidence references", async () => {
@@ -124,9 +135,7 @@ test("valid AI Council output rejects zero confidence and invalid HOLD evidence 
       decision: "HOLD",
       confidence_score: 55,
       evidence_refs: ["marketDataQuality"],
-      claims: [{ text: "Quality is weak.", evidence_refs: ["marketDataQuality"] }],
       blocking_risk: null,
-      neutral_reason: "Quality is weak.",
       reasoning: "Quality is weak.",
     },
   ];
@@ -145,6 +154,31 @@ test("valid AI Council output rejects zero confidence and invalid HOLD evidence 
 
   assert.equal(result.ok, false);
   assert.equal(result.failureStatus, "model_output_schema_invalid");
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["SCHEMA_INVALID", "SCHEMA_INVALID"]);
+});
+
+test("compact Council contract rejects legacy duplicated fields", async () => {
+  const content = JSON.stringify({
+    decision: "HOLD",
+    confidence_score: 55,
+    evidence_refs: ["spx.last"],
+    claims: [{ text: "Legacy duplicated claim.", evidence_refs: ["spx.last"] }],
+    blocking_risk: null,
+    neutral_reason: "Legacy duplicated neutral reason.",
+    reasoning: "Price lacks a confirmed edge.",
+  });
+  const result = await runStructuredOpenRouterRequest({
+    callKind: "agent",
+    apiKey: "test-key",
+    model: "google/gemma-4-26b-a4b-it",
+    messages: [],
+    allowedEvidenceRefs: ["spx.last"],
+    fetcher: async () => new Response(JSON.stringify({
+      choices: [{ finish_reason: "stop", message: { content } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }),
+  });
+
+  assert.equal(result.ok, false);
   assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["SCHEMA_INVALID", "SCHEMA_INVALID"]);
 });
 
@@ -313,10 +347,15 @@ test("AI council and CIO are enabled by default and only falsey flags disable th
   assert.equal(shouldRunLlmCio("no"), false);
 });
 
-test("Council OpenRouter call uses strict schema and recovers when the second same-model attempt is valid", async () => {
+test("Council classifies length truncation and retries the same model with a larger output cap", async () => {
   const requestBodies: any[] = [];
   const responses = [
-    { choices: [{ finish_reason: "stop", message: { content: "not json" } }] },
+    {
+      model: "google/gemma-4-26b-a4b-it-202607",
+      provider: "DeepInfra",
+      usage: { prompt_tokens: 101, completion_tokens: 512, total_tokens: 613, cost: 0.0002 },
+      choices: [{ finish_reason: "length", message: { content: '{"decision":"HOLD"' } }],
+    },
     {
       id: "gen-uat-2",
       model: "google/gemma-4-26b-a4b-it-202607",
@@ -329,9 +368,7 @@ test("Council OpenRouter call uses strict schema and recovers when the second sa
             decision: "HOLD",
             confidence_score: 62,
             evidence_refs: ["spx.last"],
-            claims: [{ text: "Price remains pinned near VWAP.", evidence_refs: ["spx.last"] }],
             blocking_risk: null,
-            neutral_reason: "No entry edge.",
             reasoning: "Price remains pinned near VWAP.",
           }),
         },
@@ -352,6 +389,9 @@ test("Council OpenRouter call uses strict schema and recovers when the second sa
     model: "google/gemma-4-26b-a4b-it",
     messages: [{ role: "user", content: "normalized agent projection" }],
     fetcher,
+    projectionBytes: 123,
+    factCount: 1,
+    deadlineAtMs: Date.now() + 30_000,
   });
 
   assert.equal(result.ok, true);
@@ -360,16 +400,27 @@ test("Council OpenRouter call uses strict schema and recovers when the second sa
   assert.equal(requestBodies[0].model, requestBodies[1].model);
   assert.equal(result.attempts[1].requestedModel, "google/gemma-4-26b-a4b-it");
   assert.equal(result.attempts[1].resolvedModel, "google/gemma-4-26b-a4b-it-202607");
-  assert.equal(result.attempts[1].provider, "Google");
+  assert.deepEqual(result.attempts.map((attempt) => attempt.provider), ["DeepInfra", "Google"]);
   assert.equal(result.attempts[1].totalTokens, 143);
   assert.equal(result.attempts[1].cost, 0.00012);
   assert.equal(requestBodies[0].temperature, 0);
-  assert.equal(requestBodies[0].max_tokens, 420);
+  assert.equal(requestBodies[0].max_tokens, 512);
+  assert.equal(requestBodies[1].max_tokens, 640);
   assert.equal(requestBodies[0].provider.require_parameters, true);
+  assert.equal(requestBodies[0].provider.sort, "throughput");
+  assert.equal(requestBodies[0].provider.allow_fallbacks, true);
   assert.equal(requestBodies[0].response_format.type, "json_schema");
   assert.equal(requestBodies[0].response_format.json_schema.strict, true);
   assert.equal(requestBodies[0].response_format.json_schema.schema.additionalProperties, false);
-  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["SCHEMA_INVALID", "SUCCESS"]);
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["OUTPUT_TRUNCATED", "SUCCESS"]);
+  assert.equal(result.attempts[0].requestBytes > 0, true);
+  assert.equal(result.attempts[0].projectionBytes, 123);
+  assert.equal(result.attempts[0].factCount, 1);
+  assert.equal(result.attempts[0].maxOutputTokens, 512);
+  assert.equal(result.attempts[1].maxOutputTokens, 640);
+  assert.equal(result.attempts[0].routingPolicy, "throughput_same_model_fallbacks");
+  assert.equal(typeof result.attempts[0].deadlineRemainingMs, "number");
+  assert.ok(result.attempts[0].requestHash);
   assert.ok(result.attempts[1].responseHash);
 });
 
@@ -385,9 +436,7 @@ test("Council retries only its failed call and sends a role-specific normalized 
         decision: "HOLD",
         confidence_score: 58,
         evidence_refs: ["spx.last", "spx.vwap"],
-        claims: [{ text: "SPX remains close to VWAP.", evidence_refs: ["spx.last", "spx.vwap"] }],
         blocking_risk: null,
-        neutral_reason: "No momentum confirmation.",
         reasoning: "SPX remains close to VWAP.",
       });
     return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content } }] }), {
@@ -411,11 +460,68 @@ test("Council retries only its failed call and sends a role-specific normalized 
 
   assert.equal(result.modelStatus, "AI");
   assert.equal(result.decision, "HOLD");
+  assert.deepEqual(result.claims, [{
+    text: "SPX remains close to VWAP.",
+    evidenceRefs: ["spx.last", "spx.vwap"],
+    evidence_refs: ["spx.last", "spx.vwap"],
+  }]);
   assert.deepEqual(result.attempts?.map((attempt) => attempt.status), ["SCHEMA_INVALID", "SUCCESS"]);
   assert.equal(requestBodies.length, 2);
   const sentProjection = requestBodies[1].messages[1].content;
   assert.match(sentProjection, /spx\.last/);
   assert.doesNotMatch(sentProjection, /extendedOnlyPayload|mustNotBeSent|gex\.gammaFlip/);
+});
+
+test("Council rejects an oversized role projection before spending a model request", async () => {
+  let calls = 0;
+  const oversizedFacts = Object.fromEntries(Array.from({ length: 80 }, (_, index) => [
+    `spx.synthetic${index}`,
+    "x".repeat(160),
+  ]));
+  const result = await analyzeWithAgent("QM", "Momentum analyst", {
+    snapshotFacts: oversizedFacts,
+    marketDataQuality: { overallStatus: "OK", hardBlocks: [], warnings: [] },
+  }, {
+    OPENROUTER_API_KEY: "test-key",
+    SPX_COUNCIL_MODEL: "google/gemma-4-26b-a4b-it",
+  } as any, {
+    fetcher: async () => {
+      calls += 1;
+      throw new Error("must not fetch");
+    },
+  });
+
+  assert.equal(calls, 0);
+  assert.equal(result.modelStatus, "input_budget_exceeded");
+  assert.equal(result.attempts?.[0].status, "INPUT_BUDGET_EXCEEDED");
+  assert.equal((result.attempts?.[0].projectionBytes || 0) > 8_192, true);
+  assert.equal(result.attempts?.[0].factCount, 80);
+  assert.ok(result.attempts?.[0].requestHash);
+});
+
+test("four Council agents run concurrently under one absolute deadline", async () => {
+  let calls = 0;
+  const fetcher: typeof fetch = async (_input, init) => {
+    calls += 1;
+    return await new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    });
+  };
+  const startedAt = Date.now();
+  const agents = await runCouncilAnalyses({
+    snapshotFacts: { "spx.last": 7532.8, "quality.status": "OK" },
+    marketDataQuality: { overallStatus: "OK", hardBlocks: [], warnings: [] },
+  }, {
+    OPENROUTER_API_KEY: "test-key",
+    SPX_COUNCIL_MODEL: "google/gemma-4-26b-a4b-it",
+  } as any, { fetcher, deadlineMs: 60 });
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.equal(calls, 4);
+  assert.equal(agents.length, 4);
+  assert.equal(elapsedMs < 250, true);
+  assert.equal(agents.every((agent) => agent.modelStatus === "council_deadline_exceeded"), true);
+  assert.equal(agents.every((agent) => agent.attempts?.[0].deadlineRemainingMs! <= 60), true);
 });
 
 test("CIO strict schema retries once and then reports a traceable failure", async () => {
@@ -471,15 +577,13 @@ test("CIO two-attempt schema failure returns fail-closed HOLD with attempt evide
   assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["SCHEMA_INVALID", "SCHEMA_INVALID"]);
 });
 
-test("OpenRouter retry policy retries 429 but fails fast on 401", async () => {
+test("OpenRouter retry policy retries 429 and 5xx but fails fast on 401 and 403", async () => {
   let rateLimitedCalls = 0;
   const validAgentContent = JSON.stringify({
     decision: "HOLD",
     confidence_score: 50,
     evidence_refs: ["spx.last"],
-    claims: [{ text: "No confirmed edge.", evidence_refs: ["spx.last"] }],
     blocking_risk: null,
-    neutral_reason: "Wait.",
     reasoning: "No confirmed edge.",
   });
   const rateLimited = await runStructuredOpenRouterRequest({
@@ -497,6 +601,22 @@ test("OpenRouter retry policy retries 429 but fails fast on 401", async () => {
   assert.equal(rateLimited.ok, true);
   assert.equal(rateLimitedCalls, 2);
 
+  let unavailableCalls = 0;
+  const unavailable = await runStructuredOpenRouterRequest({
+    callKind: "agent",
+    apiKey: "test-key",
+    model: "same-model",
+    messages: [],
+    fetcher: async () => {
+      unavailableCalls += 1;
+      return unavailableCalls === 1
+        ? new Response("unavailable", { status: 503 })
+        : new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: validAgentContent } }] }), { status: 200 });
+    },
+  });
+  assert.equal(unavailable.ok, true);
+  assert.equal(unavailableCalls, 2);
+
   let unauthorizedCalls = 0;
   const unauthorized = await runStructuredOpenRouterRequest({
     callKind: "agent",
@@ -511,6 +631,39 @@ test("OpenRouter retry policy retries 429 but fails fast on 401", async () => {
   assert.equal(unauthorized.ok, false);
   assert.equal(unauthorizedCalls, 1);
   assert.equal(unauthorized.attempts[0].errorCategory, "HTTP_401");
+
+  let forbiddenCalls = 0;
+  const forbidden = await runStructuredOpenRouterRequest({
+    callKind: "agent",
+    apiKey: "test-key",
+    model: "same-model",
+    messages: [],
+    fetcher: async () => {
+      forbiddenCalls += 1;
+      return new Response("forbidden", { status: 403 });
+    },
+  });
+  assert.equal(forbidden.ok, false);
+  assert.equal(forbiddenCalls, 1);
+  assert.equal(forbidden.attempts[0].errorCategory, "HTTP_403");
+});
+
+test("OpenRouter retry policy retries a per-attempt timeout only once", async () => {
+  let calls = 0;
+  const result = await runStructuredOpenRouterRequest({
+    callKind: "agent",
+    apiKey: "test-key",
+    model: "same-model",
+    messages: [],
+    fetcher: async () => {
+      calls += 1;
+      throw new DOMException("aborted", "AbortError");
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(calls, 2);
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["TIMEOUT", "TIMEOUT"]);
 });
 
 test("orchestrator output parser degrades without throwing on non-JSON text", () => {
