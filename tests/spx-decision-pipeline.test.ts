@@ -258,6 +258,38 @@ test("Telegram explains upstream Council failures without pretending they are sc
   assert.doesNotMatch(message, /model_upstream_error|模型回應格式無效/);
 });
 
+test("Telegram explains an unapproved Council provider without leaking the contract code", async () => {
+  const providerViolationCouncil: CouncilResult = {
+    status: "DEGRADED",
+    degradedReason: "council_pa_model_unapproved_provider",
+    latencyMs: 0,
+    agents: allHoldCouncil.agents.map((agent) => agent.agent === "PA"
+      ? {
+        ...agent,
+        valid: false,
+        confidence: 0,
+        modelStatus: "model_unapproved_provider",
+        fallbackStatus: "model_unapproved_provider",
+        reasoning: "model_unapproved_provider",
+      }
+      : agent),
+  };
+  const { dependencies, sent } = buildDependencies({
+    council: { analyze: async () => providerViolationCouncil },
+  });
+
+  await runSpxDecisionPipeline({
+    runId: "telegram-unapproved-provider-contract",
+    scheduledAt,
+    currentPosition: "NONE",
+  }, dependencies);
+
+  const message = sent[0] || "";
+  assert.match(message, /判斷｜Council 未完整：PA 模型供應商不在批准清單；CIO 按契約未執行。/);
+  assert.match(message, /PA｜無效 · 信心 0% · 無效票\n理由｜模型供應商不在批准清單；重試後仍無法驗證。/);
+  assert.doesNotMatch(message, /model_unapproved_provider|UNAPPROVED_PROVIDER/);
+});
+
 test("run ledger and Board cockpit retain sanitized OpenRouter attempt evidence", async () => {
   const attemptEvidence = {
     attempt: 1,

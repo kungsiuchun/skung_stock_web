@@ -292,7 +292,8 @@ const sha256Text = async (value: string) => {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 };
 
-export const SPX_COUNCIL_PROVIDER_ORDER = ["deepinfra", "parasail", "nextbit", "google-vertex"] as const;
+export const SPX_COUNCIL_PROVIDER_ORDER = ["deepinfra", "parasail"] as const;
+export const SPX_COUNCIL_PROVIDER_ALLOWLIST = SPX_COUNCIL_PROVIDER_ORDER;
 
 const rotateCouncilProviderOrder = (attempt: number) => {
   const offset = Math.max(0, attempt - 1) % SPX_COUNCIL_PROVIDER_ORDER.length;
@@ -301,10 +302,11 @@ const rotateCouncilProviderOrder = (attempt: number) => {
 
 const councilProviderSlug = (value: unknown) => {
   const provider = String(value || "").trim().toLowerCase();
-  if (provider === "google" || provider === "google vertex" || provider === "google-vertex") return "google-vertex";
-  if (provider === "deepinfra" || provider === "parasail" || provider === "nextbit") return provider;
+  if (provider === "deepinfra" || provider === "parasail") return provider;
   return null;
 };
+
+const isApprovedCouncilProvider = (value: string | null) => value === null || councilProviderSlug(value) !== null;
 
 const nullableString = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
 
@@ -340,6 +342,7 @@ export const buildStructuredOpenRouterBody = (
     ? {
       require_parameters: true,
       order: [...councilProviderOrder],
+      only: [...SPX_COUNCIL_PROVIDER_ALLOWLIST],
       allow_fallbacks: true,
       ...(ignoredCouncilProviders.length ? { ignore: [...ignoredCouncilProviders] } : {}),
     }
@@ -514,22 +517,23 @@ export async function runStructuredOpenRouterRequest(input: {
         const providerCode = nullableString(upstreamError?.metadata?.provider_code);
         const upstreamErrorCode = toNullableFiniteNumber(upstreamError?.code);
         const errorMessage = nullableString(upstreamError?.message);
-        const retryable = response.status === 429 || response.status >= 500;
-        failureStatus = `openrouter_${response.status}`;
+        const unapprovedProvider = input.callKind === "agent" && !isApprovedCouncilProvider(selectedProvider);
+        const retryable = !unapprovedProvider && (response.status === 429 || response.status >= 500);
+        failureStatus = unapprovedProvider ? "model_unapproved_provider" : `openrouter_${response.status}`;
         attempts.push({
           attempt,
           model: input.model,
           ...unavailableResponseMetadata,
           provider: selectedProvider,
           responseId: nullableString(responseData?.id),
-          status: "HTTP_ERROR",
+          status: unapprovedProvider ? "UNAPPROVED_PROVIDER" : "HTTP_ERROR",
           latencyMs: Math.max(0, Date.now() - startedAt),
           httpStatus: response.status,
-          errorCategory: `HTTP_${response.status}`,
+          errorCategory: unapprovedProvider ? "UNAPPROVED_PROVIDER" : `HTTP_${response.status}`,
           finishReason: null,
           contentLength: responseText.length,
           responseHash: responseText ? await sha256Text(responseText) : null,
-          responseShape: "ERROR_ENVELOPE",
+          responseShape: unapprovedProvider ? "UNAPPROVED_PROVIDER" : "ERROR_ENVELOPE",
           choiceCount: Array.isArray(responseData?.choices) ? responseData.choices.length : 0,
           selectedProvider,
           attemptedProviders: providerNamesFrom(routerMetadata?.attempts),
@@ -586,6 +590,24 @@ export async function runStructuredOpenRouterRequest(input: {
         errorMessageHash: errorMessage ? await sha256Text(errorMessage) : null,
       };
       const content = typeof choice?.message?.content === "string" ? choice.message.content : "";
+      if (input.callKind === "agent" && !isApprovedCouncilProvider(selectedProvider)) {
+        failureStatus = "model_unapproved_provider";
+        attempts.push({
+          attempt,
+          model: input.model,
+          ...responseMetadata,
+          status: "UNAPPROVED_PROVIDER",
+          latencyMs: Math.max(0, Date.now() - startedAt),
+          httpStatus: response.status,
+          errorCategory: "UNAPPROVED_PROVIDER",
+          finishReason: choice?.finish_reason || null,
+          contentLength: content.length,
+          responseHash: content ? await sha256Text(content) : null,
+          responseShape: "UNAPPROVED_PROVIDER",
+          ...requestMetadata,
+        });
+        break;
+      }
       if (upstreamError || choice?.finish_reason === "error") {
         failureStatus = input.callKind === "agent" ? "model_upstream_error" : "cio_upstream_error";
         attempts.push({

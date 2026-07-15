@@ -105,7 +105,7 @@ export interface ModelAttemptMetadata {
   resolvedModel?: string | null;
   provider?: string | null;
   responseId?: string | null;
-  status: "SUCCESS" | "TIMEOUT" | "HTTP_ERROR" | "UPSTREAM_ERROR" | "MISSING_CHOICE" | "EMPTY_CONTENT" | "OUTPUT_NOT_JSON" | "SCHEMA_INVALID" | "OUTPUT_TRUNCATED" | "DEADLINE_EXCEEDED" | "INPUT_BUDGET_EXCEEDED" | "REQUEST_FAILED";
+  status: "SUCCESS" | "TIMEOUT" | "HTTP_ERROR" | "UPSTREAM_ERROR" | "UNAPPROVED_PROVIDER" | "MISSING_CHOICE" | "EMPTY_CONTENT" | "OUTPUT_NOT_JSON" | "SCHEMA_INVALID" | "OUTPUT_TRUNCATED" | "DEADLINE_EXCEEDED" | "INPUT_BUDGET_EXCEEDED" | "REQUEST_FAILED";
   latencyMs: number;
   httpStatus: number | null;
   errorCategory: string | null;
@@ -125,7 +125,7 @@ export interface ModelAttemptMetadata {
   deadlineRemainingMs?: number | null;
   routingPolicy?: string;
   providerOrder?: string[];
-  responseShape?: "COMPLETION" | "ERROR_ENVELOPE" | "CHOICE_ERROR" | "MISSING_CHOICE" | "EMPTY_CONTENT" | "NON_JSON" | "SCHEMA_INVALID" | "OUTPUT_TRUNCATED" | "REQUEST_FAILED";
+  responseShape?: "COMPLETION" | "ERROR_ENVELOPE" | "CHOICE_ERROR" | "UNAPPROVED_PROVIDER" | "MISSING_CHOICE" | "EMPTY_CONTENT" | "NON_JSON" | "SCHEMA_INVALID" | "OUTPUT_TRUNCATED" | "REQUEST_FAILED";
   choiceCount?: number;
   selectedProvider?: string | null;
   attemptedProviders?: string[];
@@ -529,6 +529,7 @@ const councilAgentIsValid = (agent: CouncilAgentAnalysis) => agent.valid
 const humanizeModelFailure = (value: string | null | undefined) => {
   const reason = String(value || "").toLowerCase();
   if (reason.includes("input_budget_exceeded")) return "模型輸入超出預算";
+  if (reason.includes("unapproved_provider")) return "模型供應商不在批准清單";
   if (reason.includes("upstream_error")) return "上游模型服務失敗";
   if (reason.includes("missing_choice") || reason.includes("empty_content")) return "上游模型服務未產生內容";
   if (reason.includes("output_truncated")) return "模型輸出被截斷";

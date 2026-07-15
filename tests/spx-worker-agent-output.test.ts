@@ -126,7 +126,8 @@ test("OpenRouter request profiles keep Gemma Council deterministic and omit temp
   assert.equal(council.temperature, 0);
   assert.equal(council.max_tokens, 512);
   assert.equal(council.provider.require_parameters, true);
-  assert.deepEqual(council.provider.order, ["deepinfra", "parasail", "nextbit", "google-vertex"]);
+  assert.deepEqual(council.provider.order, ["deepinfra", "parasail"]);
+  assert.deepEqual(council.provider.only, ["deepinfra", "parasail"]);
   assert.equal(council.provider.allow_fallbacks, true);
   assert.deepEqual(
     Object.keys(council.response_format.json_schema.schema.properties),
@@ -245,9 +246,60 @@ test("HTTP 200 OpenRouter error envelopes are classified as upstream errors with
   assert.equal(result.attempts[0].selectedProvider, "DeepInfra");
   assert.equal(result.attempts[0].errorMessageHash?.length, 64);
   assert.equal("errorMessage" in result.attempts[0], false);
-  assert.deepEqual(requestBodies[0].provider.order, ["deepinfra", "parasail", "nextbit", "google-vertex"]);
-  assert.deepEqual(requestBodies[1].provider.order, ["parasail", "nextbit", "google-vertex"]);
+  assert.deepEqual(requestBodies[0].provider.order, ["deepinfra", "parasail"]);
+  assert.deepEqual(requestBodies[0].provider.only, ["deepinfra", "parasail"]);
+  assert.deepEqual(requestBodies[1].provider.order, ["parasail"]);
+  assert.deepEqual(requestBodies[1].provider.only, ["deepinfra", "parasail"]);
   assert.deepEqual(requestBodies[1].provider.ignore, ["deepinfra"]);
+});
+
+test("Council fail-closes when router reports an unapproved resolved provider", async () => {
+  const content = JSON.stringify({
+    decision: "HOLD",
+    confidence_score: 58,
+    evidence_refs: ["spx.last"],
+    blocking_risk: null,
+    reasoning: "Price remains inside the current range.",
+  });
+  const result = await runStructuredOpenRouterRequest({
+    callKind: "agent",
+    apiKey: "test-key",
+    model: "google/gemma-4-26b-a4b-it",
+    messages: [],
+    allowedEvidenceRefs: ["spx.last"],
+    fetcher: async () => new Response(JSON.stringify({
+      id: "gen-unapproved-provider",
+      choices: [{ finish_reason: "stop", message: { content } }],
+      openrouter_metadata: {
+        endpoints: { available: [{ provider: "Google", selected: true }] },
+      },
+    }), { status: 200, headers: { "Content-Type": "application/json" } }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.failureStatus, "model_unapproved_provider");
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["UNAPPROVED_PROVIDER"]);
+  assert.equal(result.attempts[0].selectedProvider, "Google");
+});
+
+test("Council preserves an unapproved provider contract violation from an HTTP error envelope", async () => {
+  const result = await runStructuredOpenRouterRequest({
+    callKind: "agent",
+    apiKey: "test-key",
+    model: "google/gemma-4-26b-a4b-it",
+    messages: [],
+    fetcher: async () => new Response(JSON.stringify({
+      error: { code: 503, message: "unavailable" },
+      openrouter_metadata: {
+        endpoints: { available: [{ provider: "NextBit", selected: true }] },
+      },
+    }), { status: 503, headers: { "Content-Type": "application/json" } }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.failureStatus, "model_unapproved_provider");
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["UNAPPROVED_PROVIDER"]);
+  assert.equal(result.attempts[0].selectedProvider, "NextBit");
 });
 
 test("missing choices and empty model content retry as distinct recoverable failures", async () => {
@@ -464,7 +516,7 @@ test("Council classifies length truncation and retries the same model with a lar
     {
       id: "gen-uat-2",
       model: "google/gemma-4-26b-a4b-it-202607",
-      provider: "Google",
+      provider: "Parasail",
       usage: { prompt_tokens: 101, completion_tokens: 42, total_tokens: 143, cost: 0.00012 },
       choices: [{
         finish_reason: "stop",
@@ -505,14 +557,15 @@ test("Council classifies length truncation and retries the same model with a lar
   assert.equal(requestBodies[0].model, requestBodies[1].model);
   assert.equal(result.attempts[1].requestedModel, "google/gemma-4-26b-a4b-it");
   assert.equal(result.attempts[1].resolvedModel, "google/gemma-4-26b-a4b-it-202607");
-  assert.deepEqual(result.attempts.map((attempt) => attempt.provider), ["DeepInfra", "Google"]);
+  assert.deepEqual(result.attempts.map((attempt) => attempt.provider), ["DeepInfra", "Parasail"]);
   assert.equal(result.attempts[1].totalTokens, 143);
   assert.equal(result.attempts[1].cost, 0.00012);
   assert.equal(requestBodies[0].temperature, 0);
   assert.equal(requestBodies[0].max_tokens, 512);
   assert.equal(requestBodies[1].max_tokens, 640);
   assert.equal(requestBodies[0].provider.require_parameters, true);
-  assert.deepEqual(requestBodies[0].provider.order, ["deepinfra", "parasail", "nextbit", "google-vertex"]);
+  assert.deepEqual(requestBodies[0].provider.order, ["deepinfra", "parasail"]);
+  assert.deepEqual(requestBodies[0].provider.only, ["deepinfra", "parasail"]);
   assert.equal(requestBodies[0].provider.allow_fallbacks, true);
   assert.equal(requestBodies[0].response_format.type, "json_schema");
   assert.equal(requestBodies[0].response_format.json_schema.strict, true);
