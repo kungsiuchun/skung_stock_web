@@ -3093,7 +3093,10 @@ export async function runSpxGpt5CompatibilityProbe(
     apiKey: env.OPENROUTER_API_KEY,
     model,
     messages: [
-      { role: 'system', content: 'Return the strict JSON schema only. This is a provider compatibility probe, not market analysis.' },
+      {
+        role: 'system',
+        content: 'This is a provider compatibility probe, not market analysis. Return exactly one JSON object and no markdown. It must contain exactly these fields: decision, confidence_score, evidence_refs, blocking_risk, reasoning. Use decision="HOLD", confidence_score between 1 and 100, evidence_refs=["probe.status"], blocking_risk=null, and a short reasoning string.',
+      },
       { role: 'user', content: 'snapshotFacts: {"probe.status":"ok"}' },
     ],
     fetcher: options.fetcher,
