@@ -176,7 +176,7 @@ interface AgentDecisionContract {
 }
 
 type StructuredOpenRouterCallKind = "agent" | "cio";
-export const DEFAULT_SPX_COUNCIL_MODEL = "google/gemma-4-26b-a4b-it";
+export const DEFAULT_SPX_COUNCIL_MODEL = "openai/gpt-5-mini";
 export const DEFAULT_SPX_CIO_MODEL = "openai/gpt-5-mini";
 
 const AGENT_RESPONSE_SCHEMA = {
@@ -294,6 +294,9 @@ const sha256Text = async (value: string) => {
 
 export const SPX_COUNCIL_PROVIDER_ORDER = ["deepinfra", "parasail"] as const;
 export const SPX_COUNCIL_PROVIDER_ALLOWLIST = SPX_COUNCIL_PROVIDER_ORDER;
+export const SPX_GPT5_AZURE_PROVIDER_ORDER = ["azure"] as const;
+
+const isGpt5Model = (model: string) => /^openai\/gpt-5(?:-|$)/i.test(model);
 
 const rotateCouncilProviderOrder = (attempt: number) => {
   const offset = Math.max(0, attempt - 1) % SPX_COUNCIL_PROVIDER_ORDER.length;
@@ -306,7 +309,32 @@ const councilProviderSlug = (value: unknown) => {
   return null;
 };
 
-const isApprovedCouncilProvider = (value: string | null) => value === null || councilProviderSlug(value) !== null;
+const azureProviderSlug = (value: unknown) => {
+  const provider = String(value || "").trim().toLowerCase();
+  return provider === "azure" || provider.startsWith("azure/") ? "azure" : null;
+};
+
+const isApprovedStructuredProvider = (callKind: StructuredOpenRouterCallKind, model: string, value: string | null) => {
+  if (value === null) return true;
+  if (isGpt5Model(model)) return azureProviderSlug(value) !== null;
+  return callKind !== "agent" || councilProviderSlug(value) !== null;
+};
+
+const routingPolicyFor = (callKind: StructuredOpenRouterCallKind, model: string) => (
+  isGpt5Model(model) ? "azure_only" : callKind === "agent" ? "ordered_same_model_fallbacks" : "parameters_only"
+);
+
+const providerOrderForAttempt = (
+  callKind: StructuredOpenRouterCallKind,
+  model: string,
+  attempt: number,
+  ignoredCouncilProviders: readonly string[] = [],
+) => {
+  if (isGpt5Model(model)) return [...SPX_GPT5_AZURE_PROVIDER_ORDER];
+  return callKind === "agent"
+    ? rotateCouncilProviderOrder(attempt).filter((provider) => !ignoredCouncilProviders.includes(provider))
+    : [];
+};
 
 const nullableString = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
 
@@ -332,13 +360,20 @@ export const buildStructuredOpenRouterBody = (
   councilProviderOrder: readonly string[] = SPX_COUNCIL_PROVIDER_ORDER,
   ignoredCouncilProviders: readonly string[] = [],
 ) => {
-  const isGpt5 = /^openai\/gpt-5(?:-|$)/i.test(model);
+  const isGpt5 = isGpt5Model(model);
   return {
   model,
   ...(isGpt5
     ? { max_completion_tokens: maxOutputTokens }
     : { temperature: 0, max_tokens: maxOutputTokens }),
-  provider: callKind === "agent"
+  provider: isGpt5
+    ? {
+      require_parameters: true,
+      order: [...SPX_GPT5_AZURE_PROVIDER_ORDER],
+      only: [...SPX_GPT5_AZURE_PROVIDER_ORDER],
+      allow_fallbacks: false,
+    }
+    : callKind === "agent"
     ? {
       require_parameters: true,
       order: [...councilProviderOrder],
@@ -428,8 +463,8 @@ export async function runStructuredOpenRouterRequest(input: {
         deadlineRemainingMs: input.deadlineAtMs === undefined
           ? null
           : Math.max(0, input.deadlineAtMs - Date.now()),
-        routingPolicy: input.callKind === "agent" ? "ordered_same_model_fallbacks" : "parameters_only",
-        providerOrder: input.callKind === "agent" ? [...SPX_COUNCIL_PROVIDER_ORDER] : [],
+        routingPolicy: routingPolicyFor(input.callKind, input.model),
+        providerOrder: providerOrderForAttempt(input.callKind, input.model, 1),
       }],
     };
   }
@@ -458,14 +493,12 @@ export async function runStructuredOpenRouterRequest(input: {
         requestHash: null,
         maxOutputTokens,
         deadlineRemainingMs,
-        routingPolicy: input.callKind === "agent" ? "ordered_same_model_fallbacks" : "parameters_only",
-        providerOrder: input.callKind === "agent" ? [...SPX_COUNCIL_PROVIDER_ORDER] : [],
+        routingPolicy: routingPolicyFor(input.callKind, input.model),
+        providerOrder: providerOrderForAttempt(input.callKind, input.model, attempt),
       });
       break;
     }
-    const providerOrder = input.callKind === "agent"
-      ? rotateCouncilProviderOrder(attempt).filter((provider) => !retryIgnoredProviders.includes(provider))
-      : [];
+    const providerOrder = providerOrderForAttempt(input.callKind, input.model, attempt, retryIgnoredProviders);
     const body = buildStructuredOpenRouterBody(
       input.callKind,
       input.model,
@@ -482,7 +515,7 @@ export async function runStructuredOpenRouterRequest(input: {
       requestHash: await sha256Text(requestBody),
       maxOutputTokens,
       deadlineRemainingMs,
-      routingPolicy: input.callKind === "agent" ? "ordered_same_model_fallbacks" : "parameters_only",
+      routingPolicy: routingPolicyFor(input.callKind, input.model),
       providerOrder,
     };
     const controller = new AbortController();
@@ -517,9 +550,11 @@ export async function runStructuredOpenRouterRequest(input: {
         const providerCode = nullableString(upstreamError?.metadata?.provider_code);
         const upstreamErrorCode = toNullableFiniteNumber(upstreamError?.code);
         const errorMessage = nullableString(upstreamError?.message);
-        const unapprovedProvider = input.callKind === "agent" && !isApprovedCouncilProvider(selectedProvider);
+        const unapprovedProvider = !isApprovedStructuredProvider(input.callKind, input.model, selectedProvider);
         const retryable = !unapprovedProvider && (response.status === 429 || response.status >= 500);
-        failureStatus = unapprovedProvider ? "model_unapproved_provider" : `openrouter_${response.status}`;
+        failureStatus = unapprovedProvider
+          ? input.callKind === "agent" ? "model_unapproved_provider" : "cio_unapproved_provider"
+          : `openrouter_${response.status}`;
         attempts.push({
           attempt,
           model: input.model,
@@ -545,7 +580,7 @@ export async function runStructuredOpenRouterRequest(input: {
           ...requestMetadata,
         });
         if (!retryable || attempt === 2) break;
-        retryIgnoredProviders = Array.from(new Set(
+        retryIgnoredProviders = isGpt5Model(input.model) ? [] : Array.from(new Set(
           [selectedProvider, ...providerNamesFrom(routerMetadata?.attempts)]
             .map(councilProviderSlug)
             .filter((provider): provider is string => Boolean(provider)),
@@ -590,8 +625,8 @@ export async function runStructuredOpenRouterRequest(input: {
         errorMessageHash: errorMessage ? await sha256Text(errorMessage) : null,
       };
       const content = typeof choice?.message?.content === "string" ? choice.message.content : "";
-      if (input.callKind === "agent" && !isApprovedCouncilProvider(selectedProvider)) {
-        failureStatus = "model_unapproved_provider";
+      if (!isApprovedStructuredProvider(input.callKind, input.model, selectedProvider)) {
+        failureStatus = input.callKind === "agent" ? "model_unapproved_provider" : "cio_unapproved_provider";
         attempts.push({
           attempt,
           model: input.model,
@@ -625,7 +660,7 @@ export async function runStructuredOpenRouterRequest(input: {
           ...requestMetadata,
         });
         if (!isRetryableOpenRouterError(upstreamErrorCode, errorType) || attempt === 2) break;
-        retryIgnoredProviders = Array.from(new Set(
+        retryIgnoredProviders = isGpt5Model(input.model) ? [] : Array.from(new Set(
           [selectedProvider, ...attemptedProviders]
             .map(councilProviderSlug)
             .filter((provider): provider is string => Boolean(provider)),
@@ -1511,6 +1546,8 @@ export async function decideWithCio(
         ? "INVALID_OUTPUT"
         : result.failureStatus === "cio_upstream_error"
           ? "UPSTREAM_ERROR"
+          : result.failureStatus === "cio_unapproved_provider"
+            ? "UNAPPROVED_PROVIDER"
           : result.failureStatus?.startsWith("openrouter_")
             ? result.failureStatus.toUpperCase()
             : "REQUEST_FAILED";

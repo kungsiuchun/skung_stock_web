@@ -118,17 +118,17 @@ test("0DTE rules use VIX and VIX9D without a removed VIX3M penalty", () => {
   assert.equal(result.tradeEligibility.hardBlocked, false);
 });
 
-test("OpenRouter request profiles keep Gemma Council deterministic and omit temperature for GPT-5 Mini CIO", () => {
-  const council = buildStructuredOpenRouterBody("agent", "google/gemma-4-26b-a4b-it", []);
+test("OpenRouter request profiles keep every GPT-5 Mini decision role Azure-only without temperature", () => {
+  const council = buildStructuredOpenRouterBody("agent", "openai/gpt-5-mini", []);
   const cio = buildStructuredOpenRouterBody("cio", "openai/gpt-5-mini", []);
 
-  assert.equal(council.model, "google/gemma-4-26b-a4b-it");
-  assert.equal(council.temperature, 0);
-  assert.equal(council.max_tokens, 512);
+  assert.equal(council.model, "openai/gpt-5-mini");
+  assert.equal("temperature" in council, false);
+  assert.equal(council.max_completion_tokens, 512);
   assert.equal(council.provider.require_parameters, true);
-  assert.deepEqual(council.provider.order, ["deepinfra", "parasail"]);
-  assert.deepEqual(council.provider.only, ["deepinfra", "parasail"]);
-  assert.equal(council.provider.allow_fallbacks, true);
+  assert.deepEqual(council.provider.order, ["azure"]);
+  assert.deepEqual(council.provider.only, ["azure"]);
+  assert.equal(council.provider.allow_fallbacks, false);
   assert.deepEqual(
     Object.keys(council.response_format.json_schema.schema.properties),
     ["decision", "confidence_score", "evidence_refs", "blocking_risk", "reasoning"],
@@ -139,7 +139,12 @@ test("OpenRouter request profiles keep Gemma Council deterministic and omit temp
   assert.equal("temperature" in cio, false);
   assert.equal("max_tokens" in cio, false);
   assert.equal(cio.max_completion_tokens, 520);
-  assert.deepEqual(cio.provider, { require_parameters: true });
+  assert.deepEqual(cio.provider, {
+    require_parameters: true,
+    order: ["azure"],
+    only: ["azure"],
+    allow_fallbacks: false,
+  });
 });
 
 test("valid AI Council output rejects zero confidence and invalid HOLD evidence references", async () => {
@@ -168,7 +173,7 @@ test("valid AI Council output rejects zero confidence and invalid HOLD evidence 
   const result = await runStructuredOpenRouterRequest({
     callKind: "agent",
     apiKey: "test-key",
-    model: "google/gemma-4-26b-a4b-it",
+    model: "openai/gpt-5-mini",
     messages: [],
     allowedEvidenceRefs: ["spx.last"],
     fetcher,
@@ -218,10 +223,10 @@ test("HTTP 200 OpenRouter error envelopes are classified as upstream errors with
         },
       },
       openrouter_metadata: {
-        requested: "google/gemma-4-26b-a4b-it",
+        requested: "openai/gpt-5-mini",
         attempt: 1,
         endpoints: {
-          available: [{ provider: "DeepInfra", selected: true }],
+          available: [{ provider: "Azure", selected: true }],
         },
       },
     }), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -230,7 +235,7 @@ test("HTTP 200 OpenRouter error envelopes are classified as upstream errors with
   const result = await runStructuredOpenRouterRequest({
     callKind: "agent",
     apiKey: "test-key",
-    model: "google/gemma-4-26b-a4b-it",
+    model: "openai/gpt-5-mini",
     messages: [],
     fetcher,
   });
@@ -243,17 +248,14 @@ test("HTTP 200 OpenRouter error envelopes are classified as upstream errors with
   assert.equal(result.attempts[0].providerCode, "empty_response");
   assert.equal(result.attempts[0].responseShape, "ERROR_ENVELOPE");
   assert.equal(result.attempts[0].choiceCount, 0);
-  assert.equal(result.attempts[0].selectedProvider, "DeepInfra");
+  assert.equal(result.attempts[0].selectedProvider, "Azure");
   assert.equal(result.attempts[0].errorMessageHash?.length, 64);
   assert.equal("errorMessage" in result.attempts[0], false);
-  assert.deepEqual(requestBodies[0].provider.order, ["deepinfra", "parasail"]);
-  assert.deepEqual(requestBodies[0].provider.only, ["deepinfra", "parasail"]);
-  assert.deepEqual(requestBodies[1].provider.order, ["parasail"]);
-  assert.deepEqual(requestBodies[1].provider.only, ["deepinfra", "parasail"]);
-  assert.deepEqual(requestBodies[1].provider.ignore, ["deepinfra"]);
+  assert.deepEqual(requestBodies[0].provider, { require_parameters: true, order: ["azure"], only: ["azure"], allow_fallbacks: false });
+  assert.deepEqual(requestBodies[1].provider, { require_parameters: true, order: ["azure"], only: ["azure"], allow_fallbacks: false });
 });
 
-test("Council fail-closes when router reports an unapproved resolved provider", async () => {
+test("GPT-5 Mini Council fail-closes when router reports an unapproved resolved provider", async () => {
   const content = JSON.stringify({
     decision: "HOLD",
     confidence_score: 58,
@@ -264,14 +266,14 @@ test("Council fail-closes when router reports an unapproved resolved provider", 
   const result = await runStructuredOpenRouterRequest({
     callKind: "agent",
     apiKey: "test-key",
-    model: "google/gemma-4-26b-a4b-it",
+    model: "openai/gpt-5-mini",
     messages: [],
     allowedEvidenceRefs: ["spx.last"],
     fetcher: async () => new Response(JSON.stringify({
       id: "gen-unapproved-provider",
       choices: [{ finish_reason: "stop", message: { content } }],
       openrouter_metadata: {
-        endpoints: { available: [{ provider: "Google", selected: true }] },
+        endpoints: { available: [{ provider: "DeepInfra", selected: true }] },
       },
     }), { status: 200, headers: { "Content-Type": "application/json" } }),
   });
@@ -279,19 +281,19 @@ test("Council fail-closes when router reports an unapproved resolved provider", 
   assert.equal(result.ok, false);
   assert.equal(result.failureStatus, "model_unapproved_provider");
   assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["UNAPPROVED_PROVIDER"]);
-  assert.equal(result.attempts[0].selectedProvider, "Google");
+  assert.equal(result.attempts[0].selectedProvider, "DeepInfra");
 });
 
 test("Council preserves an unapproved provider contract violation from an HTTP error envelope", async () => {
   const result = await runStructuredOpenRouterRequest({
     callKind: "agent",
     apiKey: "test-key",
-    model: "google/gemma-4-26b-a4b-it",
+    model: "openai/gpt-5-mini",
     messages: [],
     fetcher: async () => new Response(JSON.stringify({
       error: { code: 503, message: "unavailable" },
       openrouter_metadata: {
-        endpoints: { available: [{ provider: "NextBit", selected: true }] },
+        endpoints: { available: [{ provider: "Parasail", selected: true }] },
       },
     }), { status: 503, headers: { "Content-Type": "application/json" } }),
   });
@@ -299,7 +301,52 @@ test("Council preserves an unapproved provider contract violation from an HTTP e
   assert.equal(result.ok, false);
   assert.equal(result.failureStatus, "model_unapproved_provider");
   assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["UNAPPROVED_PROVIDER"]);
-  assert.equal(result.attempts[0].selectedProvider, "NextBit");
+  assert.equal(result.attempts[0].selectedProvider, "Parasail");
+});
+
+test("GPT-5 Mini CIO classifies a non-Azure resolved provider as a CIO contract violation", async () => {
+  const result = await runStructuredOpenRouterRequest({
+    callKind: "cio",
+    apiKey: "test-key",
+    model: "openai/gpt-5-mini",
+    messages: [],
+    fetcher: async () => new Response(JSON.stringify({
+      id: "gen-cio-unapproved-provider",
+      choices: [{ finish_reason: "stop", message: { content: "{}" } }],
+      openrouter_metadata: {
+        endpoints: { available: [{ provider: "OpenAI", selected: true }] },
+      },
+    }), { status: 200, headers: { "Content-Type": "application/json" } }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.failureStatus, "cio_unapproved_provider");
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["UNAPPROVED_PROVIDER"]);
+  assert.equal(result.attempts[0].selectedProvider, "OpenAI");
+});
+
+test("GPT-5 Mini Azure timeout retries only Azure and never falls back to another provider", async () => {
+  const requestBodies: any[] = [];
+  const result = await runStructuredOpenRouterRequest({
+    callKind: "agent",
+    apiKey: "test-key",
+    model: "openai/gpt-5-mini",
+    messages: [],
+    fetcher: async (_input, init) => {
+      requestBodies.push(JSON.parse(String(init?.body || "{}")));
+      throw new DOMException("Aborted", "AbortError");
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.failureStatus, "model_timeout");
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["TIMEOUT", "TIMEOUT"]);
+  assert.deepEqual(requestBodies.map((body) => body.provider), [
+    { require_parameters: true, order: ["azure"], only: ["azure"], allow_fallbacks: false },
+    { require_parameters: true, order: ["azure"], only: ["azure"], allow_fallbacks: false },
+  ]);
+  assert.deepEqual(result.attempts.map((attempt) => attempt.providerOrder), [["azure"], ["azure"]]);
+  assert.deepEqual(result.attempts.map((attempt) => attempt.routingPolicy), ["azure_only", "azure_only"]);
 });
 
 test("missing choices and empty model content retry as distinct recoverable failures", async () => {
@@ -613,7 +660,6 @@ test("Council retries only its failed call and sends a role-specific normalized 
     extendedOnlyPayload: { mustNotBeSent: true },
   }, {
     OPENROUTER_API_KEY: "test-key",
-    OPENROUTER_MODEL: "google/gemma-4-26b-a4b-it",
   } as any, { fetcher });
 
   assert.equal(result.modelStatus, "AI");
@@ -625,6 +671,8 @@ test("Council retries only its failed call and sends a role-specific normalized 
   }]);
   assert.deepEqual(result.attempts?.map((attempt) => attempt.status), ["OUTPUT_NOT_JSON", "SUCCESS"]);
   assert.equal(requestBodies.length, 2);
+  assert.equal(requestBodies[0].model, "openai/gpt-5-mini");
+  assert.deepEqual(requestBodies[0].provider, { require_parameters: true, order: ["azure"], only: ["azure"], allow_fallbacks: false });
   const sentProjection = requestBodies[1].messages[1].content;
   assert.match(sentProjection, /spx\.last/);
   assert.doesNotMatch(sentProjection, /extendedOnlyPayload|mustNotBeSent|gex\.gammaFlip/);
@@ -694,7 +742,7 @@ test("CIO non-JSON output retries once and then reports a traceable failure", as
   const result = await runStructuredOpenRouterRequest({
     callKind: "cio",
     apiKey: "test-key",
-    model: "google/gemma-4-26b-a4b-it",
+    model: "openai/gpt-5-mini",
     messages: [{ role: "user", content: "normalized CIO projection" }],
     fetcher,
   });
@@ -702,8 +750,9 @@ test("CIO non-JSON output retries once and then reports a traceable failure", as
   assert.equal(result.ok, false);
   assert.equal(result.failureStatus, "cio_output_not_json");
   assert.equal(requestBodies.length, 2);
-  assert.equal(requestBodies[0].max_tokens, 520);
-  assert.equal(requestBodies[0].temperature, 0);
+  assert.equal(requestBodies[0].max_completion_tokens, 520);
+  assert.equal("temperature" in requestBodies[0], false);
+  assert.deepEqual(requestBodies[0].provider, { require_parameters: true, order: ["azure"], only: ["azure"], allow_fallbacks: false });
   assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["OUTPUT_NOT_JSON", "OUTPUT_NOT_JSON"]);
 });
 
