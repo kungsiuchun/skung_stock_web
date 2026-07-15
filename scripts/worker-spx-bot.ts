@@ -4030,6 +4030,15 @@ export default {
       return new Response('SPX GEX heatmap generation triggered.');
     }
 
+    if (url.searchParams.has('probe_llm')) {
+      const probe = await runSpxGpt5CompatibilityProbe(env);
+      return Response.json({
+        probe: probe.ok ? 'SUCCESS' : 'FAILED',
+        failureStatus: probe.failureStatus,
+        attempts: probe.attempts,
+      }, { status: probe.ok ? 200 : 502 });
+    }
+
     if (url.searchParams.has('uat_llm')) {
       const deliveryMode = resolveSpxDeliveryMode({
         trigger: 'MANUAL',
