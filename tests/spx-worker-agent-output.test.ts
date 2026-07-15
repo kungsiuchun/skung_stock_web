@@ -296,6 +296,7 @@ test("GPT-5 compatibility probe uses the exact Azure-only Council wire contract 
   assert.deepEqual(requestBodies[0].response_format, { type: "json_object" });
   assert.match(requestBodies[0].messages[0].content, /exactly these fields: decision, confidence_score, evidence_refs, blocking_risk, reasoning/);
   assert.match(requestBodies[0].messages[0].content, /evidence_refs=\["probe\.status"\]/);
+  assert.match(requestBodies[0].messages[0].content, /reasoning="Azure compatibility confirmed\."/);
 });
 
 test("GPT-5 compatibility probe returns sanitized failure evidence so UAT never sends Telegram blindly", async () => {

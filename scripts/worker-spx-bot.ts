@@ -2424,7 +2424,7 @@ export async function analyzeWithAgent(
     ...analysis,
     latencyMs: Math.max(0, Date.now() - startedAt),
   });
-  const systemPrompt = `You are an SPX council analyst with this role: ${personaPrompt}. Analyze only the supplied normalized snapshotFacts. Return CALL, PUT, or HOLD analysis, never OPEN_* execution language. confidence_score must be 1-100. Keep reasoning within 180 characters and cite 1-4 exact snapshotFacts keys in evidence_refs. For HOLD, state the concrete conflict in reasoning. You analyze; you never execute trades or override the CIO.`;
+  const systemPrompt = `You are an SPX council analyst with this role: ${personaPrompt}. Analyze only the supplied normalized snapshotFacts. Return exactly one JSON object and no markdown with exactly these fields: decision, confidence_score, evidence_refs, blocking_risk, reasoning. decision must be CALL, PUT, or HOLD analysis, never OPEN_* execution language. confidence_score must be 1-100. evidence_refs must contain 1-4 exact supplied snapshotFacts keys. blocking_risk must be null or at most 80 characters. reasoning must be a non-empty string of at most 180 characters. For HOLD, state the concrete conflict in reasoning. You analyze; you never execute trades or override the CIO.`;
   if (!env.OPENROUTER_API_KEY) {
     return finish({
       ...buildDataBackedAgentFallback(personaKey, contextData, "missing_openrouter_key"),
@@ -3095,7 +3095,7 @@ export async function runSpxGpt5CompatibilityProbe(
     messages: [
       {
         role: 'system',
-        content: 'This is a provider compatibility probe, not market analysis. Return exactly one JSON object and no markdown. It must contain exactly these fields: decision, confidence_score, evidence_refs, blocking_risk, reasoning. Use decision="HOLD", confidence_score between 1 and 100, evidence_refs=["probe.status"], blocking_risk=null, and a short reasoning string.',
+        content: 'This is a provider compatibility probe, not market analysis. Return exactly one JSON object and no markdown. It must contain exactly these fields: decision, confidence_score, evidence_refs, blocking_risk, reasoning. Use decision="HOLD", confidence_score=50, evidence_refs=["probe.status"], blocking_risk=null, and reasoning="Azure compatibility confirmed." Do not add any other fields.',
       },
       { role: 'user', content: 'snapshotFacts: {"probe.status":"ok"}' },
     ],
