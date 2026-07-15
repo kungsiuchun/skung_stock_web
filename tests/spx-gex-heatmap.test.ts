@@ -1498,7 +1498,11 @@ describe("SPX GEX heatmap API", () => {
     assert.equal((latestPayload as any).status, "READY");
     assert.equal(latestResponse.headers.get("cache-control"), "public, max-age=15");
     assert.equal(latestPayload.selectedDate, "2026-05-27");
-    assert.equal(latestPayload.sessions.length, 2);
+    assert.deepEqual(
+      latestPayload.sessions.map((session) => session.snapshotMinuteEt),
+      [9 * 60 + 30, 9 * 60 + 45],
+      "timeline frames stay replayable in chronological order",
+    );
     assert.equal(latestPayload.selectedSnapshot.snapshotMinuteEt, 9 * 60 + 45);
     assert.equal(latestPayload.selectedSnapshot.collectedTimeEt, "10:00");
     assert.equal(latestPayload.heatmap.quote.last, 6010);
@@ -1510,6 +1514,21 @@ describe("SPX GEX heatmap API", () => {
     const selectedPayload = (await selectedResponse.json()) as { heatmap: SpxGexHeatmapModel };
 
     assert.equal(selectedPayload.heatmap.quote.last, 6000);
+
+    const missingFrameResponse = await getSpxGexHeatmapApi({
+      request: new Request("https://example.com/api/spx-gex-heatmap?date=2026-05-27&snapshot=600"),
+      env: { SPX_RECAP_DB: db },
+    });
+    const missingFramePayload = (await missingFrameResponse.json()) as {
+      status: string;
+      heatmap: SpxGexHeatmapModel | null;
+      selectedSnapshot: unknown | null;
+    };
+
+    assert.equal(missingFrameResponse.status, 200);
+    assert.equal(missingFramePayload.status, "EMPTY");
+    assert.equal(missingFramePayload.heatmap, null);
+    assert.equal(missingFramePayload.selectedSnapshot, null);
 
     const defaultResponse = await getSpxGexHeatmapApi({
       request: new Request("https://example.com/api/spx-gex-heatmap"),

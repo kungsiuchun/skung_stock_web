@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowLeft, CalendarDays, Gauge, Pause, Play, RefreshCw, Waves } from "lucide-react";
 import { buildSpxGexHeatmapReadingContext, formatSpxGexCompactExposure, type SpxGexHeatmapCell, type SpxGexHeatmapModel, type SpxGexHeatmapReadingRule, type SpxGexSessionSummary, type SpxGexStrikeProfile } from "@/lib/spx-gex-heatmap";
 import type { SpxDecisionCockpitProjection } from "@/lib/spx-decision-ledger";
@@ -44,6 +44,11 @@ interface BoardRequestState {
   httpStatus: number | null;
   errorCode: string | null;
   message: string | null;
+}
+
+interface FailedPlaybackSnapshot {
+  date: string;
+  snapshotMinuteEt: number;
 }
 
 const sourceModeLabel = () => {
@@ -167,22 +172,37 @@ const dataQualityText = (heatmap: SpxGexHeatmapModel) => {
   return `priced ${summary.priced} · repaired ${summary.repaired} · partial ${summary.partial} · unpriced ${summary.unpriced} · excluded ${summary.excluded}`;
 };
 
+class HeatmapResponseError extends Error {
+  constructor(message: string, readonly httpStatus: number) {
+    super(message);
+    this.name = "HeatmapResponseError";
+  }
+}
+
+const formatSnapshotMinuteEt = (minute: number) => {
+  const hours = Math.floor(minute / 60).toString().padStart(2, "0");
+  const minutes = (minute % 60).toString().padStart(2, "0");
+  return `${hours}:${minutes}`;
+};
+
 const parseHeatmapResponse = async (response: Response, requestUrl: string) => {
   const contentType = response.headers.get("content-type") || "";
   const text = await response.text();
 
   if (!contentType.toLowerCase().includes("application/json")) {
     const prefix = text.trim().slice(0, 80).replace(/\s+/g, " ");
-    throw new Error(
+    throw new HeatmapResponseError(
       `SPX GEX API returned ${contentType || "unknown content"} (HTTP ${response.status}) for ${requestUrl}; expected JSON. Response starts: ${prefix || "empty"}`,
+      response.status,
     );
   }
 
   try {
     return JSON.parse(text) as SpxGexHeatmapResponse & { error?: string };
   } catch (error) {
-    throw new Error(
+    throw new HeatmapResponseError(
       `SPX GEX API returned invalid JSON (HTTP ${response.status}) for ${requestUrl}: ${error instanceof Error ? error.message : String(error)}`,
+      response.status,
     );
   }
 };
@@ -219,12 +239,32 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const [playing, setPlaying] = useState(false);
   const [speedMs, setSpeedMs] = useState(900);
   const [rowRangeMode, setRowRangeMode] = useState<RowRangeMode>("auto");
+  const [failedPlayback, setFailedPlayback] = useState<FailedPlaybackSnapshot | null>(null);
+  const activeRequestRef = useRef<AbortController | null>(null);
+  const requestVersionRef = useRef(0);
+  const playbackRunRef = useRef(0);
+  const playbackStateRef = useRef({
+    sessions: data.sessions,
+    selectedDate,
+    selectedMinute,
+    speedMs,
+  });
+  playbackStateRef.current = {
+    sessions: data.sessions,
+    selectedDate,
+    selectedMinute,
+    speedMs,
+  };
 
-  const loadHeatmap = async (
+  const loadHeatmap = useCallback(async (
     date?: string,
     snapshotMinute?: number | null,
-    options: { bypassCache?: boolean } = {},
+    options: { bypassCache?: boolean; playback?: boolean } = {},
   ) => {
+    activeRequestRef.current?.abort();
+    const controller = new AbortController();
+    activeRequestRef.current = controller;
+    const requestVersion = ++requestVersionRef.current;
     setLoading(true);
     try {
       const params = new URLSearchParams();
@@ -233,9 +273,10 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
       if (options.bypassCache) params.set("_", String(Date.now()));
       const requestUrl = `/api/spx-gex-heatmap${params.toString() ? `?${params.toString()}` : ""}`;
       setRequestState({ phase: "LOADING", requestUrl, httpStatus: null, errorCode: null, message: null });
-      const response = await fetch(requestUrl, { cache: "no-store" });
+      const response = await fetch(requestUrl, { cache: "no-store", signal: controller.signal });
       const payload = await parseHeatmapResponse(response, requestUrl);
-      setData(payload);
+      if (requestVersion !== requestVersionRef.current) return "STALE";
+
       if (!response.ok) {
         setRequestState({
           phase: "ERROR",
@@ -244,16 +285,37 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
           errorCode: payload.errorCode,
           message: payload.error || "SPX GEX heatmap API failed",
         });
+        if (options.playback && date && snapshotMinute !== null && snapshotMinute !== undefined) {
+          setFailedPlayback({ date, snapshotMinuteEt: snapshotMinute });
+        }
         setPlaying(false);
-        return;
+        return "FAILED";
       }
+
+      if (payload.status !== "READY" || !payload.heatmap) {
+        setRequestState({
+          phase: "EMPTY",
+          requestUrl,
+          httpStatus: response.status,
+          errorCode: payload.errorCode,
+          message: "No retained canonical SPX GEX snapshot was returned.",
+        });
+        if (options.playback && date && snapshotMinute !== null && snapshotMinute !== undefined) {
+          setFailedPlayback({ date, snapshotMinuteEt: snapshotMinute });
+        }
+        setPlaying(false);
+        return "FAILED";
+      }
+
+      setData(payload);
       setRequestState({
-        phase: payload.status === "READY" || payload.heatmap ? "READY" : "EMPTY",
+        phase: "READY",
         requestUrl,
         httpStatus: response.status,
         errorCode: payload.errorCode,
-        message: payload.status === "EMPTY" ? "No retained canonical SPX GEX snapshots found." : null,
+        message: null,
       });
+      setFailedPlayback(null);
       setSelectedDate(payload.selectedDate || "");
       setSelectedMinute(payload.selectedSnapshot?.snapshotMinuteEt ?? null);
       if (payload.selectedDate && payload.selectedSnapshot?.snapshotMinuteEt !== undefined) {
@@ -263,31 +325,63 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
           `#/work/spx-gex-heatmap?date=${encodeURIComponent(payload.selectedDate)}&snapshot=${payload.selectedSnapshot.snapshotMinuteEt}`,
         );
       }
+      return "READY";
     } catch (err) {
-      setRequestState((current) => ({
-        ...current,
+      if (controller.signal.aborted || requestVersion !== requestVersionRef.current) return "STALE";
+      const httpStatus = err instanceof HeatmapResponseError ? err.httpStatus : null;
+      setRequestState({
         phase: "ERROR",
+        requestUrl: `/api/spx-gex-heatmap${date ? `?date=${encodeURIComponent(date)}${snapshotMinute !== null && snapshotMinute !== undefined ? `&snapshot=${snapshotMinute}` : ""}` : ""}`,
+        httpStatus,
+        errorCode: null,
         message: err instanceof Error ? err.message : "SPX GEX heatmap failed",
-      }));
+      });
+      if (options.playback && date && snapshotMinute !== null && snapshotMinute !== undefined) {
+        setFailedPlayback({ date, snapshotMinuteEt: snapshotMinute });
+      }
       setPlaying(false);
+      return "FAILED";
     } finally {
-      setLoading(false);
+      if (requestVersion === requestVersionRef.current) setLoading(false);
     }
-  };
-
-  useEffect(() => {
-    void loadHeatmap(initialSelection.date || undefined, initialSelection.snapshot);
   }, []);
 
   useEffect(() => {
-    if (!playing || data.sessions.length <= 1 || !selectedDate) return undefined;
-    const timer = window.setInterval(() => {
-      const currentIndex = Math.max(0, data.sessions.findIndex((session) => session.snapshotMinuteEt === selectedMinute));
-      const next = data.sessions[(currentIndex + 1) % data.sessions.length];
-      if (next) void loadHeatmap(selectedDate, next.snapshotMinuteEt);
-    }, speedMs);
-    return () => window.clearInterval(timer);
-  }, [data.sessions, playing, selectedDate, selectedMinute, speedMs]);
+    void loadHeatmap(initialSelection.date || undefined, initialSelection.snapshot);
+    return () => activeRequestRef.current?.abort();
+  }, [initialSelection.date, initialSelection.snapshot, loadHeatmap]);
+
+  useEffect(() => {
+    if (!playing) return undefined;
+    const runId = ++playbackRunRef.current;
+    let cancelled = false;
+    const runPlayback = async () => {
+      while (!cancelled && playbackRunRef.current === runId) {
+        const current = playbackStateRef.current;
+        if (current.sessions.length <= 1 || !current.selectedDate) {
+          setPlaying(false);
+          return;
+        }
+        await new Promise<void>((resolve) => window.setTimeout(resolve, current.speedMs));
+        if (cancelled || playbackRunRef.current !== runId) return;
+
+        const state = playbackStateRef.current;
+        const currentIndex = Math.max(0, state.sessions.findIndex((session) => session.snapshotMinuteEt === state.selectedMinute));
+        const next = state.sessions[(currentIndex + 1) % state.sessions.length];
+        if (!next) {
+          setPlaying(false);
+          return;
+        }
+        const result = await loadHeatmap(state.selectedDate, next.snapshotMinuteEt, { playback: true });
+        if (result !== "READY" || playbackRunRef.current !== runId) return;
+      }
+    };
+    void runPlayback();
+    return () => {
+      cancelled = true;
+      if (playbackRunRef.current === runId) playbackRunRef.current += 1;
+    };
+  }, [loadHeatmap, playing]);
 
   const heatmap = data.heatmap;
   const cellByKey = useMemo(() => {
@@ -409,6 +503,22 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
 
         </header>
 
+        {failedPlayback && requestState.phase === "ERROR" && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border border-red-300/30 bg-red-300/10 px-3 py-2 text-sm text-red-100" role="alert" data-spx-gex-playback-error="true">
+            <span>
+              Timeline paused at {formatSnapshotMinuteEt(failedPlayback.snapshotMinuteEt)} ET · HTTP {requestState.httpStatus ?? "network"}. Last verified board remains on screen.
+            </span>
+            <button
+              onClick={() => {
+                setPlaying(false);
+                void loadHeatmap(failedPlayback.date, failedPlayback.snapshotMinuteEt);
+              }}
+              className="border border-red-200/40 bg-red-200/10 px-3 py-1 font-mono text-xs font-black uppercase tracking-[0.08em] text-red-50 transition-colors hover:bg-red-200/20"
+            >
+              Retry {formatSnapshotMinuteEt(failedPlayback.snapshotMinuteEt)}
+            </button>
+          </div>
+        )}
         {requestState.phase === "ERROR" && requestState.message && <Notice tone="red" text={requestState.message} />}
         {data.warnings.length > 0 && <Notice tone="amber" text={data.warnings.join(" ")} />}
         <div className="flex flex-wrap gap-x-4 gap-y-1 border border-white/10 bg-black/20 px-3 py-2 font-mono text-[10px] text-zinc-500" data-spx-gex-request-state={requestState.phase}>
@@ -517,8 +627,15 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
               </div>
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
                 <button
-                  onClick={() => setPlaying((value) => !value)}
-                  disabled={data.sessions.length <= 1}
+                  onClick={() => {
+                    if (playing) {
+                      setPlaying(false);
+                      activeRequestRef.current?.abort();
+                      return;
+                    }
+                    setPlaying(true);
+                  }}
+                  disabled={!playing && (loading || data.sessions.length <= 1)}
                   className="inline-flex h-10 w-12 items-center justify-center border border-pink-400/30 bg-pink-400/15 text-pink-100 transition-colors hover:bg-pink-400/25 disabled:cursor-not-allowed disabled:opacity-40"
                   title={playing ? "Pause timeline" : "Play timeline"}
                 >

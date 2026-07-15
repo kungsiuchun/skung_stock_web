@@ -11,6 +11,12 @@ interface Env {
   SPX_RECAP_DB?: D1DatabaseLike;
 }
 
+interface Context {
+  request: Request;
+  env: Env;
+  waitUntil?: (promise: Promise<unknown>) => void;
+}
+
 const isValidDate = (date: string | null) => Boolean(date && /^\d{4}-\d{2}-\d{2}$/.test(date));
 
 const parseSnapshotMinute = (value: string | null) => {
@@ -28,6 +34,16 @@ const json = (body: unknown, init: ResponseInit = {}, cacheControl = "no-store")
       ...(init.headers || {}),
     },
   });
+
+const getEdgeCache = () => typeof caches === "undefined" ? null : caches.default;
+
+const cacheResponse = (context: Context, response: Response) => {
+  if (context.request.method !== "GET") return;
+  const edgeCache = getEdgeCache();
+  if (!edgeCache) return;
+  const write = edgeCache.put(context.request, response.clone()).catch(() => undefined);
+  context.waitUntil?.(write);
+};
 
 const chooseSelectedDate = (availableDates: string[], requestedDate: string | null) => {
   if (isValidDate(requestedDate) && availableDates.includes(requestedDate!)) return requestedDate!;
@@ -69,9 +85,15 @@ const readDecisionCockpit = async (
   }
 };
 
-export async function onRequest(context: { request: Request; env: Env }) {
+export async function onRequest(context: Context) {
   const warnings: string[] = [];
   const url = new URL(context.request.url);
+  const bypassCache = url.searchParams.has("_");
+  const edgeCache = getEdgeCache();
+  if (!bypassCache && context.request.method === "GET" && edgeCache) {
+    const cached = await edgeCache.match(context.request);
+    if (cached) return cached;
+  }
 
   if (!context.env.SPX_RECAP_DB) {
     return json({
@@ -107,7 +129,7 @@ export async function onRequest(context: { request: Request; env: Env }) {
     ]);
 
     const status = heatmap ? "READY" : "EMPTY";
-    return json({
+    const response = json({
       status,
       errorCode: null,
       availableDates,
@@ -119,6 +141,8 @@ export async function onRequest(context: { request: Request; env: Env }) {
       collection,
       warnings,
     }, {}, status === "READY" ? "public, max-age=15" : "no-store");
+    if (status === "READY") cacheResponse(context, response);
+    return response;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const missingTable = /no such table:\s*spx_gex_intraday_snapshots/i.test(message);

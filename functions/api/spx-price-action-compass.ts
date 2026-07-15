@@ -13,6 +13,12 @@ interface Env {
   SPX_PRICE_ACTION_TEST_CANDLES?: SpxPriceActionCandle[];
 }
 
+interface Context {
+  request: Request;
+  env: Env;
+  waitUntil?: (promise: Promise<unknown>) => void;
+}
+
 const json = (body: unknown, init: ResponseInit = {}) =>
   new Response(JSON.stringify(body), {
     ...init,
@@ -23,11 +29,18 @@ const json = (body: unknown, init: ResponseInit = {}) =>
     },
   });
 
-export async function onRequest(context: { request: Request; env: Env }) {
+export async function onRequest(context: Context) {
   const url = new URL(context.request.url);
   const timeframe = normalizeSpxPriceActionTimeframe(url.searchParams.get("timeframe"));
   const config = getSpxPriceActionFetchConfig(timeframe);
   const fetchedAt = new Date().toISOString();
+  const edgeCache = Array.isArray(context.env.SPX_PRICE_ACTION_TEST_CANDLES) || typeof caches === "undefined"
+    ? null
+    : caches.default;
+  if (context.request.method === "GET" && edgeCache) {
+    const cached = await edgeCache.match(context.request);
+    if (cached) return cached;
+  }
 
   try {
     const rawCandles = Array.isArray(context.env.SPX_PRICE_ACTION_TEST_CANDLES)
@@ -56,12 +69,17 @@ export async function onRequest(context: { request: Request; env: Env }) {
         note: "SPX OHLCV uses the existing native Yahoo chart source path; Cboe remains reserved for options/GEX source truth.",
       };
 
-    return json(buildSpxPriceActionCompassResponse({
+    const response = json(buildSpxPriceActionCompassResponse({
       timeframe,
       candles,
       source,
       warnings: candles.length === 0 ? ["No SPX OHLCV candles returned from source."] : [],
     }));
+    if (edgeCache && context.request.method === "GET") {
+      const write = edgeCache.put(context.request, response.clone()).catch(() => undefined);
+      context.waitUntil?.(write);
+    }
+    return response;
   } catch (error) {
     return json(
       {

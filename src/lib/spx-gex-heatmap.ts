@@ -367,6 +367,14 @@ interface D1SpxGexIntradayRow {
   snapshot_json: string;
 }
 
+interface D1SpxGexSessionRow {
+  trading_date: string;
+  snapshot_minute_et: number;
+  snapshot_time_et: string;
+  generated_at: string;
+  spot: number;
+}
+
 const toDateKey = (year: number, month: number, day: number) =>
   `${year}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
 
@@ -2142,17 +2150,27 @@ const rowToIntradayHeatmap = (row: D1SpxGexIntradayRow): SpxGexHeatmapModel | nu
     : null;
 };
 
+const rowToSessionSummary = (row: D1SpxGexSessionRow): SpxGexSessionSummary => {
+  const collectionStatus = getSpxGexGenerationStatus(new Date(row.generated_at));
+  return {
+    tradingDate: row.trading_date,
+    snapshotMinuteEt: Number(row.snapshot_minute_et),
+    snapshotTimeEt: row.snapshot_time_et,
+    collectedMinuteEt: collectionStatus.collectedMinuteEt,
+    collectedTimeEt: collectionStatus.collectedTimeEt,
+    generatedAt: row.generated_at,
+    spot: Number(row.spot),
+  };
+};
+
 const isMissingIntradayTable = (error: unknown) => /spx_gex_intraday_snapshots|no such table/i.test(error instanceof Error ? error.message : String(error));
 
 export const listSpxGexHeatmapDates = async (db: D1DatabaseLike) => {
   try {
+    // Date discovery must stay metadata-only: older valid rows are normalized and audited
+    // when their selected snapshot is read, but may not persist a canonical envelope yet.
     const result = await db.prepare("SELECT DISTINCT trading_date FROM spx_gex_intraday_snapshots ORDER BY trading_date DESC").all<{ trading_date: string }>();
-    const dates = (result.results || []).map((row) => row.trading_date);
-    const auditedDates: string[] = [];
-    for (const date of dates) {
-      if (await readSpxGexIntradaySnapshot(db, date)) auditedDates.push(date);
-    }
-    return auditedDates;
+    return (result.results || []).map((row) => row.trading_date);
   } catch (error) {
     if (!isMissingIntradayTable(error)) throw error;
     return [];
@@ -2163,17 +2181,14 @@ export const listSpxGexHeatmapSessions = async (db: D1DatabaseLike, date: string
   try {
     const result = await db
       .prepare(`
-        SELECT trading_date, snapshot_minute_et, snapshot_time_et, generated_at, spot, snapshot_json
+        SELECT trading_date, snapshot_minute_et, snapshot_time_et, generated_at, spot
         FROM spx_gex_intraday_snapshots
         WHERE trading_date = ?
         ORDER BY snapshot_minute_et ASC
       `)
       .bind(date)
-      .all<D1SpxGexIntradayRow>();
-    const sessions = (result.results || [])
-      .map((row) => rowToIntradayHeatmap(row)?.session)
-      .filter((session): session is SpxGexSessionSummary => Boolean(session));
-    return sessions;
+      .all<D1SpxGexSessionRow>();
+    return (result.results || []).map(rowToSessionSummary);
   } catch (error) {
     if (!isMissingIntradayTable(error)) throw error;
     return [];
