@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildSpxDecisionTelegramPayload,
   buildTelegramSendPayload,
   assessMarketDataQuality,
   analyzeCompletedM5Bars,
@@ -44,10 +45,10 @@ const forbiddenVisibleFragments = [
   "parse failed",
 ];
 
-test("SPX decision Telegram payload is plain text so model punctuation cannot become HTML", () => {
-  const payload = buildTelegramSendPayload("chat", "QM｜price < VWAP & invalidation > 0", null);
-  assert.equal("parse_mode" in payload, false);
-  assert.equal(payload.text, "QM｜price < VWAP & invalidation > 0");
+test("SPX decision Telegram payload escapes model punctuation before HTML delivery", () => {
+  const payload = buildSpxDecisionTelegramPayload("chat", "QM｜price < VWAP & invalidation > 0");
+  assert.equal(payload.parse_mode, "HTML");
+  assert.equal(payload.text, "QM｜price &lt; VWAP &amp; invalidation &gt; 0");
 
   const auditPayload = buildTelegramSendPayload("chat", "<b>audit</b>");
   assert.equal(auditPayload.parse_mode, "HTML");

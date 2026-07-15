@@ -2486,6 +2486,9 @@ export const buildTelegramSendPayload = (chatId: string, text: string, parseMode
   disable_web_page_preview: true,
 });
 
+export const buildSpxDecisionTelegramPayload = (chatId: string, text: string) =>
+  buildTelegramSendPayload(chatId, tgEscape(text), "HTML");
+
 async function sendTelegramMessage(token: string, chatId: string, text: string, parseMode: "HTML" | null = "HTML") {
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
   const res = await fetchWithTimeout(url, {
@@ -2503,8 +2506,10 @@ async function sendTelegramMessage(token: string, chatId: string, text: string, 
   return { messageId: String(messageId) };
 }
 
-const sendSpxDecisionTelegramMessage = (token: string, chatId: string, text: string) =>
-  sendTelegramMessage(token, chatId, text, null);
+const sendSpxDecisionTelegramMessage = async (token: string, chatId: string, text: string) => {
+  const payload = buildSpxDecisionTelegramPayload(chatId, text);
+  return sendTelegramMessage(token, chatId, payload.text, "HTML");
+};
 
 export function hasActiveTradingRunLock(rawLock: string | null, nowMs = Date.now()) {
   if (!rawLock) return false;
