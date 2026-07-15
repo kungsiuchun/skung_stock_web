@@ -120,7 +120,7 @@ test("0DTE rules use VIX and VIX9D without a removed VIX3M penalty", () => {
   assert.equal(result.tradeEligibility.hardBlocked, false);
 });
 
-test("OpenRouter request profiles keep every GPT-5 Mini decision role Azure-only with minimal reasoning", () => {
+test("OpenRouter request profiles keep every GPT-5 Mini decision role Azure-only with minimal reasoning and JSON mode", () => {
   const council = buildStructuredOpenRouterBody("agent", "openai/gpt-5-mini", []);
   const cio = buildStructuredOpenRouterBody("cio", "openai/gpt-5-mini", []);
 
@@ -132,12 +132,7 @@ test("OpenRouter request profiles keep every GPT-5 Mini decision role Azure-only
   assert.deepEqual(council.provider.order, ["azure"]);
   assert.deepEqual(council.provider.only, ["azure"]);
   assert.equal(council.provider.allow_fallbacks, false);
-  assert.deepEqual(
-    Object.keys(council.response_format.json_schema.schema.properties),
-    ["decision", "confidence_score", "evidence_refs", "blocking_risk", "reasoning"],
-  );
-  assert.equal(council.response_format.json_schema.schema.properties.reasoning.maxLength, 180);
-  assert.equal(council.response_format.json_schema.schema.properties.evidence_refs.maxItems, 4);
+  assert.deepEqual(council.response_format, { type: "json_object" });
   assert.equal(cio.model, "openai/gpt-5-mini");
   assert.equal("temperature" in cio, false);
   assert.equal("max_tokens" in cio, false);
@@ -149,6 +144,7 @@ test("OpenRouter request profiles keep every GPT-5 Mini decision role Azure-only
     only: ["azure"],
     allow_fallbacks: false,
   });
+  assert.deepEqual(cio.response_format, { type: "json_object" });
 });
 
 test("valid AI Council output rejects zero confidence and invalid HOLD evidence references", async () => {

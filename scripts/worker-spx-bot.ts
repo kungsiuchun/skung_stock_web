@@ -397,14 +397,20 @@ export const buildStructuredOpenRouterBody = (
       ...(ignoredCouncilProviders.length ? { ignore: [...ignoredCouncilProviders] } : {}),
     }
     : { require_parameters: true },
-  response_format: {
-    type: "json_schema",
-    json_schema: {
-      name: callKind === "agent" ? "spx_council_agent_analysis" : "spx_cio_decision",
-      strict: true,
-      schema: callKind === "agent" ? AGENT_RESPONSE_SCHEMA : CIO_RESPONSE_SCHEMA,
+  // Azure accepts GPT-5 Mini JSON mode but rejects OpenRouter's json_schema wire
+  // contract. The response remains fail-closed: isStructuredOutputValid below
+  // still enforces the exact schema and snapshot-evidence contract before any
+  // Council vote or CIO decision is accepted.
+  response_format: isGpt5
+    ? { type: "json_object" }
+    : {
+      type: "json_schema",
+      json_schema: {
+        name: callKind === "agent" ? "spx_council_agent_analysis" : "spx_cio_decision",
+        strict: true,
+        schema: callKind === "agent" ? AGENT_RESPONSE_SCHEMA : CIO_RESPONSE_SCHEMA,
+      },
     },
-  },
   messages,
   };
 };
