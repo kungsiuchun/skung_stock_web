@@ -3096,7 +3096,6 @@ export async function runSpxGpt5CompatibilityProbe(
     factCount: 1,
     maxProjectionBytes: AGENT_PROJECTION_MAX_BYTES,
   });
-  if (!result.ok) throw new Error(`gpt5_probe_${result.failureStatus || 'failed'}`);
   return result;
 }
 
@@ -3107,7 +3106,12 @@ export async function runSpxUatLlm(
   options: { fetcher?: typeof fetch } = {},
 ) {
   if (deliveryMode === 'SEND' && !env.SPX_RECAP_DB) throw new Error('SPX_RECAP_DB unavailable');
-  await runSpxGpt5CompatibilityProbe(env, options);
+  const probe = await runSpxGpt5CompatibilityProbe(env, options);
+  if (!probe.ok) {
+    const error = new Error(`gpt5_probe_${probe.failureStatus || 'failed'}`);
+    (error as Error & { probe?: typeof probe }).probe = probe;
+    throw error;
+  }
   const previewStore = new InMemorySpxDecisionStore();
   const store = deliveryMode === 'SEND' ? new D1SpxDecisionStore(env.SPX_RECAP_DB!) : previewStore;
   let message = '';
@@ -4038,15 +4042,27 @@ export default {
       const runId = requestedRunId && /^[a-z0-9_.:-]{8,120}$/i.test(requestedRunId)
         ? requestedRunId
         : `uat-llm-20260713-1445-${Date.now()}`;
-      const outcome = await runSpxUatLlm(env, runId, deliveryMode);
-      return Response.json({
-        runId,
-        deliveryMode,
-        probe: 'SUCCESS',
-        delivery: outcome.result.delivery,
-        finalAction: outcome.result.finalDecision.action,
-        degraded: outcome.result.run.degraded,
-      });
+      try {
+        const outcome = await runSpxUatLlm(env, runId, deliveryMode);
+        return Response.json({
+          runId,
+          deliveryMode,
+          probe: 'SUCCESS',
+          delivery: outcome.result.delivery,
+          finalAction: outcome.result.finalDecision.action,
+          degraded: outcome.result.run.degraded,
+        });
+      } catch (error) {
+        const probe = (error as Error & { probe?: Awaited<ReturnType<typeof runSpxGpt5CompatibilityProbe>> }).probe;
+        console.error('[SPX_UAT_LLM]', error);
+        return Response.json({
+          runId,
+          deliveryMode,
+          probe: 'FAILED',
+          failureStatus: probe?.failureStatus || 'UAT_RUNTIME_FAILURE',
+          attempts: probe?.attempts || [],
+        }, { status: 502 });
+      }
     }
 
     const manualStatus = getMarketScheduleStatus(new Date());

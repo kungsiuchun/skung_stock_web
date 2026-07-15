@@ -299,6 +299,23 @@ test("GPT-5 compatibility probe uses the exact OpenAI-only Council wire contract
   });
 });
 
+test("GPT-5 compatibility probe returns sanitized failure evidence so UAT never sends Telegram blindly", async () => {
+  const probe = await runSpxGpt5CompatibilityProbe({
+    OPENROUTER_API_KEY: "test-key",
+    SPX_COUNCIL_MODEL: "openai/gpt-5-mini",
+  } as any, {
+    fetcher: async () => new Response(JSON.stringify({
+      error: { code: 400, message: "unsupported parameter temperature" },
+    }), { status: 400, headers: { "Content-Type": "application/json" } }),
+  });
+
+  assert.equal(probe.ok, false);
+  assert.equal(probe.failureStatus, "model_unsupported_parameter");
+  assert.equal(probe.attempts.length, 1);
+  assert.equal(probe.attempts[0].contractError, "UNSUPPORTED_PARAMETER");
+  assert.equal("errorMessage" in probe.attempts[0], false);
+});
+
 test("HTTP 400 GPT-5 contract failures persist a safe canonical cause without raw router text", async () => {
   const result = await runStructuredOpenRouterRequest({
     callKind: "agent",
