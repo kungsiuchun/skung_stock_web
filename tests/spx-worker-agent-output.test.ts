@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildTelegramSendPayload,
   assessMarketDataQuality,
   analyzeCompletedM5Bars,
   analyzeZeroDteRules,
@@ -42,6 +43,15 @@ const forbiddenVisibleFragments = [
   "analysis failed",
   "parse failed",
 ];
+
+test("SPX decision Telegram payload is plain text so model punctuation cannot become HTML", () => {
+  const payload = buildTelegramSendPayload("chat", "QM｜price < VWAP & invalidation > 0", null);
+  assert.equal("parse_mode" in payload, false);
+  assert.equal(payload.text, "QM｜price < VWAP & invalidation > 0");
+
+  const auditPayload = buildTelegramSendPayload("chat", "<b>audit</b>");
+  assert.equal(auditPayload.parse_mode, "HTML");
+});
 
 function assertCleanVisibleReasoning(text: string) {
   for (const fragment of forbiddenVisibleFragments) {

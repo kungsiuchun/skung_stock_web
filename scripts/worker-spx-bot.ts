@@ -2479,17 +2479,19 @@ export async function runCouncilAnalyses(
   ]);
 }
 
-async function sendTelegramMessage(token: string, chatId: string, text: string) {
+export const buildTelegramSendPayload = (chatId: string, text: string, parseMode: "HTML" | null = "HTML") => ({
+  chat_id: chatId,
+  text,
+  ...(parseMode ? { parse_mode: parseMode } : {}),
+  disable_web_page_preview: true,
+});
+
+async function sendTelegramMessage(token: string, chatId: string, text: string, parseMode: "HTML" | null = "HTML") {
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
   const res = await fetchWithTimeout(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: 'HTML',
-      disable_web_page_preview: true
-    })
+    body: JSON.stringify(buildTelegramSendPayload(chatId, text, parseMode))
   }, TELEGRAM_TIMEOUT_MS);
   const resData = await res.json() as any;
   if (!res.ok) {
@@ -2500,6 +2502,9 @@ async function sendTelegramMessage(token: string, chatId: string, text: string) 
   console.log(`[TELEGRAM] Delivered message_id=${messageId}`);
   return { messageId: String(messageId) };
 }
+
+const sendSpxDecisionTelegramMessage = (token: string, chatId: string, text: string) =>
+  sendTelegramMessage(token, chatId, text, null);
 
 export function hasActiveTradingRunLock(rawLock: string | null, nowMs = Date.now()) {
   if (!rawLock) return false;
@@ -2725,7 +2730,7 @@ async function retryDueDecisionOutbox(env: Env, now: Date) {
     await retrySpxDelivery(record.runId, {
       clock: { now: () => new Date() },
       store,
-      telegram: { send: (message) => sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, message) },
+      telegram: { send: (message) => sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, message) },
     });
   }
 }
@@ -2832,7 +2837,7 @@ async function completeDegradedDecisionRun(
   }
   await store.persistDecision(run);
 
-  const message = tgEscape(formatTelegramDecisionMessage({ run, snapshot, council, cioDecision, riskGate }));
+  const message = formatTelegramDecisionMessage({ run, snapshot, council, cioDecision, riskGate });
   return dispatchSpxDecisionDelivery({
     runId: run.runId,
     message,
@@ -2840,7 +2845,7 @@ async function completeDegradedDecisionRun(
   }, {
     clock: { now: () => new Date() },
     store,
-    telegram: { send: (payload) => sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, payload) },
+    telegram: { send: (payload) => sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, payload) },
   });
 }
 
@@ -3065,7 +3070,7 @@ export async function runSpxUatReplay(
     telegram: { send: async (text) => {
       message = text;
       return deliveryMode === 'SEND'
-        ? sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, text)
+        ? sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, text)
         : { messageId: 'uat-preview' };
     } },
   });
@@ -3165,7 +3170,7 @@ export async function runSpxUatLlm(
     telegram: { send: async (text) => {
       message = text;
       return deliveryMode === 'SEND'
-        ? sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, text)
+        ? sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, text)
         : { messageId: 'uat-llm-preview' };
     } },
   });
@@ -3208,7 +3213,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
         await retrySpxDelivery(runId, {
           clock: { now: () => new Date() },
           store: decisionStore,
-          telegram: { send: (message) => sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, message) },
+          telegram: { send: (message) => sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, message) },
         });
       }
       if (deliveryMode === 'PREVIEW') {
@@ -3757,13 +3762,13 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     });
     await decisionStore!.persistDecision(decisionRun!);
 
-    const message = tgEscape(formatTelegramDecisionMessage({
+    const message = formatTelegramDecisionMessage({
       run: decisionRun!,
       snapshot: marketSnapshot,
       council: councilResult,
       cioDecision,
       riskGate: riskGateResult,
-    }));
+    });
 
     if (options.debugReportPreview) {
       console.log(`[DEBUG_FINAL_REPORT]\n${message.trim()}`);
@@ -3775,7 +3780,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     }, {
       clock: { now: () => new Date() },
       store: decisionStore!,
-      telegram: { send: (payload) => sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, payload) },
+      telegram: { send: (payload) => sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, payload) },
     });
     if (delivery) {
       console.log(`[DELIVERY] run_id=${runId} status=${delivery.status} message_id=${delivery.telegramMessageId || 'none'} attempts=${delivery.attemptCount}`);
@@ -4005,7 +4010,7 @@ export default {
       const delivery = await retrySpxDelivery(runId, {
         clock: { now: () => new Date() },
         store,
-        telegram: { send: (message) => sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, message) },
+        telegram: { send: (message) => sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, message) },
       });
       return Response.json({ runId, delivery });
     }
