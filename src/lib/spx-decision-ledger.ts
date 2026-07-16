@@ -101,6 +101,18 @@ export interface SpxDecisionCockpitProjection {
 
 const stageRank = new Map<string, number>(SPX_LIFECYCLE_STAGES.map((stage, index) => [stage, index]));
 
+const staleIncompleteDecisionStages = [
+  "SCHEDULED",
+  "LOCK_ACQUIRED",
+  "SNAPSHOT_READY",
+  "COUNCIL_COMPLETED",
+  "CIO_DECIDED",
+  "RISK_GATED",
+] as const satisfies readonly SpxLifecycleStage[];
+
+export const isStaleIncompleteDecisionStage = (stage: SpxLifecycleStage) =>
+  staleIncompleteDecisionStages.includes(stage as typeof staleIncompleteDecisionStages[number]);
+
 const parseJson = <T>(value: string | null, fallback: T, field: string): T => {
   if (!value) return fallback;
   try {
@@ -407,7 +419,7 @@ export class D1SpxDecisionStore implements SpxDecisionStore {
       FROM spx_decision_runs r
       LEFT JOIN spx_delivery_outbox o ON o.run_id = r.run_id
       WHERE r.scheduled_at < ?
-        AND r.current_stage NOT IN ('DELIVERED', 'DELIVERY_FAILED')
+        AND r.current_stage IN ('SCHEDULED', 'LOCK_ACQUIRED', 'SNAPSHOT_READY', 'COUNCIL_COMPLETED', 'CIO_DECIDED', 'RISK_GATED')
       ORDER BY r.scheduled_at
       LIMIT ?
     `).bind(cutoff, Math.max(1, Math.min(limit, 100))).all<DecisionRunRow & {

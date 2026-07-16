@@ -17,6 +17,7 @@ import {
   type SpxDecisionPipelineDependencies,
 } from "../src/lib/spx-decision-pipeline";
 import { buildSpxDecisionCockpitProjection } from "../src/lib/spx-decision-ledger";
+import { isStaleIncompleteDecisionStage } from "../src/lib/spx-decision-ledger";
 
 const replayFixture = JSON.parse(readFileSync(
   new URL("./fixtures/spx-2026-07-13-1445-et.json", import.meta.url),
@@ -582,6 +583,14 @@ test("position directives distinguish flat wait, hold, and Risk Gate required cl
   assert.equal(applyRiskGate(hold, { disposition: "PASS", reason: "clear" }, "NONE").positionDirective, "FLAT_WAIT");
   assert.equal(applyRiskGate(hold, { disposition: "PASS", reason: "clear" }, "CALL").positionDirective, "HOLD_CALL");
   assert.equal(applyRiskGate(hold, { disposition: "REQUIRE_CLOSE", reason: "risk" }, "PUT").positionDirective, "CLOSE_PUT");
+});
+
+test("stale recovery selects only interrupted decision stages and never re-recovers PERSISTED runs", () => {
+  assert.equal(isStaleIncompleteDecisionStage("LOCK_ACQUIRED"), true);
+  assert.equal(isStaleIncompleteDecisionStage("RISK_GATED"), true);
+  assert.equal(isStaleIncompleteDecisionStage("PERSISTED"), false);
+  assert.equal(isStaleIncompleteDecisionStage("DELIVERED"), false);
+  assert.equal(isStaleIncompleteDecisionStage("DELIVERY_FAILED"), false);
 });
 
 test("manual preview never enqueues or sends Telegram without explicit delivery", async () => {
