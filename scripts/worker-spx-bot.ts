@@ -5,6 +5,7 @@ import { generateAndStoreSpxGexHeatmap, getSpxGexGenerationStatus, readSpxGexHea
 import { createSpxGexIntradayDataClient } from '../src/lib/spx-gex-cboe';
 import {
   applyRiskGate,
+  applyPositionTransitionGuard,
   dispatchSpxDecisionDelivery,
   formatTelegramDecisionMessage,
   getCanonicalGexRiskDirective,
@@ -22,9 +23,11 @@ import {
   type RiskGateDirective,
   type SpxDeliveryMode,
   type SpxLifecycleStage,
+  type SpxOpenPositionContext,
 } from '../src/lib/spx-decision-pipeline';
 import { D1SpxDecisionStore, queryLifecycleCoverage } from '../src/lib/spx-decision-ledger';
 import { D1SpxGexCollectionStore, querySpxGexCollectionCoverage } from '../src/lib/spx-gex-collection-lifecycle';
+import { D1SpxOperationalHealthStore, classifySpxOperationalFailure, type SpxOperationalJob } from '../src/lib/spx-operational-health';
 
 // Cloudflare Worker Environment Types
 interface Env {
@@ -40,6 +43,7 @@ interface Env {
   WEBHOOK_SECRET?: string; // 🔒 防護互聯網隨機觸發的安全金鑰
   SPX_MEMORY: any;
   SPX_RECAP_DB?: D1DatabaseLike;
+  CF_VERSION_METADATA?: { id?: string; tag?: string; timestamp?: string };
 }
 
 interface ActionLogItem {
@@ -240,6 +244,86 @@ const structuredClaimsValid = (value: unknown, allowedEvidenceRefs?: Set<string>
     && claim.evidence_refs.length > 0
     && (!allowedEvidenceRefs || claim.evidence_refs.every((reference: string) => allowedEvidenceRefs.has(reference))));
 
+export interface CioModelPlan {
+  trade_action: "OPEN_CALL" | "OPEN_PUT" | "HOLD" | "CLOSE";
+  confidence_score: number;
+  logic: string;
+  buy_zone: string | null;
+  stop_loss: string | null;
+  targets: string[];
+  no_trade_conditions: string[];
+  evidence_refs: string[];
+  claims: Array<{ text: string; evidence_refs: string[] }>;
+}
+
+export const deriveOpenPositionContext = (dailyMemory: DailyMemory): SpxOpenPositionContext | null => {
+  if (dailyMemory.currentPosition === "NONE") return null;
+  const openingAction = dailyMemory.currentPosition === "PUT" ? "買入 Put" : "買入 Call";
+  const openingSnapshot = [...dailyMemory.actionLog].reverse().find((item) => item.action === openingAction);
+  return {
+    side: dailyMemory.currentPosition,
+    entryPrice: dailyMemory.entryPrice,
+    entryTime: dailyMemory.entryTime,
+    invalidation: openingSnapshot?.stopLoss || null,
+    targets: openingSnapshot?.takeProfit ? [openingSnapshot.takeProfit] : [],
+    openingRunId: openingSnapshot?.runId || null,
+  };
+};
+
+export const validateCioModelPlan = (
+  value: unknown,
+  allowedEvidenceRefs?: Set<string>,
+): { ok: true; value: CioModelPlan } | { ok: false; invalidField: string } => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: false, invalidField: "root_not_object" };
+  const candidate = value as Record<string, unknown>;
+  const keys = ["trade_action", "confidence_score", "logic", "buy_zone", "stop_loss", "targets", "no_trade_conditions", "evidence_refs", "claims"];
+  const observedKeys = Object.keys(candidate);
+  const missingKey = keys.find((key) => !(key in candidate));
+  if (missingKey) return { ok: false, invalidField: `${missingKey}_missing` };
+  const unexpectedKey = observedKeys.find((key) => !keys.includes(key));
+  if (unexpectedKey || observedKeys.length !== keys.length) return { ok: false, invalidField: "keys_exactly_nine_required" };
+  if (!(["OPEN_CALL", "OPEN_PUT", "HOLD", "CLOSE"] as const).includes(candidate.trade_action as CioModelPlan["trade_action"])) {
+    return { ok: false, invalidField: "trade_action" };
+  }
+  if (typeof candidate.confidence_score !== "number" || !Number.isFinite(candidate.confidence_score)) {
+    return { ok: false, invalidField: "confidence_score_not_number" };
+  }
+  if (!Number.isInteger(candidate.confidence_score)) return { ok: false, invalidField: "confidence_score_not_integer" };
+  if (candidate.confidence_score < 1 || candidate.confidence_score > 100) return { ok: false, invalidField: "confidence_score_out_of_range" };
+  if (typeof candidate.logic !== "string" || !candidate.logic.trim()) return { ok: false, invalidField: "logic" };
+  if (candidate.buy_zone !== null && typeof candidate.buy_zone !== "string") return { ok: false, invalidField: "buy_zone" };
+  if (candidate.stop_loss !== null && typeof candidate.stop_loss !== "string") return { ok: false, invalidField: "stop_loss" };
+  if (!stringArray(candidate.targets)) return { ok: false, invalidField: "targets" };
+  if (!stringArray(candidate.no_trade_conditions)) return { ok: false, invalidField: "no_trade_conditions" };
+  if (!stringArray(candidate.evidence_refs) || candidate.evidence_refs.length === 0) return { ok: false, invalidField: "evidence_refs" };
+  if (allowedEvidenceRefs && candidate.evidence_refs.some((reference) => !allowedEvidenceRefs.has(reference))) {
+    return { ok: false, invalidField: "evidence_refs_not_in_projection" };
+  }
+  if (!structuredClaimsValid(candidate.claims, allowedEvidenceRefs)) return { ok: false, invalidField: "claims" };
+  const action = candidate.trade_action as CioModelPlan["trade_action"];
+  if (["OPEN_CALL", "OPEN_PUT"].includes(action)
+    && (!candidate.buy_zone || !candidate.stop_loss || candidate.targets.length === 0)) {
+    return { ok: false, invalidField: "directional_trade_levels" };
+  }
+  if (action === "HOLD" && (candidate.buy_zone !== null || candidate.stop_loss !== null || candidate.targets.length > 0)) {
+    return { ok: false, invalidField: "hold_trade_levels" };
+  }
+  return {
+    ok: true,
+    value: {
+      trade_action: action,
+      confidence_score: candidate.confidence_score,
+      logic: candidate.logic,
+      buy_zone: candidate.buy_zone as string | null,
+      stop_loss: candidate.stop_loss as string | null,
+      targets: [...candidate.targets],
+      no_trade_conditions: [...candidate.no_trade_conditions],
+      evidence_refs: [...candidate.evidence_refs],
+      claims: candidate.claims.map((claim: any) => ({ text: claim.text, evidence_refs: [...claim.evidence_refs] })),
+    },
+  };
+};
+
 const isStructuredOutputValid = (
   callKind: StructuredOpenRouterCallKind,
   value: any,
@@ -264,27 +348,7 @@ const isStructuredOutputValid = (
     if (!shapeValid) return false;
     return true;
   }
-  const shapeValid = ["OPEN_CALL", "OPEN_PUT", "HOLD", "CLOSE"].includes(value.trade_action)
-    && Number.isFinite(value.confidence_score) && value.confidence_score >= 1 && value.confidence_score <= 100
-    && typeof value.logic === "string" && Boolean(value.logic.trim())
-    && (typeof value.buy_zone === "string" || value.buy_zone === null)
-    && (typeof value.stop_loss === "string" || value.stop_loss === null)
-    && stringArray(value.targets)
-    && stringArray(value.no_trade_conditions)
-    && stringArray(value.evidence_refs)
-    && value.evidence_refs.length > 0
-    && (!allowedEvidenceRefs || value.evidence_refs.every((reference: string) => allowedEvidenceRefs.has(reference)))
-    && structuredClaimsValid(value.claims, allowedEvidenceRefs);
-  if (!shapeValid) return false;
-  if (["OPEN_CALL", "OPEN_PUT"].includes(value.trade_action)) {
-    return Boolean(value.buy_zone && value.stop_loss)
-      && value.targets.length > 0
-      && value.evidence_refs.length > 0;
-  }
-  if (value.trade_action === "HOLD") {
-    return value.buy_zone === null && value.stop_loss === null && value.targets.length === 0;
-  }
-  return true;
+  return validateCioModelPlan(value, allowedEvidenceRefs).ok;
 };
 
 const sha256Text = async (value: string) => {
@@ -431,6 +495,7 @@ export async function runStructuredOpenRouterRequest(input: {
   factCount?: number;
   deadlineAtMs?: number;
   maxProjectionBytes?: number;
+  postParseValidator?: (value: unknown) => { ok: true; value: unknown } | { ok: false; invalidField: string };
 }): Promise<{
   ok: boolean;
   value: any | null;
@@ -778,7 +843,9 @@ export async function runStructuredOpenRouterRequest(input: {
         if (attempt === 2) break;
         continue;
       }
-      if (!isStructuredOutputValid(input.callKind, value, input.allowedEvidenceRefs ? new Set(input.allowedEvidenceRefs) : undefined)) {
+      const allowedEvidenceRefs = input.allowedEvidenceRefs ? new Set(input.allowedEvidenceRefs) : undefined;
+      const postParseResult = input.postParseValidator?.(value);
+      if (!isStructuredOutputValid(input.callKind, value, allowedEvidenceRefs) || postParseResult?.ok === false) {
         failureStatus = input.callKind === "agent" ? "model_output_schema_invalid" : "cio_schema_invalid";
         attempts.push({
           attempt,
@@ -787,7 +854,8 @@ export async function runStructuredOpenRouterRequest(input: {
           status: "SCHEMA_INVALID",
           latencyMs: Math.max(0, Date.now() - startedAt),
           httpStatus: response.status,
-          errorCategory: "SCHEMA_INVALID",
+          errorCategory: postParseResult?.ok === false ? "POST_PARSE_CONTRACT" : "SCHEMA_INVALID",
+          invalidField: postParseResult?.ok === false ? postParseResult.invalidField : null,
           finishReason: choice?.finish_reason || null,
           contentLength: content.length,
           responseHash: content ? await sha256Text(content) : null,
@@ -797,6 +865,8 @@ export async function runStructuredOpenRouterRequest(input: {
         if (attempt === 2) break;
         continue;
       }
+
+      if (postParseResult?.ok) value = postParseResult.value;
 
       attempts.push({
         attempt,
@@ -1098,21 +1168,37 @@ export interface CanonicalSpxGexForTelegram {
   pcrValue: number | null;
   calculatedGex: SpxGexTelegramSummary | null;
   heatmap: SpxGexHeatmapModel | null;
+  status: 'READY' | 'MISSING' | 'INVALID';
 }
+
+export const isUsableCanonicalSpxGexHeatmap = (value: unknown): value is SpxGexHeatmapModel => {
+  if (!value || typeof value !== 'object') return false;
+  const heatmap = value as Partial<SpxGexHeatmapModel>;
+  return Boolean(
+    heatmap.session
+    && heatmap.quote
+    && heatmap.zeroDte
+    && heatmap.canonical
+    && Array.isArray(heatmap.cells)
+    && heatmap.cells.length > 0
+    && Array.isArray(heatmap.strikeProfiles)
+    && heatmap.strikeProfiles.length > 0,
+  );
+};
 
 export async function loadCanonicalSpxGexForTelegram(
   env: { SPX_RECAP_DB?: D1DatabaseLike },
   now: Date = new Date(),
-  options: { dataClient?: SpxGexDataClient } = {},
+  options: { dataClient?: SpxGexDataClient; allowGeneration?: boolean } = {},
 ): Promise<CanonicalSpxGexForTelegram> {
   const db = env.SPX_RECAP_DB;
-  if (!db) return { pcrValue: null, calculatedGex: null, heatmap: null };
+  if (!db) return { pcrValue: null, calculatedGex: null, heatmap: null, status: 'MISSING' };
 
   const generationStatus = getSpxGexGenerationStatus(now);
   const tradingDate = generationStatus.etDateKey;
   let heatmap = await readSpxGexHeatmap(db, tradingDate, generationStatus.snapshotMinuteEt);
 
-  if (!heatmap && generationStatus.isGenerationWindow) {
+  if (!heatmap && generationStatus.isGenerationWindow && options.allowGeneration !== false) {
     const result = await generateAndStoreSpxGexHeatmap({
       db,
       dataClient: options.dataClient || createSpxGexIntradayDataClient({ db, now }),
@@ -1126,12 +1212,26 @@ export async function loadCanonicalSpxGexForTelegram(
     heatmap = await readSpxGexHeatmap(db, tradingDate);
   }
 
+  if (!heatmap) {
+    await logCanonicalGexFreshness(db, tradingDate, null);
+    return { pcrValue: null, calculatedGex: null, heatmap: null, status: 'MISSING' };
+  }
+  if (!isUsableCanonicalSpxGexHeatmap(heatmap)) {
+    console.error(`[SPX_GEX_CANONICAL] invalid normalized snapshot tradingDate=${tradingDate}`);
+    return { pcrValue: null, calculatedGex: null, heatmap: null, status: 'INVALID' };
+  }
   await logCanonicalGexFreshness(db, tradingDate, heatmap);
-  return {
-    pcrValue: await readCanonicalSnapshotPcrValue(db, heatmap),
-    calculatedGex: heatmap ? toTelegramGexSummary(heatmap) : null,
-    heatmap,
-  };
+  try {
+    return {
+      pcrValue: await readCanonicalSnapshotPcrValue(db, heatmap),
+      calculatedGex: toTelegramGexSummary(heatmap),
+      heatmap,
+      status: 'READY',
+    };
+  } catch (error) {
+    console.error('[SPX_GEX_CANONICAL] canonical summary rejected', error instanceof Error ? error.message : String(error));
+    return { pcrValue: null, calculatedGex: null, heatmap: null, status: 'INVALID' };
+  }
 }
 
 const cleanVisibleModelText = (value: unknown) => {
@@ -1518,6 +1618,7 @@ export const buildCioContextProjection = (contextData: any, agents: any[]) => ({
     warnings: contextData?.marketDataQuality?.warnings || [],
   },
   currentPosition: contextData?.TODAYS_MEMORY?.currentPosition || "NONE",
+  openPosition: contextData?.TODAYS_MEMORY?.openPosition || null,
   council: agents.map((agent, index) => ({
     agent: agent.agent || (["QM", "CM", "NT", "PA"][index] ?? null),
     decision: normalizeAgentDecisionValue(agent.decision),
@@ -1557,10 +1658,14 @@ export async function decideWithCio(
     fetcher: options.fetcher,
     timeoutMs: CIO_MODEL_TIMEOUT_MS,
     allowedEvidenceRefs: Object.keys(contextData?.snapshotFacts || {}),
+    postParseValidator: (value) => validateCioModelPlan(
+      value,
+      new Set(Object.keys(contextData?.snapshotFacts || {})),
+    ),
   });
   if (result.ok) {
     return {
-      plan: { ...result.value, trade_action: normalizeCioAction(result.value.trade_action) },
+      plan: result.value as CioModelPlan,
       modelStatus: "AI",
       attempts: result.attempts,
     };
@@ -1944,11 +2049,12 @@ function parseEtTimestamp(input: string | null): Date | null {
 }
 
 const MARKET_TIME_ZONE = 'America/New_York';
-const TRADING_CRON = '*/15 14-20 * * MON-FRI';
 const AUDIT_CRON = '15 17-21 * * MON-FRI';
 // SPX GEX collection is gated in src/lib/spx-gex-heatmap.ts as a 15-minute delayed feed:
 // collect 09:45-16:15 ET, display represented market time 09:30-16:00 ET.
 const SPX_GEX_HEATMAP_CRON = '*/15 13-21 * * MON-FRI';
+const SPX_HEALTH_ALERT_DEDUP_MS = 30 * 60_000;
+const SPX_STALE_RUN_MS = 13 * 60_000;
 
 interface ScheduledRunOptions {
   force?: boolean;
@@ -3186,13 +3292,14 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
   let runLockToken: string | null = null;
   let decisionStore: D1SpxDecisionStore | null = null;
   let decisionRun: DecisionRunRecord | null = null;
+  let activeRunId: string | null = null;
   const deliveryMode = options.deliveryMode || (options.debugReportPreview ? 'PREVIEW' : 'SEND');
   try {
     const marketStatus = getMarketScheduleStatus(now);
     const runMode = options.runMode || (options.force && !marketStatus.isTradingWindow ? 'UAT_REPLAY' : 'LIVE');
     if (!options.force && !marketStatus.isTradingWindow) {
       console.log(`[SCHEDULE] Skip trading run: ${marketStatus.skipReason || 'outside_trading_window'} ${marketStatus.etDateKey} ${marketStatus.minutes}`);
-      return;
+      return { status: 'SKIPPED' as const, runId: null, failureCode: null };
     }
 
     // 0. 密鑰效驗 (PUA 診斷)
@@ -3208,6 +3315,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
     }).format(now);
     const runId = `${etDateStr}-${now.getTime()}`;
+    activeRunId = runId;
     decisionStore = new D1SpxDecisionStore(env.SPX_RECAP_DB);
     decisionRun = makeDecisionRunRecord(runId, now, runMode);
 
@@ -3225,7 +3333,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
         console.log(`[DELIVERY_PREVIEW] run_id=${runId} duplicate run; Telegram retry suppressed.`);
       }
       console.log(`[RUN] Duplicate run_id=${runId}; analysis skipped and outbox handled idempotently.`);
-      return;
+      return { status: 'SKIPPED' as const, runId, failureCode: null };
     }
     await appendDecisionLifecycle(decisionStore, decisionRun, 'SCHEDULED', { scheduledAt: now.toISOString() });
 
@@ -3234,7 +3342,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       decisionRun.degraded = true;
       decisionRun.degradedReason = 'lock_not_acquired';
       await decisionStore.persistDecision(decisionRun);
-      return;
+      return { status: 'SKIPPED' as const, runId, failureCode: 'LOCK_NOT_ACQUIRED' };
     }
     await appendDecisionLifecycle(decisionStore, decisionRun, 'LOCK_ACQUIRED');
 
@@ -3254,6 +3362,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     let dailyMemory: DailyMemory = rawMemory ? JSON.parse(rawMemory) : { currentPosition: "NONE", entryPrice: null, entryTime: null, actionLog: [], icPosition: "NONE", icDeployTime: null, icAction: null };
     // Ensure IC fields exist for legacy memory
     if (!dailyMemory.icPosition) { dailyMemory.icPosition = 'NONE'; dailyMemory.icDeployTime = null; dailyMemory.icAction = null; }
+    const openPositionContext = deriveOpenPositionContext(dailyMemory);
 
     console.log('[DEBUG] Step 1: Fetching core SPX data, optional market context, canonical SPX GEX...');
     const spxQuotes = await timedStep('SPX 15m core chart', () => fetchYahooChart('^GSPC', '15m', '7d'));
@@ -3263,9 +3372,16 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       fetchOptionalMarketData('SPX H1 price-action chart', fetchYahooChart('^GSPC', '1h', '10d'), []),
       fetchOptionalMarketData('VIX 15m chart', fetchYahooChart('^VIX', '15m', '7d'), []),
       fetchOptionalMarketData('VIX9D term-structure chart', fetchYahooChart('^VIX9D', '1d', '3mo'), []),
-      fetchOptionalMarketData('Canonical SPX GEX heatmap snapshot', withPromiseTimeout('Canonical SPX GEX heatmap snapshot', loadCanonicalSpxGexForTelegram(env, now), OPTIONAL_MARKET_DATA_TIMEOUT_MS), { pcrValue: null, calculatedGex: null, heatmap: null }),
+      fetchOptionalMarketData(
+        'Canonical SPX GEX heatmap snapshot',
+        withPromiseTimeout('Canonical SPX GEX heatmap snapshot', loadCanonicalSpxGexForTelegram(env, now, { allowGeneration: false }), OPTIONAL_MARKET_DATA_TIMEOUT_MS),
+        { pcrValue: null, calculatedGex: null, heatmap: null, status: 'MISSING' as const },
+      ),
       getDisabledNewsSentiment(),
     ]);
+    if (canonicalGexSnapshot.status !== 'READY') {
+      throw new Error(`canonical_gex_${canonicalGexSnapshot.status.toLowerCase()}`);
+    }
     const pcrValue = canonicalGexSnapshot.pcrValue;
     const calculatedGex = canonicalGexSnapshot.calculatedGex;
     const canonicalHeatmap = canonicalGexSnapshot.heatmap;
@@ -3521,6 +3637,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       TODAYS_MEMORY: {
         currentPosition: dailyMemory.currentPosition,
         entryPrice: dailyMemory.entryPrice,
+        openPosition: openPositionContext,
         recentActions: dailyMemory.actionLog.slice(-3),
       }
     };
@@ -3644,8 +3761,30 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
         attempts: cioAttempts,
       };
     }
+    const positionTransition = applyPositionTransitionGuard(cioDecision, dailyMemory.currentPosition);
+    if (positionTransition.failure) {
+      cioDecision = positionTransition.decision;
+      decisionRun!.degraded = true;
+      decisionRun!.degradedReason = positionTransition.failure;
+    }
     decisionRun!.cioDecision = cioDecision;
-    await appendDecisionLifecycle(decisionStore!, decisionRun!, 'CIO_DECIDED', { decision: cioDecision }, cioDecision.latencyMs);
+    await appendDecisionLifecycle(decisionStore!, decisionRun!, 'CIO_DECIDED', {
+      decision: cioDecision,
+      positionContext: openPositionContext,
+      positionDirective: positionTransition.positionDirective,
+      positionTransitionValidation: positionTransition.failure,
+      modelContractFailures: cioAttempts
+        .filter((attempt) => attempt.status === 'SCHEMA_INVALID')
+        .map((attempt) => ({
+          stage: 'CIO_POST_PARSE',
+          failureFamily: attempt.errorCategory,
+          invalidField: attempt.invalidField || null,
+          attempt: attempt.attempt,
+          provider: attempt.provider || attempt.selectedProvider || null,
+          responseHash: attempt.responseHash,
+          requestHash: attempt.requestHash || null,
+        })),
+    }, cioDecision.latencyMs);
 
     const plannedTradeAction = cioDecision.action;
     const mustBlockNewDirectionalSignal =
@@ -3773,6 +3912,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       council: councilResult,
       cioDecision,
       riskGate: riskGateResult,
+      openPosition: openPositionContext,
     });
 
     if (options.debugReportPreview) {
@@ -3792,6 +3932,8 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
     } else {
       console.log(`[DELIVERY_PREVIEW] run_id=${runId} Telegram enqueue/send suppressed.`);
     }
+
+    return { status: 'SUCCEEDED' as const, runId, failureCode: null };
 
   } catch (e: any) {
     console.error('CRITICAL BOT ERROR:', e.message);
@@ -3814,6 +3956,7 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
         }).catch(() => undefined);
       });
     }
+    return { status: 'FAILED' as const, runId: activeRunId, failureCode: classifySpxOperationalFailure(e, 'TRADING_PIPELINE_FAILED') };
   } finally {
     await releaseTradingRunLock(env, runLockToken);
   }
@@ -3909,15 +4052,15 @@ async function runEndOfDayAudit(env: Env, now: Date = new Date(), options: Sched
 async function runSpxGexHeatmapGeneration(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}) {
   if (!env.SPX_RECAP_DB) {
     console.log('[SPX_GEX_HEATMAP] Skip: SPX_RECAP_DB binding is missing.');
-    return;
+    return { status: 'FAILED' as const, failureCode: 'D1_OPERATION_FAILED' };
   }
 
   const generationStatus = getSpxGexGenerationStatus(now);
   const collectionStore = new D1SpxGexCollectionStore(env.SPX_RECAP_DB);
   const slotId = `${generationStatus.etDateKey}:${generationStatus.snapshotMinuteEt}`;
-  await collectionStore.scheduleDate(generationStatus.etDateKey, now.toISOString());
 
   try {
+    await collectionStore.scheduleDate(generationStatus.etDateKey, now.toISOString());
     const result = await generateAndStoreSpxGexHeatmap({
       db: env.SPX_RECAP_DB,
       dataClient: createSpxGexIntradayDataClient({ db: env.SPX_RECAP_DB, now }),
@@ -3945,10 +4088,124 @@ async function runSpxGexHeatmapGeneration(env: Env, now: Date = new Date(), opti
       }
     }
     console.log(`[SPX_GEX_HEATMAP] ${result.status} ${result.date}${'reason' in result ? ` ${result.reason}` : ''}`);
+    return { status: 'SUCCEEDED' as const, failureCode: null };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await collectionStore.appendStage(slotId, 'FAILED', { error: message }, new Date().toISOString());
+    await collectionStore.appendStage(slotId, 'FAILED', { error: classifySpxOperationalFailure(error, 'GEX_COLLECTION_FAILED') }, new Date().toISOString())
+      .catch((persistError) => console.error('[SPX_GEX_HEATMAP] failed to persist terminal collection state', persistError instanceof Error ? persistError.message : String(persistError)));
     console.error('[SPX_GEX_HEATMAP] Generation failed', message);
+    return { status: 'FAILED' as const, failureCode: classifySpxOperationalFailure(error, 'GEX_COLLECTION_FAILED') };
+  }
+}
+
+const operationalTickId = (now: Date) => `tick-${now.toISOString()}`;
+
+async function sendOperationalHealthAlert(
+  env: Env,
+  health: D1SpxOperationalHealthStore,
+  tickId: string,
+  job: SpxOperationalJob,
+  message: string,
+) {
+  const now = new Date();
+  const recentlyAlerted = await health.hasRecentAlert(job, new Date(now.getTime() - SPX_HEALTH_ALERT_DEDUP_MS).toISOString());
+  if (recentlyAlerted || !env.TELEGRAM_TOKEN || !env.TELEGRAM_CHAT_ID) return false;
+  try {
+    await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, `⚠️ <b>SPX 系統健康告警</b>\n${tgEscape(message)}`);
+    await health.markAlertSent(tickId, job, now.toISOString());
+    return true;
+  } catch (error) {
+    console.error('[SPX_HEALTH] Telegram health alert failed', error instanceof Error ? error.message : String(error));
+    return false;
+  }
+}
+
+async function recoverStaleTradingRuns(env: Env, now: Date, health: D1SpxOperationalHealthStore, tickId: string) {
+  if (!env.SPX_RECAP_DB) return 0;
+  const store = new D1SpxDecisionStore(env.SPX_RECAP_DB);
+  const stale = await store.listStaleIncomplete(new Date(now.getTime() - SPX_STALE_RUN_MS).toISOString());
+  if (stale.length === 0) return 0;
+
+  await health.begin({ tickId, job: 'STALE_RECOVERY', runId: null, stage: 'DISCOVERED' }, now.toISOString());
+  let recovered = 0;
+  for (const record of stale) {
+    try {
+      await completeDegradedDecisionRun(env, store, record.run, 'stale_run_recovered_without_replay', 'PREVIEW');
+      recovered += 1;
+    } catch (error) {
+      console.error('[SPX_HEALTH] stale-run recovery failed', record.run.runId, error instanceof Error ? error.message : String(error));
+    }
+  }
+  await health.finish({
+    tickId,
+    job: 'STALE_RECOVERY',
+    runId: null,
+    status: recovered === stale.length ? 'RECOVERED' : 'FAILED',
+    stage: recovered === stale.length ? 'TERMINAL' : 'PARTIAL',
+    failureCode: recovered === stale.length ? null : 'STALE_RECOVERY_PARTIAL',
+  }, new Date().toISOString());
+  if (recovered > 0) {
+    await sendOperationalHealthAlert(env, health, tickId, 'STALE_RECOVERY', `已封存 ${recovered} 個卡死 run；沒有重跑過期交易決策。`);
+  }
+  return recovered;
+}
+
+export async function runSupervisedSpxMarketTick(env: Env, now: Date = new Date()) {
+  if (!env.SPX_RECAP_DB) {
+    console.error('[SPX_TICK] SPX_RECAP_DB binding is missing.');
+    return { status: 'FAILED' as const, failureCode: 'D1_OPERATION_FAILED' };
+  }
+  const tickId = operationalTickId(now);
+  const health = new D1SpxOperationalHealthStore(env.SPX_RECAP_DB);
+  try {
+    await health.begin({ tickId, job: 'MARKET_TICK', runId: null, stage: 'STARTED' }, now.toISOString());
+    await recoverStaleTradingRuns(env, now, health, tickId);
+
+    await health.begin({ tickId, job: 'GEX_COLLECTION', runId: null, stage: 'STARTED' }, new Date().toISOString());
+    const gex = await runSpxGexHeatmapGeneration(env, now);
+    await health.finish({
+      tickId,
+      job: 'GEX_COLLECTION',
+      runId: null,
+      status: gex.status === 'SUCCEEDED' ? 'SUCCEEDED' : 'FAILED',
+      stage: 'TERMINAL',
+      failureCode: gex.failureCode,
+    }, new Date().toISOString());
+    if (gex.status === 'FAILED') {
+      await sendOperationalHealthAlert(env, health, tickId, 'GEX_COLLECTION', 'GEX 更新失敗；系統只會使用已持久化且新鮮的 snapshot，否則本輪會 fail-closed。');
+    }
+
+    const marketStatus = getMarketScheduleStatus(now);
+    if (!marketStatus.isTradingWindow) {
+      await health.finish({ tickId, job: 'MARKET_TICK', runId: null, status: 'SUCCEEDED', stage: 'GEX_ONLY' }, new Date().toISOString());
+      return { status: 'SUCCEEDED' as const, failureCode: null };
+    }
+
+    await health.begin({ tickId, job: 'TRADING', runId: null, stage: 'STARTED' }, new Date().toISOString());
+    const trading = await runTradingAgents(env, now);
+    await health.finish({
+      tickId,
+      job: 'TRADING',
+      runId: trading.runId,
+      status: trading.status === 'FAILED' ? 'FAILED' : 'SUCCEEDED',
+      stage: trading.status,
+      failureCode: trading.failureCode,
+    }, new Date().toISOString());
+    await health.finish({
+      tickId,
+      job: 'MARKET_TICK',
+      runId: trading.runId,
+      status: trading.status === 'FAILED' ? 'FAILED' : 'SUCCEEDED',
+      stage: 'TERMINAL',
+      failureCode: trading.failureCode,
+    }, new Date().toISOString());
+    return { status: trading.status === 'FAILED' ? 'FAILED' as const : 'SUCCEEDED' as const, failureCode: trading.failureCode };
+  } catch (error) {
+    const failureCode = classifySpxOperationalFailure(error, 'MARKET_TICK_FAILED');
+    console.error('[SPX_TICK] supervised tick failed', failureCode, error instanceof Error ? error.message : String(error));
+    await health.finish({ tickId, job: 'MARKET_TICK', runId: null, status: 'FAILED', stage: 'UNHANDLED', failureCode }, new Date().toISOString()).catch(() => undefined);
+    await sendOperationalHealthAlert(env, health, tickId, 'MARKET_TICK', '排程執行中斷；本輪沒有重跑交易決策，下一輪會重新取得即時資料。').catch(() => undefined);
+    return { status: 'FAILED' as const, failureCode };
   }
 }
 
@@ -3970,12 +4227,7 @@ export default {
     }
 
     if (cron === SPX_GEX_HEATMAP_CRON) {
-      ctx.waitUntil(runSpxGexHeatmapGeneration(env, scheduledAt));
-      return;
-    }
-
-    if (cron === TRADING_CRON && marketStatus.isTradingWindow) {
-      ctx.waitUntil(runTradingAgents(env, scheduledAt));
+      ctx.waitUntil(runSupervisedSpxMarketTick(env, scheduledAt));
       return;
     }
 
@@ -4026,6 +4278,29 @@ export default {
       const expectedRunIds = expectedTradingRunIdsForDate(dateKey);
       const coverage = await queryLifecycleCoverage(env.SPX_RECAP_DB, expectedRunIds);
       return Response.json({ date: dateKey, expectedRunCount: expectedRunIds.length, ...coverage });
+    }
+
+    if (url.searchParams.has('health')) {
+      if (!env.SPX_RECAP_DB) return new Response('SPX_RECAP_DB unavailable', { status: 503 });
+      const now = new Date();
+      const marketStatus = getMarketScheduleStatus(now);
+      const [recentJobs, staleRuns, gexCoverage] = await Promise.all([
+        new D1SpxOperationalHealthStore(env.SPX_RECAP_DB).listRecent(12),
+        new D1SpxDecisionStore(env.SPX_RECAP_DB).listStaleIncomplete(new Date(now.getTime() - SPX_STALE_RUN_MS).toISOString()),
+        querySpxGexCollectionCoverage(env.SPX_RECAP_DB, marketStatus.etDateKey, getSpxGexGenerationStatus(now).collectedMinuteEt),
+      ]);
+      return Response.json({
+        checkedAt: now.toISOString(),
+        deployment: env.CF_VERSION_METADATA || null,
+        market: { date: marketStatus.etDateKey, minutesEt: marketStatus.minutes, isTradingWindow: marketStatus.isTradingWindow },
+        staleRunIds: staleRuns.map(({ run }) => run.runId),
+        gex: {
+          persistedCount: gexCoverage.persistedCount,
+          incompleteSlotIds: gexCoverage.incompleteSlotIds,
+          failedSlotIds: gexCoverage.failedSlotIds,
+        },
+        recentJobs,
+      });
     }
 
     if (url.searchParams.has('gex_lifecycle_date')) {

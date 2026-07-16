@@ -62,7 +62,16 @@ test("SPX Worker persists normalized replay context without claiming raw source 
 test("Telegram GEX section is wired from the canonical Board summary", () => {
   assert.match(workerSource, /const calculatedGex = canonicalGexSnapshot\.calculatedGex/);
   assert.match(workerSource, /gexSummary:\s*calculatedGex/);
-  assert.match(workerSource, /calculatedGex:\s*heatmap\s*\?\s*toTelegramGexSummary\(heatmap\)\s*:\s*null/);
+  assert.match(workerSource, /isUsableCanonicalSpxGexHeatmap/);
+  assert.match(workerSource, /canonicalGexSnapshot\.status !== 'READY'/);
+  assert.match(workerSource, /loadCanonicalSpxGexForTelegram\(env, now, \{ allowGeneration: false \}\)/);
+});
+
+test("scheduled market work is supervised by one tick with stale-run recovery", () => {
+  assert.match(workerSource, /runSupervisedSpxMarketTick/);
+  assert.match(workerSource, /recoverStaleTradingRuns/);
+  assert.match(workerSource, /runSpxGexHeatmapGeneration\(env, now\)[\s\S]*?runTradingAgents\(env, now\)/);
+  assert.equal(workerSource.includes("const TRADING_CRON"), false);
 });
 
 test("manual and debug Worker triggers are preview-only unless delivery is explicit", () => {

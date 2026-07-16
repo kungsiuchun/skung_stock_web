@@ -551,6 +551,7 @@ describe("SPX GEX Cboe delayed source adapter", () => {
     assert.equal(pcrValue, 0.9);
     assert.equal(canonicalOnly.heatmap, null);
     assert.equal(canonicalOnly.calculatedGex, null);
+    assert.equal(canonicalOnly.status, "MISSING");
   });
 
   it("continues with live Cboe data when the D1 cache table is unavailable", async () => {

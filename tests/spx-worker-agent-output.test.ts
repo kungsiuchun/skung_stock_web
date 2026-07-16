@@ -11,9 +11,11 @@ import {
   applyRequiredSpxFreshnessGate,
   buildDataBackedAgentFallback,
   buildDataBackedCioPlan,
+  buildCioContextProjection,
   buildStructuredOpenRouterBody,
   countDirectionalVotes,
   decideWithCio,
+  deriveOpenPositionContext,
   formatAgentTelegramBrief,
   hasActiveTradingRunLock,
   parseAgentResponseWithDataFallback,
@@ -28,6 +30,7 @@ import {
   SPX_COUNCIL_TIMING_POLICY,
   shouldRunLlmCio,
   shouldRunLlmCouncil,
+  validateCioModelPlan,
 } from "../scripts/worker-spx-bot";
 import { ORCHESTRATOR_PROMPT, SYSTEM_PROMPT_PREFIX } from "../scripts/prompts";
 
@@ -156,6 +159,124 @@ test("OpenRouter request profiles keep every GPT-5 Mini decision role Azure-only
     allow_fallbacks: false,
   });
   assert.deepEqual(cio.response_format, { type: "json_object" });
+});
+
+test("CIO projection carries the complete open-position plan instead of only a direction flag", () => {
+  const projection = buildCioContextProjection({
+    snapshotFacts: { "spx.last": 7531.98 },
+    TODAYS_MEMORY: {
+      currentPosition: "PUT",
+      openPosition: {
+        side: "PUT",
+        entryPrice: 7532.21,
+        entryTime: "2026/07/16 14:30:03",
+        invalidation: "SPX 7540 reclaim invalidates the PUT",
+        targets: ["SPX 7520"],
+        openingRunId: "open-put-run",
+      },
+    },
+  }, []);
+
+  assert.deepEqual(projection.openPosition, {
+    side: "PUT",
+    entryPrice: 7532.21,
+    entryTime: "2026/07/16 14:30:03",
+    invalidation: "SPX 7540 reclaim invalidates the PUT",
+    targets: ["SPX 7520"],
+    openingRunId: "open-put-run",
+  });
+});
+
+test("open-position context is reconstructed from the original entry snapshot, not the latest HOLD", () => {
+  const context = deriveOpenPositionContext({
+    currentPosition: "PUT",
+    entryPrice: 7532.21,
+    entryTime: "2026/07/16 14:30:03",
+    actionLog: [
+      { time: "2026/07/16 14:30:03", price: 7532.21, action: "買入 Put", reasoning: "Open.", stopLoss: "SPX 7540", takeProfit: "SPX 7520", runId: "open-put-run" },
+      { time: "2026/07/16 14:45:03", price: 7531.98, action: "觀望防守", reasoning: "Hold." },
+    ],
+    icPosition: "NONE",
+    icDeployTime: null,
+    icAction: null,
+  });
+
+  assert.deepEqual(context, {
+    side: "PUT",
+    entryPrice: 7532.21,
+    entryTime: "2026/07/16 14:30:03",
+    invalidation: "SPX 7540",
+    targets: ["SPX 7520"],
+    openingRunId: "open-put-run",
+  });
+});
+
+test("CIO post-parse contract retries a fractional confidence and preserves a valid confidence without mapping it to zero", async () => {
+  const responses = [
+    {
+      trade_action: "HOLD",
+      confidence_score: 55.5,
+      logic: "First response is not a valid integer confidence.",
+      buy_zone: null,
+      stop_loss: null,
+      targets: [],
+      no_trade_conditions: ["Wait for confirmation."],
+      evidence_refs: ["spx.last"],
+      claims: [{ text: "SPX has no confirmed entry edge.", evidence_refs: ["spx.last"] }],
+    },
+    {
+      trade_action: "HOLD",
+      confidence_score: 56,
+      logic: "Second response is contract-valid.",
+      buy_zone: null,
+      stop_loss: null,
+      targets: [],
+      no_trade_conditions: ["Wait for confirmation."],
+      evidence_refs: ["spx.last"],
+      claims: [{ text: "SPX has no confirmed entry edge.", evidence_refs: ["spx.last"] }],
+    },
+  ];
+  const result = await decideWithCio({
+    snapshotFacts: { "spx.last": 7531.98 },
+    marketDataQuality: { overallStatus: "OK", hardBlocks: [], warnings: [] },
+    TODAYS_MEMORY: { currentPosition: "PUT", openPosition: null },
+  }, [], { OPENROUTER_API_KEY: "test-key", SPX_CIO_MODEL: "openai/gpt-5-mini" } as any, {
+    fetcher: async () => new Response(JSON.stringify({
+      model: "openai/gpt-5-mini",
+      provider: "Azure",
+      choices: [{ finish_reason: "stop", message: { content: JSON.stringify(responses.shift()) } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }),
+  });
+
+  assert.equal(result.modelStatus, "AI");
+  assert.equal(result.plan.confidence_score, 56);
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["SCHEMA_INVALID", "SUCCESS"]);
+  assert.equal(result.attempts[0].errorCategory, "POST_PARSE_CONTRACT");
+  assert.equal(result.attempts[0].invalidField, "confidence_score_not_integer");
+  assert.equal(result.attempts[0].responseHash?.length, 64);
+  assert.equal(result.attempts[0].requestHash?.length, 64);
+});
+
+test("CIO typed validator reports precise confidence contract fields", () => {
+  const valid = {
+    trade_action: "HOLD",
+    confidence_score: 56,
+    logic: "No confirmed entry edge.",
+    buy_zone: null,
+    stop_loss: null,
+    targets: [],
+    no_trade_conditions: ["Wait."],
+    evidence_refs: ["spx.last"],
+    claims: [{ text: "SPX has no confirmed entry edge.", evidence_refs: ["spx.last"] }],
+  };
+  const allowed = new Set(["spx.last"]);
+  const missing = { ...valid } as Record<string, unknown>;
+  delete missing.confidence_score;
+
+  assert.deepEqual(validateCioModelPlan(missing, allowed), { ok: false, invalidField: "confidence_score_missing" });
+  assert.deepEqual(validateCioModelPlan({ ...valid, confidence_score: "56" }, allowed), { ok: false, invalidField: "confidence_score_not_number" });
+  assert.deepEqual(validateCioModelPlan({ ...valid, confidence_score: 0 }, allowed), { ok: false, invalidField: "confidence_score_out_of_range" });
+  assert.deepEqual(validateCioModelPlan({ ...valid, confidence_score: 101 }, allowed), { ok: false, invalidField: "confidence_score_out_of_range" });
 });
 
 test("valid AI Council output rejects zero confidence and invalid HOLD evidence references", async () => {

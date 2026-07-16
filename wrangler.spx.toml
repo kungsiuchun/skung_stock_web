@@ -8,7 +8,16 @@ compatibility_flags = [ "nodejs_compat" ]
 # Trading: 10:00-15:45 ET every 15 minutes, 10:00-12:45 ET on early closes.
 # Audit: 16:15 ET, or 13:15 ET on early closes.
 # SPX GEX heatmap: collect 09:45-16:15 ET, display 09:30-16:00 ET as a 15-min delayed feed.
-crons = [ "*/15 14-20 * * MON-FRI", "15 17-21 * * MON-FRI", "*/15 13-21 * * MON-FRI" ]
+# One supervised market tick owns GEX collection and (when open) trading.  Running
+# separate cron handlers at the same minute allowed the trading path to read a
+# partially-written canonical GEX snapshot.
+crons = [ "15 17-21 * * MON-FRI", "*/15 13-21 * * MON-FRI" ]
+
+[observability]
+enabled = true
+
+[version_metadata]
+binding = "CF_VERSION_METADATA"
 
 [[kv_namespaces]]
 binding = "SPX_MEMORY"

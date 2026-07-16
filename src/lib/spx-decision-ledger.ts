@@ -57,6 +57,11 @@ export interface LifecycleCoverageResult {
   deliveryFailedRunIds: string[];
 }
 
+export interface StaleSpxDecisionRun {
+  run: DecisionRunRecord;
+  outbox: OutboxRecord | null;
+}
+
 export interface SpxDecisionCockpitProjection {
   runId: string;
   scheduledAt: string;
@@ -389,6 +394,46 @@ export class D1SpxDecisionStore implements SpxDecisionStore {
       LIMIT ?
     `).bind(at, Math.max(1, Math.min(25, limit))).all<OutboxRow>();
     return (result.results || []).map(rowToOutbox);
+  }
+
+  async listStaleIncomplete(cutoff: string, limit = 25): Promise<StaleSpxDecisionRun[]> {
+    const result = await this.db.prepare(`
+      SELECT r.run_id, r.scheduled_at, r.current_stage, r.snapshot_json, r.council_json,
+             r.cio_decision_json, r.risk_gate_json, r.final_decision_json, r.final_action,
+             r.degraded, r.degraded_reason, r.created_at, r.updated_at,
+             o.message AS outbox_message, o.status AS outbox_status, o.attempt_count AS outbox_attempt_count,
+             o.telegram_message_id AS outbox_telegram_message_id, o.last_error AS outbox_last_error,
+             o.next_attempt_at AS outbox_next_attempt_at, o.created_at AS outbox_created_at, o.updated_at AS outbox_updated_at
+      FROM spx_decision_runs r
+      LEFT JOIN spx_delivery_outbox o ON o.run_id = r.run_id
+      WHERE r.scheduled_at < ?
+        AND r.current_stage NOT IN ('DELIVERED', 'DELIVERY_FAILED')
+      ORDER BY r.scheduled_at
+      LIMIT ?
+    `).bind(cutoff, Math.max(1, Math.min(limit, 100))).all<DecisionRunRow & {
+      outbox_message: string | null;
+      outbox_status: OutboxRecord["status"] | null;
+      outbox_attempt_count: number | null;
+      outbox_telegram_message_id: string | null;
+      outbox_last_error: string | null;
+      outbox_next_attempt_at: string | null;
+      outbox_created_at: string | null;
+      outbox_updated_at: string | null;
+    }>();
+    return (result.results || []).map((row) => ({
+      run: rowToRun(row),
+      outbox: row.outbox_status === null ? null : rowToOutbox({
+        run_id: row.run_id,
+        message: row.outbox_message || "",
+        status: row.outbox_status,
+        attempt_count: Number(row.outbox_attempt_count || 0),
+        telegram_message_id: row.outbox_telegram_message_id,
+        last_error: row.outbox_last_error,
+        next_attempt_at: row.outbox_next_attempt_at,
+        created_at: row.outbox_created_at || row.created_at,
+        updated_at: row.outbox_updated_at || row.updated_at,
+      }),
+    }));
   }
 
   private async requireOutbox(runId: string) {

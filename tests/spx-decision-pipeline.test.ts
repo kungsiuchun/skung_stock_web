@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   InMemorySpxDecisionStore,
+  applyPositionTransitionGuard,
   applyRiskGate,
   dispatchSpxDecisionDelivery,
   findMissingScheduledRuns,
@@ -474,6 +475,113 @@ test("directional Telegram is a compact decision card with Council votes and exe
   assert.match(message, /🏁 目標｜7540 · 7552/);
   assert.match(message, /🚫 不交易｜VWAP rejection persists/);
   assert.doesNotMatch(message, /🟢 SPX｜CALL 機會|判斷｜|依據｜|CIO｜OPEN_CALL · 78% · 完成/);
+});
+
+test("an open PUT survives a CIO HOLD and Telegram labels it as holding the existing plan", async () => {
+  const { dependencies, sent } = buildDependencies();
+
+  const result = await runSpxDecisionPipeline({
+    runId: "open-put-hold-continuity",
+    scheduledAt,
+    currentPosition: "PUT",
+    openPosition: {
+      side: "PUT",
+      entryPrice: 7532.21,
+      entryTime: "2026/07/16 14:30:03",
+      invalidation: "SPX 7540 reclaim invalidates the PUT",
+      targets: ["SPX 7520", "SPX 7512"],
+      openingRunId: "2026-07-16-1784226603000",
+    },
+  }, dependencies);
+
+  assert.equal(result.finalDecision.action, "HOLD");
+  assert.equal(result.run.riskGate?.positionDirective, "HOLD_PUT");
+  assert.match(sent[0] || "", /操作：持有 Put/);
+  assert.match(sent[0] || "", /入場｜2026\/07\/16 14:30:03 ET · SPX 7,532\.21/);
+  assert.match(sent[0] || "", /失效｜SPX 7540 reclaim invalidates the PUT/);
+  assert.doesNotMatch(sent[0] || "", /計劃｜不開倉/);
+});
+
+test("an open PUT survives CIO schema invalid without a new entry or a lost plan", async () => {
+  const { dependencies, sent } = buildDependencies({
+    cio: {
+      decide: async () => ({
+        action: "HOLD",
+        confidence: 0,
+        thesis: "Invalid model confidence.",
+        entry: null,
+        invalidation: null,
+        targets: [],
+        noTradeConditions: ["Invalid."],
+        evidenceRefs: ["spx.last"],
+        claims: [{ text: "SPX is 7523.", evidenceRefs: ["spx.last"] }],
+        modelStatus: "AI",
+        latencyMs: 1,
+      }),
+    },
+  });
+
+  const result = await runSpxDecisionPipeline({
+    runId: "open-put-schema-invalid-continuity",
+    scheduledAt,
+    currentPosition: "PUT",
+    openPosition: {
+      side: "PUT",
+      entryPrice: 7532.21,
+      entryTime: "2026/07/16 14:30:03",
+      invalidation: "SPX 7540 reclaim invalidates the PUT",
+      targets: ["SPX 7520"],
+      openingRunId: "open-put-run",
+    },
+  }, dependencies);
+
+  assert.equal(result.finalDecision.action, "HOLD");
+  assert.equal(result.run.degraded, true);
+  assert.equal(result.run.riskGate?.positionDirective, "HOLD_PUT");
+  assert.match(sent[0] || "", /操作：持有 Put/);
+  assert.match(sent[0] || "", /CIO 本輪未完成，維持現有 Put/);
+  assert.match(sent[0] || "", /失效｜SPX 7540 reclaim invalidates the PUT/);
+  assert.doesNotMatch(sent[0] || "", /買入 Call|買入 Put|計劃｜不開倉/);
+});
+
+test("a reverse-direction CIO instruction is rejected before Risk Gate and keeps the current PUT", () => {
+  const guarded = applyPositionTransitionGuard({
+    action: "OPEN_CALL",
+    confidence: 72,
+    thesis: "Invalid reversal attempt.",
+    entry: "SPX 7535",
+    invalidation: "SPX 7528",
+    targets: ["SPX 7542"],
+    noTradeConditions: [],
+    evidenceRefs: ["spx.last"],
+    claims: [{ text: "SPX is 7532.", evidenceRefs: ["spx.last"] }],
+    modelStatus: "AI",
+    latencyMs: 1,
+  }, "PUT");
+
+  assert.equal(guarded.decision.action, "HOLD");
+  assert.equal(guarded.failure, "position_transition_open_call_while_put");
+  assert.equal(guarded.positionDirective, "HOLD_PUT");
+});
+
+test("position directives distinguish flat wait, hold, and Risk Gate required close", () => {
+  const hold = {
+    action: "HOLD" as const,
+    confidence: 65,
+    thesis: "Hold the position.",
+    entry: null,
+    invalidation: null,
+    targets: [],
+    noTradeConditions: ["Wait."],
+    evidenceRefs: ["spx.last"],
+    claims: [{ text: "SPX is unchanged.", evidenceRefs: ["spx.last"] }],
+    modelStatus: "AI",
+    latencyMs: 1,
+  };
+
+  assert.equal(applyRiskGate(hold, { disposition: "PASS", reason: "clear" }, "NONE").positionDirective, "FLAT_WAIT");
+  assert.equal(applyRiskGate(hold, { disposition: "PASS", reason: "clear" }, "CALL").positionDirective, "HOLD_CALL");
+  assert.equal(applyRiskGate(hold, { disposition: "REQUIRE_CLOSE", reason: "risk" }, "PUT").positionDirective, "CLOSE_PUT");
 });
 
 test("manual preview never enqueues or sends Telegram without explicit delivery", async () => {

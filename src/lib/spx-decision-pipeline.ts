@@ -2,6 +2,7 @@ import type { SpxGexTelegramSummary } from "./spx-gex-heatmap";
 
 export type SpxDecisionAction = "OPEN_CALL" | "OPEN_PUT" | "HOLD" | "CLOSE";
 export type SpxPosition = "NONE" | "CALL" | "PUT";
+export type SpxPositionDirective = "FLAT_WAIT" | "HOLD_CALL" | "HOLD_PUT" | "CLOSE_CALL" | "CLOSE_PUT";
 export type SpxDeliveryMode = "SEND" | "PREVIEW";
 export type SpxRunMode = "LIVE" | "UAT_REPLAY" | "UAT_LLM";
 
@@ -135,6 +136,7 @@ export interface ModelAttemptMetadata {
   providerCode?: string | null;
   errorMessageHash?: string | null;
   contractError?: "INVALID_REQUEST" | "UNSUPPORTED_PARAMETER" | "INVALID_SCHEMA" | "INVALID_TOKEN_BUDGET" | "UNKNOWN_ROUTER_400" | "PROVIDER_UNAVAILABLE" | null;
+  invalidField?: string | null;
 }
 
 export interface CouncilResult {
@@ -159,6 +161,15 @@ export interface CioDecision {
   attempts?: ModelAttemptMetadata[];
 }
 
+export interface SpxOpenPositionContext {
+  side: Exclude<SpxPosition, "NONE">;
+  entryPrice: number | null;
+  entryTime: string | null;
+  invalidation: string | null;
+  targets: string[];
+  openingRunId: string | null;
+}
+
 export type RiskGateDisposition = "PASS" | "VETO_TO_HOLD" | "REQUIRE_CLOSE";
 
 export interface RiskGateDirective {
@@ -171,6 +182,7 @@ export interface RiskGateResult {
   disposition: RiskGateDisposition;
   reason: string;
   cioAction: SpxDecisionAction;
+  positionDirective: SpxPositionDirective;
 }
 
 export interface LifecycleEvent {
@@ -261,6 +273,7 @@ export interface SpxDecisionPipelineInput {
   runId: string;
   scheduledAt: Date;
   currentPosition: SpxPosition;
+  openPosition?: SpxOpenPositionContext | null;
   runMode?: SpxRunMode;
 }
 
@@ -277,6 +290,7 @@ export interface TelegramDecisionMessageInput {
   council: CouncilResult;
   cioDecision: CioDecision;
   riskGate: RiskGateResult;
+  openPosition?: SpxOpenPositionContext | null;
 }
 
 export function resolveSpxDeliveryMode(input: {
@@ -379,6 +393,39 @@ const validateCioDecision = (decision: CioDecision, snapshot: MarketSnapshot) =>
 
 export const getCioValidationFailure = validateCioDecision;
 
+const positionDirectiveFor = (action: SpxDecisionAction, currentPosition: SpxPosition): SpxPositionDirective => {
+  if (currentPosition === "PUT") return action === "CLOSE" ? "CLOSE_PUT" : "HOLD_PUT";
+  if (currentPosition === "CALL") return action === "CLOSE" ? "CLOSE_CALL" : "HOLD_CALL";
+  return "FLAT_WAIT";
+};
+
+export function applyPositionTransitionGuard(
+  cioDecision: CioDecision,
+  currentPosition: SpxPosition,
+): { decision: CioDecision; failure: string | null; positionDirective: SpxPositionDirective } {
+  if (currentPosition === "NONE" || !directionalActions.has(cioDecision.action)) {
+    return {
+      decision: cioDecision,
+      failure: null,
+      positionDirective: positionDirectiveFor(cioDecision.action, currentPosition),
+    };
+  }
+  const failure = `position_transition_${cioDecision.action.toLowerCase()}_while_${currentPosition.toLowerCase()}`;
+  return {
+    decision: {
+      ...cioDecision,
+      action: "HOLD",
+      thesis: `${cioDecision.thesis} Position transition rejected: close the existing ${currentPosition} before a new entry.`,
+      entry: null,
+      invalidation: null,
+      targets: [],
+      noTradeConditions: Array.from(new Set([...cioDecision.noTradeConditions, failure])),
+    },
+    failure,
+    positionDirective: positionDirectiveFor("HOLD", currentPosition),
+  };
+}
+
 export function getCanonicalGexRiskDirective(
   snapshot: MarketSnapshot,
   cioDecision: CioDecision,
@@ -412,14 +459,32 @@ export function applyRiskGate(
   currentPosition: SpxPosition,
 ): RiskGateResult {
   if (directive.disposition === "PASS") {
-    return { action: cioDecision.action, disposition: directive.disposition, reason: directive.reason, cioAction: cioDecision.action };
+    return {
+      action: cioDecision.action,
+      disposition: directive.disposition,
+      reason: directive.reason,
+      cioAction: cioDecision.action,
+      positionDirective: positionDirectiveFor(cioDecision.action, currentPosition),
+    };
   }
   if (directive.disposition === "VETO_TO_HOLD") {
-    return { action: "HOLD", disposition: directive.disposition, reason: directive.reason, cioAction: cioDecision.action };
+    return {
+      action: "HOLD",
+      disposition: directive.disposition,
+      reason: directive.reason,
+      cioAction: cioDecision.action,
+      positionDirective: positionDirectiveFor("HOLD", currentPosition),
+    };
   }
   if (directive.disposition === "REQUIRE_CLOSE") {
     const action = currentPosition === "NONE" ? "HOLD" : "CLOSE";
-    return { action, disposition: directive.disposition, reason: directive.reason, cioAction: cioDecision.action };
+    return {
+      action,
+      disposition: directive.disposition,
+      reason: directive.reason,
+      cioAction: cioDecision.action,
+      positionDirective: positionDirectiveFor(action, currentPosition),
+    };
   }
   throw new Error(`Risk Gate cannot create directional action: ${String((directive as { disposition?: unknown }).disposition)}`);
 }
@@ -608,7 +673,7 @@ const formatCouncilAgentLines = (council: CouncilResult) => {
 };
 
 export function formatTelegramDecisionMessage(input: TelegramDecisionMessageInput) {
-  const { run, snapshot, council, cioDecision, riskGate } = input;
+  const { run, snapshot, council, cioDecision, riskGate, openPosition } = input;
   const tally = council.agents.reduce((result, agent) => {
     const bucket = councilAgentIsValid(agent) ? agent.decision : "INVALID";
     result[bucket] = (result[bucket] || 0) + 1;
@@ -619,6 +684,13 @@ export function formatTelegramDecisionMessage(input: TelegramDecisionMessageInpu
     OPEN_PUT: "買入 Put",
     HOLD: "觀望",
     CLOSE: "平倉",
+  };
+  const positionActionLabel: Record<SpxPositionDirective, string> = {
+    FLAT_WAIT: actionLabel[riskGate.action],
+    HOLD_CALL: "持有 Call",
+    HOLD_PUT: "持有 Put",
+    CLOSE_CALL: "平倉 Call",
+    CLOSE_PUT: "平倉 Put",
   };
   const scheduledEtParts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/New_York",
@@ -658,7 +730,7 @@ export function formatTelegramDecisionMessage(input: TelegramDecisionMessageInpu
   const compactPlanText = (value: string) => value.replace(/\s+/g, " ").trim().slice(0, 150);
   const lines: Array<string | null> = [
     run.runMode === "UAT_LLM" ? "SYSTEM UAT｜非即時訊號｜不可交易" : null,
-    `SPX: ${spxLabel} 操作：${actionLabel[riskGate.action]}`,
+    `SPX: ${spxLabel} 操作：${positionActionLabel[riskGate.positionDirective]}`,
     `⏱️ 美東時間：${scheduledEt.year}/${scheduledEt.month}/${scheduledEt.day} ${scheduledEt.hour}:${scheduledEt.minute}:${scheduledEt.second} ET｜標的：SPX`,
     run.runMode === "UAT_REPLAY" ? "🧪 UAT REPLAY｜非即時訊號，只用固定歷史 fixture 驗證流水線。" : null,
     ...formatTelegramGexSection(snapshot),
@@ -669,7 +741,19 @@ export function formatTelegramDecisionMessage(input: TelegramDecisionMessageInpu
     `🧠 CIO｜${actionEmoji[cioDecision.action]} ${cioDecision.action} · ${safeConfidence(cioDecision.confidence)}%`,
   ];
 
-  if (riskGate.action === "HOLD") {
+  const holdingPosition = riskGate.positionDirective === "HOLD_CALL" || riskGate.positionDirective === "HOLD_PUT";
+  if (holdingPosition) {
+    const sideLabel = riskGate.positionDirective === "HOLD_PUT" ? "Put" : "Call";
+    lines.push(`⏸️ 計劃｜${run.degraded ? `CIO 本輪未完成，維持現有 ${sideLabel}。` : `維持現有 ${sideLabel}。`}`);
+    if (openPosition?.entryTime || openPosition?.entryPrice !== null) {
+      const entryPrice = openPosition?.entryPrice === null || openPosition?.entryPrice === undefined
+        ? "N/A"
+        : formatDisplayNumber(openPosition.entryPrice);
+      lines.push(`🧾 入場｜${openPosition?.entryTime || "時間未記錄"} ET · SPX ${entryPrice}`);
+    }
+    if (openPosition?.invalidation) lines.push(`🛑 失效｜${compactPlanText(openPosition.invalidation)}`);
+    if (openPosition?.targets.length) lines.push(`🏁 目標｜${openPosition.targets.slice(0, 2).map(compactPlanText).join(" · ")}`);
+  } else if (riskGate.action === "HOLD") {
     lines.push(`⏸️ 計劃｜不開倉；${run.degraded ? "等待下一個完整決策週期。" : "等待條件成立。"}`);
   } else if (riskGate.action === "CLOSE") {
     lines.push("⏸️ 計劃｜關閉現有持倉，不建立反方向倉位。");
@@ -865,11 +949,21 @@ export async function runSpxDecisionPipeline(
     run.degraded = true;
     run.degradedReason = failureReason;
   }
+  const positionTransition = applyPositionTransitionGuard(cioDecision, input.currentPosition);
+  if (positionTransition.failure) {
+    cioDecision = positionTransition.decision;
+    run.degraded = true;
+    run.degradedReason = positionTransition.failure;
+  }
   cioDecision.confidence = safeConfidence(cioDecision.confidence);
   cioDecision.latencyMs = cioDecision.latencyMs || toLatency(cioStarted, dependencies);
   run.cioDecision = cioDecision;
   run.currentStage = "CIO_DECIDED";
-  await appendLifecycle(dependencies, run, "CIO_DECIDED", { decision: cioDecision }, toLatency(cioStarted, dependencies));
+  await appendLifecycle(dependencies, run, "CIO_DECIDED", {
+    decision: cioDecision,
+    positionTransitionValidation: positionTransition.failure,
+    positionDirective: positionTransition.positionDirective,
+  }, toLatency(cioStarted, dependencies));
 
   const riskStarted = dependencies.clock.now().getTime();
   let directive: RiskGateDirective;
@@ -909,7 +1003,14 @@ export async function runSpxDecisionPipeline(
   await dependencies.store.persistDecision(run);
 
   const render = dependencies.renderMessage || formatTelegramDecisionMessage;
-  const message = render({ run, snapshot, council, cioDecision, riskGate });
+  const message = render({
+    run,
+    snapshot,
+    council,
+    cioDecision,
+    riskGate,
+    openPosition: input.openPosition || null,
+  });
   const delivery = await dispatchSpxDecisionDelivery({
     runId: input.runId,
     message,
