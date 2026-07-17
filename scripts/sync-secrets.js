@@ -57,6 +57,7 @@ export const syncSecrets = ({
       input: value,
       stdio: ["pipe", "inherit", "inherit"],
       env: deployEnv,
+      shell: process.platform === "win32",
     });
     synced.push(key);
   }

@@ -7,4 +7,5 @@ const { deployEnv } = syncSecrets({ vars });
 execFileSync(npxCommand, ["wrangler", "pages", "deploy", "dist", "--project-name", process.env.CF_PAGES_PROJECT_NAME || "sius-ai-workshop"], {
   stdio: "inherit",
   env: deployEnv,
+  shell: process.platform === "win32",
 });

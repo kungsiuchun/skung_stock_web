@@ -6,4 +6,5 @@ const deployEnv = buildCloudflareDeployEnv(loadDeployVars());
 execFileSync(npxCommand, ["wrangler", "deploy", "--config", "wrangler.spx.toml"], {
   stdio: "inherit",
   env: deployEnv,
+  shell: process.platform === "win32",
 });

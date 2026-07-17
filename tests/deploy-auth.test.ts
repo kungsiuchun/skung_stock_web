@@ -18,15 +18,16 @@ describe("Cloudflare deploy credential boundary", () => {
   });
 
   it("syncs only allowlisted runtime secrets with the deploy auth environment", () => {
-    const calls: Array<{ args: string[]; env: Record<string, string> }> = [];
+    const calls: Array<{ args: string[]; env: Record<string, string>; shell: boolean }> = [];
     const result = syncSecrets({
       vars: { CF_API_TOKEN: "deploy-token", OPENROUTER_API_KEY: "runtime", CF_ACCOUNT_ID: "account" },
       env: {},
-      run: (_command, args, options) => calls.push({ args, env: options.env }),
+      run: (_command, args, options) => calls.push({ args, env: options.env, shell: options.shell }),
     });
     assert.deepEqual(result.synced, ["OPENROUTER_API_KEY"]);
     assert.equal(calls.length, 1);
     assert.equal(calls[0].args.includes("CF_API_TOKEN"), false);
     assert.equal(calls[0].env.CLOUDFLARE_API_TOKEN, "deploy-token");
+    assert.equal(calls[0].shell, process.platform === "win32");
   });
 });
