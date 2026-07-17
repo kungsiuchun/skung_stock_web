@@ -144,6 +144,9 @@ const normalizeCboeLeg = (row: Record<string, any>): CboeNormalizedLeg | null =>
   if (!parsed || !["SPX", "SPXW"].includes(parsed.root)) return null;
   return {
     contractSymbol: option,
+    contractRoot: parsed.root,
+    settlement: parsed.root === "SPX" ? "AM" : "PM",
+    lastTradeTime: typeof row.last_trade_time === "string" ? row.last_trade_time : null,
     expiry: parsed.expiry,
     side: parsed.side,
     strike: parsed.strike,

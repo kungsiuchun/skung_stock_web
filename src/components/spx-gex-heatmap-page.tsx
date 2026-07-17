@@ -18,6 +18,13 @@ interface SpxGexHeatmapResponse {
   heatmap: SpxGexHeatmapModel | null;
   decision: SpxDecisionCockpitProjection | null;
   collection: SpxGexCollectionRecord | null;
+  collectionHealth?: {
+    dueSlots: number;
+    persistedSlots: number;
+    provider: string | null;
+    stage: string | null;
+    failure: string | null;
+  } | null;
   warnings: string[];
 }
 
@@ -117,6 +124,8 @@ const cellAuditLines = (cell: SpxGexHeatmapCell | undefined) => {
   return [
     `Strike ${cell.strike} ${cell.expdate}`,
     `Quality ${cell.pricingQuality || "legacy"} / Model ${cell.model || "none"}`,
+    `Included series ${(cell.activeSeries || []).join(", ") || "legacy / unavailable"}`,
+    ...((cell.inactiveSeries || []).map((series) => `Inactive ${series} / AM-settled after 09:30 ET`)),
     priced
       ? `Net GEX ${formatSignedCompact(cell.netGex)} = Call ${formatSignedCompact(cell.callGex)} + Put ${formatSignedCompact(cell.putGex)}`
       : `State ${cellDisplayLabel(cell)}`,
@@ -129,7 +138,7 @@ const cellAuditLines = (cell: SpxGexHeatmapCell | undefined) => {
     `Effective OI C ${formatNumber(cell.callEffectiveOpenInterest)} / P ${formatNumber(cell.putEffectiveOpenInterest)}`,
     `DTE ${formatNumber(cell.dteHours)}h / t=${formatYears(cell.yearsToExpiry)}`,
     `Formula: Net = Call gamma(gamma IV) - Put gamma(gamma IV)`,
-    ...(cell.repairNotes?.length ? cell.repairNotes.map((note) => `Repair: ${note}`) : []),
+    ...(cell.repairNotes?.length ? cell.repairNotes.map((note) => `Audit: ${note}`) : []),
     ...(cell.missingReasons?.length ? [`Audit flags: ${cell.missingReasons.join(", ")}`] : []),
     `Calculated @ ${cell.calculationTimestamp || "-"}`,
   ].filter(Boolean);
@@ -180,7 +189,8 @@ const auditedProfiles = (heatmap: SpxGexHeatmapModel): SpxGexStrikeProfile[] => 
 const dataQualityText = (heatmap: SpxGexHeatmapModel) => {
   const summary = heatmap.dataQuality;
   if (!summary) return "quality unavailable";
-  return `priced ${summary.priced} · repaired ${summary.repaired} · partial ${summary.partial} · unpriced ${summary.unpriced} · excluded ${summary.excluded}`;
+  const inactiveAm = heatmap.cells.reduce((sum, cell) => sum + (cell.inactiveSeries?.length || 0), 0);
+  return `priced ${summary.priced} · repaired ${summary.repaired} · partial ${summary.partial} · unpriced ${summary.unpriced} · IV-excluded ${summary.excluded} · inactive AM ${inactiveAm}`;
 };
 
 class HeatmapResponseError extends Error {
@@ -234,6 +244,14 @@ const initialBoardSelection = () => {
   return parseSpxGexBoardSelection(window.location.hash);
 };
 
+const currentEtClock = () => {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(new Date()).map((part) => [part.type, part.value]));
+  return { tradingDate: `${parts.year}-${parts.month}-${parts.day}`, minuteEt: Number(parts.hour) * 60 + Number(parts.minute) };
+};
+
 export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const initialSelection = useMemo(initialBoardSelection, []);
   const [data, setData] = useState<SpxGexHeatmapResponse>(emptyPayload);
@@ -255,6 +273,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const auditHoverSuppressedAfterScrollRef = useRef(false);
   activeAuditCellRef.current = activeAuditCell;
   const [pressureRefreshKey, setPressureRefreshKey] = useState(0);
+  const [isFollowingLatest, setIsFollowingLatest] = useState(initialSelection.snapshot === null);
   const [failedPlayback, setFailedPlayback] = useState<FailedPlaybackSnapshot | null>(null);
   const activeRequestRef = useRef<AbortController | null>(null);
   const requestVersionRef = useRef(0);
@@ -366,6 +385,22 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     void loadHeatmap(initialSelection.date || undefined, initialSelection.snapshot);
     return () => activeRequestRef.current?.abort();
   }, [initialSelection.date, initialSelection.snapshot, loadHeatmap]);
+
+  useEffect(() => {
+    if (!isFollowingLatest || playing || !selectedDate) return undefined;
+    const refreshVisibleLiveSession = () => {
+      const clock = currentEtClock();
+      if (document.visibilityState !== "visible" || selectedDate !== clock.tradingDate || clock.minuteEt < 570 || clock.minuteEt > 975) return;
+      setPressureRefreshKey(Date.now());
+      void loadHeatmap(selectedDate, null);
+    };
+    const interval = window.setInterval(refreshVisibleLiveSession, 60_000);
+    document.addEventListener("visibilitychange", refreshVisibleLiveSession);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshVisibleLiveSession);
+    };
+  }, [isFollowingLatest, loadHeatmap, playing, selectedDate]);
 
   useEffect(() => {
     if (!playing) return undefined;
@@ -502,6 +537,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
           value={selectedDate}
           onChange={(event) => {
             setPlaying(false);
+            setIsFollowingLatest(event.target.value === currentEtClock().tradingDate);
             void loadHeatmap(event.target.value, null);
           }}
           className="bg-[#06111a] text-sm font-bold text-white outline-none focus-visible:ring-2 focus-visible:ring-cyan-200"
@@ -520,14 +556,15 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
       <button
         onClick={() => {
           setPlaying(false);
+          setIsFollowingLatest(true);
           setPressureRefreshKey(Date.now());
           void loadHeatmap(undefined, null, { bypassCache: true });
         }}
         disabled={loading}
         aria-busy={loading}
         className="inline-flex h-10 w-10 items-center justify-center border border-cyan-300/20 bg-cyan-300/10 text-cyan-100 transition-colors hover:bg-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-50"
-        title="Refresh latest DB snapshot"
-        aria-label="Refresh latest DB snapshot"
+        title="Refresh latest SPX and GEX sources"
+        aria-label="Refresh latest SPX and GEX sources"
       >
         <RefreshCw aria-hidden="true" className={`h-4 w-4 ${loading ? "animate-spin motion-reduce:animate-none" : ""}`} />
       </button>
@@ -628,6 +665,12 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                 </div>
                 <div className="font-mono text-[10px] text-zinc-500">
                   GEX collection: <span className="font-black text-cyan-100">{data.collection?.currentStage || "NOT_RECORDED"}</span>
+                  {data.collectionHealth && (
+                    <span className="ml-2 tabular-nums text-zinc-400">
+                      {data.collectionHealth.persistedSlots}/{data.collectionHealth.dueSlots} due persisted
+                      {data.collectionHealth.provider ? ` / ${data.collectionHealth.provider}` : ""}
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -701,6 +744,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                       activeRequestRef.current?.abort();
                       return;
                     }
+                    setIsFollowingLatest(false);
                     setPlaying(true);
                   }}
                   disabled={!playing && (loading || data.sessions.length <= 1)}
@@ -720,6 +764,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                     onChange={(event) => {
                       const next = data.sessions[Number(event.target.value)];
                       setPlaying(false);
+                      setIsFollowingLatest(false);
                       if (next) void loadHeatmap(selectedDate, next.snapshotMinuteEt);
                     }}
                     className="w-full accent-cyan-300"
@@ -730,6 +775,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                         key={session.snapshotMinuteEt}
                         onClick={() => {
                           setPlaying(false);
+                          setIsFollowingLatest(false);
                           void loadHeatmap(selectedDate, session.snapshotMinuteEt);
                         }}
                         className={session.snapshotMinuteEt === selectedMinute ? "text-yellow-300" : "text-cyan-200/55"}
@@ -957,6 +1003,8 @@ const GexAuditCellDetail = ({ activeCell }: { activeCell: ActiveGexAuditCell }) 
           </span>
         </div>
         <div className="text-zinc-500">Model {cell.model || "none"}</div>
+        <div className="text-cyan-200">Included {(cell.activeSeries || []).join(", ") || "legacy / unavailable"}</div>
+        {(cell.inactiveSeries || []).map((series) => <div key={series} className="text-amber-200">Inactive {series} / AM-settled after 09:30 ET</div>)}
       </SpxGexTooltipSection>
       <SpxGexTooltipSection label="Exposure">
         {priced ? (
@@ -980,7 +1028,7 @@ const GexAuditCellDetail = ({ activeCell }: { activeCell: ActiveGexAuditCell }) 
       <SpxGexTooltipSection label="Audit Trail">
         <div>DTE {formatNumber(cell.dteHours)}h / t={formatYears(cell.yearsToExpiry)}</div>
         <div>Formula: Net = Call gamma − Put gamma</div>
-        {(cell.repairNotes || []).map((note) => <div key={note} className="text-amber-200">Repair: {note}</div>)}
+        {(cell.repairNotes || []).map((note) => <div key={note} className="text-amber-200">Audit: {note}</div>)}
         {(cell.missingReasons || []).length > 0 && <div className="text-red-200">Audit flags: {(cell.missingReasons || []).join(", ")}</div>}
         <div className="break-all text-zinc-500">Calculated {cell.calculationTimestamp || "n/a"}</div>
       </SpxGexTooltipSection>

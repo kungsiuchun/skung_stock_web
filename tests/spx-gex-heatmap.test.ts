@@ -39,6 +39,8 @@ import {
   buildSpxGexPressureAxisTicks,
   buildSpxGexPressureChartGeometry,
   buildSpxGexPressureMatrix,
+  extendSpxGexPressureForSession,
+  getLatestSpxGexSpotPoint,
   getSpxGexPressureTooltipPosition,
 } from "../src/lib/spx-gex-pressure-matrix";
 import { parseSpxGexBoardSelection } from "../src/components/spx-gex-heatmap-page";
@@ -341,6 +343,64 @@ describe("SPX GEX Cboe delayed source adapter", () => {
     assert.equal(chains[0]?.selectedExpiry, "2026-06-24");
     assert.equal(chains[0]?.calls[0]?.contractSymbol, "SPXW260624C07365000");
     assert.equal(chains[0]?.puts[0]?.contractSymbol, "SPXW260624P07365000");
+  });
+
+  it("excludes settled AM SPX and prices the active PM SPXW series on third-Friday 0DTE", () => {
+    const chains = parseCboeSpxOptionsPayload({
+      timestamp: "2026-07-17 10:45:10",
+      data: {
+        symbol: "SPX",
+        current_price: 7490,
+        options: [
+          cboeOption("SPX260717C07490000", { bid: 0, ask: 0, iv: 0, open_interest: 682, volume: 0, last_trade_price: 46.9, last_trade_time: "2026-07-16T16:01:36" }),
+          cboeOption("SPX260717P07490000", { bid: 0, ask: 0, iv: 0, open_interest: 2182, volume: 0, last_trade_price: 4.85, last_trade_time: "2026-07-16T16:14:05" }),
+          cboeOption("SPXW260717C07490000", { bid: 14.4, ask: 14.6, iv: 0.2163, open_interest: 559, volume: 23084, last_trade_price: 14.5, last_trade_time: "2026-07-17T10:48:22" }),
+          cboeOption("SPXW260717P07490000", { bid: 16.9, ask: 17.1, iv: 0.2161, open_interest: 2199, volume: 12291, last_trade_price: 16.8, last_trade_time: "2026-07-17T10:48:20" }),
+        ],
+      },
+    }, { todayEt: "2026-07-17" });
+    const heatmap = buildSpxGexHeatmapFromOptionChains({
+      generatedAt: "2026-07-17T14:45:59.000Z",
+      chains,
+      selectedExpiries: ["2026-07-17"],
+      maxStrikes: 1,
+    });
+    const cell = heatmap.cells[0];
+
+    assert.equal(cell?.pricingQuality, "priced");
+    assert.equal(typeof cell?.netGex, "number");
+    assert.deepEqual(cell?.activeSeries, ["SPXW"]);
+    assert.deepEqual(cell?.inactiveSeries, ["SPX"]);
+    assert.equal(cell?.callOpenInterest, 559);
+    assert.equal(cell?.putOpenInterest, 2199);
+    assert.ok(cell?.repairNotes?.some((note) => note.includes("AM-settled series inactive")));
+    assert.equal(heatmap.zeroDte.netGex === null, false);
+  });
+
+  it("fails closed for an active PM 0DTE series with 0/0 quotes and stale last trades", () => {
+    const chains = parseCboeSpxOptionsPayload({
+      timestamp: "2026-07-17 10:45:10",
+      data: {
+        symbol: "SPX",
+        current_price: 7490,
+        options: [
+          cboeOption("SPXW260717C07490000", { bid: 0, ask: 0, iv: 0, open_interest: 559, volume: 0, last_trade_price: 0.05, last_trade_time: "2026-07-16T16:01:36" }),
+          cboeOption("SPXW260717P07490000", { bid: 0, ask: 0, iv: 0, open_interest: 2199, volume: 0, last_trade_price: 0.05, last_trade_time: "2026-07-16T16:14:05" }),
+        ],
+      },
+    }, { todayEt: "2026-07-17" });
+    const heatmap = buildSpxGexHeatmapFromOptionChains({
+      generatedAt: "2026-07-17T14:45:59.000Z",
+      chains,
+      selectedExpiries: ["2026-07-17"],
+      maxStrikes: 1,
+    });
+    const cell = heatmap.cells[0];
+
+    assert.equal(cell?.pricingQuality, "unpriced");
+    assert.equal(cell?.netGex, null);
+    assert.notEqual(cell?.callIvSource, "excluded_low_time_value");
+    assert.notEqual(cell?.putIvSource, "excluded_low_time_value");
   });
 
   it("marks Cboe as the heatmap source label and keeps source-specific timestamp text", async () => {
@@ -1575,7 +1635,7 @@ describe("SPX GEX heatmap API", () => {
     assert.equal((payload as any).status, "EMPTY");
     assert.equal(response.headers.get("cache-control"), "no-store");
     assert.deepEqual(payload.availableDates, []);
-    assert.equal(payload.selectedDate, null);
+    assert.equal(payload.selectedDate, "2026-05-27");
     assert.deepEqual(payload.sessions, []);
     assert.equal(payload.selectedSnapshot, null);
     assert.equal(payload.heatmap, null);
@@ -1820,6 +1880,38 @@ describe("SPX 0DTE pressure matrix", () => {
       [["09:30", 6000], ["09:31", 6001]],
       [["09:33", 6003]],
     ]);
+  });
+
+  it("keeps the Yahoo 1-minute endpoint ahead of the latest 15-minute GEX slot", () => {
+    const candles = [
+      { time: Date.parse("2026-05-27T14:00:00.000Z"), close: 6000 },
+      { time: Date.parse("2026-05-27T14:07:00.000Z"), close: 6007 },
+    ];
+    const latest = getLatestSpxGexSpotPoint(candles, "2026-05-27");
+    assert.equal(latest?.timeEt, "10:07");
+    assert.equal(latest?.price, 6007);
+  });
+
+  it("labels future GEX slots pending and overdue absent slots missing", () => {
+    const pressure = buildSpxGexPressureMatrix([
+      buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, baselineValues),
+    ]);
+    const live = extendSpxGexPressureForSession(pressure, { tradingDate: "2026-05-27", minuteEt: 10 * 60 + 7 });
+    assert.equal(live.timeline.find((slot) => slot.snapshotTimeEt === "09:45")?.status, "MISSING");
+    assert.equal(live.timeline.find((slot) => slot.snapshotTimeEt === "10:00")?.status, "PENDING");
+    assert.equal(live.timeline.at(-1)?.snapshotTimeEt, "16:00");
+  });
+
+  it("resets pressure baseline at the latest compatible calculation engine segment", () => {
+    const legacy = buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, baselineValues);
+    const currentA = buildPressureSnapshot("2026-05-27T14:00:00.000Z", 6002, currentValues);
+    const currentB = buildPressureSnapshot("2026-05-27T14:15:00.000Z", 6004, currentValues);
+    legacy.source.calculationEngineVersion = 1;
+    currentA.source.calculationEngineVersion = 2;
+    currentB.source.calculationEngineVersion = 2;
+    const pressure = buildSpxGexPressureMatrix([legacy, currentA, currentB]);
+    assert.equal(pressure.baseline.snapshotTimeEt, "09:45");
+    assert.match(pressure.warnings.join(" "), /engine changed to v2/i);
   });
 
   it("shows only open, hourly, and latest major time ticks while preserving missing slots", () => {

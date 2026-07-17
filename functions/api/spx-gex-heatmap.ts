@@ -5,7 +5,7 @@ import {
 } from "../../src/lib/spx-gex-heatmap";
 import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
 import { readSpxDecisionCockpitForGexSnapshot } from "../../src/lib/spx-decision-ledger";
-import { D1SpxGexCollectionStore } from "../../src/lib/spx-gex-collection-lifecycle";
+import { D1SpxGexCollectionStore, querySpxGexCollectionCoverage } from "../../src/lib/spx-gex-collection-lifecycle";
 
 interface Env {
   SPX_RECAP_DB?: D1DatabaseLike;
@@ -46,8 +46,44 @@ const cacheResponse = (context: Context, response: Response) => {
 };
 
 const chooseSelectedDate = (availableDates: string[], requestedDate: string | null) => {
-  if (isValidDate(requestedDate) && availableDates.includes(requestedDate!)) return requestedDate!;
+  if (isValidDate(requestedDate)) return requestedDate!;
   return availableDates[0] || null;
+};
+
+const currentEtClock = () => {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(new Date()).map((part) => [part.type, part.value]));
+  return { tradingDate: `${parts.year}-${parts.month}-${parts.day}`, minuteEt: Number(parts.hour) * 60 + Number(parts.minute) };
+};
+
+const readCollectionHealth = async (db: D1DatabaseLike, tradingDate: string | null, warnings: string[]) => {
+  if (!tradingDate) return null;
+  try {
+    const clock = currentEtClock();
+    const health = await querySpxGexCollectionCoverage(db, tradingDate, tradingDate === clock.tradingDate ? clock.minuteEt : 24 * 60);
+    const latest = health.records.at(-1) || null;
+    return {
+      dueSlots: health.dueCount,
+      persistedSlots: health.persistedCount,
+      missingSnapshotMinutesEt: health.missingSnapshotMinutesEt,
+      incompleteSlotIds: health.incompleteSlotIds,
+      failedSlotIds: health.failedSlotIds,
+      provider: latest?.provider || null,
+      fallbackFrom: latest?.fallbackFrom || null,
+      stage: latest?.currentStage || null,
+      failure: latest?.error || null,
+      updatedAt: latest?.updatedAt || null,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/no such table:\s*spx_gex_collection_runs/i.test(message)) {
+      warnings.push("GEX collection lifecycle migration is not applied yet.");
+      return null;
+    }
+    throw error;
+  }
 };
 
 const readCollectionSlot = async (
@@ -119,13 +155,14 @@ export async function onRequest(context: Context) {
     const requestedSnapshot = parseSnapshotMinute(url.searchParams.get("snapshot"));
     const selectedSnapshot = requestedSnapshot ?? sessions[sessions.length - 1]?.snapshotMinuteEt ?? null;
     const heatmap = selectedDate ? await readSpxGexHeatmap(context.env.SPX_RECAP_DB, selectedDate, selectedSnapshot) : null;
-    const [decision, collection] = await Promise.all([
+    const [decision, collection, collectionHealth] = await Promise.all([
       readDecisionCockpit(context.env.SPX_RECAP_DB, heatmap?.canonical?.snapshotId, warnings),
       readCollectionSlot(
         context.env.SPX_RECAP_DB,
         selectedDate && selectedSnapshot !== null ? `${selectedDate}:${selectedSnapshot}` : null,
         warnings,
       ),
+      readCollectionHealth(context.env.SPX_RECAP_DB, selectedDate, warnings),
     ]);
 
     const status = heatmap ? "READY" : "EMPTY";
@@ -139,7 +176,8 @@ export async function onRequest(context: Context) {
       heatmap,
       decision,
       collection,
-      warnings,
+      collectionHealth,
+      warnings: [...new Set(warnings)],
     }, {}, status === "READY" ? "public, max-age=15" : "no-store");
     if (status === "READY") cacheResponse(context, response);
     return response;

@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Activity, AlertTriangle, TrendingUp } from "lucide-react";
 import { formatSpxGexCompactExposure } from "@/lib/spx-gex-heatmap";
 import {
   buildSpxGexOneMinuteSpotSegments,
   buildSpxGexPressureAxisTicks,
   buildSpxGexPressureChartGeometry,
+  extendSpxGexPressureForSession,
+  getLatestSpxGexSpotPoint,
   type SpxGexPressureCell,
   type SpxGexPressureMatrixModel,
   type SpxGexPressureMover,
@@ -52,6 +54,7 @@ const CELL_WIDTH = 35;
 const ROW_HEIGHT = 25;
 const STRIKE_WIDTH = 82;
 const CURRENT_GEX_WIDTH = 120;
+const MATRIX_HEADER_HEIGHT = 45;
 const TOOLTIP_ID = "spx-gex-pressure-cell-tooltip";
 const TOOLTIP_WIDTH = 320;
 const TOOLTIP_HEIGHT = 150;
@@ -102,28 +105,41 @@ const cellBackground = (cell: SpxGexPressureCell, missingSlot: boolean) => {
   return `rgba(190, 24, 93, ${alpha})`;
 };
 
+const etClock = () => {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(new Date()).map((part) => [part.type, part.value]));
+  return { tradingDate: `${parts.year}-${parts.month}-${parts.day}`, minuteEt: Number(parts.hour) * 60 + Number(parts.minute) };
+};
+
 const formatPercent = (value: number | null) => value === null ? "n/a" : `${value >= 0 ? "+" : ""}${value.toFixed(1)}%`;
 
-const MoverTape = ({ movers, latestTime }: { movers: SpxGexPressureMover[]; latestTime: string }) => {
+const MoverTape = ({ movers, latestTime, matrixHeight }: { movers: SpxGexPressureMover[]; latestTime: string; matrixHeight: number }) => {
   const topMover = movers[0] || null;
   return (
-    <aside className="border-t border-[#123142] bg-[#040a12] p-3 2xl:border-l 2xl:border-t-0" data-spx-gex-mover-tape="true" aria-labelledby="spx-gex-mover-tape-title">
+    <aside
+      className="flex flex-col overflow-hidden border-t border-[#123142] bg-[#040a12] p-3 2xl:h-[var(--spx-pressure-matrix-height)] 2xl:border-l 2xl:border-t-0"
+      style={{ "--spx-pressure-matrix-height": `${matrixHeight}px` } as CSSProperties}
+      data-spx-gex-mover-tape="true"
+      aria-labelledby="spx-gex-mover-tape-title"
+    >
       <div className="flex items-center justify-between gap-3 border-b border-[#123142] pb-2">
         <div id="spx-gex-mover-tape-title" className="flex items-center gap-2 font-mono text-[11px] font-black uppercase tracking-[0.14em] text-cyan-300">
           <Activity aria-hidden="true" className="h-3.5 w-3.5" />Mover Tape
         </div>
         <span className="font-mono text-[10px] tabular-nums text-zinc-500">Latest {latestTime} ET</span>
       </div>
-      {!topMover ? (
-        <div className="py-10 text-center text-xs text-zinc-500">No comparable baseline movers.</div>
-      ) : (
-        <ol className="mt-3" aria-label="Latest GEX movers ranked by absolute delta">
-          <li>
-            <MoverHero mover={topMover} />
-          </li>
-          {movers.slice(1).map((mover) => <MoverRow key={mover.strike} mover={mover} />)}
-        </ol>
-      )}
+      <ol className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1" aria-label="Latest GEX movers ranked by absolute delta">
+        {!topMover ? (
+          <li className="py-10 text-center text-xs text-zinc-500">No comparable baseline movers.</li>
+        ) : (
+          <>
+            <li><MoverHero mover={topMover} /></li>
+            {movers.slice(1).map((mover) => <MoverRow key={mover.strike} mover={mover} />)}
+          </>
+        )}
+      </ol>
     </aside>
   );
 };
@@ -179,6 +195,8 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
   const [priceOverlay, setPriceOverlay] = useState<PriceOverlayState | null>(null);
   const [loading, setLoading] = useState(false);
   const [activeCell, setActiveCell] = useState<ActiveCell | null>(null);
+  const [matrixRailWidth, setMatrixRailWidth] = useState(0);
+  const matrixScrollRef = useRef<HTMLDivElement>(null);
   const activeCellRef = useRef(activeCell);
   const hoverSuppressedAfterScrollRef = useRef(false);
   activeCellRef.current = activeCell;
@@ -208,6 +226,16 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
   }, []);
 
   useEffect(() => setActiveCell(null), [refreshKey, selectedDate]);
+
+  useEffect(() => {
+    const rail = matrixScrollRef.current;
+    if (!rail) return undefined;
+    const syncWidth = () => setMatrixRailWidth(Math.max(0, rail.getBoundingClientRect().width));
+    syncWidth();
+    const observer = new ResizeObserver(syncWidth);
+    observer.observe(rail);
+    return () => observer.disconnect();
+  }, [data?.pressure]);
 
   useEffect(() => {
     if (!selectedDate) return undefined;
@@ -255,22 +283,30 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
   }, [refreshKey, selectedDate]);
 
   const pressure = data?.selectedDate === selectedDate ? data.pressure : null;
+  const latestYahooPoint = useMemo(() => pressure && priceOverlay?.data
+    ? getLatestSpxGexSpotPoint(priceOverlay.data.candles, pressure.tradingDate)
+    : null, [pressure, priceOverlay?.data]);
+  const displayPressure = useMemo(() => pressure ? extendSpxGexPressureForSession(pressure, etClock()) : null, [pressure, refreshKey]);
   const oneMinuteSpotSegments = useMemo(() => {
-    if (!pressure || priceOverlay?.selectedDate !== selectedDate || !priceOverlay.data) return [];
-    const startMinute = pressure.timeline[0]?.snapshotMinuteEt ?? pressure.baseline.snapshotMinuteEt;
-    return buildSpxGexOneMinuteSpotSegments(priceOverlay.data.candles, pressure.tradingDate, startMinute, pressure.latest.snapshotMinuteEt);
-  }, [pressure, priceOverlay, selectedDate]);
-  const axisTicks = useMemo(() => pressure ? buildSpxGexPressureAxisTicks(pressure.timeline) : [], [pressure]);
+    if (!displayPressure || priceOverlay?.selectedDate !== selectedDate || !priceOverlay.data || !latestYahooPoint) return [];
+    const startMinute = displayPressure.timeline[0]?.snapshotMinuteEt ?? displayPressure.baseline.snapshotMinuteEt;
+    return buildSpxGexOneMinuteSpotSegments(priceOverlay.data.candles, displayPressure.tradingDate, startMinute, latestYahooPoint.minuteEt);
+  }, [displayPressure, latestYahooPoint, priceOverlay, selectedDate]);
+  const axisTicks = useMemo(() => displayPressure ? buildSpxGexPressureAxisTicks(displayPressure.timeline) : [], [displayPressure]);
+  const timelineLength = displayPressure?.timeline.length || 0;
+  const availableTimelineWidth = Math.max(0, matrixRailWidth - STRIKE_WIDTH - CURRENT_GEX_WIDTH);
+  const effectiveCellWidth = timelineLength > 0 ? Math.max(CELL_WIDTH, availableTimelineWidth / timelineLength) : CELL_WIDTH;
   const chartGeometry = useMemo(
-    () => pressure ? buildSpxGexPressureChartGeometry(pressure, oneMinuteSpotSegments, CELL_WIDTH, ROW_HEIGHT) : null,
-    [oneMinuteSpotSegments, pressure],
+    () => displayPressure ? buildSpxGexPressureChartGeometry(displayPressure, oneMinuteSpotSegments, effectiveCellWidth, ROW_HEIGHT) : null,
+    [displayPressure, effectiveCellWidth, oneMinuteSpotSegments],
   );
-  const matrixWidth = (pressure?.timeline.length || 0) * CELL_WIDTH;
-  const matrixHeight = (pressure?.rows.length || 0) * ROW_HEIGHT;
+  const matrixWidth = timelineLength * effectiveCellWidth;
+  const matrixHeight = (displayPressure?.rows.length || 0) * ROW_HEIGHT;
+  const matrixGridHeight = MATRIX_HEADER_HEIGHT + matrixHeight;
   const oneMinuteOverlayPending = priceOverlay?.selectedDate !== selectedDate;
   const usingOneMinuteSpot = chartGeometry?.resolution === "1m";
   const spotSourceLabel = usingOneMinuteSpot
-    ? `SPX 1M / ${(priceOverlay?.data?.source.provider || "source").toUpperCase()} / ${chartGeometry?.pointCount || 0} PTS`
+    ? `SPX 1M / ${(priceOverlay?.data?.source.provider || "source").toUpperCase()} / LATEST ${latestYahooPoint?.timeEt || "--:--"} ET`
     : oneMinuteOverlayPending ? "SPX 1M LOADING…" : "SPX 15M SNAPSHOT FALLBACK";
   const priceOverlayWarning = !usingOneMinuteSpot && !oneMinuteOverlayPending
     ? priceOverlay?.error || `No SPX 1-minute candles are available for ${selectedDate}; showing the canonical 15-minute snapshot line.`
@@ -290,7 +326,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
     setActiveCell((current) => current?.locked ? current : null);
   }, []);
 
-  const activeSlot = pressure?.timeline.find((slot) => slot.snapshotMinuteEt === activeCell?.cell.snapshotMinuteEt) || null;
+  const activeSlot = displayPressure?.timeline.find((slot) => slot.snapshotMinuteEt === activeCell?.cell.snapshotMinuteEt) || null;
   const activeYahooPoint = activeCell
     ? oneMinuteSpotSegments.flat().find((point) => point.minuteEt === activeCell.cell.snapshotMinuteEt) || null
     : null;
@@ -328,9 +364,10 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
           {pressure.warnings.length > 0 && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-warning="true">{pressure.warnings.join(" ")}</div>}
           {priceOverlayWarning && <div className="border-b border-cyan-300/20 bg-cyan-300/5 px-3 py-2 text-xs text-cyan-100" role="status" data-spx-gex-pressure-spot-warning="true">{priceOverlayWarning}</div>}
 
-          <div className="grid 2xl:grid-cols-[minmax(0,1fr)_320px]">
+          <div className="grid 2xl:grid-cols-[minmax(0,1fr)_320px] 2xl:items-start">
             <div
-              className="min-w-0 overflow-x-auto [scrollbar-width:none] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-200 [&::-webkit-scrollbar]:hidden"
+              ref={matrixScrollRef}
+              className="min-w-0 self-start overflow-x-auto [scrollbar-width:none] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-200 [&::-webkit-scrollbar]:hidden"
               data-spx-gex-pressure-scroll="true"
               onScroll={() => setActiveCell(null)}
               tabIndex={0}
@@ -343,15 +380,16 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
                     {axisTicks.map((slot) => (
                       <div
                         key={slot.snapshotMinuteEt}
-                        className={`relative flex h-11 shrink-0 items-start justify-center border-l border-[#102433] pt-2 font-black ${slot.snapshotMinuteEt === selectedMinute ? "bg-cyan-300/15 text-cyan-100" : slot.status === "MISSING" ? "text-amber-200/80" : "text-cyan-200/70"}`}
-                        style={{ width: CELL_WIDTH }}
-                        title={`${slot.snapshotTimeEt} ET${slot.collectedTimeEt ? ` / collected ${slot.collectedTimeEt} ET` : " / missing"}`}
+                        className={`relative flex h-11 shrink-0 items-start justify-center border-l border-[#102433] pt-2 font-black ${slot.snapshotMinuteEt === selectedMinute ? "bg-cyan-300/15 text-cyan-100" : slot.status === "MISSING" ? "text-amber-200/80" : slot.status === "PENDING" ? "text-zinc-600" : "text-cyan-200/70"}`}
+                        style={{ width: effectiveCellWidth }}
+                        title={`${slot.snapshotTimeEt} ET${slot.collectedTimeEt ? ` / collected ${slot.collectedTimeEt} ET` : slot.status === "PENDING" ? " / pending collection" : " / missing"}`}
                         data-pressure-axis-major={slot.isMajor ? "true" : "false"}
                         data-pressure-column-status={slot.status}
                       >
                         {slot.isMajor && <span className="whitespace-nowrap text-[9px]">{slot.snapshotTimeEt}</span>}
                         {!slot.isMajor && <span className="mt-1 h-1.5 w-px bg-cyan-200/25" aria-hidden="true" />}
                         {slot.status === "MISSING" && <span className="absolute bottom-1 text-[8px] font-black tracking-[-0.08em]">MISSING</span>}
+                        {slot.status === "PENDING" && <span className="absolute bottom-1 text-[8px] font-black tracking-[-0.08em]">PENDING</span>}
                       </div>
                     ))}
                   </div>
@@ -361,7 +399,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
                 <div className="flex">
                   <div className="sticky left-0 z-30 shrink-0 bg-[#050c14]" style={{ width: STRIKE_WIDTH }}>
                     <div className="relative" style={{ height: matrixHeight }}>
-                      {pressure.rows.map((row) => (
+                      {displayPressure!.rows.map((row) => (
                         <div key={row.strike} className="flex items-center border-b border-[#102433] px-2 font-black tabular-nums text-cyan-300" style={{ height: ROW_HEIGHT }}>
                           {strikeFormatter.format(row.strike)}
                         </div>
@@ -379,10 +417,10 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
                   </div>
 
                   <div className="relative shrink-0" style={{ width: matrixWidth, height: matrixHeight }}>
-                    {pressure.rows.map((row) => (
+                    {displayPressure!.rows.map((row) => (
                       <div key={row.strike} className="flex" style={{ height: ROW_HEIGHT }}>
                         {row.cells.map((cell, columnIndex) => {
-                          const slot = pressure.timeline[columnIndex];
+                          const slot = displayPressure!.timeline[columnIndex];
                           const key = `${row.strike}-${cell.snapshotMinuteEt}`;
                           const isActive = activeCell?.key === key;
                           return (
@@ -390,7 +428,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
                               key={key}
                               type="button"
                               className={`relative z-10 flex shrink-0 items-center justify-center border-b border-l border-[#102433] font-black transition-[filter] hover:brightness-150 focus-visible:z-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-200 ${cell.snapshotMinuteEt === selectedMinute ? "ring-1 ring-inset ring-cyan-300/45" : ""}`}
-                              style={{ width: CELL_WIDTH, minWidth: CELL_WIDTH, height: ROW_HEIGHT, minHeight: ROW_HEIGHT, background: cellBackground(cell, slot.status === "MISSING"), color: stateColor(cell.state, cell.currentGex) }}
+                              style={{ width: effectiveCellWidth, minWidth: effectiveCellWidth, height: ROW_HEIGHT, minHeight: ROW_HEIGHT, background: cellBackground(cell, slot.status !== "READY"), color: stateColor(cell.state, cell.currentGex) }}
                               onMouseEnter={(event) => {
                                 if (!hoverSuppressedAfterScrollRef.current) activateCell(event.currentTarget, row.strike, cell, false);
                               }}
@@ -447,7 +485,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
                   </div>
 
                   <div className="sticky right-0 z-30 shrink-0 bg-[#050c14] shadow-[-8px_0_12px_rgba(3,9,16,.75)]" style={{ width: CURRENT_GEX_WIDTH }} data-current-gex-column="body">
-                    {pressure.rows.map((row) => (
+                    {displayPressure!.rows.map((row) => (
                       <div key={row.strike} className={`flex items-center justify-end border-b border-[#102433] px-2 text-right font-black tabular-nums ${(row.currentGex || 0) >= 0 ? "text-green-300" : "text-pink-300"}`} style={{ height: ROW_HEIGHT }}>
                         {compact(row.currentGex, true)}
                       </div>
@@ -457,7 +495,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
               </div>
             </div>
 
-            <MoverTape movers={pressure.movers} latestTime={pressure.latest.snapshotTimeEt} />
+            <MoverTape movers={pressure.movers} latestTime={pressure.latest.snapshotTimeEt} matrixHeight={matrixGridHeight} />
           </div>
 
           {activeCell && (

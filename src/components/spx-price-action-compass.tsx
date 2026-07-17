@@ -503,6 +503,49 @@ interface ChartProps {
   onSelectPattern: (pattern: SpxPriceActionPattern) => void;
 }
 
+interface ChartPatternGeometry {
+  pattern: SpxPriceActionPattern;
+  x1: number;
+  x2: number;
+  yTop: number;
+  yBottom: number;
+  color: string;
+  selected: boolean;
+  labelX: number;
+  desiredLabelY: number;
+  labelWidth: number;
+}
+
+interface ChartPatternLabelLayout extends ChartPatternGeometry {
+  labelY: number;
+}
+
+const PATTERN_LABEL_HEIGHT = 15;
+const PATTERN_LABEL_LANE_HEIGHT = 17;
+const PATTERN_LABEL_GAP = 2;
+
+const layoutChartPatternLabels = (patterns: ChartPatternGeometry[], chartHeight: number): ChartPatternLabelLayout[] => {
+  const laneCount = Math.max(1, Math.floor((chartHeight - PATTERN_LABEL_HEIGHT) / PATTERN_LABEL_LANE_HEIGHT) + 1);
+  const laneOccupancy: Array<Array<{ left: number; right: number }>> = Array.from({ length: laneCount }, () => []);
+  const sorted = [...patterns].sort((left, right) =>
+    Number(right.selected) - Number(left.selected)
+    || left.desiredLabelY - right.desiredLabelY
+    || left.labelX - right.labelX
+    || left.pattern.id.localeCompare(right.pattern.id));
+
+  return sorted.flatMap((pattern) => {
+    const preferredLane = Math.max(0, Math.min(laneCount - 1, Math.round(pattern.desiredLabelY / PATTERN_LABEL_LANE_HEIGHT)));
+    const candidateLanes = Array.from({ length: laneCount }, (_, index) => index)
+      .sort((left, right) => Math.abs(left - preferredLane) - Math.abs(right - preferredLane) || left - right);
+    const lane = candidateLanes.find((candidate) => laneOccupancy[candidate].every((occupied) =>
+      pattern.labelX + pattern.labelWidth + PATTERN_LABEL_GAP <= occupied.left
+      || pattern.labelX >= occupied.right + PATTERN_LABEL_GAP));
+    if (lane === undefined) return [];
+    laneOccupancy[lane].push({ left: pattern.labelX, right: pattern.labelX + pattern.labelWidth });
+    return [{ ...pattern, labelY: lane * PATTERN_LABEL_LANE_HEIGHT }];
+  });
+};
+
 function PriceActionChartCanvas({
   candles,
   patterns,
@@ -526,6 +569,7 @@ function PriceActionChartCanvas({
   const [startIndex, setStartIndex] = useState(0);
   const [dragStart, setDragStart] = useState<number | null>(null);
   const [crosshair, setCrosshair] = useState<{ x: number; y: number; price: number; index: number } | null>(null);
+  const lastPointerRef = useRef<{ clientX: number; clientY: number } | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [viewportHeight, setViewportHeight] = useState(760);
@@ -639,8 +683,36 @@ function PriceActionChartCanvas({
     }
     return spaced;
   })();
+  const chartPatterns = showPatterns ? patterns.flatMap((pattern): ChartPatternGeometry[] => {
+    const localIndices = pattern.candleIndices.filter((index) => index >= visibleStart && index < visibleStart + zoom);
+    if (localIndices.length === 0) return [];
+    const first = Math.max(pattern.fromIndex, visibleStart) - visibleStart;
+    const last = Math.min(pattern.toIndex, visibleStart + zoom - 1) - visibleStart;
+    const patternCandles = pattern.candleIndices.map((index) => candles[index]).filter(Boolean);
+    if (patternCandles.length === 0) return [];
+    const yTop = getY(Math.max(...patternCandles.map((candle) => candle.high))) - 8;
+    const yBottom = getY(Math.min(...patternCandles.map((candle) => candle.low))) + 8;
+    const x1 = getX(first) - candleWidth / 2;
+    const x2 = getX(last) + candleWidth / 2;
+    const labelWidth = Math.min(170, Math.max(82, pattern.label.length * 6.2));
+    const labelX = Math.max(axisLeft, Math.min(width - labelWidth, x1));
+    return [{
+      pattern,
+      x1,
+      x2,
+      yTop,
+      yBottom,
+      color: isBullishPattern(pattern) ? "#22c55e" : isBearishPattern(pattern) ? "#ef4444" : "#facc15",
+      selected: selectedPattern?.id === pattern.id,
+      labelX,
+      desiredLabelY: Math.max(0, Math.min(chartHeight - PATTERN_LABEL_HEIGHT, yTop - 16)),
+      labelWidth,
+    }];
+  }) : [];
+  const chartPatternLabels = layoutChartPatternLabels(chartPatterns, chartHeight);
 
   const updateCrosshair = (clientX: number, clientY: number) => {
+    lastPointerRef.current = { clientX, clientY };
     const rect = svgRef.current?.getBoundingClientRect();
     if (!rect || visibleCandles.length === 0) return;
     const point = projectSpxChartClientPoint({ clientX, clientY, rect, viewBoxWidth: width, viewBoxHeight: height });
@@ -651,6 +723,11 @@ function PriceActionChartCanvas({
     const price = low + ((chartHeight - 16 - priceY) / Math.max(1, chartHeight - 40)) * priceRange;
     setCrosshair({ x, y, price, index: visibleStart + visibleIndex });
   };
+
+  useEffect(() => {
+    const pointer = lastPointerRef.current;
+    if (pointer) updateCrosshair(pointer.clientX, pointer.clientY);
+  }, [height, width]);
 
   const handleMove = (clientX: number, clientY: number) => {
     updateCrosshair(clientX, clientY);
@@ -763,6 +840,7 @@ function PriceActionChartCanvas({
         width="100%"
         height={height}
         viewBox={`0 0 ${width} ${height}`}
+        preserveAspectRatio="none"
         className={dragStart === null ? "cursor-crosshair select-none" : "cursor-grabbing select-none"}
         onPointerDown={(event) => {
           event.currentTarget.setPointerCapture(event.pointerId);
@@ -776,7 +854,10 @@ function PriceActionChartCanvas({
         }}
         onPointerCancel={() => setDragStart(null)}
         onPointerLeave={() => {
-          if (dragStart === null) setCrosshair(null);
+          if (dragStart === null) {
+            lastPointerRef.current = null;
+            setCrosshair(null);
+          }
         }}
       >
         <defs>
@@ -851,29 +932,40 @@ function PriceActionChartCanvas({
           );
         })}
 
-        {showPatterns && patterns.map((pattern) => {
-          const localIndices = pattern.candleIndices.filter((index) => index >= visibleStart && index < visibleStart + zoom);
-          if (localIndices.length === 0) return null;
-          const first = Math.max(pattern.fromIndex, visibleStart) - visibleStart;
-          const last = Math.min(pattern.toIndex, visibleStart + zoom - 1) - visibleStart;
-          const patternCandles = pattern.candleIndices.map((index) => candles[index]).filter(Boolean);
-          if (patternCandles.length === 0) return null;
-          const yTop = getY(Math.max(...patternCandles.map((candle) => candle.high))) - 8;
-          const yBottom = getY(Math.min(...patternCandles.map((candle) => candle.low))) + 8;
-          const x1 = getX(first) - candleWidth / 2;
-          const x2 = getX(last) + candleWidth / 2;
-          const color = isBullishPattern(pattern) ? "#22c55e" : isBearishPattern(pattern) ? "#ef4444" : "#facc15";
-          const selected = selectedPattern?.id === pattern.id;
-          return (
-            <g key={pattern.id} onClick={() => onSelectPattern(pattern)} className="cursor-pointer" data-pa-pattern-badge="true" data-pa-selected-pattern={selected ? "true" : undefined}>
-              <rect x={x1} y={yTop} width={Math.max(16, x2 - x1)} height={Math.max(18, yBottom - yTop)} fill={color} opacity={selected ? 0.12 : 0.035} stroke={color} strokeWidth={selected ? 2 : 1} strokeDasharray={selected ? "" : "3 2"} filter={selected ? "url(#pa-selected-glow)" : undefined} />
-              <rect x={x1} y={Math.max(0, yTop - 16)} width={Math.min(170, Math.max(82, pattern.label.length * 6.2))} height={15} fill={selected ? color : "#02070d"} stroke={color} />
-              <text x={x1 + 5} y={Math.max(11, yTop - 5)} className="fill-white font-mono text-[9px] font-black">
-                {pattern.label}
-              </text>
-            </g>
-          );
-        })}
+        {chartPatterns.map(({ pattern, x1, x2, yTop, yBottom, color, selected }) => (
+          <g key={`${pattern.id}-range`} pointerEvents="none" data-pa-pattern-range="true" data-pa-selected-pattern={selected ? "true" : undefined}>
+            <rect x={x1} y={yTop} width={Math.max(16, x2 - x1)} height={Math.max(18, yBottom - yTop)} fill={color} opacity={selected ? 0.12 : 0.035} stroke={color} strokeWidth={selected ? 2 : 1} strokeDasharray={selected ? "" : "3 2"} filter={selected ? "url(#pa-selected-glow)" : undefined} />
+          </g>
+        ))}
+
+        {chartPatternLabels.map(({ pattern, color, selected, labelX, labelY, labelWidth }) => (
+          <g
+            key={`${pattern.id}-label`}
+            role="button"
+            tabIndex={0}
+            aria-label={`Select ${pattern.label} signal`}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              onSelectPattern(pattern);
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" && event.key !== " ") return;
+              event.preventDefault();
+              event.stopPropagation();
+              onSelectPattern(pattern);
+            }}
+            className="cursor-pointer outline-none focus-visible:[&>rect]:stroke-white focus-visible:[&>rect]:stroke-2"
+            data-pa-pattern-badge="true"
+            data-pa-pattern-id={pattern.id}
+            data-pa-selected-pattern={selected ? "true" : undefined}
+          >
+            <rect x={labelX} y={labelY} width={labelWidth} height={PATTERN_LABEL_HEIGHT} fill={selected ? color : "#02070d"} stroke={color} />
+            <text x={labelX + 5} y={labelY + 11} className="pointer-events-none fill-white font-mono text-[9px] font-black">
+              {pattern.label}
+            </text>
+          </g>
+        ))}
 
         {showTrend && trend.labels
           .filter((label) => label.index >= visibleStart && label.index < visibleStart + zoom)
@@ -887,7 +979,7 @@ function PriceActionChartCanvas({
             const y = highLabel ? getY(candle.high) - 18 : getY(candle.low) + 22;
             const color = highLabel ? "#22c55e" : "#ef4444";
             return (
-              <g key={`${label.index}-${label.label}`} data-pa-structure-label="true">
+              <g key={`${label.index}-${label.label}`} pointerEvents="none" data-pa-structure-label="true">
                 <circle cx={x} cy={y} r={8} fill={color} />
                 <text x={x} y={y + 3} textAnchor="middle" className="fill-black font-mono text-[8px] font-black">{label.label}</text>
               </g>

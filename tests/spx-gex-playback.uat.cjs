@@ -163,6 +163,30 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.match(monitorOrder[0].text, /Latest A/, "signal ties must use the deterministic id tie-break");
     assert.match(await page.$eval('[data-spx-price-action-compass="true"]', (node) => node.textContent || ""), /LATEST FIRST/i);
 
+    const signalHitTargets = await page.$$eval('[data-pa-pattern-badge="true"]', (badges) => badges.map((badge) => {
+      const label = badge.querySelector("text")?.textContent?.trim() || "";
+      const labelRect = badge.querySelector("text")?.getBoundingClientRect();
+      if (!labelRect || labelRect.width === 0 || labelRect.height === 0) return null;
+      const clientX = labelRect.left + labelRect.width / 2;
+      const clientY = labelRect.top + labelRect.height / 2;
+      const hitBadge = document.elementFromPoint(clientX, clientY)?.closest('[data-pa-pattern-badge="true"]');
+      return {
+        label,
+        hitLabel: hitBadge?.querySelector("text")?.textContent?.trim() || null,
+        clientX,
+        clientY,
+      };
+    }).filter(Boolean));
+    assert.deepEqual(
+      signalHitTargets.filter((target) => target.label !== target.hitLabel),
+      [],
+      "every visible chart signal label must hit its own signal",
+    );
+    const latestBTarget = signalHitTargets.find((target) => target.label === "Latest B");
+    assert.ok(latestBTarget, "overlapping Latest B signal must render a chart label");
+    await page.mouse.click(latestBTarget.clientX, latestBTarget.clientY);
+    await page.waitForFunction(() => document.querySelector('[data-pa-selected-signal-card="true"]')?.textContent?.includes("Latest B"));
+
     await page.$eval('[data-pa-chart-surface="true"]', (element) => element.scrollIntoView({ block: "center" }));
     const pointerTarget = await page.$eval('[data-pa-chart-surface="true"]', (svg) => {
       const rect = svg.getBoundingClientRect();
@@ -231,7 +255,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
         spotResolution: spotLine?.getAttribute("data-spx-gex-pressure-spot-resolution") || "",
         spotPointCount: pointCount,
         renderedPolylinePoints: (spotPolyline?.getAttribute("points") || "").trim().split(/\s+/).filter(Boolean).length,
-        majorTickLabels: [...document.querySelectorAll('[data-pressure-axis-major="true"]')].map((node) => node.textContent?.trim() || ""),
+        majorTickLabels: [...document.querySelectorAll('[data-pressure-axis-major="true"]')].map((node) => node.querySelector("span")?.textContent?.trim() || ""),
         rotatedTimeLabels: document.querySelectorAll('[data-pressure-axis-major] .-rotate-45').length,
         missingColumns: document.querySelectorAll('[data-pressure-column-status="MISSING"]').length,
         spotGuide: Boolean(document.querySelector('[data-spx-gex-pressure-spot-guide="true"]')),
@@ -260,7 +284,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.equal(pressureLayout.spotResolution, "1m", "SPX overlay must use 1-minute candles");
     assert.ok(pressureLayout.spotPointCount >= 250, `SPX overlay must retain a dense 1-minute series; got ${pressureLayout.spotPointCount}`);
     assert.ok(pressureLayout.renderedPolylinePoints >= 250, "SPX overlay polyline must render the dense series");
-    assert.deepEqual(pressureLayout.majorTickLabels, ["09:30", "10:30", "11:30", "12:30", "13:30", "14:30"], "time rail must show only hourly and latest labels");
+    assert.deepEqual(pressureLayout.majorTickLabels, ["09:30", "10:30", "11:30", "12:30", "13:30", "14:30", "15:30", "16:00"], "time rail must show only hourly and session-end labels");
     assert.equal(pressureLayout.rotatedTimeLabels, 0, "time labels must not be rotated");
     assert.ok(pressureLayout.missingColumns > 0, "an internal missing GEX column must be visibly represented");
     assert.equal(pressureLayout.spotGuide, true, "current SPX guide must render");
@@ -305,16 +329,28 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.deepEqual(consoleErrors, [], `pressure matrix console errors: ${consoleErrors.join(" | ")}`);
 
     await page.setViewport({ width: 1600, height: 1000 });
+    await page.waitForFunction(() => {
+      const scroll = document.querySelector('[data-spx-gex-pressure-scroll="true"]');
+      return Boolean(scroll && scroll.scrollWidth <= scroll.clientWidth + 1);
+    });
     const widePressureLayout = await page.evaluate(() => {
       const scroll = document.querySelector('[data-spx-gex-pressure-scroll="true"]');
+      const grid = document.querySelector('[data-spx-gex-pressure-grid="true"]');
+      const currentGex = document.querySelector('[data-current-gex-column="header"]');
       const tape = document.querySelector('[data-spx-gex-mover-tape="true"]');
       return {
         overflow: Boolean(scroll && scroll.scrollWidth > scroll.clientWidth + 1),
         tapeAtRight: Boolean(scroll && tape && tape.getBoundingClientRect().left >= scroll.getBoundingClientRect().right - 1),
+        rightGap: scroll && currentGex ? Math.abs(scroll.getBoundingClientRect().right - currentGex.getBoundingClientRect().right) : Infinity,
+        bottomGap: scroll && grid ? Math.abs(scroll.getBoundingClientRect().bottom - grid.getBoundingClientRect().bottom) : Infinity,
+        tapeHeightGap: scroll && tape ? Math.abs(scroll.getBoundingClientRect().height - tape.getBoundingClientRect().height) : Infinity,
       };
     });
     assert.equal(widePressureLayout.overflow, false, "1600px desktop matrix must not scroll horizontally");
     assert.equal(widePressureLayout.tapeAtRight, true, "Mover Tape must return to the right rail at 1536px and above");
+    assert.ok(widePressureLayout.rightGap <= 1, `matrix content must fill the desktop rail; gap=${widePressureLayout.rightGap}`);
+    assert.ok(widePressureLayout.bottomGap <= 1, `matrix content must fill the desktop rail height; gap=${widePressureLayout.bottomGap}`);
+    assert.ok(widePressureLayout.tapeHeightGap <= 1, `Mover Tape must align with matrix height; gap=${widePressureLayout.tapeHeightGap}`);
 
     const boardCell = '[data-gex-audit-trigger="true"]';
     await page.hover(boardCell);

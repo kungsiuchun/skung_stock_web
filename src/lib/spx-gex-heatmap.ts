@@ -15,6 +15,7 @@ const SIDE_IV_MODEL = "black_scholes_gamma_exposure";
 const BLENDED_IV_MODEL = "black_scholes_gamma_exposure_blended_iv";
 const BLENDED_IV_SOURCE_NOTE = "New snapshots use blended per-strike IV for gamma; raw call/put IV retained for audit. Snapshots without per-cell audit inputs are rejected as no data.";
 export const SPX_GEX_SNAPSHOT_SCHEMA_VERSION = 1 as const;
+export const SPX_GEX_CALCULATION_ENGINE_VERSION = 2 as const;
 
 export interface SpxGexQuote {
   ticker: string;
@@ -25,6 +26,9 @@ export interface SpxGexQuote {
 
 export interface SpxGexOptionLeg {
   contractSymbol?: string;
+  contractRoot?: "SPX" | "SPXW" | string;
+  settlement?: "AM" | "PM";
+  lastTradeTime?: string | null;
   strike: number;
   lastPrice?: number | null;
   bid?: number | null;
@@ -121,6 +125,10 @@ export interface SpxGexHeatmapCell {
   contractMultiplier?: number;
   riskFreeRate?: number;
   model?: typeof SIDE_IV_MODEL | typeof BLENDED_IV_MODEL;
+  activeSeries?: string[];
+  inactiveSeries?: string[];
+  activeContractCount?: number;
+  pricedContractCount?: number;
 }
 
 export interface SpxGexStrikeProfile {
@@ -257,6 +265,7 @@ export interface SpxGexHeatmapModel {
     provider?: string;
     fallbackFrom?: string | null;
     sourceTimestamp?: string | null;
+    calculationEngineVersion?: number;
   };
   dataQuality?: SpxGexDataQualitySummary;
   canonical?: CanonicalSpxGexSnapshotEnvelope;
@@ -324,6 +333,7 @@ export interface CanonicalSpxGexSnapshotEnvelope {
   sourceTimestamp: string | null;
   payloadHash: string;
   dataQuality: SpxGexDataQualitySummary | null;
+  calculationEngineVersion?: number;
 }
 
 export interface SpxGexTelegramSummary {
@@ -697,6 +707,7 @@ export const buildCanonicalSpxGexSnapshotEnvelope = (
     zeroDte: heatmap.zeroDte,
     source: normalizedSource,
     dataQuality: heatmap.dataQuality ?? null,
+    calculationEngineVersion: normalizedSource.calculationEngineVersion,
   };
   const payloadHash = fnv1a64(stableJsonStringify(replayPayload));
 
@@ -715,6 +726,7 @@ export const buildCanonicalSpxGexSnapshotEnvelope = (
     sourceTimestamp: normalizedSource.sourceTimestamp,
     payloadHash,
     dataQuality: heatmap.dataQuality ?? null,
+    calculationEngineVersion: normalizedSource.calculationEngineVersion,
   };
 };
 
@@ -799,6 +811,10 @@ const optionMid = (leg: SpxGexOptionLeg | undefined) => {
   const bid = finiteNumberOrNull(leg?.bid);
   const ask = finiteNumberOrNull(leg?.ask);
   if (bid === null || ask === null || bid < 0 || ask < bid) return null;
+  // Cboe uses a 0 / 0 quote for inactive or non-marketable series. Treating
+  // that as a real midpoint hides the last-trade evidence and incorrectly
+  // classifies every zero-IV leg as having zero time value.
+  if (bid === 0 && ask === 0) return null;
   return (bid + ask) / 2;
 };
 
@@ -812,9 +828,10 @@ const optionTimeValue = (side: "call" | "put", spot: number, strike: number, pri
 
 const hasNearZeroTimeValue = (side: "call" | "put", leg: SpxGexOptionLeg, spot: number, strike: number) => {
   const mid = optionMid(leg);
-  const last = finiteNumberOrNull(leg.lastPrice);
-  const price = mid ?? last;
-  if (price === null) return false;
+  // A last trade is diagnostic only. It cannot turn an active 0/0 quoted leg
+  // into a zero-gamma leg because the trade can be stale after settlement.
+  if (mid === null) return false;
+  const price = mid;
   const intrinsic = optionIntrinsic(side, spot, strike);
   const timeValue = optionTimeValue(side, spot, strike, price);
   const isOtm = side === "call" ? strike > spot : strike < spot;
@@ -1111,9 +1128,13 @@ const resolveSideIv = (input: {
   };
 };
 
-const optionCellForStrike = (chain: SpxGexOptionChain, strike: number, now: Date): SpxGexHeatmapCell => {
-  const call = chain.calls.find((leg) => leg.strike === strike);
-  const put = chain.puts.find((leg) => leg.strike === strike);
+const optionCellForLegPair = (
+  chain: SpxGexOptionChain,
+  strike: number,
+  now: Date,
+  call: SpxGexOptionLeg | undefined,
+  put: SpxGexOptionLeg | undefined,
+): SpxGexHeatmapCell => {
   const callOpenInterest = nonNegativeNumberOrNull(call?.openInterest);
   const putOpenInterest = nonNegativeNumberOrNull(put?.openInterest);
   const callEffectiveOpenInterest = callOpenInterest;
@@ -1243,6 +1264,110 @@ const optionCellForStrike = (chain: SpxGexOptionChain, strike: number, now: Date
     contractMultiplier: CONTRACT_MULTIPLIER,
     riskFreeRate: RISK_FREE_RATE,
     model: hasAuditInputs ? BLENDED_IV_MODEL : undefined,
+  };
+};
+
+const contractSeriesKey = (leg: SpxGexOptionLeg) => leg.contractRoot || "DEFAULT";
+
+const isInactiveSettledSeries = (leg: SpxGexOptionLeg, expiry: string, now: Date) => {
+  if (leg.settlement !== "AM" || expiry === "") return false;
+  const etNow = toEasternDate(now);
+  const dateKey = `${etNow.getFullYear()}-${String(etNow.getMonth() + 1).padStart(2, "0")}-${String(etNow.getDate()).padStart(2, "0")}`;
+  return expiry === dateKey && getEtMinutes(etNow) >= 9 * 60 + 30;
+};
+
+const weightedAverage = (items: Array<{ value: number | null | undefined; weight: number | null | undefined }>) => {
+  const usable = items.filter((item): item is { value: number; weight: number } => (
+    typeof item.value === "number" && Number.isFinite(item.value)
+    && typeof item.weight === "number" && Number.isFinite(item.weight) && item.weight >= 0
+  ));
+  if (usable.length === 0) return null;
+  const weight = usable.reduce((sum, item) => sum + item.weight, 0);
+  if (weight === 0) return usable.reduce((sum, item) => sum + item.value, 0) / usable.length;
+  return usable.reduce((sum, item) => sum + item.value * item.weight, 0) / weight;
+};
+
+const optionCellForStrike = (chain: SpxGexOptionChain, strike: number, now: Date): SpxGexHeatmapCell => {
+  const expiry = chain.selectedExpiry || "";
+  const allCalls = chain.calls.filter((leg) => leg.strike === strike);
+  const allPuts = chain.puts.filter((leg) => leg.strike === strike);
+  const inactive = [...allCalls, ...allPuts].filter((leg) => isInactiveSettledSeries(leg, expiry, now));
+  const calls = allCalls.filter((leg) => !isInactiveSettledSeries(leg, expiry, now));
+  const puts = allPuts.filter((leg) => !isInactiveSettledSeries(leg, expiry, now));
+  const series = Array.from(new Set([...calls, ...puts].map(contractSeriesKey))).sort();
+  const cells = (series.length > 0 ? series : ["DEFAULT"]).map((key) => optionCellForLegPair(
+    chain,
+    strike,
+    now,
+    calls.find((leg) => contractSeriesKey(leg) === key),
+    puts.find((leg) => contractSeriesKey(leg) === key),
+  ));
+  const inactiveSeries = Array.from(new Set(inactive.map(contractSeriesKey))).sort();
+  const pricedCells = cells.filter((cell) => typeof cell.netGex === "number" && Number.isFinite(cell.netGex));
+  if (cells.length === 1) {
+    return {
+      ...cells[0],
+      activeSeries: series,
+      inactiveSeries,
+      activeContractCount: calls.length + puts.length,
+      pricedContractCount: pricedCells.length > 0 ? calls.length + puts.length : 0,
+      repairNotes: [
+        ...(cells[0].repairNotes || []),
+        ...inactiveSeries.map((root) => `${root} AM-settled series inactive after 09:30 ET and excluded from intraday exposure`),
+      ],
+    };
+  }
+
+  const sumNullable = (key: keyof SpxGexHeatmapCell) => {
+    const values = cells.map((cell) => cell[key]).filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : null;
+  };
+  const quality: SpxGexPricingQuality = pricedCells.length === 0
+    ? "unpriced"
+    : pricedCells.length < cells.length || cells.some((cell) => cell.pricingQuality === "partial" || cell.pricingQuality === "unpriced")
+      ? "partial"
+      : cells.some((cell) => cell.pricingQuality === "repaired") ? "repaired" : "priced";
+  const callOpenInterest = sumNullable("callOpenInterest");
+  const putOpenInterest = sumNullable("putOpenInterest");
+  const callIv = weightedAverage(cells.map((cell) => ({ value: cell.callIv, weight: cell.callOpenInterest })));
+  const putIv = weightedAverage(cells.map((cell) => ({ value: cell.putIv, weight: cell.putOpenInterest })));
+  const gammaIv = weightedAverage(cells.map((cell) => ({ value: cell.gammaIv, weight: cell.totalOpenInterest })));
+  return {
+    ...cells[0],
+    netGex: sumNullable("netGex"),
+    callGex: sumNullable("callGex"),
+    putGex: sumNullable("putGex"),
+    netDex: sumNullable("netDex"),
+    netVex: sumNullable("netVex"),
+    netCex: sumNullable("netCex"),
+    callOpenInterest,
+    putOpenInterest,
+    totalOpenInterest: callOpenInterest !== null && putOpenInterest !== null ? callOpenInterest + putOpenInterest : null,
+    totalVolume: sumNullable("totalVolume"),
+    callVolume: sumNullable("callVolume"),
+    putVolume: sumNullable("putVolume"),
+    callEffectiveOpenInterest: callOpenInterest,
+    putEffectiveOpenInterest: putOpenInterest,
+    callIv,
+    putIv,
+    callIvPercent: callIv === null ? null : roundTo(callIv * 100, 2),
+    putIvPercent: putIv === null ? null : roundTo(putIv * 100, 2),
+    gammaIv,
+    gammaIvPercent: gammaIv === null ? null : roundTo(gammaIv * 100, 2),
+    avgIv: callIv === null || putIv === null ? null : roundTo((callIv + putIv) * 50, 2),
+    pricingQuality: quality,
+    approximate: quality !== "priced",
+    repairNotes: Array.from(new Set([
+      ...cells.flatMap((cell) => cell.repairNotes || []),
+      `Aggregated active contract series: ${series.join(", ")}`,
+      ...inactiveSeries.map((root) => `${root} AM-settled series inactive after 09:30 ET and excluded from intraday exposure`),
+    ])),
+    missingReasons: Array.from(new Set(cells.flatMap((cell) => cell.missingReasons || []))),
+    activeSeries: series,
+    inactiveSeries,
+    activeContractCount: calls.length + puts.length,
+    pricedContractCount: pricedCells.reduce((count, cell) => count + Number(cell.callIv !== null) + Number(cell.putIv !== null), 0),
+    model: pricedCells.length > 0 ? BLENDED_IV_MODEL : undefined,
   };
 };
 
@@ -1826,6 +1951,7 @@ export const buildSpxGexHeatmapFromOptionChains = (input: BuildSpxGexHeatmapFrom
       provider: chainSource?.provider || "yahoo",
       fallbackFrom: chainSource?.fallbackFrom ?? null,
       sourceTimestamp: toIsoSourceTimestamp(chainSource?.timestamp),
+      calculationEngineVersion: SPX_GEX_CALCULATION_ENGINE_VERSION,
     },
     dataQuality,
   };
@@ -2314,6 +2440,7 @@ export const upsertSpxGexIntradaySnapshot = async (
     await upsert.run();
     await prune.run();
   }
+  return canonicalHeatmap;
 };
 
 export const upsertSpxGexHeatmap = async (
@@ -2321,9 +2448,7 @@ export const upsertSpxGexHeatmap = async (
   _date: string,
   heatmap: SpxGexHeatmapModel,
   options: { retentionTradingDays?: number } = {},
-) => {
-  await upsertSpxGexIntradaySnapshot(db, heatmap, options);
-};
+) => upsertSpxGexIntradaySnapshot(db, heatmap, options);
 
 const buildFromStructuredChains = async (options: {
   dataClient: SpxGexDataClient;
@@ -2422,12 +2547,12 @@ export const generateAndStoreSpxGexHeatmap = async (options: {
     expiryCount: heatmap.selectedExpiries.length,
   });
 
-  await upsertSpxGexHeatmap(options.db, date, heatmap, { retentionTradingDays: 7 });
+  const persistedHeatmap = await upsertSpxGexHeatmap(options.db, date, heatmap, { retentionTradingDays: 7 });
   await options.onStage?.("PERSISTED", {
-    snapshotId: heatmap.canonical?.snapshotId || null,
-    payloadHash: heatmap.canonical?.payloadHash || null,
-    provider: heatmap.canonical?.provider || null,
-    fallbackFrom: heatmap.canonical?.fallbackFrom || null,
+    snapshotId: persistedHeatmap.canonical?.snapshotId || null,
+    payloadHash: persistedHeatmap.canonical?.payloadHash || null,
+    provider: persistedHeatmap.canonical?.provider || null,
+    fallbackFrom: persistedHeatmap.canonical?.fallbackFrom || null,
   });
   return {
     status: "generated",
