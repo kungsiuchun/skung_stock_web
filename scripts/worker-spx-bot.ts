@@ -4361,8 +4361,9 @@ export class SpxMarketScheduler {
   private async ensure() {
     const now = new Date();
     const scheduler = await this.readState();
-    if (scheduler.nextAlarmAt && scheduler.nextAlarmAt > now.getTime()) return { status: 'ARMED' as const, scheduler };
-    const next = await this.scheduleNext(scheduler, now.getTime(), now.getTime());
+    const isQuarterHour = scheduler.nextAlarmAt != null && scheduler.nextAlarmAt % 900_000 === 0;
+    if (scheduler.nextAlarmAt && scheduler.nextAlarmAt > now.getTime() && isQuarterHour) return { status: 'ARMED' as const, scheduler };
+    const next = await this.scheduleNext(scheduler, now.getTime() - 900_000, now.getTime());
     return { status: 'ARMED' as const, scheduler: next };
   }
 
