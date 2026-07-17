@@ -32,6 +32,7 @@ import { D1SpxOperationalHealthStore, classifySpxOperationalFailure, type SpxOpe
 import {
   EMPTY_SPX_SCHEDULER_STATE,
   SPX_SCHEDULER_STORAGE_KEY,
+  canonicalQuarterHourUtc,
   dueMissingRunIds,
   nextSchedulerAlarmAt,
   shouldRunScheduledTick,
@@ -4322,7 +4323,8 @@ export class SpxMarketScheduler {
     return next;
   }
 
-  private async execute(scheduledAtMs: number) {
+  private async execute(requestedAtMs: number) {
+    const scheduledAtMs = canonicalQuarterHourUtc(requestedAtMs);
     const now = new Date();
     const nowMs = now.getTime();
     let scheduler = await this.readState();

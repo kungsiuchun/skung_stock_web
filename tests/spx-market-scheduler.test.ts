@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   SPX_SCHEDULER_LATE_GRACE_MS,
+  canonicalQuarterHourUtc,
   dueMissingRunIds,
   nextQuarterHourUtc,
   nextSchedulerAlarmAt,
@@ -19,6 +20,7 @@ test("scheduler computes the next quarter-hour without drift", () => {
   assert.equal(nextSchedulerAlarmAt(at1430, Date.parse("2026-07-17T18:48:00.000Z")), Date.parse("2026-07-17T19:00:00.000Z"));
   const at1509 = Date.parse("2026-07-17T19:09:32.000Z");
   assert.equal(nextSchedulerAlarmAt(at1509 - 900_000, at1509), Date.parse("2026-07-17T19:15:00.000Z"));
+  assert.equal(canonicalQuarterHourUtc(Date.parse("2026-07-17T19:15:23.000Z")), Date.parse("2026-07-17T19:15:00.000Z"));
 });
 
 test("scheduler executes only fresh ticks and leaves late market data missing", () => {

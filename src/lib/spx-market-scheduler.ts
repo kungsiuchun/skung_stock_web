@@ -18,6 +18,7 @@ export const EMPTY_SPX_SCHEDULER_STATE: SpxSchedulerState = {
 };
 
 export const nextQuarterHourUtc = (nowMs: number) => (Math.floor(nowMs / 900_000) + 1) * 900_000;
+export const canonicalQuarterHourUtc = (timestampMs: number) => Math.floor(timestampMs / 900_000) * 900_000;
 
 export const shouldRunScheduledTick = (scheduledAtMs: number, nowMs: number) =>
   nowMs - scheduledAtMs <= SPX_SCHEDULER_LATE_GRACE_MS;
