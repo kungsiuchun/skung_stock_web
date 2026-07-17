@@ -4,6 +4,7 @@ export interface SpxCacheContext {
 }
 
 const VOLATILE_QUERY_KEYS = new Set(["_", "refresh", "cacheBust"]);
+const inFlightSpxEdgeRequests = new Map<string, Promise<Response>>();
 
 export const canonicalSpxCacheRequest = (request: Request) => {
   const url = new URL(request.url);
@@ -23,11 +24,32 @@ export const readSpxEdgeCache = async (request: Request) => {
   return new Response(cached.body, { status: cached.status, statusText: cached.statusText, headers });
 };
 
-export const writeSpxEdgeCache = (context: SpxCacheContext, response: Response) => {
+export const writeSpxEdgeCache = async (context: SpxCacheContext, response: Response) => {
   const cache = getSpxEdgeCache();
   if (!cache || context.request.method !== "GET") return;
-  context.waitUntil?.(cache.put(canonicalSpxCacheRequest(context.request), response.clone()).catch(() => undefined));
+  try {
+    await cache.put(canonicalSpxCacheRequest(context.request), response.clone());
+  } catch {
+    // Cache is an optimization only; a verified origin response remains valid.
+  }
 };
+
+/** Shares one cold-cache producer per isolate and returns an independent response body to every waiter. */
+export const coalesceSpxEdgeRequest = async (request: Request, producer: () => Promise<Response>) => {
+  const key = canonicalSpxCacheRequest(request).url;
+  const existing = inFlightSpxEdgeRequests.get(key);
+  if (existing) return (await existing).clone();
+
+  const work = producer();
+  inFlightSpxEdgeRequests.set(key, work);
+  try {
+    return (await work).clone();
+  } finally {
+    inFlightSpxEdgeRequests.delete(key);
+  }
+};
+
+export const resetSpxEdgeCoalescingForTests = () => inFlightSpxEdgeRequests.clear();
 
 export const withSpxObservability = (response: Response, originMs: number) => {
   const headers = new Headers(response.headers);

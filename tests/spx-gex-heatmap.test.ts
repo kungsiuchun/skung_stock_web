@@ -34,7 +34,7 @@ import { loadCanonicalSpxGexForTelegram } from "../scripts/worker-spx-bot";
 import { onRequest as getSpxGexHeatmapApi } from "../functions/api/spx-gex-heatmap";
 import { onRequest as getSpxGexPressureApi } from "../functions/api/spx-gex-pressure";
 import { onRequest as getSpxGexCellDetailApi } from "../functions/api/spx-gex-cell-detail";
-import { canonicalSpxCacheRequest } from "../functions/api/_spx-edge-cache";
+import { canonicalSpxCacheRequest, coalesceSpxEdgeRequest, resetSpxEdgeCoalescingForTests } from "../functions/api/_spx-edge-cache";
 import { buildSpxGexUatFixture } from "../src/lib/spx-gex-uat-fixture";
 import {
   buildSpxGexOneMinuteSpotSegments,
@@ -49,6 +49,7 @@ import { parseSpxGexBoardSelection } from "../src/components/spx-gex-heatmap-pag
 import { getSpxGexTooltipPosition } from "../src/lib/spx-gex-tooltip";
 import { parseJsonResponse, SafeJsonResponseError } from "../src/lib/safe-json-response";
 import { getSpxSpotLivePulseKey } from "../src/lib/spx-spot-live-pulse";
+import { resetSpxRequestLaneForTests, runSpxRequest } from "../src/lib/spx-request-lane";
 
 it("normalizes volatile refresh keys into one SPX edge-cache key", () => {
   const first = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?date=2026-07-17&_=1"));
@@ -76,6 +77,61 @@ it("replays the live spot pulse only for a changed candle or canonical snapshot"
   assert.notEqual(first, getSpxSpotLivePulseKey({ price: 7489.01, timeEt: "11:42", resolution: "1m" }));
   assert.equal(getSpxSpotLivePulseKey({ price: 7488.66, timeEt: "11:45", resolution: "15m-fallback" }), "15m-fallback:11:45:7488.6600");
   assert.equal(getSpxSpotLivePulseKey({ price: null, timeEt: "11:45", resolution: "1m" }), null);
+});
+
+it("serializes SPX requests and retries only transient 503 responses", async () => {
+  resetSpxRequestLaneForTests();
+  const order: string[] = [];
+  let transientAttempts = 0;
+  const first = runSpxRequest(async () => {
+    order.push("heatmap");
+    return new Response("heatmap", { status: 200 });
+  });
+  const second = runSpxRequest(async () => {
+    order.push("compass");
+    transientAttempts += 1;
+    return new Response("compass", { status: transientAttempts < 3 ? 503 : 200 });
+  }, { retryDelaysMs: [0, 0] });
+  assert.equal((await first).status, 200);
+  assert.equal((await second).status, 200);
+  assert.deepEqual(order, ["heatmap", "compass", "compass", "compass"]);
+});
+
+it("drops an obsolete queued SPX request before it reaches the origin", async () => {
+  resetSpxRequestLaneForTests();
+  let releaseFirst!: () => void;
+  let obsoleteOriginCalls = 0;
+  const first = runSpxRequest(() => new Promise<Response>((resolve) => {
+    releaseFirst = () => resolve(new Response("heatmap", { status: 200 }));
+  }));
+  const controller = new AbortController();
+  const obsolete = runSpxRequest(async () => {
+    obsoleteOriginCalls += 1;
+    return new Response("obsolete", { status: 200 });
+  }, { signal: controller.signal });
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  controller.abort();
+  releaseFirst();
+  await first;
+  await assert.rejects(obsolete, (error: unknown) => error instanceof DOMException && error.name === "AbortError");
+  assert.equal(obsoleteOriginCalls, 0);
+});
+
+it("coalesces concurrent cold-cache producers into one response", async () => {
+  resetSpxEdgeCoalescingForTests();
+  let producers = 0;
+  const request = new Request("https://example.com/api/spx-gex-pressure?date=2026-07-17");
+  const producer = async () => {
+    producers += 1;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return new Response(JSON.stringify({ status: "READY" }), { headers: { "Content-Type": "application/json" } });
+  };
+  const [first, second] = await Promise.all([
+    coalesceSpxEdgeRequest(request, producer),
+    coalesceSpxEdgeRequest(request, producer),
+  ]);
+  assert.equal(producers, 1);
+  assert.equal(await first.text(), await second.text());
 });
 
 it("does not turn a missing snapshot hash parameter into snapshot minute zero", () => {

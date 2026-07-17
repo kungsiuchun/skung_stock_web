@@ -5,6 +5,7 @@ import type { SpxDecisionCockpitProjection } from "@/lib/spx-decision-ledger";
 import type { SpxGexCollectionRecord } from "@/lib/spx-gex-collection-lifecycle";
 import { parseJsonResponse, SafeJsonResponseError } from "@/lib/safe-json-response";
 import { getSpxSpotLivePulseKey } from "@/lib/spx-spot-live-pulse";
+import { runSpxRequest } from "@/lib/spx-request-lane";
 import { SpxPriceActionCompass } from "./spx-price-action-compass";
 import { SpxGexPressureMatrix } from "./spx-gex-pressure-matrix";
 import { SpxGexInlineTooltip, SpxGexTooltip, SpxGexTooltipSection } from "./spx-gex-tooltip";
@@ -251,7 +252,10 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const activeAuditCellRef = useRef(activeAuditCell);
   const auditHoverSuppressedAfterScrollRef = useRef(false);
   activeAuditCellRef.current = activeAuditCell;
-  const [pressureRefreshKey, setPressureRefreshKey] = useState(0);
+    const [pressureRefreshKey, setPressureRefreshKey] = useState(0);
+    const [initialHeatmapSettled, setInitialHeatmapSettled] = useState(false);
+    const [initialCompassSettled, setInitialCompassSettled] = useState(false);
+    const [reconnecting, setReconnecting] = useState(false);
   const [isFollowingLatest, setIsFollowingLatest] = useState(initialSelection.snapshot === null);
   const [failedPlayback, setFailedPlayback] = useState<FailedPlaybackSnapshot | null>(null);
   const activeRequestRef = useRef<AbortController | null>(null);
@@ -287,7 +291,10 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
       if (snapshotMinute !== null && snapshotMinute !== undefined) params.set("snapshot", String(snapshotMinute));
       const requestUrl = `/api/spx-gex-heatmap${params.toString() ? `?${params.toString()}` : ""}`;
       setRequestState({ phase: "LOADING", requestUrl, httpStatus: null, errorCode: null, message: null });
-      const response = await fetch(requestUrl, { cache: "no-store", signal: controller.signal });
+      const response = await runSpxRequest(() => fetch(requestUrl, { signal: controller.signal }), {
+        signal: controller.signal,
+        onRetry: () => setReconnecting(true),
+      });
       const payload = await parseHeatmapResponse(response, requestUrl);
       if (requestVersion !== requestVersionRef.current) return "STALE";
 
@@ -356,7 +363,10 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
       setPlaying(false);
       return "FAILED";
     } finally {
-      if (requestVersion === requestVersionRef.current) setLoading(false);
+      if (requestVersion === requestVersionRef.current) {
+        setLoading(false);
+        setReconnecting(false);
+      }
     }
   }, []);
 
@@ -366,9 +376,8 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     setManualRefreshPending(true);
     setPlaying(false);
     setIsFollowingLatest(true);
-    setPressureRefreshKey(Date.now());
     try {
-      await loadHeatmap(undefined, null);
+      if (await loadHeatmap(undefined, null) === "READY") setPressureRefreshKey(Date.now());
     } finally {
       refreshInFlightRef.current = false;
       setManualRefreshPending(false);
@@ -376,7 +385,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   }, [loadHeatmap]);
 
   useEffect(() => {
-    void loadHeatmap(initialSelection.date || undefined, initialSelection.snapshot);
+    void loadHeatmap(initialSelection.date || undefined, initialSelection.snapshot).finally(() => setInitialHeatmapSettled(true));
     return () => activeRequestRef.current?.abort();
   }, [initialSelection.date, initialSelection.snapshot, loadHeatmap]);
 
@@ -385,8 +394,9 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     const refreshVisibleLiveSession = () => {
       const clock = currentEtClock();
       if (document.visibilityState !== "visible" || selectedDate !== clock.tradingDate || clock.minuteEt < 570 || clock.minuteEt > 975) return;
-      setPressureRefreshKey(Date.now());
-      void loadHeatmap(selectedDate, null);
+      void loadHeatmap(selectedDate, null).then((result) => {
+        if (result === "READY") setPressureRefreshKey(Date.now());
+      });
     };
     const interval = window.setInterval(refreshVisibleLiveSession, 60_000);
     document.addEventListener("visibilitychange", refreshVisibleLiveSession);
@@ -657,6 +667,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
             </button>
           </div>
         )}
+        {reconnecting && <Notice tone="amber" text="Reconnecting SPX source…" />}
         {requestState.phase === "ERROR" && requestState.message && <Notice tone="red" text={requestState.message} />}
         {data.warnings.length > 0 && <Notice tone="amber" text={data.warnings.join(" ")} />}
         <div className="flex flex-wrap gap-x-4 gap-y-1 border border-white/10 bg-black/20 px-3 py-2 font-mono text-[10px] text-zinc-500" data-spx-gex-request-state={requestState.phase}>
@@ -667,12 +678,13 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
           <span className="break-all">REQUEST <strong className="text-zinc-200">{requestState.requestUrl}</strong></span>
         </div>
 
-        <SpxPriceActionCompass />
+        <SpxPriceActionCompass enabled={initialHeatmapSettled} onInitialLoadSettled={() => setInitialCompassSettled(true)} />
 
         <SpxGexPressureMatrix
           selectedDate={selectedDate}
           selectedMinute={selectedMinute}
           refreshKey={pressureRefreshKey}
+          enabled={initialCompassSettled}
           controls={snapshotControls}
         />
 

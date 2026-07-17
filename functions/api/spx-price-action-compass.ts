@@ -8,7 +8,7 @@ import {
   type SpxPriceActionCandle,
   type SpxPriceActionSource,
 } from "../../src/lib/spx-price-action-compass";
-import { readSpxEdgeCache, withSpxObservability, writeSpxEdgeCache } from "./_spx-edge-cache";
+import { coalesceSpxEdgeRequest, readSpxEdgeCache, withSpxObservability, writeSpxEdgeCache } from "./_spx-edge-cache";
 
 interface Env {
   SPX_PRICE_ACTION_TEST_CANDLES?: SpxPriceActionCandle[];
@@ -33,7 +33,7 @@ const json = (body: unknown, init: ResponseInit = {}) => {
   });
 };
 
-export async function onRequest(context: Context) {
+async function onRequestUncached(context: Context) {
   const startedAt = Date.now();
   const url = new URL(context.request.url);
   const isPriceOverlay = url.searchParams.get("view") === "price-overlay";
@@ -91,7 +91,7 @@ export async function onRequest(context: Context) {
         source,
         warnings,
         })), Date.now() - startedAt);
-      if (allowCache) writeSpxEdgeCache(context, response);
+      if (allowCache) await writeSpxEdgeCache(context, response);
     return response;
   } catch (error) {
     return json(
@@ -126,4 +126,12 @@ export async function onRequest(context: Context) {
       { status: 502 },
     );
   }
+}
+
+export async function onRequest(context: Context) {
+  const allowCache = !Array.isArray(context.env.SPX_PRICE_ACTION_TEST_CANDLES);
+  if (!allowCache) return onRequestUncached(context);
+  const cached = await readSpxEdgeCache(context.request);
+  if (cached) return cached;
+  return coalesceSpxEdgeRequest(context.request, () => onRequestUncached(context));
 }

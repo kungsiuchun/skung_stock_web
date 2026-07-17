@@ -7,7 +7,7 @@ import type { SpxGexHeatmapCell, SpxGexHeatmapModel } from "../../src/lib/spx-ge
 import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
 import { readSpxDecisionCockpitForGexSnapshot } from "../../src/lib/spx-decision-ledger";
 import { D1SpxGexCollectionStore, querySpxGexCollectionCoverage } from "../../src/lib/spx-gex-collection-lifecycle";
-import { readSpxEdgeCache, withSpxObservability, writeSpxEdgeCache } from "./_spx-edge-cache";
+import { coalesceSpxEdgeRequest, readSpxEdgeCache, withSpxObservability, writeSpxEdgeCache } from "./_spx-edge-cache";
 
 interface Env {
   SPX_RECAP_DB?: D1DatabaseLike;
@@ -136,7 +136,7 @@ const readDecisionCockpit = async (
   }
 };
 
-export async function onRequest(context: Context) {
+async function onRequestUncached(context: Context) {
   const startedAt = Date.now();
   const warnings: string[] = [];
   const url = new URL(context.request.url);
@@ -191,7 +191,7 @@ export async function onRequest(context: Context) {
       collectionHealth,
       warnings: [...new Set(warnings)],
     }, {}, status === "READY" ? "public, max-age=15" : "no-store"), Date.now() - startedAt);
-    if (status === "READY") writeSpxEdgeCache(context, response);
+    if (status === "READY") await writeSpxEdgeCache(context, response);
     return response;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -215,4 +215,10 @@ export async function onRequest(context: Context) {
       { status: missingTable ? 503 : 500 },
     );
   }
+}
+
+export async function onRequest(context: Context) {
+  const cached = await readSpxEdgeCache(context.request);
+  if (cached) return cached;
+  return coalesceSpxEdgeRequest(context.request, () => onRequestUncached(context));
 }

@@ -113,6 +113,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
 
   let secondSnapshotAttempts = 0;
   let forceCompassTextFailure = false;
+  const initialSpqRequestOrder = [];
   const browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
   const page = await browser.newPage();
   const consoleErrors = [];
@@ -125,6 +126,10 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
   await page.setRequestInterception(true);
   page.on("request", (request) => {
     const url = new URL(request.url());
+    if (url.pathname === "/api/spx-gex-heatmap") initialSpqRequestOrder.push("heatmap");
+    if (url.pathname === "/api/spx-price-action-compass" && url.searchParams.get("view") !== "price-overlay") initialSpqRequestOrder.push("compass");
+    if (url.pathname === "/api/spx-gex-pressure") initialSpqRequestOrder.push("pressure");
+    if (url.pathname === "/api/spx-price-action-compass" && url.searchParams.get("view") === "price-overlay") initialSpqRequestOrder.push("overlay");
     if (url.pathname === "/api/spx-price-action-compass" && forceCompassTextFailure) {
       return request.respond({
         status: 503,
@@ -144,7 +149,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     }
     if (requestedMinute === secondMinute) {
       secondSnapshotAttempts += 1;
-      if (secondSnapshotAttempts === 1) {
+      if (secondSnapshotAttempts <= 3) {
         return request.respond({
           status: 503,
           contentType: "text/html; charset=utf-8",
@@ -163,6 +168,8 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     });
     await page.waitForSelector('[data-spx-gex-pressure-matrix="true"]', { timeout: 20_000 });
     await page.waitForSelector('[data-pa-side-pattern="true"]', { timeout: 20_000 });
+    await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-spot-line="true"] polyline'));
+    assert.deepEqual(initialSpqRequestOrder.slice(0, 4), ["heatmap", "compass", "pressure", "overlay"], "initial SPX Page reads must use the stable request lane order");
     const monitorOrder = await page.$$eval('[data-pa-side-pattern="true"]', (nodes) => nodes.map((node) => ({
       text: node.textContent || "",
       index: Number((node.textContent || "").match(/idx\s+\d+-(\d+)/)?.[1] || -1),
@@ -458,8 +465,8 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     await page.click('[data-spx-gex-playback-error="true"] button');
     await page.waitForFunction((minute) => !document.querySelector('[data-spx-gex-playback-error="true"]')
       && document.querySelector('button[class*="text-yellow-300"]')?.textContent === minute, {}, formatMinute(secondMinute));
-    assert.equal(secondSnapshotAttempts, 2, "Retry must request the same failed snapshot once");
-    assert.equal(consoleErrors.length, 2, `only deliberately injected Compass and playback 503 responses may reach console: ${consoleErrors.join(" | ")}`);
+    assert.equal(secondSnapshotAttempts, 4, "bounded retries must keep one failed playback frame, then the explicit retry may advance it");
+    assert.equal(consoleErrors.length, 6, `only deliberately injected Compass and playback 503 responses may reach console: ${consoleErrors.join(" | ")}`);
     assert.ok(consoleErrors.every((error) => /503 \(Service Unavailable\)/.test(error)));
     console.log("SPX GEX pressure + playback UAT passed: matrix renders with aligned spot/tape, and failed replay retries deterministically.");
   } finally {

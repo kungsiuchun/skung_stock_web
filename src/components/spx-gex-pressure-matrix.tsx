@@ -3,6 +3,7 @@ import { Activity, AlertTriangle, TrendingUp } from "lucide-react";
 import { formatSpxGexCompactExposure } from "@/lib/spx-gex-heatmap";
 import { parseJsonResponse } from "@/lib/safe-json-response";
 import { getSpxSpotLivePulseKey } from "@/lib/spx-spot-live-pulse";
+import { isSpxRequestAbort, runSpxRequest } from "@/lib/spx-request-lane";
 import {
   buildSpxGexOneMinuteSpotSegments,
   buildSpxGexPressureAxisTicks,
@@ -29,6 +30,7 @@ interface SpxGexPressureMatrixProps {
   selectedDate: string;
   selectedMinute: number | null;
   refreshKey: number;
+  enabled?: boolean;
   controls: ReactNode;
 }
 
@@ -192,9 +194,10 @@ const MoverRow = ({ mover }: { mover: SpxGexPressureMover }) => {
   );
 };
 
-export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey, controls }: SpxGexPressureMatrixProps) {
+export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey, controls, enabled = true }: SpxGexPressureMatrixProps) {
   const [data, setData] = useState<PressureResponse | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
   const [priceOverlay, setPriceOverlay] = useState<PriceOverlayState | null>(null);
   const [loading, setLoading] = useState(false);
   const [activeCell, setActiveCell] = useState<ActiveCell | null>(null);
@@ -243,13 +246,16 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
   }, [data?.pressure]);
 
   useEffect(() => {
-    if (!selectedDate) return undefined;
+    if (!selectedDate || !enabled) return undefined;
     const controller = new AbortController();
     const load = async () => {
       setLoading(true);
       try {
         const params = new URLSearchParams({ date: selectedDate });
-        const response = await fetch(`/api/spx-gex-pressure?${params.toString()}`, { signal: controller.signal });
+        const response = await runSpxRequest(() => fetch(`/api/spx-gex-pressure?${params.toString()}`, { signal: controller.signal }), {
+          signal: controller.signal,
+          onRetry: () => setReconnecting(true),
+        });
         const payload = await parseJsonResponse<PressureResponse>(response, "/api/spx-gex-pressure");
         if (!response.ok || payload.status === "ERROR" || payload.status === "STORAGE_UNAVAILABLE" || payload.status === "BINDING_MISSING") {
           throw new Error(payload.error || `SPX GEX pressure API failed with HTTP ${response.status}`);
@@ -258,6 +264,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
         setRefreshError(null);
       } catch (error) {
         if (controller.signal.aborted) return;
+        if (isSpxRequestAbort(error)) return;
         const message = error instanceof Error ? error.message : String(error);
         if (dataRef.current?.pressure && dataRef.current.selectedDate === selectedDate) {
           setRefreshError(message);
@@ -265,34 +272,41 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
           setData({ status: "ERROR", errorCode: "SPX_GEX_PRESSURE_REQUEST_FAILED", error: message, selectedDate, pressure: null, warnings: [] });
         }
       } finally {
+        if (!controller.signal.aborted) setReconnecting(false);
         if (!controller.signal.aborted) setLoading(false);
       }
     };
     void load();
     return () => controller.abort();
-  }, [refreshKey, selectedDate]);
+  }, [enabled, refreshKey, selectedDate]);
 
   useEffect(() => {
-    if (!selectedDate) return undefined;
+    if (!selectedDate || !enabled) return undefined;
     const controller = new AbortController();
     const load = async () => {
       try {
         const params = new URLSearchParams({ timeframe: "1m", view: "price-overlay" });
-        const response = await fetch(`/api/spx-price-action-compass?${params.toString()}`, { signal: controller.signal });
+        const response = await runSpxRequest(() => fetch(`/api/spx-price-action-compass?${params.toString()}`, { signal: controller.signal }), {
+          signal: controller.signal,
+          onRetry: () => setReconnecting(true),
+        });
         const payload = await parseJsonResponse<NonNullable<PriceOverlayState["data"]>>(response, "/api/spx-price-action-compass");
         if (!response.ok) throw new Error(payload.warnings?.join(" ") || `SPX 1-minute API failed with HTTP ${response.status}`);
         setPriceOverlay({ selectedDate, data: payload, error: null });
       } catch (error) {
         if (controller.signal.aborted) return;
+        if (isSpxRequestAbort(error)) return;
         const message = error instanceof Error ? error.message : String(error);
         setPriceOverlay((current) => current?.data && current.selectedDate === selectedDate
           ? { ...current, error: message }
           : { selectedDate, data: null, error: message });
+      } finally {
+        if (!controller.signal.aborted) setReconnecting(false);
       }
     };
     void load();
     return () => controller.abort();
-  }, [refreshKey, selectedDate]);
+  }, [enabled, refreshKey, selectedDate]);
 
   const pressure = data?.selectedDate === selectedDate ? data.pressure : null;
   const latestYahooPoint = useMemo(() => pressure && priceOverlay?.data
@@ -380,8 +394,9 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
         </div>
       ) : (
         <>
-          {pressure.warnings.length > 0 && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-warning="true">{pressure.warnings.join(" ")}</div>}
-          {refreshError && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-refresh-stale="true">Refresh failed; showing the last verified GEX matrix. {refreshError}</div>}
+            {pressure.warnings.length > 0 && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-warning="true">{pressure.warnings.join(" ")}</div>}
+            {reconnecting && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status">Reconnecting SPX source…</div>}
+            {refreshError && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-refresh-stale="true">Refresh failed; showing the last verified GEX matrix. {refreshError}</div>}
           {priceOverlayWarning && <div className="border-b border-cyan-300/20 bg-cyan-300/5 px-3 py-2 text-xs text-cyan-100" role="status" data-spx-gex-pressure-spot-warning="true">{priceOverlayWarning}</div>}
 
           <div className="grid 2xl:grid-cols-[minmax(0,1fr)_320px] 2xl:items-start">

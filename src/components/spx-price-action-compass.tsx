@@ -27,6 +27,7 @@ import {
   type SpxPriceActionZone,
 } from "@/lib/spx-price-action-compass";
 import { parseJsonResponse } from "@/lib/safe-json-response";
+import { isSpxRequestAbort, runSpxRequest } from "@/lib/spx-request-lane";
 type SignalDirectionFilter = "all" | SpxPriceActionPattern["direction"];
 
 interface SignalFilterState {
@@ -124,11 +125,12 @@ const toneClasses = (pattern: SpxPriceActionPattern | null | undefined) => {
   return "border-amber-300/35 bg-amber-300/10 text-amber-100";
 };
 
-export function SpxPriceActionCompass() {
+export function SpxPriceActionCompass({ enabled = true, onInitialLoadSettled }: { enabled?: boolean; onInitialLoadSettled?: () => void }) {
   const [timeframe, setTimeframe] = useState<SpxPriceActionTimeframe>("5m");
   const [data, setData] = useState<SpxPriceActionCompassResponse>(emptyCompass);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
   const [selectedPattern, setSelectedPattern] = useState<SpxPriceActionPattern | null>(null);
   const [modalPattern, setModalPattern] = useState<SpxPriceActionPattern | null>(null);
   const [signalFilter, setSignalFilter] = useState<SignalFilterState>(defaultSignalFilter);
@@ -148,7 +150,7 @@ export function SpxPriceActionCompass() {
     setError(null);
     try {
       const requestUrl = `/api/spx-price-action-compass?timeframe=${nextTimeframe}`;
-      const response = await fetch(requestUrl);
+      const response = await runSpxRequest(() => fetch(requestUrl), { onRetry: () => setReconnecting(true) });
       const payload = await parseJsonResponse<SpxPriceActionCompassResponse & { warnings?: string[] }>(response, requestUrl);
       if (!response.ok) throw new Error(payload.warnings?.join(" ") || "SPX Price Action Compass API failed");
       setData(payload);
@@ -157,16 +159,19 @@ export function SpxPriceActionCompass() {
       setPracticeChoice(null);
       setPracticeRevealed(false);
     } catch (err) {
+      if (isSpxRequestAbort(err)) return;
       setError(err instanceof Error ? err.message : "SPX Price Action Compass failed");
     } finally {
       refreshInFlightRef.current = false;
       setLoading(false);
+      setReconnecting(false);
     }
   };
 
   useEffect(() => {
-    void loadCompass(timeframe);
-  }, [timeframe]);
+    if (!enabled) return;
+    void loadCompass(timeframe).finally(onInitialLoadSettled);
+  }, [enabled, timeframe]);
 
   const availablePatternTypes = useMemo(() => {
     return Array.from(new Set(data.patterns.map((pattern) => pattern.type))).sort();
@@ -318,6 +323,7 @@ export function SpxPriceActionCompass() {
           </div>
         </div>
 
+        {reconnecting && <Notice tone="amber" text="Reconnecting SPX source…" />}
         {error && <Notice tone="red" text={`${data.candles.length > 0 ? "Refresh failed; showing the last verified Price Action Compass. " : ""}${error}`} />}
         {data.warnings.length > 0 && <Notice tone="amber" text={data.warnings.join(" ")} />}
 

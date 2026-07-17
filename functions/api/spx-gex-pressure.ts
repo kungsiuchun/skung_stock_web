@@ -4,7 +4,7 @@ import {
 } from "../../src/lib/spx-gex-heatmap";
 import { buildSpxGexPressureMatrix } from "../../src/lib/spx-gex-pressure-matrix";
 import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
-import { readSpxEdgeCache, withSpxObservability, writeSpxEdgeCache } from "./_spx-edge-cache";
+import { coalesceSpxEdgeRequest, readSpxEdgeCache, withSpxObservability, writeSpxEdgeCache } from "./_spx-edge-cache";
 
 interface Env {
   SPX_RECAP_DB?: D1DatabaseLike;
@@ -31,7 +31,7 @@ const json = (body: unknown, init: ResponseInit = {}, cacheControl = "no-store")
   });
 };
 
-export async function onRequest(context: Context) {
+async function onRequestUncached(context: Context) {
   const startedAt = Date.now();
   const url = new URL(context.request.url);
   const cached = await readSpxEdgeCache(context.request);
@@ -68,7 +68,7 @@ export async function onRequest(context: Context) {
       pressure,
       warnings: pressure.warnings,
     }, {}, "public, max-age=15"), Date.now() - startedAt);
-    writeSpxEdgeCache(context, response);
+    await writeSpxEdgeCache(context, response);
     return response;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -82,4 +82,10 @@ export async function onRequest(context: Context) {
       warnings: [missingTable ? "SPX GEX intraday storage migration is not applied." : `SPX GEX pressure build failed: ${message}`],
     }, { status: missingTable ? 503 : 500 });
   }
+}
+
+export async function onRequest(context: Context) {
+  const cached = await readSpxEdgeCache(context.request);
+  if (cached) return cached;
+  return coalesceSpxEdgeRequest(context.request, () => onRequestUncached(context));
 }
