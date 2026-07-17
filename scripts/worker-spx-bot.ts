@@ -29,6 +29,14 @@ import {
 import { D1SpxDecisionStore, queryLifecycleCoverage } from '../src/lib/spx-decision-ledger';
 import { D1SpxGexCollectionStore, querySpxGexCollectionCoverage } from '../src/lib/spx-gex-collection-lifecycle';
 import { D1SpxOperationalHealthStore, classifySpxOperationalFailure, type SpxOperationalJob } from '../src/lib/spx-operational-health';
+import {
+  EMPTY_SPX_SCHEDULER_STATE,
+  SPX_SCHEDULER_STORAGE_KEY,
+  dueMissingRunIds,
+  nextSchedulerAlarmAt,
+  shouldRunScheduledTick,
+  type SpxSchedulerState,
+} from '../src/lib/spx-market-scheduler';
 
 // Cloudflare Worker Environment Types
 interface Env {
@@ -43,9 +51,20 @@ interface Env {
   SPX_ENABLE_LLM_CIO?: string;
   WEBHOOK_SECRET?: string; // 🔒 防護互聯網隨機觸發的安全金鑰
   SPX_MEMORY: any;
+  SPX_SCHEDULER: SpxSchedulerNamespace;
   SPX_RECAP_DB?: D1DatabaseLike;
   CF_VERSION_METADATA?: { id?: string; tag?: string; timestamp?: string };
 }
+
+interface SpxSchedulerStorage {
+  get<T>(key: string): Promise<T | undefined>;
+  put<T>(key: string, value: T): Promise<void>;
+  setAlarm(scheduledTime: number | Date): Promise<void>;
+}
+
+interface SpxSchedulerStateHandle { storage: SpxSchedulerStorage; }
+interface SpxSchedulerStub { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>; }
+interface SpxSchedulerNamespace { idFromName(name: string): unknown; get(id: unknown): SpxSchedulerStub; }
 
 interface ActionLogItem {
   time: string;
@@ -4172,6 +4191,39 @@ async function recoverStaleTradingRuns(env: Env, now: Date, health: D1SpxOperati
   return recovered;
 }
 
+const scheduledAtMsFromRunId = (runId: string) => Number(runId.slice(runId.lastIndexOf('-') + 1));
+
+export async function reconcileMissedSpxScheduledWork(env: Env, now: Date, health: D1SpxOperationalHealthStore, tickId: string) {
+  if (!env.SPX_RECAP_DB) return { gexSlotIds: [] as string[], runIds: [] as string[] };
+  const generation = getSpxGexGenerationStatus(now);
+  const collectionStore = new D1SpxGexCollectionStore(env.SPX_RECAP_DB);
+  const decisionStore = new D1SpxDecisionStore(env.SPX_RECAP_DB);
+  await collectionStore.scheduleDate(generation.etDateKey, now.toISOString());
+  const gexSlotIds = await collectionStore.markOverdueScheduledSlotsFailed(
+    generation.etDateKey,
+    generation.collectedMinuteEt,
+    now.toISOString(),
+  );
+  const dueRunIds = dueMissingRunIds(expectedTradingRunIdsForDate(generation.etDateKey), now.getTime());
+  const coverage = await queryLifecycleCoverage(env.SPX_RECAP_DB, dueRunIds);
+  const runIds: string[] = [];
+  for (const runId of coverage.missingRunIds) {
+    const scheduledAtMs = scheduledAtMsFromRunId(runId);
+    if (!Number.isFinite(scheduledAtMs)) continue;
+    const run = makeDecisionRunRecord(runId, new Date(scheduledAtMs), 'LIVE');
+    if (!await decisionStore.beginRun(run)) continue;
+    await appendDecisionLifecycle(decisionStore, run, 'SCHEDULED', { scheduledAt: run.scheduledAt, source: 'scheduler_watchdog' });
+    await completeDegradedDecisionRun(env, decisionStore, run, 'cron_invocation_missed', 'PREVIEW');
+    runIds.push(runId);
+  }
+  if (gexSlotIds.length + runIds.length > 0) {
+    await health.begin({ tickId, job: 'STALE_RECOVERY', runId: null, stage: 'MISSED_SLOT_RECONCILIATION' }, now.toISOString());
+    await health.finish({ tickId, job: 'STALE_RECOVERY', runId: null, status: 'RECOVERED', stage: 'MISSED_SLOTS_MARKED', failureCode: 'CRON_INVOCATION_MISSED' }, new Date().toISOString());
+    await sendOperationalHealthAlert(env, health, tickId, 'STALE_RECOVERY', `偵測到漏掉排程：${gexSlotIds.length} 個 GEX slot、${runIds.length} 個交易 run 已標記為 cron_invocation_missed；沒有補造歷史數據或重播交易。`);
+  }
+  return { gexSlotIds, runIds };
+}
+
 export async function runSupervisedSpxMarketTick(env: Env, now: Date = new Date()) {
   if (!env.SPX_RECAP_DB) {
     console.error('[SPX_TICK] SPX_RECAP_DB binding is missing.');
@@ -4181,6 +4233,7 @@ export async function runSupervisedSpxMarketTick(env: Env, now: Date = new Date(
   const health = new D1SpxOperationalHealthStore(env.SPX_RECAP_DB);
   try {
     await health.begin({ tickId, job: 'MARKET_TICK', runId: null, stage: 'STARTED' }, now.toISOString());
+    await reconcileMissedSpxScheduledWork(env, now, health, tickId);
     await recoverStaleTradingRuns(env, now, health, tickId);
 
     await health.begin({ tickId, job: 'GEX_COLLECTION', runId: null, stage: 'STARTED' }, new Date().toISOString());
@@ -4195,6 +4248,8 @@ export async function runSupervisedSpxMarketTick(env: Env, now: Date = new Date(
     }, new Date().toISOString());
     if (gex.status === 'FAILED') {
       await sendOperationalHealthAlert(env, health, tickId, 'GEX_COLLECTION', 'GEX 更新失敗；系統只會使用已持久化且新鮮的 snapshot，否則本輪會 fail-closed。');
+      await health.finish({ tickId, job: 'MARKET_TICK', runId: null, status: 'FAILED', stage: 'GEX_FAILED', failureCode: gex.failureCode }, new Date().toISOString());
+      return { status: 'FAILED' as const, failureCode: gex.failureCode };
     }
 
     const marketStatus = getMarketScheduleStatus(now);
@@ -4233,6 +4288,86 @@ export async function runSupervisedSpxMarketTick(env: Env, now: Date = new Date(
 
 // --- Worker Entry Point ---
 
+const SPX_SCHEDULER_SINGLETON = 'primary';
+
+const getSpxSchedulerStub = (env: Env) => env.SPX_SCHEDULER.get(env.SPX_SCHEDULER.idFromName(SPX_SCHEDULER_SINGLETON));
+
+const findNextSpxMarketSchedulerAlarmAt = (scheduledAtMs: number, nowMs: number) => {
+  let candidateMs = nextSchedulerAlarmAt(scheduledAtMs, nowMs);
+  const maxCandidateMs = nowMs + 8 * 24 * 60 * 60_000;
+  while (candidateMs <= maxCandidateMs) {
+    const candidate = new Date(candidateMs);
+    if (getSpxGexGenerationStatus(candidate).isGenerationWindow || getMarketScheduleStatus(candidate).isTradingWindow) return candidateMs;
+    candidateMs += 900_000;
+  }
+  throw new Error('SPX scheduler could not find a market tick within eight days');
+};
+
+export class SpxMarketScheduler {
+  constructor(private readonly state: SpxSchedulerStateHandle, private readonly env: Env) {}
+
+  private async readState() {
+    return (await this.state.storage.get<SpxSchedulerState>(SPX_SCHEDULER_STORAGE_KEY)) || { ...EMPTY_SPX_SCHEDULER_STATE };
+  }
+
+  private async writeState(value: SpxSchedulerState) {
+    await this.state.storage.put(SPX_SCHEDULER_STORAGE_KEY, value);
+  }
+
+  private async scheduleNext(state: SpxSchedulerState, scheduledAtMs: number, nowMs: number) {
+    const nextAlarmAt = findNextSpxMarketSchedulerAlarmAt(scheduledAtMs, nowMs);
+    const next = { ...state, nextAlarmAt };
+    await this.writeState(next);
+    await this.state.storage.setAlarm(nextAlarmAt);
+    return next;
+  }
+
+  private async execute(scheduledAtMs: number) {
+    const now = new Date();
+    const nowMs = now.getTime();
+    let scheduler = await this.readState();
+    if ((scheduler.lastSucceededAt || 0) >= scheduledAtMs) return { status: 'DUPLICATE' as const, scheduler };
+
+    const health = this.env.SPX_RECAP_DB ? new D1SpxOperationalHealthStore(this.env.SPX_RECAP_DB) : null;
+    const tickId = operationalTickId(new Date(scheduledAtMs));
+    const scheduledAt = new Date(scheduledAtMs);
+    if (!getSpxGexGenerationStatus(scheduledAt).isGenerationWindow && !getMarketScheduleStatus(scheduledAt).isTradingWindow) {
+      scheduler = await this.scheduleNext(scheduler, scheduledAtMs, nowMs);
+      return { status: 'OUTSIDE_MARKET_WINDOW' as const, scheduler };
+    }
+    if (!shouldRunScheduledTick(scheduledAtMs, nowMs)) {
+      if (health) await reconcileMissedSpxScheduledWork(this.env, now, health, tickId);
+      scheduler = await this.scheduleNext({ ...scheduler, lastFailureCode: 'SCHEDULER_ALARM_LATE', lastFailureAt: nowMs }, scheduledAtMs, nowMs);
+      return { status: 'LATE_SKIPPED' as const, scheduler };
+    }
+
+    scheduler = { ...scheduler, lastStartedAt: scheduledAtMs, lastFailureCode: null, lastFailureAt: null };
+    await this.writeState(scheduler);
+    const result = await runSupervisedSpxMarketTick(this.env, new Date(scheduledAtMs));
+    if (result.status === 'FAILED') {
+      scheduler = { ...scheduler, lastFailureCode: result.failureCode || 'MARKET_TICK_FAILED', lastFailureAt: nowMs };
+      await this.writeState(scheduler);
+      throw new Error(`SPX scheduler tick failed: ${scheduler.lastFailureCode}`);
+    }
+    scheduler = await this.scheduleNext({ ...scheduler, lastSucceededAt: scheduledAtMs }, scheduledAtMs, nowMs);
+    return { status: 'SUCCEEDED' as const, scheduler };
+  }
+
+  async alarm() {
+    const scheduler = await this.readState();
+    await this.execute(scheduler.nextAlarmAt || Date.now());
+  }
+
+  async fetch(request: Request) {
+    const url = new URL(request.url);
+    if (url.pathname === '/status') return Response.json(await this.readState());
+    if (url.pathname !== '/wake') return new Response('Not found', { status: 404 });
+    const scheduledAtMs = Number(url.searchParams.get('scheduledAt'));
+    if (!Number.isFinite(scheduledAtMs)) return new Response('scheduledAt is required', { status: 400 });
+    return Response.json(await this.execute(scheduledAtMs));
+  }
+}
+
 export default {
   async scheduled(event: any, env: Env, ctx: any) {
     const scheduledAt = new Date(typeof event.scheduledTime === 'number' ? event.scheduledTime : Date.now());
@@ -4249,7 +4384,9 @@ export default {
     }
 
     if (cron === SPX_GEX_HEATMAP_CRON) {
-      ctx.waitUntil(runSupervisedSpxMarketTick(env, scheduledAt));
+      ctx.waitUntil(getSpxSchedulerStub(env).fetch(`https://spx-scheduler/wake?scheduledAt=${scheduledAt.getTime()}`).then(async (response) => {
+        if (!response.ok) throw new Error(`SPX scheduler wake failed: ${response.status}`);
+      }));
       return;
     }
 
@@ -4306,10 +4443,13 @@ export default {
       if (!env.SPX_RECAP_DB) return new Response('SPX_RECAP_DB unavailable', { status: 503 });
       const now = new Date();
       const marketStatus = getMarketScheduleStatus(now);
-      const [recentJobs, staleRuns, gexCoverage] = await Promise.all([
+      const [recentJobs, staleRuns, gexCoverage, scheduler] = await Promise.all([
         new D1SpxOperationalHealthStore(env.SPX_RECAP_DB).listRecent(12),
         new D1SpxDecisionStore(env.SPX_RECAP_DB).listStaleIncomplete(new Date(now.getTime() - SPX_STALE_RUN_MS).toISOString()),
         querySpxGexCollectionCoverage(env.SPX_RECAP_DB, marketStatus.etDateKey, getSpxGexGenerationStatus(now).collectedMinuteEt),
+        getSpxSchedulerStub(env).fetch('https://spx-scheduler/status')
+          .then(async (response) => response.ok ? response.json() : { status: 'UNAVAILABLE', httpStatus: response.status })
+          .catch(() => ({ status: 'UNAVAILABLE' })),
       ]);
       return Response.json({
         checkedAt: now.toISOString(),
@@ -4321,6 +4461,7 @@ export default {
           incompleteSlotIds: gexCoverage.incompleteSlotIds,
           failedSlotIds: gexCoverage.failedSlotIds,
         },
+        scheduler,
         recentJobs,
       });
     }

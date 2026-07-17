@@ -171,6 +171,19 @@ export class D1SpxGexCollectionStore {
     else for (const statement of statements) await statement.run();
   }
 
+  async markOverdueScheduledSlotsFailed(tradingDate: string, asOfCollectedMinuteEt: number, at: string) {
+    const expected = getExpectedSpxGexCollectionSlots(tradingDate);
+    const records = new Map((await this.listDate(tradingDate)).map((record) => [record.slotId, record]));
+    const missed = expected.filter((slot) => {
+      const record = records.get(slot.slotId);
+      return slot.collectedMinuteEt < asOfCollectedMinuteEt && record?.currentStage === "SCHEDULED";
+    });
+    for (const slot of missed) {
+      await this.appendStage(slot.slotId, "FAILED", { error: "cron_invocation_missed" }, at);
+    }
+    return missed.map((slot) => slot.slotId);
+  }
+
   async appendStage(
     slotId: string,
     stage: SpxGexCollectionStage,

@@ -13,6 +13,14 @@ compatibility_flags = [ "nodejs_compat" ]
 # partially-written canonical GEX snapshot.
 crons = [ "15 17-21 * * MON-FRI", "*/15 13-21 * * MON-FRI" ]
 
+[[durable_objects.bindings]]
+name = "SPX_SCHEDULER"
+class_name = "SpxMarketScheduler"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = [ "SpxMarketScheduler" ]
+
 [observability]
 enabled = true
 
