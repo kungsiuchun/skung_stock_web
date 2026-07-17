@@ -31,7 +31,8 @@ const json = (body: unknown, init: ResponseInit = {}) =>
 
 export async function onRequest(context: Context) {
   const url = new URL(context.request.url);
-  const timeframe = normalizeSpxPriceActionTimeframe(url.searchParams.get("timeframe"));
+  const isPriceOverlay = url.searchParams.get("view") === "price-overlay";
+  const timeframe = isPriceOverlay ? "1m" : normalizeSpxPriceActionTimeframe(url.searchParams.get("timeframe"));
   const config = getSpxPriceActionFetchConfig(timeframe);
   const fetchedAt = new Date().toISOString();
   const edgeCache = Array.isArray(context.env.SPX_PRICE_ACTION_TEST_CANDLES) || typeof caches === "undefined"
@@ -69,12 +70,24 @@ export async function onRequest(context: Context) {
         note: "SPX OHLCV uses the existing native Yahoo chart source path; Cboe remains reserved for options/GEX source truth.",
       };
 
-    const response = json(buildSpxPriceActionCompassResponse({
-      timeframe,
-      candles,
-      source,
-      warnings: candles.length === 0 ? ["No SPX OHLCV candles returned from source."] : [],
-    }));
+    const warnings = candles.length === 0 ? ["No SPX OHLCV candles returned from source."] : [];
+    const response = json(isPriceOverlay
+      ? {
+        ticker: "SPX",
+        timeframe: "1m",
+        candles: candles.slice(-3000),
+        source: {
+          ...source,
+          note: `${source.note} Compact 1-minute close series for the GEX pressure overlay; no pattern analysis is included.`,
+        },
+        warnings,
+      }
+      : buildSpxPriceActionCompassResponse({
+        timeframe,
+        candles,
+        source,
+        warnings,
+      }));
     if (edgeCache && context.request.method === "GET") {
       const write = edgeCache.put(context.request, response.clone()).catch(() => undefined);
       context.waitUntil?.(write);

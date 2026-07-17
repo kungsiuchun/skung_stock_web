@@ -7,7 +7,10 @@ import {
   deriveSpxSupportResistanceZones,
   detectSpxPriceActionPatterns,
   findSpxPriceActionSwingPoints,
+  projectSpxChartClientPoint,
+  sortSpxPriceActionPatternsLatestFirst,
   type SpxPriceActionCandle,
+  type SpxPriceActionPattern,
 } from "../src/lib/spx-price-action-compass";
 
 const candle = (
@@ -57,6 +60,49 @@ const buildZoneFixture = () => [
 ];
 
 describe("SPX Price Action Compass detector", () => {
+  it("sorts Signal Monitor patterns latest-first with deterministic ties without mutating input", () => {
+    const pattern = (id: string, toIndex: number, fromIndex: number, confidence: number): SpxPriceActionPattern => ({
+      id, type: "DOJI", name: id, label: id, category: "candle", direction: "neutral",
+      candleIndices: [toIndex], fromIndex, toIndex, price: 100, confidence, description: id,
+    });
+    const input = [pattern("z", 8, 8, 0.9), pattern("b", 10, 9, 0.8), pattern("a", 10, 9, 0.8), pattern("c", 10, 8, 0.99)];
+    const before = input.map((item) => item.id);
+
+    assert.deepEqual(sortSpxPriceActionPatternsLatestFirst(input).map((item) => item.id), ["a", "b", "c", "z"]);
+    assert.deepEqual(
+      sortSpxPriceActionPatternsLatestFirst(input.filter((item) => item.id !== "a")).map((item) => item.id),
+      ["b", "c", "z"],
+    );
+    assert.deepEqual(input.map((item) => item.id), before);
+  });
+
+  it("projects fullscreen coordinates and clamps pointer boundaries", () => {
+    assert.deepEqual(projectSpxChartClientPoint({
+      clientX: 800,
+      clientY: 500,
+      rect: { left: 0, top: 0, width: 1600, height: 1000 },
+      viewBoxWidth: 1200,
+      viewBoxHeight: 750,
+    }), { x: 600, y: 375, scaleX: 0.75, scaleY: 0.75 });
+    assert.deepEqual(projectSpxChartClientPoint({
+      clientX: -40,
+      clientY: 1200,
+      rect: { left: 0, top: 0, width: 1600, height: 1000 },
+      viewBoxWidth: 1200,
+      viewBoxHeight: 750,
+    }), { x: 0, y: 750, scaleX: 0.75, scaleY: 0.75 });
+  });
+
+  it("projects client coordinates through SVG offsets and CSS scaling", () => {
+    assert.deepEqual(projectSpxChartClientPoint({
+      clientX: 550,
+      clientY: 360,
+      rect: { left: 100, top: 60, width: 900, height: 600 },
+      viewBoxWidth: 1800,
+      viewBoxHeight: 1200,
+    }), { x: 900, y: 600, scaleX: 2, scaleY: 2 });
+  });
+
   it("detects deterministic candle patterns from source OHLCV geometry", () => {
     const patterns = detectSpxPriceActionPatterns(buildDetectorFixture());
     const types = new Set(patterns.map((pattern) => pattern.type));
@@ -132,5 +178,26 @@ describe("SPX Price Action Compass API", () => {
     assert.equal(typeof payload.summary.latestClose, "number");
     assert.ok(payload.summary.latestPattern);
     assert.equal(payload.source.provider, "test");
+  });
+
+  it("returns a compact dense 1-minute series for the GEX pressure overlay without pattern payload", async () => {
+    const fixture = buildDetectorFixture();
+    const response = await getSpxPriceActionCompassApi({
+      request: new Request("https://example.com/api/spx-price-action-compass?timeframe=15m&view=price-overlay"),
+      env: { SPX_PRICE_ACTION_TEST_CANDLES: fixture },
+    });
+    const payload = await response.json() as {
+      timeframe: string;
+      candles: SpxPriceActionCandle[];
+      source: { provider: string; note: string };
+      patterns?: unknown[];
+    };
+
+    assert.equal(response.status, 200);
+    assert.equal(payload.timeframe, "1m");
+    assert.equal(payload.candles.length, fixture.length);
+    assert.equal(payload.patterns, undefined);
+    assert.equal(payload.source.provider, "test");
+    assert.match(payload.source.note, /GEX pressure overlay/);
   });
 });

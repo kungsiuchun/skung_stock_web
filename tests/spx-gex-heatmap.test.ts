@@ -32,8 +32,17 @@ import {
 } from "../src/lib/spx-gex-cboe";
 import { loadCanonicalSpxGexForTelegram } from "../scripts/worker-spx-bot";
 import { onRequest as getSpxGexHeatmapApi } from "../functions/api/spx-gex-heatmap";
+import { onRequest as getSpxGexPressureApi } from "../functions/api/spx-gex-pressure";
 import { buildSpxGexUatFixture } from "../src/lib/spx-gex-uat-fixture";
+import {
+  buildSpxGexOneMinuteSpotSegments,
+  buildSpxGexPressureAxisTicks,
+  buildSpxGexPressureChartGeometry,
+  buildSpxGexPressureMatrix,
+  getSpxGexPressureTooltipPosition,
+} from "../src/lib/spx-gex-pressure-matrix";
 import { parseSpxGexBoardSelection } from "../src/components/spx-gex-heatmap-page";
+import { getSpxGexTooltipPosition } from "../src/lib/spx-gex-tooltip";
 
 it("does not turn a missing snapshot hash parameter into snapshot minute zero", () => {
   assert.deepEqual(parseSpxGexBoardSelection("#/work/spx-gex-heatmap"), {
@@ -1253,7 +1262,7 @@ class MemoryD1Statement {
 
     if (this.query.includes("FROM spx_gex_intraday_snapshots") && this.query.includes("WHERE trading_date = ?")) {
       const date = String(this.values[0]);
-      const includeSnapshotJson = this.query.includes("snapshot_json");
+      const includeSnapshotJson = this.query.includes("snapshot_json") || this.query.includes("SELECT *");
       return {
         results: [...this.db.intraday.values()]
           .filter((row) => row.trading_date === date)
@@ -1718,5 +1727,239 @@ describe("SPX GEX intraday automation runner", () => {
 
     assert.deepEqual(result, { status: "skipped", date: "2026-06-19", reason: "us_market_holiday" });
     assert.deepEqual(calls, []);
+  });
+});
+
+const buildPressureSnapshot = (generatedAt: string, spot: number, values: Record<number, number>) => {
+  const snapshot = structuredClone(buildStructuredHeatmap(generatedAt, spot));
+  const expiry = snapshot.zeroDte.expiry;
+  const template = snapshot.cells.find((cell) => cell.expdate === expiry);
+  assert.ok(template);
+  snapshot.cells = [
+    ...snapshot.cells.filter((cell) => cell.expdate !== expiry),
+    ...Object.entries(values).map(([strike, netGex]) => ({
+      ...structuredClone(template),
+      strike: Number(strike),
+      netGex,
+      callGex: netGex > 0 ? netGex : 0,
+      putGex: netGex < 0 ? netGex : 0,
+    })),
+  ];
+  delete (snapshot as Partial<SpxGexHeatmapModel>).canonical;
+  return snapshot;
+};
+
+describe("SPX 0DTE pressure matrix", () => {
+  const baselineValues = { 5970: 100, 5975: 100, 5980: -100, 5985: -100, 5990: 100, 5995: -100, 6000: 0 };
+  const currentValues = { 5970: 150, 5975: 50, 5980: -150, 5985: -50, 5990: -25, 5995: 25, 6000: 50, 6005: 75 };
+
+  it("classifies all pressure states, keeps a missing slot, and handles a zero baseline", () => {
+    const baseline = buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, baselineValues);
+    const current = buildPressureSnapshot("2026-05-27T14:15:00.000Z", 6010, currentValues);
+    const pressure = buildSpxGexPressureMatrix([current, baseline]);
+    const stateAt = (strike: number) => pressure.rows.find((row) => row.strike === strike)?.cells.at(-1)?.state;
+
+    assert.equal(pressure.baseline.snapshotTimeEt, "09:30");
+    assert.deepEqual(pressure.timeline.map((slot) => [slot.snapshotTimeEt, slot.status]), [
+      ["09:30", "READY"],
+      ["09:45", "MISSING"],
+      ["10:00", "READY"],
+    ]);
+    assert.equal(pressure.strikeRange.lower, 5950);
+    assert.equal(pressure.strikeRange.upper, 6060);
+    assert.equal(stateAt(5970), "POSITIVE_STRONGER");
+    assert.equal(stateAt(5975), "POSITIVE_WEAKER");
+    assert.equal(stateAt(5980), "NEGATIVE_DEEPER");
+    assert.equal(stateAt(5985), "NEGATIVE_WEAKER");
+    assert.equal(stateAt(5990), "FLIP_TO_NEGATIVE");
+    assert.equal(stateAt(5995), "FLIP_TO_POSITIVE");
+    assert.equal(stateAt(6000), "POSITIVE_STRONGER");
+    assert.equal(pressure.rows.find((row) => row.strike === 6000)?.cells.at(-1)?.strengthPct, null);
+    assert.equal(pressure.rows.find((row) => row.strike === 6005)?.cells.at(-1)?.state, "NO_BASELINE");
+  });
+
+  it("ranks latest movers by absolute delta with deterministic ties", () => {
+    const pressure = buildSpxGexPressureMatrix([
+      buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, baselineValues),
+      buildPressureSnapshot("2026-05-27T14:00:00.000Z", 6005, currentValues),
+    ]);
+
+    assert.equal(pressure.movers[0].strike, 5995);
+    assert.equal(pressure.movers[1].strike, 5990);
+    assert.equal(pressure.movers[0].intensityPct, 100);
+    assert.equal(pressure.movers.some((mover) => mover.strike === 6005), false);
+  });
+
+  it("fails closed when the 0DTE expiry changes during a session", () => {
+    const baseline = buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, baselineValues);
+    const current = buildPressureSnapshot("2026-05-27T14:00:00.000Z", 6005, currentValues);
+    current.zeroDte.expiry = "2026-05-28";
+    assert.throws(() => buildSpxGexPressureMatrix([baseline, current]), /expiry changed/);
+  });
+
+  it("uses the option-chain spot even when independent quote text disagrees", () => {
+    const model = buildSpxGexHeatmapFromOptionChains({
+      generatedAt: "2026-05-27T13:45:00.000Z",
+      quoteText: "| Ticker | Last | Change | Change % |\n| SPX | $6,999.00 | +1 | +0.1% |",
+      chains: expiries.map((expiry) => buildOptionChain(expiry, 6000)),
+      selectedExpiries: expiries,
+    });
+    assert.equal(model.quote.last, 6000);
+    assert.equal(model.session?.spot, 6000);
+  });
+
+  it("maps Yahoo 1-minute SPX candles onto ET market minutes and breaks only at missing price minutes", () => {
+    const segments = buildSpxGexOneMinuteSpotSegments([
+      { time: Date.parse("2026-05-27T13:30:00.000Z"), close: 6000 },
+      { time: Date.parse("2026-05-27T13:31:00.000Z"), close: 6001 },
+      { time: Date.parse("2026-05-27T13:33:00.000Z"), close: 6003 },
+      { time: Date.parse("2026-05-28T13:32:00.000Z"), close: 7000 },
+    ], "2026-05-27", 9 * 60 + 30, 9 * 60 + 35);
+
+    assert.deepEqual(segments.map((segment) => segment.map((point) => [point.timeEt, point.price])), [
+      [["09:30", 6000], ["09:31", 6001]],
+      [["09:33", 6003]],
+    ]);
+  });
+
+  it("shows only open, hourly, and latest major time ticks while preserving missing slots", () => {
+    const pressure = buildSpxGexPressureMatrix([
+      buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, baselineValues),
+      buildPressureSnapshot("2026-05-27T14:45:00.000Z", 6004, currentValues),
+      buildPressureSnapshot("2026-05-27T15:00:00.000Z", 6006, currentValues),
+    ]);
+    const ticks = buildSpxGexPressureAxisTicks(pressure.timeline);
+
+    assert.deepEqual(ticks.filter((tick) => tick.isMajor).map((tick) => tick.snapshotTimeEt), ["09:30", "10:30", "10:45"]);
+    assert.equal(ticks.find((tick) => tick.snapshotTimeEt === "10:45")?.isLatest, true);
+    assert.equal(ticks.find((tick) => tick.snapshotTimeEt === "10:00")?.status, "MISSING");
+  });
+
+  it("maps 1-minute price geometry, clamps the spot guide, and keeps the endpoint callout inside the matrix", () => {
+    const pressure = buildSpxGexPressureMatrix([
+      buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, baselineValues),
+      buildPressureSnapshot("2026-05-27T14:00:00.000Z", 6005, currentValues),
+    ]);
+    const geometry = buildSpxGexPressureChartGeometry(pressure, [[
+      { time: 1, minuteEt: 570, timeEt: "09:30", price: 7000 },
+      { time: 2, minuteEt: 585, timeEt: "09:45", price: 6005 },
+    ]], 34, 25);
+
+    assert.equal(geometry.resolution, "1m");
+    assert.equal(geometry.pointCount, 2);
+    assert.equal(geometry.latestPoint?.timeEt, "09:45");
+    assert.equal(geometry.segments[0][0].y, 12.5);
+    assert.ok(geometry.callout);
+    assert.ok(geometry.callout.x >= 4);
+    assert.ok(geometry.callout.x + geometry.callout.width <= pressure.timeline.length * 34 - 4);
+    assert.equal(geometry.spotGuide?.price, 6005);
+  });
+
+  it("uses 15-minute fallback segments without drawing across a missing GEX slot", () => {
+    const pressure = buildSpxGexPressureMatrix([
+      buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, baselineValues),
+      buildPressureSnapshot("2026-05-27T14:15:00.000Z", 6010, currentValues),
+    ]);
+    const geometry = buildSpxGexPressureChartGeometry(pressure, [], 34, 25);
+
+    assert.equal(geometry.resolution, "15m-fallback");
+    assert.deepEqual(geometry.segments.map((segment) => segment.map((point) => point.timeEt)), [["09:30"], ["10:00"]]);
+  });
+
+  it("places desktop tooltips above when possible and below near the viewport top", () => {
+    assert.deepEqual(getSpxGexPressureTooltipPosition({
+      anchor: { left: 790, top: 400, width: 34, height: 25 },
+      viewport: { width: 800, height: 600 },
+      tooltip: { width: 320, height: 150 },
+    }), { left: 472, top: 240, placement: "top" });
+    assert.deepEqual(getSpxGexPressureTooltipPosition({
+      anchor: { left: 2, top: 5, width: 34, height: 25 },
+      viewport: { width: 800, height: 600 },
+      tooltip: { width: 320, height: 150 },
+    }), { left: 8, top: 40, placement: "bottom" });
+  });
+
+  it("clamps the shared GEX tooltip on every viewport edge and caps long content", () => {
+    assert.deepEqual(getSpxGexTooltipPosition({
+      anchor: { left: 790, top: 400, width: 34, height: 25 },
+      viewport: { width: 800, height: 600 },
+      tooltip: { width: 380, estimatedHeight: 520 },
+    }), { left: 412, top: 72, placement: "bottom", width: 380, maxHeight: 584 });
+    assert.deepEqual(getSpxGexTooltipPosition({
+      anchor: { left: -20, top: 5, width: 34, height: 25 },
+      viewport: { width: 320, height: 240 },
+      tooltip: { width: 380, estimatedHeight: 520 },
+    }), { left: 8, top: 8, placement: "bottom", width: 304, maxHeight: 224 });
+  });
+});
+
+describe("SPX GEX pressure API", () => {
+  class CountingD1 extends MemoryD1 {
+    snapshotListQueries = 0;
+
+    override prepare(query: string) {
+      if (query.includes("SELECT * FROM spx_gex_intraday_snapshots") && query.includes("WHERE trading_date = ?")) {
+        this.snapshotListQueries += 1;
+      }
+      return super.prepare(query);
+    }
+  }
+
+  it("returns one compact READY response from one whole-day snapshot query", async () => {
+    const db = new CountingD1();
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, { 5995: -100, 6000: 100 }));
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildPressureSnapshot("2026-05-27T14:00:00.000Z", 6005, { 5995: -200, 6000: 150 }));
+
+    const response = await getSpxGexPressureApi({
+      request: new Request("https://example.com/api/spx-gex-pressure?date=2026-05-27"),
+      env: { SPX_RECAP_DB: db },
+    });
+    const text = await response.text();
+    const payload = JSON.parse(text) as { status: string; pressure: { timeline: unknown[]; movers: unknown[] } };
+
+    assert.equal(response.status, 200, text);
+    assert.equal(response.headers.get("cache-control"), "public, max-age=15");
+    assert.equal(payload.status, "READY");
+    assert.equal(payload.pressure.timeline.length, 2);
+    assert.equal(payload.pressure.movers.length > 0, true);
+    assert.equal(db.snapshotListQueries, 1);
+    assert.equal(text.includes("snapshot_json"), false);
+  });
+
+  it("returns explicit binding, storage, and malformed-snapshot failures", async () => {
+    const binding = await getSpxGexPressureApi({ request: new Request("https://example.com/api/spx-gex-pressure"), env: {} });
+    assert.equal(binding.status, 503);
+    assert.equal(((await binding.json()) as { status: string }).status, "BINDING_MISSING");
+
+    const storage = await getSpxGexPressureApi({
+      request: new Request("https://example.com/api/spx-gex-pressure"),
+      env: { SPX_RECAP_DB: { prepare: () => { throw new Error("no such table: spx_gex_intraday_snapshots"); } } as any },
+    });
+    assert.equal(storage.status, 503);
+    assert.equal(((await storage.json()) as { status: string }).status, "STORAGE_UNAVAILABLE");
+
+    const db = new MemoryD1();
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, { 6000: 100 }));
+    const row = db.intraday.get("2026-05-27:570");
+    assert.ok(row);
+    const incompleteSnapshot = JSON.parse(row.snapshot_json) as Partial<SpxGexHeatmapModel>;
+    delete incompleteSnapshot.session;
+    row.snapshot_json = JSON.stringify(incompleteSnapshot);
+    const incomplete = await getSpxGexPressureApi({
+      request: new Request("https://example.com/api/spx-gex-pressure?date=2026-05-27"),
+      env: { SPX_RECAP_DB: db },
+    });
+    assert.equal(incomplete.status, 500);
+    const incompletePayload = await incomplete.json() as { status: string; error: string };
+    assert.equal(incompletePayload.status, "ERROR");
+    assert.match(incompletePayload.error, /incomplete session contract/);
+
+    row.snapshot_json = "{";
+    const malformed = await getSpxGexPressureApi({
+      request: new Request("https://example.com/api/spx-gex-pressure?date=2026-05-27"),
+      env: { SPX_RECAP_DB: db },
+    });
+    assert.equal(malformed.status, 500);
+    assert.equal(((await malformed.json()) as { status: string }).status, "ERROR");
   });
 });

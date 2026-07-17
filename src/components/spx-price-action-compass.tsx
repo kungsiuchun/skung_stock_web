@@ -15,16 +15,17 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import type {
-  SpxPriceActionCandle,
-  SpxPriceActionCompassResponse,
-  SpxPriceActionPattern,
-  SpxPriceActionPatternType,
-  SpxPriceActionTimeframe,
-  SpxPriceActionTrend,
-  SpxPriceActionZone,
+import {
+  projectSpxChartClientPoint,
+  sortSpxPriceActionPatternsLatestFirst,
+  type SpxPriceActionCandle,
+  type SpxPriceActionCompassResponse,
+  type SpxPriceActionPattern,
+  type SpxPriceActionPatternType,
+  type SpxPriceActionTimeframe,
+  type SpxPriceActionTrend,
+  type SpxPriceActionZone,
 } from "@/lib/spx-price-action-compass";
-
 type SignalDirectionFilter = "all" | SpxPriceActionPattern["direction"];
 
 interface SignalFilterState {
@@ -239,7 +240,10 @@ export function SpxPriceActionCompass() {
   }, [challengePattern, data.candles, filteredPatterns, data.trend, mode, practiceRevealed]);
 
   const patternById = useMemo(() => new Map(data.patterns.map((pattern) => [pattern.id, pattern])), [data.patterns]);
-  const topPatterns = filteredPatterns.slice(0, 8);
+  const topPatterns = useMemo(
+    () => sortSpxPriceActionPatternsLatestFirst(filteredPatterns).slice(0, 8),
+    [filteredPatterns],
+  );
   const latest = data.summary;
 
   return (
@@ -368,9 +372,9 @@ export function SpxPriceActionCompass() {
             )}
 
             <section className="border border-[#123142] bg-black/20 p-3">
-              <div className="mb-3 flex items-center gap-2 font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200">
-                <Search className="h-4 w-4" />
-                Signal Monitor
+              <div className="mb-3 flex items-center justify-between gap-2 font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200">
+                <span className="flex items-center gap-2"><Search aria-hidden="true" className="h-4 w-4" />Signal Monitor</span>
+                <span className="text-[9px] text-cyan-200/45">Latest first</span>
               </div>
               <div className="flex max-h-[260px] flex-col gap-2 overflow-y-auto pr-1">
                 {topPatterns.length === 0 ? (
@@ -391,7 +395,7 @@ export function SpxPriceActionCompass() {
                       <span className="font-mono text-[10px]">{Math.round(pattern.confidence * 100)}%</span>
                     </div>
                     <div className="mt-1 font-mono text-[10px] text-zinc-500">
-                      idx {pattern.fromIndex}-{pattern.toIndex} / ${formatPrice(pattern.price)}
+                      {data.candles[pattern.toIndex] ? formatEtTime(data.candles[pattern.toIndex].time) : "time n/a"} / idx {pattern.fromIndex}-{pattern.toIndex} / ${formatPrice(pattern.price)}
                     </div>
                   </button>
                 ))}
@@ -516,6 +520,7 @@ function PriceActionChartCanvas({
   onSelectPattern,
 }: ChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
   const [width, setWidth] = useState(900);
   const [zoom, setZoom] = useState(110);
   const [startIndex, setStartIndex] = useState(0);
@@ -577,22 +582,23 @@ function PriceActionChartCanvas({
   }, [candles.length, selectedPattern?.fromIndex, selectedPattern?.id, selectedPattern?.toIndex, zoom]);
 
   useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return undefined;
+    const svg = svgRef.current;
+    if (!svg) return undefined;
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
       if (candles.length === 0) return;
-      const rect = container.getBoundingClientRect();
-      const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left - axisLeft) / plotWidth));
+      const rect = svg.getBoundingClientRect();
+      const point = projectSpxChartClientPoint({ clientX: event.clientX, clientY: event.clientY, rect, viewBoxWidth: width, viewBoxHeight: height });
+      const ratio = Math.max(0, Math.min(1, (point.x - axisLeft) / plotWidth));
       const anchor = startIndex + ratio * zoom;
       const nextZoom = Math.max(20, Math.min(candles.length, Math.round(zoom * (event.deltaY < 0 ? 0.82 : 1.18))));
       const nextMaxStart = Math.max(0, candles.length - nextZoom);
       setZoom(nextZoom);
       setStartIndex(Math.max(0, Math.min(nextMaxStart, Math.round(anchor - ratio * nextZoom))));
     };
-    container.addEventListener("wheel", onWheel, { passive: false });
-    return () => container.removeEventListener("wheel", onWheel);
-  }, [axisLeft, candles.length, plotWidth, startIndex, zoom]);
+    svg.addEventListener("wheel", onWheel, { passive: false });
+    return () => svg.removeEventListener("wheel", onWheel);
+  }, [axisLeft, candles.length, height, plotWidth, startIndex, width, zoom]);
 
   const visibleStart = Math.max(0, Math.min(startIndex, maxStart));
   const visibleCandles = candles.slice(visibleStart, visibleStart + zoom);
@@ -635,19 +641,25 @@ function PriceActionChartCanvas({
   })();
 
   const updateCrosshair = (clientX: number, clientY: number) => {
-    const rect = containerRef.current?.getBoundingClientRect();
+    const rect = svgRef.current?.getBoundingClientRect();
     if (!rect || visibleCandles.length === 0) return;
-    const x = Math.max(axisLeft, Math.min(width, clientX - rect.left));
-    const y = Math.max(0, Math.min(chartHeight + volumeHeight, clientY - rect.top));
+    const point = projectSpxChartClientPoint({ clientX, clientY, rect, viewBoxWidth: width, viewBoxHeight: height });
+    const x = Math.max(axisLeft, Math.min(width, point.x));
+    const y = Math.max(0, Math.min(chartHeight + volumeHeight, point.y));
     const visibleIndex = Math.max(0, Math.min(visibleCandles.length - 1, Math.floor((x - axisLeft) / candleWidth)));
-    const price = low + ((chartHeight - 28 - y + 12) / Math.max(1, chartHeight - 40)) * priceRange;
-    setCrosshair({ x: getX(visibleIndex), y, price, index: visibleStart + visibleIndex });
+    const priceY = Math.max(24, Math.min(chartHeight - 16, y));
+    const price = low + ((chartHeight - 16 - priceY) / Math.max(1, chartHeight - 40)) * priceRange;
+    setCrosshair({ x, y, price, index: visibleStart + visibleIndex });
   };
 
   const handleMove = (clientX: number, clientY: number) => {
     updateCrosshair(clientX, clientY);
     if (dragStart === null) return;
-    const delta = clientX - dragStart;
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const currentPoint = projectSpxChartClientPoint({ clientX, clientY, rect, viewBoxWidth: width, viewBoxHeight: height });
+    const startPoint = projectSpxChartClientPoint({ clientX: dragStart, clientY, rect, viewBoxWidth: width, viewBoxHeight: height });
+    const delta = currentPoint.x - startPoint.x;
     const moved = Math.round(delta / Math.max(1, candleWidth));
     if (Math.abs(moved) >= 1) {
       setStartIndex((current) => Math.max(0, Math.min(maxStart, current - moved)));
@@ -745,29 +757,27 @@ function PriceActionChartCanvas({
         </div>
       </div>
       <svg
+        ref={svgRef}
         data-pa-chart-surface="true"
         data-pa-visible-zone-count={zoneRows.length}
         width="100%"
         height={height}
         viewBox={`0 0 ${width} ${height}`}
         className={dragStart === null ? "cursor-crosshair select-none" : "cursor-grabbing select-none"}
-        onClick={(event) => updateCrosshair(event.clientX, event.clientY)}
-        onMouseDown={(event) => {
-          setDragStart(event.clientX);
-          updateCrosshair(event.clientX, event.clientY);
-        }}
-        onMouseMove={(event) => handleMove(event.clientX, event.clientY)}
-        onMouseUp={() => setDragStart(null)}
-        onMouseLeave={() => {
-          setDragStart(null);
-          setCrosshair(null);
-        }}
         onPointerDown={(event) => {
+          event.currentTarget.setPointerCapture(event.pointerId);
           setDragStart(event.clientX);
           updateCrosshair(event.clientX, event.clientY);
         }}
         onPointerMove={(event) => handleMove(event.clientX, event.clientY)}
-        onPointerUp={() => setDragStart(null)}
+        onPointerUp={(event) => {
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+          setDragStart(null);
+        }}
+        onPointerCancel={() => setDragStart(null)}
+        onPointerLeave={() => {
+          if (dragStart === null) setCrosshair(null);
+        }}
       >
         <defs>
           <filter id="pa-selected-glow" x="-30%" y="-30%" width="160%" height="160%">

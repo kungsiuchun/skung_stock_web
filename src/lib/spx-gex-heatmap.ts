@@ -515,7 +515,8 @@ const parseQuote = (text: string): SpxGexQuote => {
 const quoteFromChain = (chain: SpxGexOptionChain, quoteText?: string): SpxGexQuote => {
   if (quoteText) {
     try {
-      return parseQuote(quoteText);
+      const quote = parseQuote(quoteText);
+      return { ...quote, ticker: "SPX", last: chain.spot };
     } catch {
       // Chain spot is safer than failing a live snapshot because the quote table shape drifted.
     }
@@ -2118,8 +2119,31 @@ export const buildSpxGexHeatmapFromToolText = (input: BuildSpxGexHeatmapInput): 
 
 const parseJsonField = <T>(value: string): T => JSON.parse(value) as T;
 
-const rowToIntradayHeatmap = (row: D1SpxGexIntradayRow): SpxGexHeatmapModel | null => {
+const hasCompletePressureSessionContract = (session: unknown): session is SpxGexSnapshotMeta => {
+  if (!session || typeof session !== "object") return false;
+  const candidate = session as Partial<SpxGexSnapshotMeta>;
+  return typeof candidate.tradingDate === "string"
+    && /^\d{4}-\d{2}-\d{2}$/.test(candidate.tradingDate)
+    && Number.isInteger(candidate.snapshotMinuteEt)
+    && typeof candidate.snapshotTimeEt === "string"
+    && /^\d{2}:\d{2}$/.test(candidate.snapshotTimeEt)
+    && Number.isInteger(candidate.collectedMinuteEt)
+    && typeof candidate.collectedTimeEt === "string"
+    && /^\d{2}:\d{2}$/.test(candidate.collectedTimeEt)
+    && typeof candidate.generatedAt === "string"
+    && Number.isFinite(Date.parse(candidate.generatedAt))
+    && typeof candidate.spot === "number"
+    && Number.isFinite(candidate.spot);
+};
+
+const rowToIntradayHeatmap = (
+  row: D1SpxGexIntradayRow,
+  options: { requireCompleteSession?: boolean } = {},
+): SpxGexHeatmapModel | null => {
   const parsed = parseJsonField<SpxGexHeatmapModel>(row.snapshot_json);
+  if (options.requireCompleteSession && !hasCompletePressureSessionContract(parsed.session)) {
+    throw new Error(`SPX GEX pressure snapshot JSON has an incomplete session contract at ${row.trading_date}:${row.snapshot_minute_et}.`);
+  }
   const collectionStatus = getSpxGexGenerationStatus(new Date(row.generated_at));
   const parsedSession = parsed.session;
   const session: SpxGexSnapshotMeta = {
@@ -2193,6 +2217,26 @@ export const listSpxGexHeatmapSessions = async (db: D1DatabaseLike, date: string
     if (!isMissingIntradayTable(error)) throw error;
     return [];
   }
+};
+
+export const listSpxGexIntradaySnapshots = async (
+  db: D1DatabaseLike,
+  date: string,
+  options: { requireCompleteSession?: boolean } = {},
+): Promise<SpxGexHeatmapModel[]> => {
+  const result = await db
+    .prepare(`
+      SELECT * FROM spx_gex_intraday_snapshots
+      WHERE trading_date = ?
+      ORDER BY snapshot_minute_et ASC
+    `)
+    .bind(date)
+    .all<D1SpxGexIntradayRow>();
+  return (result.results || []).map((row) => {
+    const snapshot = rowToIntradayHeatmap(row, options);
+    if (!snapshot) throw new Error(`Invalid SPX GEX intraday snapshot JSON at ${row.trading_date}:${row.snapshot_minute_et}.`);
+    return snapshot;
+  });
 };
 
 export const readSpxGexIntradaySnapshot = async (

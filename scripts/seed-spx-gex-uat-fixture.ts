@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 
 import { buildSpxGexUatFixture } from "../src/lib/spx-gex-uat-fixture";
+import { withCanonicalSpxGexSnapshotEnvelope, type SpxGexHeatmapModel } from "../src/lib/spx-gex-heatmap";
 
 const repoRoot = process.cwd();
 const persistTo = path.resolve(repoRoot, ".wrangler", "spx-uat");
@@ -19,6 +20,79 @@ const json = (value: unknown) => quote(JSON.stringify(value));
 const runId = "uat-spx-board-2026-07-13-1445-et";
 const createdAt = "2026-07-13T18:45:10.000Z";
 const slotId = `${session.tradingDate}:${session.snapshotMinuteEt}`;
+const buildPressureFrame = (input: {
+  generatedAt: string;
+  snapshotMinuteEt: number;
+  snapshotTimeEt: string;
+  collectedMinuteEt: number;
+  collectedTimeEt: string;
+  spot: number;
+  scale: number;
+  flipEvery?: number;
+}) => {
+  const frame = structuredClone(fixture) as SpxGexHeatmapModel;
+  frame.generatedAt = input.generatedAt;
+  frame.snapshot = input.generatedAt;
+  frame.quote.last = input.spot;
+  frame.session = {
+    tradingDate: session.tradingDate,
+    snapshotMinuteEt: input.snapshotMinuteEt,
+    snapshotTimeEt: input.snapshotTimeEt,
+    collectedMinuteEt: input.collectedMinuteEt,
+    collectedTimeEt: input.collectedTimeEt,
+    generatedAt: input.generatedAt,
+    spot: input.spot,
+  };
+  frame.cells = frame.cells.map((cell, index) => {
+    if (cell.expdate !== frame.zeroDte.expiry || typeof cell.netGex !== "number") return cell;
+    const flip = input.flipEvery && index % input.flipEvery === 0 ? -1 : 1;
+    return {
+      ...cell,
+      netGex: cell.netGex * input.scale * flip,
+      callGex: typeof cell.callGex === "number" ? cell.callGex * input.scale * flip : cell.callGex,
+      putGex: typeof cell.putGex === "number" ? cell.putGex * input.scale * flip : cell.putGex,
+    };
+  });
+  frame.source = { ...frame.source, sourceTimestamp: new Date(new Date(input.generatedAt).getTime() - 15 * 60_000).toISOString() };
+  return withCanonicalSpxGexSnapshotEnvelope(frame);
+};
+const formatMinuteEt = (minute: number) => `${Math.floor(minute / 60).toString().padStart(2, "0")}:${(minute % 60).toString().padStart(2, "0")}`;
+const openMinuteEt = 9 * 60 + 30;
+const missingMinuteEt = 11 * 60;
+const sessionMinutes = Array.from(
+  { length: Math.floor((session.snapshotMinuteEt - openMinuteEt) / 15) + 1 },
+  (_, index) => openMinuteEt + index * 15,
+).filter((minute) => minute !== missingMinuteEt);
+const intradayFixtures = sessionMinutes.map((snapshotMinuteEt, index) => {
+  if (snapshotMinuteEt === session.snapshotMinuteEt) return fixture;
+  const progress = (snapshotMinuteEt - openMinuteEt) / Math.max(15, session.snapshotMinuteEt - openMinuteEt);
+  const spot = 7518.25 + (fixture.quote.last - 7518.25) * progress + Math.sin(index / 2.15) * 7.5;
+  const collectedMinuteEt = snapshotMinuteEt + 15;
+  return buildPressureFrame({
+    generatedAt: new Date(Date.parse("2026-07-13T13:45:00.000Z") + (snapshotMinuteEt - openMinuteEt) * 60_000).toISOString(),
+    snapshotMinuteEt,
+    snapshotTimeEt: formatMinuteEt(snapshotMinuteEt),
+    collectedMinuteEt,
+    collectedTimeEt: formatMinuteEt(collectedMinuteEt),
+    spot: Number(spot.toFixed(2)),
+    scale: 0.58 + progress * 0.42,
+    flipEvery: index === 0 ? 13 : index % 7 === 0 ? 29 : undefined,
+  });
+});
+const intradaySnapshotsSql = intradayFixtures.map((frame) => {
+  if (!frame.session) throw new Error("SPX pressure UAT frame is missing session metadata.");
+  return `
+INSERT INTO spx_gex_intraday_snapshots
+  (trading_date, snapshot_minute_et, snapshot_time_et, generated_at, ticker, spot, snapshot_json, created_at, updated_at)
+VALUES
+  (${quote(frame.session.tradingDate)}, ${frame.session.snapshotMinuteEt}, ${quote(frame.session.snapshotTimeEt)}, ${quote(frame.generatedAt)}, 'SPX', ${frame.quote.last}, ${json(frame)}, ${quote(createdAt)}, ${quote(createdAt)})
+ON CONFLICT(trading_date, snapshot_minute_et) DO UPDATE SET
+  snapshot_time_et=excluded.snapshot_time_et,
+  generated_at=excluded.generated_at,
+  spot=excluded.spot,
+  snapshot_json=excluded.snapshot_json,
+  updated_at=excluded.updated_at;`;
+}).join("\n");
 const council = {
   status: "OK",
   latencyMs: 480,
@@ -124,16 +198,7 @@ VALUES
   (${quote(slotId)}, ${quote(stage)}, 0, ${quote(createdAt)}, ${json({ source: "LOCAL_FIXTURE", cellCount: fixture.cells.length })}, ${quote(createdAt)});`).join("\n");
 
 const sql = `
-INSERT INTO spx_gex_intraday_snapshots
-  (trading_date, snapshot_minute_et, snapshot_time_et, generated_at, ticker, spot, snapshot_json, created_at, updated_at)
-VALUES
-  (${quote(session.tradingDate)}, ${session.snapshotMinuteEt}, ${quote(session.snapshotTimeEt)}, ${quote(fixture.generatedAt)}, 'SPX', ${fixture.quote.last}, ${json(fixture)}, ${quote(createdAt)}, ${quote(createdAt)})
-ON CONFLICT(trading_date, snapshot_minute_et) DO UPDATE SET
-  snapshot_time_et=excluded.snapshot_time_et,
-  generated_at=excluded.generated_at,
-  spot=excluded.spot,
-  snapshot_json=excluded.snapshot_json,
-  updated_at=excluded.updated_at;
+${intradaySnapshotsSql}
 
 INSERT INTO spx_gex_collection_runs
   (slot_id, trading_date, snapshot_minute_et, snapshot_time_et, collected_minute_et, collected_time_et, current_stage, snapshot_id, payload_hash, provider, fallback_from, error, created_at, updated_at)
@@ -169,4 +234,4 @@ try {
   database.close();
 }
 
-console.log(`[SPX UAT] Seeded ${fixture.cells.length} cells / ${fixture.selectedExpiries.length} expiries / ${canonical.payloadHash}`);
+console.log(`[SPX UAT] Seeded ${intradayFixtures.length} intraday frames / ${fixture.cells.length} cells / ${fixture.selectedExpiries.length} expiries / ${canonical.payloadHash}`);

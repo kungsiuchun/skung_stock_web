@@ -42,6 +42,40 @@ export interface SpxPriceActionPattern {
   description: string;
 }
 
+export const sortSpxPriceActionPatternsLatestFirst = (
+  patterns: readonly SpxPriceActionPattern[],
+): SpxPriceActionPattern[] => [...patterns].sort((a, b) =>
+  b.toIndex - a.toIndex
+  || b.fromIndex - a.fromIndex
+  || b.confidence - a.confidence
+  || a.id.localeCompare(b.id));
+
+export interface SpxChartClientRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+export const projectSpxChartClientPoint = (input: {
+  clientX: number;
+  clientY: number;
+  rect: SpxChartClientRect;
+  viewBoxWidth: number;
+  viewBoxHeight: number;
+}) => {
+  const renderedWidth = Math.max(1, input.rect.width);
+  const renderedHeight = Math.max(1, input.rect.height);
+  const rawX = (input.clientX - input.rect.left) * input.viewBoxWidth / renderedWidth;
+  const rawY = (input.clientY - input.rect.top) * input.viewBoxHeight / renderedHeight;
+  return {
+    x: Math.max(0, Math.min(input.viewBoxWidth, rawX)),
+    y: Math.max(0, Math.min(input.viewBoxHeight, rawY)),
+    scaleX: input.viewBoxWidth / renderedWidth,
+    scaleY: input.viewBoxHeight / renderedHeight,
+  };
+};
+
 export interface SpxPriceActionZone {
   id: string;
   type: "support" | "resistance" | "flip";

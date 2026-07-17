@@ -4,6 +4,8 @@ import { buildSpxGexHeatmapReadingContext, formatSpxGexCompactExposure, type Spx
 import type { SpxDecisionCockpitProjection } from "@/lib/spx-decision-ledger";
 import type { SpxGexCollectionRecord } from "@/lib/spx-gex-collection-lifecycle";
 import { SpxPriceActionCompass } from "./spx-price-action-compass";
+import { SpxGexPressureMatrix } from "./spx-gex-pressure-matrix";
+import { SpxGexInlineTooltip, SpxGexTooltip, SpxGexTooltipSection } from "./spx-gex-tooltip";
 
 interface SpxGexHeatmapResponse {
   status: "READY" | "EMPTY" | "BINDING_MISSING" | "STORAGE_UNAVAILABLE" | "ERROR";
@@ -50,6 +52,15 @@ interface FailedPlaybackSnapshot {
   date: string;
   snapshotMinuteEt: number;
 }
+
+interface ActiveGexAuditCell {
+  key: string;
+  cell: SpxGexHeatmapCell;
+  anchor: { left: number; top: number; width: number; height: number };
+  locked: boolean;
+}
+
+const GEX_AUDIT_TOOLTIP_ID = "spx-gex-board-cell-tooltip";
 
 const sourceModeLabel = () => {
   const mode = (import.meta as ImportMeta & { env?: { MODE?: string } }).env?.MODE;
@@ -239,6 +250,11 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const [playing, setPlaying] = useState(false);
   const [speedMs, setSpeedMs] = useState(900);
   const [rowRangeMode, setRowRangeMode] = useState<RowRangeMode>("auto");
+  const [activeAuditCell, setActiveAuditCell] = useState<ActiveGexAuditCell | null>(null);
+  const activeAuditCellRef = useRef(activeAuditCell);
+  const auditHoverSuppressedAfterScrollRef = useRef(false);
+  activeAuditCellRef.current = activeAuditCell;
+  const [pressureRefreshKey, setPressureRefreshKey] = useState(0);
   const [failedPlayback, setFailedPlayback] = useState<FailedPlaybackSnapshot | null>(null);
   const activeRequestRef = useRef<AbortController | null>(null);
   const requestVersionRef = useRef(0);
@@ -383,6 +399,33 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     };
   }, [loadHeatmap, playing]);
 
+  useEffect(() => {
+    const dismissAuditTooltip = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setActiveAuditCell(null);
+    };
+    window.addEventListener("keydown", dismissAuditTooltip);
+    return () => window.removeEventListener("keydown", dismissAuditTooltip);
+  }, []);
+
+  useEffect(() => {
+    const dismissOnOuterScroll = (event: Event) => {
+      if (!activeAuditCellRef.current?.locked) return;
+      if (!window.matchMedia("(min-width: 768px)").matches) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest('[data-spx-gex-tooltip-surface]')) return;
+      auditHoverSuppressedAfterScrollRef.current = true;
+      setActiveAuditCell(null);
+    };
+    window.addEventListener("scroll", dismissOnOuterScroll, true);
+    document.addEventListener("scroll", dismissOnOuterScroll, true);
+    return () => {
+      window.removeEventListener("scroll", dismissOnOuterScroll, true);
+      document.removeEventListener("scroll", dismissOnOuterScroll, true);
+    };
+  }, []);
+
+  useEffect(() => setActiveAuditCell(null), [selectedDate, selectedMinute, rowRangeMode]);
+
   const heatmap = data.heatmap;
   const cellByKey = useMemo(() => {
     const map = new Map<string, SpxGexHeatmapCell>();
@@ -435,17 +478,33 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const sourceText = heatmap
     ? `${isDelayedSnapshot ? `15-min delayed snapshot · collected ${selectedSession?.collectedTimeEt} ET. ` : ""}${heatmap.source.note}`
     : "";
+  const activateAuditCell = useCallback((element: HTMLElement, cell: SpxGexHeatmapCell, locked: boolean) => {
+    if (locked) auditHoverSuppressedAfterScrollRef.current = false;
+    const key = `${cell.strike}:${cell.expdate}`;
+    const rect = element.getBoundingClientRect();
+    setActiveAuditCell((current) => {
+      if (locked && current?.key === key && current.locked) return null;
+      if (!locked && current?.locked) return current;
+      return { key, cell, anchor: { left: rect.left, top: rect.top, width: rect.width, height: rect.height }, locked };
+    });
+  }, []);
+  const clearTransientAuditCell = useCallback(() => {
+    setActiveAuditCell((current) => current?.locked ? current : null);
+  }, []);
   const snapshotControls = (
     <div data-spx-gex-snapshot-controls="true" className="flex flex-wrap items-center gap-2">
       <label className="inline-flex h-10 items-center gap-2 border border-white/10 bg-white/[0.04] px-3 text-sm text-zinc-300">
-        <CalendarDays className="h-4 w-4 text-cyan-200" />
+        <CalendarDays aria-hidden="true" className="h-4 w-4 text-cyan-200" />
+        <span className="sr-only">SPX GEX snapshot date</span>
         <select
+          name="spx-gex-snapshot-date"
+          aria-label="SPX GEX snapshot date"
           value={selectedDate}
           onChange={(event) => {
             setPlaying(false);
             void loadHeatmap(event.target.value, null);
           }}
-          className="bg-transparent text-sm font-bold text-white outline-none"
+          className="bg-[#06111a] text-sm font-bold text-white outline-none focus-visible:ring-2 focus-visible:ring-cyan-200"
         >
           {data.availableDates.length === 0 ? (
             <option value="">No snapshots</option>
@@ -461,14 +520,16 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
       <button
         onClick={() => {
           setPlaying(false);
+          setPressureRefreshKey(Date.now());
           void loadHeatmap(undefined, null, { bypassCache: true });
         }}
         disabled={loading}
+        aria-busy={loading}
         className="inline-flex h-10 w-10 items-center justify-center border border-cyan-300/20 bg-cyan-300/10 text-cyan-100 transition-colors hover:bg-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-50"
         title="Refresh latest DB snapshot"
         aria-label="Refresh latest DB snapshot"
       >
-        <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+        <RefreshCw aria-hidden="true" className={`h-4 w-4 ${loading ? "animate-spin motion-reduce:animate-none" : ""}`} />
       </button>
     </div>
   );
@@ -531,13 +592,21 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
 
         <SpxPriceActionCompass />
 
+        <SpxGexPressureMatrix
+          selectedDate={selectedDate}
+          selectedMinute={selectedMinute}
+          refreshKey={pressureRefreshKey}
+          controls={snapshotControls}
+        />
+
         {loading && !heatmap ? (
           <div className="flex h-72 items-center justify-center border border-white/10 bg-white/[0.03] text-sm uppercase tracking-[0.2em] text-zinc-500">
             Loading SPX GEX
           </div>
         ) : heatmap ? (
           <>
-            <section className="border border-[#123142] bg-[#04101a] p-3">
+            <section className="overflow-hidden border border-[#123142] bg-[#030910]" data-spx-gex-board-shell="true">
+            <header className="border-b border-[#123142] bg-[#04101a] p-3">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
                 <div className="max-w-2xl">
                   <div className="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200/70">Exposure board</div>
@@ -546,11 +615,10 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                     Strike-by-expiry GEX matrix with deterministic structure labels and DEX/VEX/CEX exposure lanes.
                   </p>
                 </div>
-                <div className="shrink-0 sm:self-end">{snapshotControls}</div>
               </div>
-            </section>
+            </header>
 
-            <section className="border border-[#123142] bg-[#06111a] p-3" data-spx-decision-cockpit="true">
+            <div className="border-b border-[#123142] bg-[#06111a] p-3" data-spx-decision-cockpit="true">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <div className="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200/70">Decision cockpit</div>
@@ -612,9 +680,9 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
               <div className="mt-2 break-all font-mono text-[9px] leading-4 text-zinc-600">
                 Snapshot {heatmap.canonical?.snapshotId || "legacy/no-id"} · {heatmap.canonical?.payloadHash || "hash unavailable"} · provider {heatmap.canonical?.provider || "unknown"}
               </div>
-            </section>
+            </div>
 
-            <section className="border border-[#123142] bg-[#06111a] p-3">
+            <div className="border-b border-[#123142] bg-[#06111a] p-3" data-spx-gex-playback-controls="true">
               <div
                 className="mb-4 flex snap-x snap-mandatory gap-2 overflow-x-auto overscroll-x-contain pb-2 [scrollbar-width:thin] sm:mb-3 sm:grid sm:grid-cols-2 sm:overflow-visible sm:pb-0 lg:grid-cols-5"
                 aria-label="SPX GEX summary metrics"
@@ -636,6 +704,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                     setPlaying(true);
                   }}
                   disabled={!playing && (loading || data.sessions.length <= 1)}
+                  aria-label={playing ? "Pause GEX timeline" : "Play GEX timeline"}
                   className="inline-flex h-10 w-12 items-center justify-center border border-pink-400/30 bg-pink-400/15 text-pink-100 transition-colors hover:bg-pink-400/25 disabled:cursor-not-allowed disabled:opacity-40"
                   title={playing ? "Pause timeline" : "Play timeline"}
                 >
@@ -644,6 +713,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                 <div className="min-w-0 flex-1">
                   <input
                     type="range"
+                    aria-label="Select SPX GEX snapshot"
                     min={0}
                     max={Math.max(0, data.sessions.length - 1)}
                     value={selectedSessionIndex}
@@ -670,6 +740,8 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                   </div>
                 </div>
                 <select
+                  name="spx-gex-playback-speed"
+                  aria-label="SPX GEX playback speed"
                   value={speedMs}
                   onChange={(event) => setSpeedMs(Number(event.target.value))}
                   className="h-10 border border-white/10 bg-[#08131d] px-3 text-sm font-bold text-white outline-none"
@@ -679,9 +751,9 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                   <option value={500}>3X</option>
                 </select>
               </div>
-            </section>
+            </div>
 
-            <section className="overflow-x-auto border border-[#123142] bg-[#030910]" data-spx-gex-heatmap-board="true">
+            <div className="overflow-x-auto bg-[#030910]" data-spx-gex-heatmap-board="true" onScroll={() => setActiveAuditCell(null)}>
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#123142] bg-[#06111a] px-3 py-2">
                 <div className="flex flex-wrap items-center gap-3 font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200/70">
                   <span>{visibleStrikes.length} / {heatmap.strikes.length} strikes</span>
@@ -730,34 +802,46 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                           return (
                             <td
                               key={`${strike}-${expiry}`}
-                              className="group relative border border-[#102433] px-1.5 py-[2px] text-right font-black tabular-nums"
+                              className="relative border border-[#102433] p-0 text-right font-black tabular-nums"
                               style={cellStyleForCell(cell, maxGex)}
-                              title={auditLines.join("\n")}
                               data-gex-audit-cell={cell ? "true" : undefined}
                               data-gex-value-state={exposureState(cell?.netGex)}
                               data-gex-pricing-quality={cell?.pricingQuality}
                             >
-                              <span>{cellDisplayLabel(cell)}</span>
-                              {cellBadges(cell).map((badge) => (
-                                <span
-                                  key={badge}
-                                  className="ml-1 inline-flex h-3.5 items-center border border-white/20 bg-black/25 px-1 align-middle text-[8px] font-black uppercase text-white/90"
+                              {cell ? (
+                                <button
+                                  type="button"
+                                  className="flex h-full min-h-5 w-full items-center justify-end px-1.5 py-[2px] text-right hover:brightness-125 focus-visible:relative focus-visible:z-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-100"
+                                  onMouseEnter={(event) => {
+                                    if (!auditHoverSuppressedAfterScrollRef.current) activateAuditCell(event.currentTarget, cell, false);
+                                  }}
+                                  onMouseLeave={() => {
+                                    auditHoverSuppressedAfterScrollRef.current = false;
+                                    clearTransientAuditCell();
+                                  }}
+                                  onPointerMove={(event) => {
+                                    if (!auditHoverSuppressedAfterScrollRef.current) return;
+                                    auditHoverSuppressedAfterScrollRef.current = false;
+                                    activateAuditCell(event.currentTarget, cell, false);
+                                  }}
+                                  onFocus={(event) => {
+                                    auditHoverSuppressedAfterScrollRef.current = false;
+                                    activateAuditCell(event.currentTarget, cell, false);
+                                  }}
+                                  onBlur={clearTransientAuditCell}
+                                  onClick={(event) => activateAuditCell(event.currentTarget, cell, true)}
+                                  aria-label={`Strike ${cell.strike}, expiry ${cell.expdate}, ${auditLines[2] || cellDisplayLabel(cell)}`}
+                                  aria-describedby={activeAuditCell?.key === `${cell.strike}:${cell.expdate}` ? GEX_AUDIT_TOOLTIP_ID : undefined}
+                                  data-gex-audit-trigger="true"
                                 >
-                                  {badge}
-                                </span>
-                              ))}
-                              {cell && (
-                                <span
-                                  className="pointer-events-none absolute left-1/2 top-full z-50 hidden w-80 -translate-x-1/2 whitespace-normal border border-cyan-300/35 bg-[#02070d] p-2 text-left text-[10px] font-semibold leading-4 text-cyan-50 shadow-2xl shadow-black/60 group-hover:block"
-                                  data-gex-audit-tooltip="true"
-                                >
-                                  {auditLines.map((line) => (
-                                    <span key={line} className="block">
-                                      {line}
+                                  <span>{cellDisplayLabel(cell)}</span>
+                                  {cellBadges(cell).map((badge) => (
+                                    <span key={badge} className="ml-1 inline-flex h-3.5 items-center border border-white/20 bg-black/25 px-1 align-middle text-[8px] font-black uppercase text-white/90">
+                                      {badge}
                                     </span>
                                   ))}
-                                </span>
-                              )}
+                                </button>
+                              ) : <span className="block px-1.5 py-[2px]">{cellDisplayLabel(cell)}</span>}
                             </td>
                           );
                         })}
@@ -788,6 +872,24 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                   })}
                 </tbody>
               </table>
+              {activeAuditCell && (
+                <SpxGexTooltip
+                  id={GEX_AUDIT_TOOLTIP_ID}
+                  anchor={activeAuditCell.anchor}
+                  width={380}
+                  estimatedHeight={520}
+                  surface="board"
+                  interactive={activeAuditCell.locked}
+                >
+                  <GexAuditCellDetail activeCell={activeAuditCell} />
+                </SpxGexTooltip>
+              )}
+              <SpxGexInlineTooltip surface="board">
+                {activeAuditCell ? <GexAuditCellDetail activeCell={activeAuditCell} /> : (
+                  <div className="text-zinc-500">Tap a priced expiry cell for complete GEX audit evidence.</div>
+                )}
+              </SpxGexInlineTooltip>
+            </div>
             </section>
 
             <section className="grid gap-3 text-xs text-zinc-400 lg:grid-cols-[1fr_360px]">
@@ -841,6 +943,51 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     </section>
   );
 }
+
+const GexAuditCellDetail = ({ activeCell }: { activeCell: ActiveGexAuditCell }) => {
+  const { cell } = activeCell;
+  const priced = typeof cell.netGex === "number" && Number.isFinite(cell.netGex);
+  return (
+    <div className="space-y-2">
+      <SpxGexTooltipSection>
+        <div className="flex items-start justify-between gap-3">
+          <div className="font-black text-white">Strike {cell.strike} / {cell.expdate}</div>
+          <span className="shrink-0 border border-cyan-300/30 bg-cyan-300/10 px-1.5 py-0.5 text-[10px] font-black uppercase text-cyan-100">
+            {cell.pricingQuality || "legacy"}
+          </span>
+        </div>
+        <div className="text-zinc-500">Model {cell.model || "none"}</div>
+      </SpxGexTooltipSection>
+      <SpxGexTooltipSection label="Exposure">
+        {priced ? (
+          <>
+            <div className="font-black text-white">Net GEX {formatSignedCompact(cell.netGex)}</div>
+            <div>Call {formatSignedCompact(cell.callGex)} / Put {formatSignedCompact(cell.putGex)}</div>
+          </>
+        ) : <div className="text-zinc-400">State {cellDisplayLabel(cell)}</div>}
+      </SpxGexTooltipSection>
+      <SpxGexTooltipSection label="Volatility Inputs">
+        <div>Gamma IV {formatPercent(cell.gammaIvPercent)}</div>
+        <div>Call IV {formatNumber(cell.callRawIv)} → {formatPercent(cell.callIvPercent)} / {formatIvSource(cell.callIvSource)}</div>
+        <div>Put IV {formatNumber(cell.putRawIv)} → {formatPercent(cell.putIvPercent)} / {formatIvSource(cell.putIvSource)}</div>
+      </SpxGexTooltipSection>
+      <SpxGexTooltipSection label="Market Inputs">
+        <div>Call bid / ask / last {formatNumber(cell.callBid)} / {formatNumber(cell.callAsk)} / {formatNumber(cell.callLastPrice)}</div>
+        <div>Put bid / ask / last {formatNumber(cell.putBid)} / {formatNumber(cell.putAsk)} / {formatNumber(cell.putLastPrice)}</div>
+        <div>Raw OI C {formatNumber(cell.callOpenInterest)} / P {formatNumber(cell.putOpenInterest)}</div>
+        <div>Effective OI C {formatNumber(cell.callEffectiveOpenInterest)} / P {formatNumber(cell.putEffectiveOpenInterest)}</div>
+      </SpxGexTooltipSection>
+      <SpxGexTooltipSection label="Audit Trail">
+        <div>DTE {formatNumber(cell.dteHours)}h / t={formatYears(cell.yearsToExpiry)}</div>
+        <div>Formula: Net = Call gamma − Put gamma</div>
+        {(cell.repairNotes || []).map((note) => <div key={note} className="text-amber-200">Repair: {note}</div>)}
+        {(cell.missingReasons || []).length > 0 && <div className="text-red-200">Audit flags: {(cell.missingReasons || []).join(", ")}</div>}
+        <div className="break-all text-zinc-500">Calculated {cell.calculationTimestamp || "n/a"}</div>
+      </SpxGexTooltipSection>
+      {activeCell.locked && <div className="text-zinc-500">Pinned / press Escape to dismiss</div>}
+    </div>
+  );
+};
 
 const Notice = ({ tone, text }: { tone: "red" | "amber"; text: string }) => (
   <div className={`flex items-center gap-2 border px-4 py-3 text-sm ${tone === "red" ? "border-red-400/30 bg-red-400/10 text-red-100" : "border-amber-400/30 bg-amber-400/10 text-amber-100"}`}>
