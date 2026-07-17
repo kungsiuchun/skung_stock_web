@@ -282,12 +282,15 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
         rotatedTimeLabels: document.querySelectorAll('[data-pressure-axis-major] .-rotate-45').length,
         missingColumns: document.querySelectorAll('[data-pressure-column-status="MISSING"]').length,
         spotGuide: Boolean(document.querySelector('[data-spx-gex-pressure-spot-guide="true"]')),
+        spotLiveChip: Boolean(document.querySelector('[data-spx-gex-pressure-live-spot="true"]')),
         spotCallout: Boolean(document.querySelector('[data-spx-gex-pressure-spot-callout="true"]')),
+        selectedHeaderCount: document.querySelectorAll('[data-pressure-selected-slot="true"]').length,
+        selectedBodyRingCount: [...document.querySelectorAll('[data-pressure-cell="true"]')].filter((cell) => cell.classList.contains("ring-1")).length,
         pulseTargets: [
           '[data-spx-gex-pressure-spot-marker="true"]',
           '[data-spx-gex-pressure-spot-guide="true"]',
           '[data-spx-gex-pressure-spot-endpoint="true"]',
-          '[data-spx-gex-pressure-spot-callout="true"]',
+          '[data-spx-gex-pressure-live-spot="true"]',
           '[data-spx-gex-heatmap-spot-badge="true"]',
           '[data-spx-gex-heatmap-spot-row="true"]',
           '[data-spx-gex-heatmap-spot-pill="true"]',
@@ -320,7 +323,10 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.equal(pressureLayout.rotatedTimeLabels, 0, "time labels must not be rotated");
     assert.ok(pressureLayout.missingColumns > 0, "an internal missing GEX column must be visibly represented");
     assert.equal(pressureLayout.spotGuide, true, "current SPX guide must render");
-    assert.equal(pressureLayout.spotCallout, true, "latest SPX endpoint callout must render");
+    assert.equal(pressureLayout.spotLiveChip, true, "latest SPX price must render outside the chart body");
+    assert.equal(pressureLayout.spotCallout, false, "chart body must not contain an SPX price card that obscures the line");
+    assert.equal(pressureLayout.selectedHeaderCount, 1, "exactly one pressure time header must identify the selected slot");
+    assert.equal(pressureLayout.selectedBodyRingCount, 0, "selected pressure slot must not add a border to every matrix cell");
     assert.deepEqual(pressureLayout.pulseTargets.filter((target) => !target.pulses), [], "every current-spot marker must use the live pulse surface");
     assert.equal(pressureLayout.stickyStrike, "sticky", "strike rail must remain sticky");
     assert.equal(pressureLayout.stickyCurrentGex, "sticky", "Current GEX rail must remain sticky");

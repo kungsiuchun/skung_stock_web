@@ -339,8 +339,11 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
   const oneMinuteOverlayPending = priceOverlay?.selectedDate !== selectedDate;
   const usingOneMinuteSpot = chartGeometry?.resolution === "1m";
   const spotSourceLabel = usingOneMinuteSpot
-    ? `SPX 1M / ${(priceOverlay?.data?.source.provider || "source").toUpperCase()} / LATEST ${latestYahooPoint?.timeEt || "--:--"} ET`
+    ? `SPX 1M / ${(priceOverlay?.data?.source.provider || "source").toUpperCase()}`
     : oneMinuteOverlayPending ? "SPX 1M LOADING…" : "SPX 15M SNAPSHOT FALLBACK";
+  const spotLiveLabel = chartGeometry?.latestPoint
+    ? `SPX ${spotFormatter.format(chartGeometry.latestPoint.price)} · ${chartGeometry.latestPoint.timeEt} ET`
+    : null;
   const priceOverlayWarning = !usingOneMinuteSpot && !oneMinuteOverlayPending
     ? priceOverlay?.error || `No SPX 1-minute candles are available for ${selectedDate}; showing the canonical 15-minute snapshot line.`
     : null;
@@ -381,6 +384,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
           <span className="border border-cyan-300/60 bg-cyan-300/10 px-2 py-1 font-mono text-[10px] font-black text-cyan-100">0DTE</span>
           {pressure && <span className="border border-amber-300/30 bg-amber-300/10 px-2 py-1 font-mono text-[10px] font-black text-amber-100">{pressure.delayMinutes}M DELAYED</span>}
           {pressure && <span className="border border-cyan-300/30 bg-cyan-300/5 px-2 py-1 font-mono text-[10px] font-black text-cyan-100" data-spx-gex-pressure-spot-source="true">{spotSourceLabel}</span>}
+          {spotLiveLabel && <span key={spotPulseKey || "spot-live"} className="spx-spot-live-pulse border border-cyan-300/70 bg-cyan-300/10 px-2 py-1 font-mono text-[10px] font-black text-cyan-50 shadow-[0_0_14px_rgba(34,211,238,.14)]" data-spx-gex-pressure-live-spot="true">{spotLiveLabel}</span>}
           {controls}
         </div>
       </div>
@@ -418,11 +422,14 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
                         className={`relative flex h-11 shrink-0 items-start justify-center border-l border-[#102433] pt-2 font-black ${slot.snapshotMinuteEt === selectedMinute ? "bg-cyan-300/15 text-cyan-100" : slot.status === "MISSING" ? "text-amber-200/80" : slot.status === "PENDING" ? "text-zinc-600" : "text-cyan-200/70"}`}
                         style={{ width: effectiveCellWidth }}
                         title={`${slot.snapshotTimeEt} ET${slot.collectedTimeEt ? ` / collected ${slot.collectedTimeEt} ET` : slot.status === "PENDING" ? " / pending collection" : " / missing"}`}
+                        aria-current={slot.snapshotMinuteEt === selectedMinute ? "time" : undefined}
                         data-pressure-axis-major={slot.isMajor ? "true" : "false"}
                         data-pressure-column-status={slot.status}
+                        data-pressure-selected-slot={slot.snapshotMinuteEt === selectedMinute ? "true" : undefined}
                       >
-                        {slot.isMajor && <span className="whitespace-nowrap text-[9px]">{slot.snapshotTimeEt}</span>}
-                        {!slot.isMajor && <span className="mt-1 h-1.5 w-px bg-cyan-200/25" aria-hidden="true" />}
+                        {slot.snapshotMinuteEt === selectedMinute && <span className="absolute inset-x-0 top-0 h-0.5 bg-cyan-200 shadow-[0_0_8px_rgba(34,211,238,.9)]" aria-hidden="true" />}
+                        {(slot.isMajor || slot.snapshotMinuteEt === selectedMinute) && <span className="whitespace-nowrap text-[9px]">{slot.snapshotTimeEt}</span>}
+                        {!slot.isMajor && slot.snapshotMinuteEt !== selectedMinute && <span className="mt-1 h-1.5 w-px bg-cyan-200/25" aria-hidden="true" />}
                         {slot.status === "MISSING" && <span className="absolute bottom-1 text-[8px] font-black tracking-[-0.08em]">MISSING</span>}
                         {slot.status === "PENDING" && <span className="absolute bottom-1 text-[8px] font-black tracking-[-0.08em]">PENDING</span>}
                       </div>
@@ -463,7 +470,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
                             <button
                               key={key}
                               type="button"
-                              className={`relative z-10 flex shrink-0 items-center justify-center border-b border-l border-[#102433] font-black transition-[filter] hover:brightness-150 focus-visible:z-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-200 ${cell.snapshotMinuteEt === selectedMinute ? "ring-1 ring-inset ring-cyan-300/45" : ""}`}
+                              className="relative z-10 flex shrink-0 items-center justify-center border-b border-l border-[#102433] font-black transition-[filter] hover:brightness-150 focus-visible:z-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-200"
                               style={{ width: effectiveCellWidth, minWidth: effectiveCellWidth, height: ROW_HEIGHT, minHeight: ROW_HEIGHT, background: cellBackground(cell, slot.status !== "READY"), color: stateColor(cell.state, cell.currentGex) }}
                               onMouseEnter={(event) => {
                                 if (!hoverSuppressedAfterScrollRef.current) activateCell(event.currentTarget, row.strike, cell, false);
@@ -509,13 +516,6 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
                         <polyline key={index} points={segment.map((point) => `${point.x},${point.y}`).join(" ")} fill="none" stroke="#22d3ee" strokeWidth="1.7" vectorEffect="non-scaling-stroke" />
                       ))}
                       {chartGeometry?.latestPoint && <circle key={`${spotPulseKey || "spot"}:endpoint`} className="spx-spot-live-pulse" cx={chartGeometry.latestPoint.x} cy={chartGeometry.latestPoint.y} r="4" fill="#ecfeff" stroke="#22d3ee" strokeWidth="2" data-spx-gex-pressure-spot-endpoint="true" />}
-                      {chartGeometry?.latestPoint && chartGeometry.callout && (
-                        <g key={`${spotPulseKey || "spot"}:callout`} className="spx-spot-live-pulse" transform={`translate(${chartGeometry.callout.x} ${chartGeometry.callout.y})`} data-spx-gex-pressure-spot-callout="true">
-                          <rect width={chartGeometry.callout.width} height={chartGeometry.callout.height} rx="5" fill="#04222c" stroke="#22d3ee" strokeOpacity="0.9" />
-                          <text x="8" y="16" fill="#ecfeff" fontSize="13" fontWeight="800">{spotFormatter.format(chartGeometry.latestPoint.price)}</text>
-                          <text x="8" y="29" fill="#67e8f9" fontSize="9" fontWeight="700">{chartGeometry.latestPoint.timeEt} ET / {chartGeometry.resolution}</text>
-                        </g>
-                      )}
                     </svg>
                     <span className="sr-only">{usingOneMinuteSpot ? "SPX 1-minute Yahoo price overlay" : "SPX 15-minute canonical snapshot fallback overlay"}</span>
                   </div>

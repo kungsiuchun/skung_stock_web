@@ -2033,7 +2033,7 @@ describe("SPX 0DTE pressure matrix", () => {
     assert.equal(ticks.find((tick) => tick.snapshotTimeEt === "10:00")?.status, "MISSING");
   });
 
-  it("maps 1-minute price geometry, clamps the spot guide, and keeps the endpoint callout inside the matrix", () => {
+  it("maps 1-minute price geometry and clamps the spot guide without drawing an in-chart price card", () => {
     const pressure = buildSpxGexPressureMatrix([
       buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, baselineValues),
       buildPressureSnapshot("2026-05-27T14:00:00.000Z", 6005, currentValues),
@@ -2047,9 +2047,7 @@ describe("SPX 0DTE pressure matrix", () => {
     assert.equal(geometry.pointCount, 2);
     assert.equal(geometry.latestPoint?.timeEt, "09:45");
     assert.equal(geometry.segments[0][0].y, 12.5);
-    assert.ok(geometry.callout);
-    assert.ok(geometry.callout.x >= 4);
-    assert.ok(geometry.callout.x + geometry.callout.width <= pressure.timeline.length * 34 - 4);
+    assert.equal("callout" in geometry, false);
     assert.equal(geometry.spotGuide?.price, 6005);
   });
 

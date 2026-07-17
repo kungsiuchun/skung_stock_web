@@ -118,7 +118,6 @@ export interface SpxGexPressureChartGeometry {
   segments: SpxGexPressureChartPoint[][];
   latestPoint: SpxGexPressureChartPoint | null;
   spotGuide: { price: number; y: number; timeEt: string } | null;
-  callout: { x: number; y: number; width: number; height: number } | null;
 }
 
 export interface SpxGexPressureTooltipPositionInput {
@@ -292,22 +291,12 @@ export const buildSpxGexPressureChartGeometry = (
       }, []);
   const latestSegment = segments.length > 0 ? segments[segments.length - 1] : null;
   const latestPoint = latestSegment && latestSegment.length > 0 ? latestSegment[latestSegment.length - 1] : null;
-  const calloutWidth = Math.min(94, Math.max(0, width - 8));
-  const calloutHeight = Math.min(38, Math.max(0, height - 8));
-  const callout = latestPoint ? {
-    x: clamp(latestPoint.x - calloutWidth - 10, 4, Math.max(4, width - calloutWidth - 4)),
-    y: clamp(latestPoint.y - calloutHeight / 2, 4, Math.max(4, height - calloutHeight - 4)),
-    width: calloutWidth,
-    height: calloutHeight,
-  } : null;
-
   return {
     resolution: usingOneMinute ? "1m" : "15m-fallback",
     pointCount: usingOneMinute ? oneMinutePointCount : segments.reduce((total, segment) => total + segment.length, 0),
     segments,
     latestPoint,
     spotGuide: latestPoint ? { price: latestPoint.price, y: latestPoint.y, timeEt: latestPoint.timeEt } : null,
-    callout,
   };
 };
 
