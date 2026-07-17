@@ -24,6 +24,7 @@ import {
   type SpxDeliveryMode,
   type SpxLifecycleStage,
   type SpxOpenPositionContext,
+  type SpxPosition,
 } from '../src/lib/spx-decision-pipeline';
 import { D1SpxDecisionStore, queryLifecycleCoverage } from '../src/lib/spx-decision-ledger';
 import { D1SpxGexCollectionStore, querySpxGexCollectionCoverage } from '../src/lib/spx-gex-collection-lifecycle';
@@ -2171,7 +2172,12 @@ export function getMarketScheduleStatus(now: Date = new Date()) {
   const isFullHoliday = fullHolidayKeys.has(etDateKey);
   const isMarketOpenDay = !isWeekend && !isFullHoliday;
   const isEarlyClose = isMarketOpenDay && getEarlyCloseMarketHolidayKeys(etNow.getFullYear(), fullHolidayKeys).has(etDateKey);
-  const tradingEndMinutes = isEarlyClose ? 12 * 60 + 45 : 15 * 60 + 45;
+  // The final scheduled decision slot is a deterministic flattening pass, not
+  // a discretionary trade window.  It leaves fifteen minutes before the cash
+  // close for the advisory close to be acted on without keeping a strategy
+  // position overnight.
+  const closeFlattenMinutes = isEarlyClose ? 12 * 60 + 45 : 15 * 60 + 45;
+  const tradingEndMinutes = closeFlattenMinutes;
   const auditMinutes = isEarlyClose ? 13 * 60 + 15 : 16 * 60 + 15;
 
   return {
@@ -2181,9 +2187,22 @@ export function getMarketScheduleStatus(now: Date = new Date()) {
     isMarketOpenDay,
     isEarlyClose,
     isTradingWindow: isMarketOpenDay && minutes >= 10 * 60 && minutes <= tradingEndMinutes,
+    isCloseFlattenWindow: isMarketOpenDay && minutes === closeFlattenMinutes,
     isAuditWindow: isMarketOpenDay && minutes === auditMinutes,
     skipReason: isWeekend ? 'weekend' : isFullHoliday ? 'us_market_holiday' : null
   };
+}
+
+export const END_OF_DAY_FLATTEN_REASON = 'end_of_day_flatten';
+
+export function getEndOfDayRiskDirective(
+  marketStatus: Pick<ReturnType<typeof getMarketScheduleStatus>, 'isCloseFlattenWindow'>,
+  currentPosition: SpxPosition,
+): RiskGateDirective | null {
+  if (!marketStatus.isCloseFlattenWindow) return null;
+  return currentPosition === 'NONE'
+    ? { disposition: 'VETO_TO_HOLD', reason: END_OF_DAY_FLATTEN_REASON }
+    : { disposition: 'REQUIRE_CLOSE', reason: END_OF_DAY_FLATTEN_REASON };
 }
 
 function getConsecutiveLosses(actionLog: ActionLogItem[]) {
@@ -3793,9 +3812,12 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
       (zeroDteRuleEngine.verdict === 'NO_TRADE' && zeroDteRuleEngine.signalScore < 45) ||
       (zeroDteRuleEngine.gammaPinningDetected && trendDayContext.regime === 'RANGE_OR_MIXED') ||
       zeroDteRuleEngine.directionalBias === 'NONE';
+    const endOfDayDirective = getEndOfDayRiskDirective(marketStatus, dailyMemory.currentPosition);
     const canonicalGexDirective = getCanonicalGexRiskDirective(marketSnapshot, cioDecision);
     let riskDirective: RiskGateDirective = { disposition: 'PASS', reason: 'No safety veto.' };
-    if (zeroDteRuleEngine.verdict === 'CLOSE_OR_REDUCE_SUGGESTED' && dailyMemory.currentPosition !== 'NONE') {
+    if (endOfDayDirective) {
+      riskDirective = endOfDayDirective;
+    } else if (zeroDteRuleEngine.verdict === 'CLOSE_OR_REDUCE_SUGGESTED' && dailyMemory.currentPosition !== 'NONE') {
       riskDirective = {
         disposition: 'REQUIRE_CLOSE',
         reason: `0DTE safety close: ${zeroDteRuleEngine.hardBlocks.join(', ') || 'position_timeout'}`,

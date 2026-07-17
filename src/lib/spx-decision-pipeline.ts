@@ -724,6 +724,7 @@ export function formatTelegramDecisionMessage(input: TelegramDecisionMessageInpu
     if (riskGate.reason === "canonical_gex_missing") return "Canonical GEX 缺失，禁止方向性開倉";
     if (riskGate.reason === "canonical_gex_stale") return "Canonical GEX 超過 35 分鐘，禁止方向性開倉";
     if (riskGate.reason.startsWith("canonical_gex_schema_mismatch")) return "Canonical GEX schema 不相容，禁止方向性開倉";
+    if (riskGate.reason === "end_of_day_flatten") return "收市前策略平倉；不留策略過夜倉";
     if (riskGate.disposition === "REQUIRE_CLOSE") return "安全條件要求關閉現有持倉";
     return "安全條件未通過，方向性交易已否決";
   })();
@@ -756,7 +757,10 @@ export function formatTelegramDecisionMessage(input: TelegramDecisionMessageInpu
   } else if (riskGate.action === "HOLD") {
     lines.push(`⏸️ 計劃｜不開倉；${run.degraded ? "等待下一個完整決策週期。" : "等待條件成立。"}`);
   } else if (riskGate.action === "CLOSE") {
-    lines.push("⏸️ 計劃｜關閉現有持倉，不建立反方向倉位。");
+    lines.push(riskGate.reason === "end_of_day_flatten"
+      ? "⏸️ 計劃｜收市前策略平倉；不留策略過夜倉。"
+      : "⏸️ 計劃｜關閉現有持倉，不建立反方向倉位。"
+    );
   } else {
     if (cioDecision.entry) lines.push(`🎯 進場｜${compactPlanText(cioDecision.entry)}`);
     if (cioDecision.invalidation) lines.push(`🛑 失效｜${compactPlanText(cioDecision.invalidation)}`);

@@ -16,7 +16,10 @@ import {
   countDirectionalVotes,
   decideWithCio,
   deriveOpenPositionContext,
+  END_OF_DAY_FLATTEN_REASON,
   formatAgentTelegramBrief,
+  getEndOfDayRiskDirective,
+  getMarketScheduleStatus,
   hasActiveTradingRunLock,
   parseAgentResponseWithDataFallback,
   parseAgentResponseContent,
@@ -82,6 +85,32 @@ test("Council retry keeps a full 45-second timeout while the shared deadline has
   assert.equal(resolveAttemptTimeoutMs(45_000, 55_000), 45_000);
   assert.equal(resolveAttemptTimeoutMs(45_000, 10_000), 10_000);
   assert.equal(resolveAttemptTimeoutMs(45_000, null), 45_000);
+});
+
+test("end-of-day flatten is a deterministic Risk Gate rule at the final regular and early-close slots", () => {
+  const regularCloseSlot = getMarketScheduleStatus(new Date("2026-07-16T19:45:03.000Z"));
+  assert.equal(regularCloseSlot.isTradingWindow, true);
+  assert.equal(regularCloseSlot.isCloseFlattenWindow, true);
+  assert.deepEqual(getEndOfDayRiskDirective(regularCloseSlot, "PUT"), {
+    disposition: "REQUIRE_CLOSE",
+    reason: END_OF_DAY_FLATTEN_REASON,
+  });
+  assert.deepEqual(getEndOfDayRiskDirective(regularCloseSlot, "NONE"), {
+    disposition: "VETO_TO_HOLD",
+    reason: END_OF_DAY_FLATTEN_REASON,
+  });
+
+  const beforeCloseSlot = getMarketScheduleStatus(new Date("2026-07-16T19:30:03.000Z"));
+  assert.equal(beforeCloseSlot.isCloseFlattenWindow, false);
+  assert.equal(getEndOfDayRiskDirective(beforeCloseSlot, "CALL"), null);
+
+  const earlyCloseSlot = getMarketScheduleStatus(new Date("2026-11-27T17:45:03.000Z"));
+  assert.equal(earlyCloseSlot.isEarlyClose, true);
+  assert.equal(earlyCloseSlot.isCloseFlattenWindow, true);
+  assert.deepEqual(getEndOfDayRiskDirective(earlyCloseSlot, "CALL"), {
+    disposition: "REQUIRE_CLOSE",
+    reason: END_OF_DAY_FLATTEN_REASON,
+  });
 });
 
 test("M5 analysis excludes the in-progress and zero-volume phantom candles", () => {

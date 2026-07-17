@@ -585,6 +585,36 @@ test("position directives distinguish flat wait, hold, and Risk Gate required cl
   assert.equal(applyRiskGate(hold, { disposition: "REQUIRE_CLOSE", reason: "risk" }, "PUT").positionDirective, "CLOSE_PUT");
 });
 
+test("end-of-day Risk Gate closes an existing PUT and states the no-overnight policy in Telegram", async () => {
+  const { dependencies, sent } = buildDependencies({
+    riskGate: {
+      evaluate: async () => ({ disposition: "REQUIRE_CLOSE", reason: "end_of_day_flatten" }),
+    },
+  });
+
+  const result = await runSpxDecisionPipeline({
+    runId: "end-of-day-close-put",
+    scheduledAt,
+    currentPosition: "PUT",
+    openPosition: {
+      side: "PUT",
+      entryPrice: 7532.21,
+      entryTime: "2026/07/16 14:30:03",
+      invalidation: "SPX 7540 reclaim invalidates the PUT",
+      targets: ["SPX 7520"],
+      openingRunId: "open-put-run",
+    },
+  }, dependencies);
+
+  assert.equal(result.finalDecision.action, "CLOSE");
+  assert.equal(result.run.riskGate?.disposition, "REQUIRE_CLOSE");
+  assert.equal(result.run.riskGate?.reason, "end_of_day_flatten");
+  assert.equal(result.run.riskGate?.positionDirective, "CLOSE_PUT");
+  assert.match(sent[0] || "", /SPX: 7523\.96 操作：平倉 Put/);
+  assert.match(sent[0] || "", /收市前策略平倉；不留策略過夜倉/);
+  assert.doesNotMatch(sent[0] || "", /end_of_day_flatten/);
+});
+
 test("stale recovery selects only interrupted decision stages and never re-recovers PERSISTED runs", () => {
   assert.equal(isStaleIncompleteDecisionStage("LOCK_ACQUIRED"), true);
   assert.equal(isStaleIncompleteDecisionStage("RISK_GATED"), true);

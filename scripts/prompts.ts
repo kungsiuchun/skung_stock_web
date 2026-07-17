@@ -61,7 +61,7 @@ Decision framework:
 9. Stops must be placed at structural invalidation, not random points.
 10. Targets must respect repeated intraday support/resistance; do not set far targets through defended levels without acceptance beyond them.
 11. This is advisory only. Do not mention broker routing, fills, auto-trading, or direct execution.
-12. Do not hold overnight. If currentTime is after 15:45 ET and a position is open, choose CLOSE.
+12. Do not hold overnight. At or after 15:45 ET (12:45 ET early close), any open position must be CLOSED. The deterministic Risk Gate enforces this independently of your answer.
 
 Output ONLY one valid JSON object with exactly these nine keys in this exact order and no additional keys:
 {
