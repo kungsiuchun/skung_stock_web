@@ -30,8 +30,10 @@ export const parseDotEnv = (content) => Object.fromEntries(
 
 export const buildCloudflareDeployEnv = (vars, inherited = process.env) => {
   const token = inherited.CLOUDFLARE_API_TOKEN || vars.CF_API_TOKEN;
+  const accountId = inherited.CLOUDFLARE_ACCOUNT_ID || vars.CF_ACCOUNT_ID;
   if (!token) throw new Error("Cloudflare deploy requires CLOUDFLARE_API_TOKEN or .dev.vars CF_API_TOKEN.");
-  return { ...inherited, CLOUDFLARE_API_TOKEN: token };
+  if (!accountId) throw new Error("Cloudflare deploy requires CLOUDFLARE_ACCOUNT_ID or .dev.vars CF_ACCOUNT_ID.");
+  return { ...inherited, CLOUDFLARE_API_TOKEN: token, CLOUDFLARE_ACCOUNT_ID: accountId };
 };
 
 export const loadDeployVars = (varsPath = path.resolve(process.cwd(), ".dev.vars")) => {

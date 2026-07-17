@@ -4,8 +4,9 @@ import { buildCloudflareDeployEnv, RUNTIME_SECRET_KEYS, syncSecrets } from "../s
 
 describe("Cloudflare deploy credential boundary", () => {
   it("maps CF_API_TOKEN to Wrangler auth without treating it as an app secret", () => {
-    const env = buildCloudflareDeployEnv({ CF_API_TOKEN: "deploy-token" }, {});
+    const env = buildCloudflareDeployEnv({ CF_API_TOKEN: "deploy-token", CF_ACCOUNT_ID: "account-id" }, {});
     assert.equal(env.CLOUDFLARE_API_TOKEN, "deploy-token");
+    assert.equal(env.CLOUDFLARE_ACCOUNT_ID, "account-id");
     assert.equal(RUNTIME_SECRET_KEYS.includes("CF_API_TOKEN"), false);
     assert.equal(RUNTIME_SECRET_KEYS.includes("CF_ACCOUNT_ID"), false);
     assert.equal(RUNTIME_SECRET_KEYS.includes("KV_NAMESPACE_ID"), false);
@@ -28,6 +29,7 @@ describe("Cloudflare deploy credential boundary", () => {
     assert.equal(calls.length, 1);
     assert.equal(calls[0].args.includes("CF_API_TOKEN"), false);
     assert.equal(calls[0].env.CLOUDFLARE_API_TOKEN, "deploy-token");
+    assert.equal(calls[0].env.CLOUDFLARE_ACCOUNT_ID, "account");
     assert.equal(calls[0].shell, process.platform === "win32");
   });
 });
