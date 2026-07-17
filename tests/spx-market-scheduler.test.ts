@@ -36,6 +36,7 @@ test("watchdog identifies only decision runs already due", () => {
 test("worker uses the DO alarm as the market clock and preserves fail-closed missed-slot semantics", () => {
   assert.match(workerSource, /export class SpxMarketScheduler/);
   assert.match(workerSource, /async alarm\(\)/);
+  assert.match(workerSource, /async ensure\(\)/);
   assert.match(workerSource, /SPX_SCHEDULER\.get/);
   assert.match(workerSource, /markOverdueScheduledSlotsFailed/);
   assert.match(workerSource, /cron_invocation_missed/);

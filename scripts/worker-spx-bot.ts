@@ -4358,9 +4358,20 @@ export class SpxMarketScheduler {
     await this.execute(scheduler.nextAlarmAt || Date.now());
   }
 
+  private async ensure() {
+    const now = new Date();
+    const scheduler = await this.readState();
+    if (scheduler.nextAlarmAt && scheduler.nextAlarmAt > now.getTime()) return { status: 'ARMED' as const, scheduler };
+    const health = this.env.SPX_RECAP_DB ? new D1SpxOperationalHealthStore(this.env.SPX_RECAP_DB) : null;
+    if (health) await reconcileMissedSpxScheduledWork(this.env, now, health, operationalTickId(now));
+    const next = await this.scheduleNext(scheduler, now.getTime(), now.getTime());
+    return { status: 'ARMED' as const, scheduler: next };
+  }
+
   async fetch(request: Request) {
     const url = new URL(request.url);
     if (url.pathname === '/status') return Response.json(await this.readState());
+    if (url.pathname === '/ensure') return Response.json(await this.ensure());
     if (url.pathname !== '/wake') return new Response('Not found', { status: 404 });
     const scheduledAtMs = Number(url.searchParams.get('scheduledAt'));
     if (!Number.isFinite(scheduledAtMs)) return new Response('scheduledAt is required', { status: 400 });
@@ -4447,7 +4458,7 @@ export default {
         new D1SpxOperationalHealthStore(env.SPX_RECAP_DB).listRecent(12),
         new D1SpxDecisionStore(env.SPX_RECAP_DB).listStaleIncomplete(new Date(now.getTime() - SPX_STALE_RUN_MS).toISOString()),
         querySpxGexCollectionCoverage(env.SPX_RECAP_DB, marketStatus.etDateKey, getSpxGexGenerationStatus(now).collectedMinuteEt),
-        getSpxSchedulerStub(env).fetch('https://spx-scheduler/status')
+        getSpxSchedulerStub(env).fetch('https://spx-scheduler/ensure')
           .then(async (response) => response.ok ? response.json() : { status: 'UNAVAILABLE', httpStatus: response.status })
           .catch(() => ({ status: 'UNAVAILABLE' })),
       ]);
