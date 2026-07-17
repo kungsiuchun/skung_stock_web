@@ -4362,8 +4362,6 @@ export class SpxMarketScheduler {
     const now = new Date();
     const scheduler = await this.readState();
     if (scheduler.nextAlarmAt && scheduler.nextAlarmAt > now.getTime()) return { status: 'ARMED' as const, scheduler };
-    const health = this.env.SPX_RECAP_DB ? new D1SpxOperationalHealthStore(this.env.SPX_RECAP_DB) : null;
-    if (health) await reconcileMissedSpxScheduledWork(this.env, now, health, operationalTickId(now));
     const next = await this.scheduleNext(scheduler, now.getTime(), now.getTime());
     return { status: 'ARMED' as const, scheduler: next };
   }

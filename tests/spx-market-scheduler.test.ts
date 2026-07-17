@@ -37,6 +37,7 @@ test("worker uses the DO alarm as the market clock and preserves fail-closed mis
   assert.match(workerSource, /export class SpxMarketScheduler/);
   assert.match(workerSource, /async alarm\(\)/);
   assert.match(workerSource, /async ensure\(\)/);
+  assert.doesNotMatch(workerSource.match(/private async ensure\(\)[\s\S]*?async fetch\(/)?.[0] || "", /reconcileMissedSpxScheduledWork/);
   assert.match(workerSource, /SPX_SCHEDULER\.get/);
   assert.match(workerSource, /markOverdueScheduledSlotsFailed/);
   assert.match(workerSource, /cron_invocation_missed/);
