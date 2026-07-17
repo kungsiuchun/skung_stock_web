@@ -24,8 +24,8 @@
     "test:stocks-watcher": "node --import tsx --test tests/stocks-intelligence-watcher.test.ts",
     "test:stocks-watcher:uat": "node tests/stocks-intelligence-watcher.uat.cjs",
     "deploy": "npm run deploy:site && npm run deploy:spx",
-    "deploy:site": "node scripts/sync-secrets.js && wrangler pages deploy dist --project-name sius-ai-workshop",
-    "deploy:spx": "wrangler deploy --config wrangler.spx.toml",
+    "deploy:site": "node scripts/deploy-site.js",
+    "deploy:spx": "node scripts/deploy-spx.js",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
   },
