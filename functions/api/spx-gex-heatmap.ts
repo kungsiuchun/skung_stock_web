@@ -3,9 +3,11 @@ import {
   listSpxGexHeatmapSessions,
   readSpxGexHeatmap,
 } from "../../src/lib/spx-gex-heatmap";
+import type { SpxGexHeatmapCell, SpxGexHeatmapModel } from "../../src/lib/spx-gex-heatmap";
 import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
 import { readSpxDecisionCockpitForGexSnapshot } from "../../src/lib/spx-decision-ledger";
 import { D1SpxGexCollectionStore, querySpxGexCollectionCoverage } from "../../src/lib/spx-gex-collection-lifecycle";
+import { readSpxEdgeCache, withSpxObservability, writeSpxEdgeCache } from "./_spx-edge-cache";
 
 interface Env {
   SPX_RECAP_DB?: D1DatabaseLike;
@@ -25,25 +27,38 @@ const parseSnapshotMinute = (value: string | null) => {
   return Number.isInteger(minute) && minute >= 0 && minute <= 24 * 60 ? minute : null;
 };
 
-const json = (body: unknown, init: ResponseInit = {}, cacheControl = "no-store") =>
-  new Response(JSON.stringify(body), {
+const json = (body: unknown, init: ResponseInit = {}, cacheControl = "no-store") => {
+  const text = JSON.stringify(body);
+  return new Response(text, {
     ...init,
     headers: {
       "Content-Type": "application/json",
       "Cache-Control": cacheControl,
+      "X-SPX-Payload-Bytes": String(new TextEncoder().encode(text).byteLength),
       ...(init.headers || {}),
     },
   });
-
-const getEdgeCache = () => typeof caches === "undefined" ? null : caches.default;
-
-const cacheResponse = (context: Context, response: Response) => {
-  if (context.request.method !== "GET") return;
-  const edgeCache = getEdgeCache();
-  if (!edgeCache) return;
-  const write = edgeCache.put(context.request, response.clone()).catch(() => undefined);
-  context.waitUntil?.(write);
 };
+
+const compactCell = (cell: SpxGexHeatmapCell) => ({
+  strike: cell.strike,
+  expdate: cell.expdate,
+  netGex: cell.netGex,
+  callGex: cell.callGex,
+  putGex: cell.putGex,
+  netDex: cell.netDex,
+  netVex: cell.netVex,
+  netCex: cell.netCex,
+  pricingQuality: cell.pricingQuality,
+  callIvSource: cell.callIvSource,
+  putIvSource: cell.putIvSource,
+  inactiveSeries: cell.inactiveSeries,
+});
+
+const compactHeatmap = (heatmap: SpxGexHeatmapModel) => ({
+  ...heatmap,
+  cells: heatmap.cells.map(compactCell),
+});
 
 const chooseSelectedDate = (availableDates: string[], requestedDate: string | null) => {
   if (isValidDate(requestedDate)) return requestedDate!;
@@ -122,14 +137,11 @@ const readDecisionCockpit = async (
 };
 
 export async function onRequest(context: Context) {
+  const startedAt = Date.now();
   const warnings: string[] = [];
   const url = new URL(context.request.url);
-  const bypassCache = url.searchParams.has("_");
-  const edgeCache = getEdgeCache();
-  if (!bypassCache && context.request.method === "GET" && edgeCache) {
-    const cached = await edgeCache.match(context.request);
-    if (cached) return cached;
-  }
+  const cached = await readSpxEdgeCache(context.request);
+  if (cached) return cached;
 
   if (!context.env.SPX_RECAP_DB) {
     return json({
@@ -166,20 +178,20 @@ export async function onRequest(context: Context) {
     ]);
 
     const status = heatmap ? "READY" : "EMPTY";
-    const response = json({
+    const response = withSpxObservability(json({
       status,
       errorCode: null,
       availableDates,
       selectedDate,
       sessions,
       selectedSnapshot: heatmap?.session || sessions.find((session) => session.snapshotMinuteEt === selectedSnapshot) || null,
-      heatmap,
+      heatmap: heatmap ? compactHeatmap(heatmap) : null,
       decision,
       collection,
       collectionHealth,
       warnings: [...new Set(warnings)],
-    }, {}, status === "READY" ? "public, max-age=15" : "no-store");
-    if (status === "READY") cacheResponse(context, response);
+    }, {}, status === "READY" ? "public, max-age=15" : "no-store"), Date.now() - startedAt);
+    if (status === "READY") writeSpxEdgeCache(context, response);
     return response;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -3,6 +3,8 @@ import { AlertTriangle, ArrowLeft, CalendarDays, Gauge, Pause, Play, RefreshCw, 
 import { buildSpxGexHeatmapReadingContext, formatSpxGexCompactExposure, type SpxGexHeatmapCell, type SpxGexHeatmapModel, type SpxGexHeatmapReadingRule, type SpxGexSessionSummary, type SpxGexStrikeProfile } from "@/lib/spx-gex-heatmap";
 import type { SpxDecisionCockpitProjection } from "@/lib/spx-decision-ledger";
 import type { SpxGexCollectionRecord } from "@/lib/spx-gex-collection-lifecycle";
+import { parseJsonResponse, SafeJsonResponseError } from "@/lib/safe-json-response";
+import { getSpxSpotLivePulseKey } from "@/lib/spx-spot-live-pulse";
 import { SpxPriceActionCompass } from "./spx-price-action-compass";
 import { SpxGexPressureMatrix } from "./spx-gex-pressure-matrix";
 import { SpxGexInlineTooltip, SpxGexTooltip, SpxGexTooltipSection } from "./spx-gex-tooltip";
@@ -193,40 +195,13 @@ const dataQualityText = (heatmap: SpxGexHeatmapModel) => {
   return `priced ${summary.priced} · repaired ${summary.repaired} · partial ${summary.partial} · unpriced ${summary.unpriced} · IV-excluded ${summary.excluded} · inactive AM ${inactiveAm}`;
 };
 
-class HeatmapResponseError extends Error {
-  constructor(message: string, readonly httpStatus: number) {
-    super(message);
-    this.name = "HeatmapResponseError";
-  }
-}
-
 const formatSnapshotMinuteEt = (minute: number) => {
   const hours = Math.floor(minute / 60).toString().padStart(2, "0");
   const minutes = (minute % 60).toString().padStart(2, "0");
   return `${hours}:${minutes}`;
 };
 
-const parseHeatmapResponse = async (response: Response, requestUrl: string) => {
-  const contentType = response.headers.get("content-type") || "";
-  const text = await response.text();
-
-  if (!contentType.toLowerCase().includes("application/json")) {
-    const prefix = text.trim().slice(0, 80).replace(/\s+/g, " ");
-    throw new HeatmapResponseError(
-      `SPX GEX API returned ${contentType || "unknown content"} (HTTP ${response.status}) for ${requestUrl}; expected JSON. Response starts: ${prefix || "empty"}`,
-      response.status,
-    );
-  }
-
-  try {
-    return JSON.parse(text) as SpxGexHeatmapResponse & { error?: string };
-  } catch (error) {
-    throw new HeatmapResponseError(
-      `SPX GEX API returned invalid JSON (HTTP ${response.status}) for ${requestUrl}: ${error instanceof Error ? error.message : String(error)}`,
-      response.status,
-    );
-  }
-};
+const parseHeatmapResponse = (response: Response, requestUrl: string) => parseJsonResponse<SpxGexHeatmapResponse & { error?: string }>(response, requestUrl);
 
 export const parseSpxGexBoardSelection = (hash: string) => {
   const query = hash.split("?", 2)[1] || "";
@@ -258,6 +233,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const [selectedDate, setSelectedDate] = useState(initialSelection.date);
   const [selectedMinute, setSelectedMinute] = useState<number | null>(initialSelection.snapshot);
   const [loading, setLoading] = useState(true);
+  const [manualRefreshPending, setManualRefreshPending] = useState(false);
   const [requestState, setRequestState] = useState<BoardRequestState>({
     phase: "LOADING",
     requestUrl: "/api/spx-gex-heatmap",
@@ -269,6 +245,9 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const [speedMs, setSpeedMs] = useState(900);
   const [rowRangeMode, setRowRangeMode] = useState<RowRangeMode>("auto");
   const [activeAuditCell, setActiveAuditCell] = useState<ActiveGexAuditCell | null>(null);
+  const [auditDetail, setAuditDetail] = useState<SpxGexHeatmapCell | null>(null);
+  const [auditDetailKey, setAuditDetailKey] = useState<string | null>(null);
+  const [auditDetailError, setAuditDetailError] = useState<string | null>(null);
   const activeAuditCellRef = useRef(activeAuditCell);
   const auditHoverSuppressedAfterScrollRef = useRef(false);
   activeAuditCellRef.current = activeAuditCell;
@@ -277,6 +256,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const [failedPlayback, setFailedPlayback] = useState<FailedPlaybackSnapshot | null>(null);
   const activeRequestRef = useRef<AbortController | null>(null);
   const requestVersionRef = useRef(0);
+  const refreshInFlightRef = useRef(false);
   const playbackRunRef = useRef(0);
   const playbackStateRef = useRef({
     sessions: data.sessions,
@@ -294,7 +274,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const loadHeatmap = useCallback(async (
     date?: string,
     snapshotMinute?: number | null,
-    options: { bypassCache?: boolean; playback?: boolean } = {},
+    options: { playback?: boolean } = {},
   ) => {
     activeRequestRef.current?.abort();
     const controller = new AbortController();
@@ -305,7 +285,6 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
       const params = new URLSearchParams();
       if (date) params.set("date", date);
       if (snapshotMinute !== null && snapshotMinute !== undefined) params.set("snapshot", String(snapshotMinute));
-      if (options.bypassCache) params.set("_", String(Date.now()));
       const requestUrl = `/api/spx-gex-heatmap${params.toString() ? `?${params.toString()}` : ""}`;
       setRequestState({ phase: "LOADING", requestUrl, httpStatus: null, errorCode: null, message: null });
       const response = await fetch(requestUrl, { cache: "no-store", signal: controller.signal });
@@ -363,7 +342,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
       return "READY";
     } catch (err) {
       if (controller.signal.aborted || requestVersion !== requestVersionRef.current) return "STALE";
-      const httpStatus = err instanceof HeatmapResponseError ? err.httpStatus : null;
+      const httpStatus = err instanceof SafeJsonResponseError ? err.httpStatus : null;
       setRequestState({
         phase: "ERROR",
         requestUrl: `/api/spx-gex-heatmap${date ? `?date=${encodeURIComponent(date)}${snapshotMinute !== null && snapshotMinute !== undefined ? `&snapshot=${snapshotMinute}` : ""}` : ""}`,
@@ -380,6 +359,21 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
       if (requestVersion === requestVersionRef.current) setLoading(false);
     }
   }, []);
+
+  const refreshLatest = useCallback(async () => {
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
+    setManualRefreshPending(true);
+    setPlaying(false);
+    setIsFollowingLatest(true);
+    setPressureRefreshKey(Date.now());
+    try {
+      await loadHeatmap(undefined, null);
+    } finally {
+      refreshInFlightRef.current = false;
+      setManualRefreshPending(false);
+    }
+  }, [loadHeatmap]);
 
   useEffect(() => {
     void loadHeatmap(initialSelection.date || undefined, initialSelection.snapshot);
@@ -461,6 +455,47 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
 
   useEffect(() => setActiveAuditCell(null), [selectedDate, selectedMinute, rowRangeMode]);
 
+  useEffect(() => {
+    if (!activeAuditCell || !selectedDate || selectedMinute === null) {
+      setAuditDetail(null);
+      setAuditDetailKey(null);
+      setAuditDetailError(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    setAuditDetail(null);
+    setAuditDetailKey(null);
+    const timer = window.setTimeout(() => {
+      const params = new URLSearchParams({
+        date: selectedDate,
+        snapshot: String(selectedMinute),
+        strike: String(activeAuditCell.cell.strike),
+        expiry: activeAuditCell.cell.expdate,
+      });
+      void (async () => {
+        try {
+          const response = await fetch(`/api/spx-gex-cell-detail?${params.toString()}`, { signal: controller.signal });
+          const payload = await parseJsonResponse<{ status: string; detail: SpxGexHeatmapCell | null; error?: string }>(response, "/api/spx-gex-cell-detail");
+          if (!response.ok || payload.status !== "READY" || !payload.detail) throw new Error(payload.error || "GEX audit detail is unavailable.");
+          if (!controller.signal.aborted) {
+            setAuditDetailKey(activeAuditCell.key);
+            setAuditDetail(payload.detail);
+            setAuditDetailError(null);
+          }
+        } catch (error) {
+          if (!controller.signal.aborted) {
+            setAuditDetail(null);
+            setAuditDetailError(error instanceof Error ? error.message : String(error));
+          }
+        }
+      })();
+    }, activeAuditCell.locked ? 0 : 180);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [activeAuditCell, selectedDate, selectedMinute]);
+
   const heatmap = data.heatmap;
   const cellByKey = useMemo(() => {
     const map = new Map<string, SpxGexHeatmapCell>();
@@ -504,6 +539,11 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   ]);
   const selectedSessionIndex = Math.max(0, data.sessions.findIndex((session) => session.snapshotMinuteEt === selectedMinute));
   const selectedSession = data.selectedSnapshot || heatmap?.session || null;
+  const heatmapSpotPulseKey = useMemo(() => getSpxSpotLivePulseKey({
+    price: heatmap?.quote.last,
+    timeEt: selectedSession?.snapshotTimeEt,
+    resolution: "15m-canonical",
+  }), [heatmap?.quote.last, selectedSession?.snapshotTimeEt]);
   const isDelayedSnapshot = Boolean(
     selectedSession &&
     selectedSession.collectedMinuteEt !== undefined &&
@@ -557,16 +597,15 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
         onClick={() => {
           setPlaying(false);
           setIsFollowingLatest(true);
-          setPressureRefreshKey(Date.now());
-          void loadHeatmap(undefined, null, { bypassCache: true });
+          void refreshLatest();
         }}
-        disabled={loading}
-        aria-busy={loading}
+        disabled={loading || manualRefreshPending}
+        aria-busy={loading || manualRefreshPending}
         className="inline-flex h-10 w-10 items-center justify-center border border-cyan-300/20 bg-cyan-300/10 text-cyan-100 transition-colors hover:bg-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-50"
         title="Refresh latest SPX and GEX sources"
         aria-label="Refresh latest SPX and GEX sources"
       >
-        <RefreshCw aria-hidden="true" className={`h-4 w-4 ${loading ? "animate-spin motion-reduce:animate-none" : ""}`} />
+        <RefreshCw aria-hidden="true" className={`h-4 w-4 ${(loading || manualRefreshPending) ? "animate-spin motion-reduce:animate-none" : ""}`} />
       </button>
     </div>
   );
@@ -589,7 +628,8 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                 {sourceModeLabel()}
               </span>
               {heatmap && (
-                <span className="border border-cyan-300/25 bg-cyan-300/10 px-2 py-1 font-mono text-xs font-black text-cyan-100">
+                <span key={heatmapSpotPulseKey || "heatmap-spot"} className="spx-spot-live-pulse inline-flex items-center gap-1.5 border border-cyan-300/25 bg-cyan-300/10 px-2 py-1 font-mono text-xs font-black text-cyan-100" data-spx-gex-heatmap-spot-badge="true">
+                  <span className="h-1.5 w-1.5 rounded-full bg-cyan-200 shadow-[0_0_7px_rgba(34,211,238,.9)]" aria-hidden="true" />
                   Spot ${heatmap.quote.last.toFixed(2)}
                 </span>
               )}
@@ -840,7 +880,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                     const profile = profileByStrike.get(strike);
                     const isSpotStrike = strike === spotStrike;
                     return (
-                      <tr key={strike} className={isSpotStrike ? "bg-yellow-400/10" : ""}>
+                      <tr key={isSpotStrike ? `${strike}:${heatmapSpotPulseKey || "spot"}` : strike} className={isSpotStrike ? "bg-yellow-400/10 spx-spot-live-row" : ""} data-spx-gex-heatmap-spot-row={isSpotStrike || undefined}>
                         <StrikeCell strike={strike} isSpotStrike={isSpotStrike} />
                         {heatmap.selectedExpiries.map((expiry) => {
                           const cell = cellByKey.get(`${strike}:${expiry}`);
@@ -898,7 +938,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                             <span className="text-right font-black text-cyan-100">{formatSignedCompact(profile?.netGex)}</span>
                             <span className="flex min-h-4 flex-wrap items-center gap-1 overflow-hidden">
                               {isSpotStrike && (
-                                <span className="border border-yellow-300/45 bg-yellow-300/15 px-1 py-0 text-[9px] font-black text-yellow-100">
+                                <span key={heatmapSpotPulseKey || "heatmap-spot-pill"} className="spx-spot-live-pulse border border-yellow-300/45 bg-yellow-300/15 px-1 py-0 text-[9px] font-black text-yellow-100" data-spx-gex-heatmap-spot-pill="true">
                                   Spot ${heatmap.quote.last.toFixed(2)}
                                 </span>
                               )}
@@ -927,11 +967,11 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                   surface="board"
                   interactive={activeAuditCell.locked}
                 >
-                  <GexAuditCellDetail activeCell={activeAuditCell} />
+                  <GexAuditCellDetail activeCell={activeAuditCell} detail={auditDetailKey === activeAuditCell.key ? auditDetail : null} detailError={auditDetailError} />
                 </SpxGexTooltip>
               )}
               <SpxGexInlineTooltip surface="board">
-                {activeAuditCell ? <GexAuditCellDetail activeCell={activeAuditCell} /> : (
+                {activeAuditCell ? <GexAuditCellDetail activeCell={activeAuditCell} detail={auditDetailKey === activeAuditCell.key ? auditDetail : null} detailError={auditDetailError} /> : (
                   <div className="text-zinc-500">Tap a priced expiry cell for complete GEX audit evidence.</div>
                 )}
               </SpxGexInlineTooltip>
@@ -990,8 +1030,12 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   );
 }
 
-const GexAuditCellDetail = ({ activeCell }: { activeCell: ActiveGexAuditCell }) => {
-  const { cell } = activeCell;
+const GexAuditCellDetail = ({ activeCell, detail, detailError }: {
+  activeCell: ActiveGexAuditCell;
+  detail: SpxGexHeatmapCell | null;
+  detailError: string | null;
+}) => {
+  const cell = detail || activeCell.cell;
   const priced = typeof cell.netGex === "number" && Number.isFinite(cell.netGex);
   return (
     <div className="space-y-2">
@@ -1005,6 +1049,8 @@ const GexAuditCellDetail = ({ activeCell }: { activeCell: ActiveGexAuditCell }) 
         <div className="text-zinc-500">Model {cell.model || "none"}</div>
         <div className="text-cyan-200">Included {(cell.activeSeries || []).join(", ") || "legacy / unavailable"}</div>
         {(cell.inactiveSeries || []).map((series) => <div key={series} className="text-amber-200">Inactive {series} / AM-settled after 09:30 ET</div>)}
+        {!detail && !detailError && <div className="text-zinc-500">Loading full audit evidence…</div>}
+        {detailError && <div className="text-amber-200">Full audit unavailable: {detailError}</div>}
       </SpxGexTooltipSection>
       <SpxGexTooltipSection label="Exposure">
         {priced ? (

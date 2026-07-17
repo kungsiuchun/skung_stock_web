@@ -26,3 +26,33 @@ body {
   height: 100vh;
   overflow: hidden;
 }
+
+@keyframes spx-spot-live-pulse {
+  0%, 100% {
+    filter: drop-shadow(0 0 0 rgb(34 211 238 / 0));
+    opacity: 1;
+  }
+  18%, 58% {
+    filter: drop-shadow(0 0 9px rgb(34 211 238 / 0.92));
+    opacity: 0.76;
+  }
+  34%, 74% {
+    filter: drop-shadow(0 0 3px rgb(34 211 238 / 0.42));
+    opacity: 1;
+  }
+}
+
+.spx-spot-live-pulse {
+  animation: spx-spot-live-pulse 840ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.spx-spot-live-row {
+  animation: spx-spot-live-pulse 840ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spx-spot-live-pulse,
+  .spx-spot-live-row {
+    animation: none;
+  }
+}

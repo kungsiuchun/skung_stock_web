@@ -112,6 +112,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
   };
 
   let secondSnapshotAttempts = 0;
+  let forceCompassTextFailure = false;
   const browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
   const page = await browser.newPage();
   const consoleErrors = [];
@@ -124,6 +125,13 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
   await page.setRequestInterception(true);
   page.on("request", (request) => {
     const url = new URL(request.url());
+    if (url.pathname === "/api/spx-price-action-compass" && forceCompassTextFailure) {
+      return request.respond({
+        status: 503,
+        contentType: "text/html; charset=utf-8",
+        body: "<!DOCTYPE html><html><body>upstream unavailable</body></html>",
+      });
+    }
     if (url.pathname === "/api/spx-price-action-compass" && (url.searchParams.get("timeframe") === "1m" || url.searchParams.get("view") === "price-overlay")) {
       return request.respond(jsonResponse(oneMinutePayload));
     }
@@ -162,6 +170,14 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.deepEqual(monitorOrder.map((row) => row.index), [280, 280, 240, 120], "Signal Monitor must be latest-first");
     assert.match(monitorOrder[0].text, /Latest A/, "signal ties must use the deterministic id tie-break");
     assert.match(await page.$eval('[data-spx-price-action-compass="true"]', (node) => node.textContent || ""), /LATEST FIRST/i);
+    forceCompassTextFailure = true;
+    await page.click('button[title="Refresh"]');
+    await page.waitForFunction(() => document.querySelector('[data-spx-price-action-compass="true"]')?.textContent?.includes("Refresh failed; showing the last verified Price Action Compass."));
+    const compassFailure = await page.$eval('[data-spx-price-action-compass="true"]', (element) => element.textContent || "");
+    assert.match(compassFailure, /HTTP 503/);
+    assert.ok(!compassFailure.includes("Unexpected token"), "Compass must not expose a JSON syntax error for HTML failures");
+    assert.ok(await page.$('[data-pa-chart-surface="true"]'), "Compass must retain its last verified chart after refresh failure");
+    forceCompassTextFailure = false;
 
     const signalHitTargets = await page.$$eval('[data-pa-pattern-badge="true"]', (badges) => badges.map((badge) => {
       const label = badge.querySelector("text")?.textContent?.trim() || "";
@@ -260,6 +276,15 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
         missingColumns: document.querySelectorAll('[data-pressure-column-status="MISSING"]').length,
         spotGuide: Boolean(document.querySelector('[data-spx-gex-pressure-spot-guide="true"]')),
         spotCallout: Boolean(document.querySelector('[data-spx-gex-pressure-spot-callout="true"]')),
+        pulseTargets: [
+          '[data-spx-gex-pressure-spot-marker="true"]',
+          '[data-spx-gex-pressure-spot-guide="true"]',
+          '[data-spx-gex-pressure-spot-endpoint="true"]',
+          '[data-spx-gex-pressure-spot-callout="true"]',
+          '[data-spx-gex-heatmap-spot-badge="true"]',
+          '[data-spx-gex-heatmap-spot-row="true"]',
+          '[data-spx-gex-heatmap-spot-pill="true"]',
+        ].map((selector) => ({ selector, pulses: document.querySelector(selector)?.classList.contains("spx-spot-live-pulse") || document.querySelector(selector)?.classList.contains("spx-spot-live-row") })),
         stickyStrike: getComputedStyle(document.querySelector('[data-spx-gex-pressure-grid="true"] .sticky.left-0') || document.body).position,
         stickyCurrentGex: getComputedStyle(document.querySelector('[data-current-gex-column="body"]') || document.body).position,
         moverUsesOrderedList: Boolean(document.querySelector('[data-spx-gex-mover-tape="true"] ol')),
@@ -289,6 +314,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.ok(pressureLayout.missingColumns > 0, "an internal missing GEX column must be visibly represented");
     assert.equal(pressureLayout.spotGuide, true, "current SPX guide must render");
     assert.equal(pressureLayout.spotCallout, true, "latest SPX endpoint callout must render");
+    assert.deepEqual(pressureLayout.pulseTargets.filter((target) => !target.pulses), [], "every current-spot marker must use the live pulse surface");
     assert.equal(pressureLayout.stickyStrike, "sticky", "strike rail must remain sticky");
     assert.equal(pressureLayout.stickyCurrentGex, "sticky", "Current GEX rail must remain sticky");
     assert.equal(pressureLayout.moverUsesOrderedList, true, "Mover Tape ranks must use an ordered list");
@@ -298,6 +324,10 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.equal(pressureLayout.unifiedBoardShell, true, "Board header, cockpit, playback, and exposure table must share one shell");
     assert.equal(pressureLayout.cellsMeetMinimumSize, true, "pressure cells must remain at least 34 by 25 CSS pixels");
     assert.equal(pressureLayout.betweenCompassAndBoard, true, "pressure matrix must sit between Compass and GEX Board");
+    await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+    const reducedMotionAnimation = await page.$eval('[data-spx-gex-pressure-spot-marker="true"]', (element) => getComputedStyle(element).animationName);
+    assert.equal(reducedMotionAnimation, "none", "reduced motion must disable the current-spot pulse");
+    await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "no-preference" }]);
     const readyCell = '[data-pressure-cell="true"][data-pressure-column-status="READY"]';
     await page.hover(readyCell);
     await page.waitForSelector('[data-spx-gex-pressure-tooltip="desktop"]');
@@ -326,7 +356,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     await page.waitForFunction(() => !document.querySelector('[data-spx-gex-pressure-tooltip="desktop"]'));
     await page.$eval('[data-spx-gex-pressure-matrix="true"]', (element) => element.scrollIntoView({ block: "start" }));
     await page.screenshot({ path: path.join(SCREENSHOT_DIR, "spx-gex-pressure-professional-desktop.png") });
-    assert.deepEqual(consoleErrors, [], `pressure matrix console errors: ${consoleErrors.join(" | ")}`);
+    assert.deepEqual(consoleErrors.filter((error) => !/503 \(Service Unavailable\)/.test(error)), [], `unexpected pressure matrix console errors: ${consoleErrors.join(" | ")}`);
 
     await page.setViewport({ width: 1600, height: 1000 });
     await page.waitForFunction(() => {
@@ -429,8 +459,8 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     await page.waitForFunction((minute) => !document.querySelector('[data-spx-gex-playback-error="true"]')
       && document.querySelector('button[class*="text-yellow-300"]')?.textContent === minute, {}, formatMinute(secondMinute));
     assert.equal(secondSnapshotAttempts, 2, "Retry must request the same failed snapshot once");
-    assert.equal(consoleErrors.length, 1, `only the deliberately injected playback 503 may reach console: ${consoleErrors.join(" | ")}`);
-    assert.match(consoleErrors[0], /503 \(Service Unavailable\)/);
+    assert.equal(consoleErrors.length, 2, `only deliberately injected Compass and playback 503 responses may reach console: ${consoleErrors.join(" | ")}`);
+    assert.ok(consoleErrors.every((error) => /503 \(Service Unavailable\)/.test(error)));
     console.log("SPX GEX pressure + playback UAT passed: matrix renders with aligned spot/tape, and failed replay retries deterministically.");
   } finally {
     await browser.close();

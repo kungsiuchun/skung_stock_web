@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Activity, AlertTriangle, TrendingUp } from "lucide-react";
 import { formatSpxGexCompactExposure } from "@/lib/spx-gex-heatmap";
+import { parseJsonResponse } from "@/lib/safe-json-response";
+import { getSpxSpotLivePulseKey } from "@/lib/spx-spot-live-pulse";
 import {
   buildSpxGexOneMinuteSpotSegments,
   buildSpxGexPressureAxisTicks,
@@ -192,14 +194,17 @@ const MoverRow = ({ mover }: { mover: SpxGexPressureMover }) => {
 
 export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey, controls }: SpxGexPressureMatrixProps) {
   const [data, setData] = useState<PressureResponse | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const [priceOverlay, setPriceOverlay] = useState<PriceOverlayState | null>(null);
   const [loading, setLoading] = useState(false);
   const [activeCell, setActiveCell] = useState<ActiveCell | null>(null);
   const [matrixRailWidth, setMatrixRailWidth] = useState(0);
   const matrixScrollRef = useRef<HTMLDivElement>(null);
+  const dataRef = useRef(data);
   const activeCellRef = useRef(activeCell);
   const hoverSuppressedAfterScrollRef = useRef(false);
   activeCellRef.current = activeCell;
+  dataRef.current = data;
   useEffect(() => {
     const dismiss = (event: KeyboardEvent) => {
       if (event.key === "Escape") setActiveCell(null);
@@ -244,16 +249,21 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
       setLoading(true);
       try {
         const params = new URLSearchParams({ date: selectedDate });
-        if (refreshKey > 0) params.set("_", String(refreshKey));
-        const response = await fetch(`/api/spx-gex-pressure?${params.toString()}`, { cache: "no-store", signal: controller.signal });
-        const payload = await response.json() as PressureResponse;
+        const response = await fetch(`/api/spx-gex-pressure?${params.toString()}`, { signal: controller.signal });
+        const payload = await parseJsonResponse<PressureResponse>(response, "/api/spx-gex-pressure");
         if (!response.ok || payload.status === "ERROR" || payload.status === "STORAGE_UNAVAILABLE" || payload.status === "BINDING_MISSING") {
           throw new Error(payload.error || `SPX GEX pressure API failed with HTTP ${response.status}`);
         }
         setData(payload);
+        setRefreshError(null);
       } catch (error) {
         if (controller.signal.aborted) return;
-        setData({ status: "ERROR", errorCode: "SPX_GEX_PRESSURE_REQUEST_FAILED", error: error instanceof Error ? error.message : String(error), selectedDate, pressure: null, warnings: [] });
+        const message = error instanceof Error ? error.message : String(error);
+        if (dataRef.current?.pressure && dataRef.current.selectedDate === selectedDate) {
+          setRefreshError(message);
+        } else {
+          setData({ status: "ERROR", errorCode: "SPX_GEX_PRESSURE_REQUEST_FAILED", error: message, selectedDate, pressure: null, warnings: [] });
+        }
       } finally {
         if (!controller.signal.aborted) setLoading(false);
       }
@@ -268,14 +278,16 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
     const load = async () => {
       try {
         const params = new URLSearchParams({ timeframe: "1m", view: "price-overlay" });
-        if (refreshKey > 0) params.set("_", String(refreshKey));
-        const response = await fetch(`/api/spx-price-action-compass?${params.toString()}`, { cache: "no-store", signal: controller.signal });
-        const payload = await response.json() as NonNullable<PriceOverlayState["data"]>;
+        const response = await fetch(`/api/spx-price-action-compass?${params.toString()}`, { signal: controller.signal });
+        const payload = await parseJsonResponse<NonNullable<PriceOverlayState["data"]>>(response, "/api/spx-price-action-compass");
         if (!response.ok) throw new Error(payload.warnings?.join(" ") || `SPX 1-minute API failed with HTTP ${response.status}`);
         setPriceOverlay({ selectedDate, data: payload, error: null });
       } catch (error) {
         if (controller.signal.aborted) return;
-        setPriceOverlay({ selectedDate, data: null, error: error instanceof Error ? error.message : String(error) });
+        const message = error instanceof Error ? error.message : String(error);
+        setPriceOverlay((current) => current?.data && current.selectedDate === selectedDate
+          ? { ...current, error: message }
+          : { selectedDate, data: null, error: message });
       }
     };
     void load();
@@ -300,6 +312,13 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
     () => displayPressure ? buildSpxGexPressureChartGeometry(displayPressure, oneMinuteSpotSegments, effectiveCellWidth, ROW_HEIGHT) : null,
     [displayPressure, effectiveCellWidth, oneMinuteSpotSegments],
   );
+  const spotPulseKey = useMemo(() => chartGeometry?.latestPoint
+    ? getSpxSpotLivePulseKey({
+      price: chartGeometry.latestPoint.price,
+      timeEt: chartGeometry.latestPoint.timeEt,
+      resolution: chartGeometry.resolution,
+    })
+    : null, [chartGeometry]);
   const matrixWidth = timelineLength * effectiveCellWidth;
   const matrixHeight = (displayPressure?.rows.length || 0) * ROW_HEIGHT;
   const matrixGridHeight = MATRIX_HEADER_HEIGHT + matrixHeight;
@@ -362,6 +381,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
       ) : (
         <>
           {pressure.warnings.length > 0 && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-warning="true">{pressure.warnings.join(" ")}</div>}
+          {refreshError && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-refresh-stale="true">Refresh failed; showing the last verified GEX matrix. {refreshError}</div>}
           {priceOverlayWarning && <div className="border-b border-cyan-300/20 bg-cyan-300/5 px-3 py-2 text-xs text-cyan-100" role="status" data-spx-gex-pressure-spot-warning="true">{priceOverlayWarning}</div>}
 
           <div className="grid 2xl:grid-cols-[minmax(0,1fr)_320px] 2xl:items-start">
@@ -406,7 +426,8 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
                       ))}
                       {chartGeometry?.spotGuide && (
                         <div
-                          className="pointer-events-none absolute left-0 z-40 flex w-full -translate-y-1/2 items-center justify-between border-y border-cyan-300/70 bg-[#04222c] px-1.5 py-0.5 text-[9px] font-black text-cyan-100 shadow-[0_0_14px_rgba(34,211,238,.18)]"
+                          key={spotPulseKey || "spot-guide"}
+                          className="spx-spot-live-pulse pointer-events-none absolute left-0 z-40 flex w-full -translate-y-1/2 items-center justify-between border-y border-cyan-300/70 bg-[#04222c] px-1.5 py-0.5 text-[9px] font-black text-cyan-100 shadow-[0_0_14px_rgba(34,211,238,.18)]"
                           style={{ top: chartGeometry.spotGuide.y }}
                           data-spx-gex-pressure-spot-marker="true"
                         >
@@ -468,13 +489,13 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
                       data-spx-gex-pressure-spot-resolution={chartGeometry?.resolution || "15m-fallback"}
                       data-spx-gex-pressure-spot-point-count={chartGeometry?.pointCount || 0}
                     >
-                      {chartGeometry?.spotGuide && <line x1="0" x2={matrixWidth} y1={chartGeometry.spotGuide.y} y2={chartGeometry.spotGuide.y} stroke="#22d3ee" strokeWidth="1" strokeDasharray="5 4" opacity="0.72" data-spx-gex-pressure-spot-guide="true" />}
+                      {chartGeometry?.spotGuide && <line key={`${spotPulseKey || "spot"}:guide`} className="spx-spot-live-pulse" x1="0" x2={matrixWidth} y1={chartGeometry.spotGuide.y} y2={chartGeometry.spotGuide.y} stroke="#22d3ee" strokeWidth="1" strokeDasharray="5 4" opacity="0.72" data-spx-gex-pressure-spot-guide="true" />}
                       {chartGeometry?.segments.map((segment, index) => (
                         <polyline key={index} points={segment.map((point) => `${point.x},${point.y}`).join(" ")} fill="none" stroke="#22d3ee" strokeWidth="1.7" vectorEffect="non-scaling-stroke" />
                       ))}
-                      {chartGeometry?.latestPoint && <circle cx={chartGeometry.latestPoint.x} cy={chartGeometry.latestPoint.y} r="4" fill="#ecfeff" stroke="#22d3ee" strokeWidth="2" />}
+                      {chartGeometry?.latestPoint && <circle key={`${spotPulseKey || "spot"}:endpoint`} className="spx-spot-live-pulse" cx={chartGeometry.latestPoint.x} cy={chartGeometry.latestPoint.y} r="4" fill="#ecfeff" stroke="#22d3ee" strokeWidth="2" data-spx-gex-pressure-spot-endpoint="true" />}
                       {chartGeometry?.latestPoint && chartGeometry.callout && (
-                        <g transform={`translate(${chartGeometry.callout.x} ${chartGeometry.callout.y})`} data-spx-gex-pressure-spot-callout="true">
+                        <g key={`${spotPulseKey || "spot"}:callout`} className="spx-spot-live-pulse" transform={`translate(${chartGeometry.callout.x} ${chartGeometry.callout.y})`} data-spx-gex-pressure-spot-callout="true">
                           <rect width={chartGeometry.callout.width} height={chartGeometry.callout.height} rx="5" fill="#04222c" stroke="#22d3ee" strokeOpacity="0.9" />
                           <text x="8" y="16" fill="#ecfeff" fontSize="13" fontWeight="800">{spotFormatter.format(chartGeometry.latestPoint.price)}</text>
                           <text x="8" y="29" fill="#67e8f9" fontSize="9" fontWeight="700">{chartGeometry.latestPoint.timeEt} ET / {chartGeometry.resolution}</text>

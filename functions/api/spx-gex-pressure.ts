@@ -4,6 +4,7 @@ import {
 } from "../../src/lib/spx-gex-heatmap";
 import { buildSpxGexPressureMatrix } from "../../src/lib/spx-gex-pressure-matrix";
 import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
+import { readSpxEdgeCache, withSpxObservability, writeSpxEdgeCache } from "./_spx-edge-cache";
 
 interface Env {
   SPX_RECAP_DB?: D1DatabaseLike;
@@ -17,33 +18,24 @@ interface Context {
 
 const isValidDate = (date: string | null) => Boolean(date && /^\d{4}-\d{2}-\d{2}$/.test(date));
 
-const json = (body: unknown, init: ResponseInit = {}, cacheControl = "no-store") =>
-  new Response(JSON.stringify(body), {
+const json = (body: unknown, init: ResponseInit = {}, cacheControl = "no-store") => {
+  const text = JSON.stringify(body);
+  return new Response(text, {
     ...init,
     headers: {
       "Content-Type": "application/json",
       "Cache-Control": cacheControl,
+      "X-SPX-Payload-Bytes": String(new TextEncoder().encode(text).byteLength),
       ...(init.headers || {}),
     },
   });
-
-const getEdgeCache = () => typeof caches === "undefined" ? null : caches.default;
-
-const cacheResponse = (context: Context, response: Response) => {
-  if (context.request.method !== "GET") return;
-  const edgeCache = getEdgeCache();
-  if (!edgeCache) return;
-  context.waitUntil?.(edgeCache.put(context.request, response.clone()).catch(() => undefined));
 };
 
 export async function onRequest(context: Context) {
+  const startedAt = Date.now();
   const url = new URL(context.request.url);
-  const bypassCache = url.searchParams.has("_");
-  const edgeCache = getEdgeCache();
-  if (!bypassCache && context.request.method === "GET" && edgeCache) {
-    const cached = await edgeCache.match(context.request);
-    if (cached) return cached;
-  }
+  const cached = await readSpxEdgeCache(context.request);
+  if (cached) return cached;
 
   if (!context.env.SPX_RECAP_DB) {
     return json({
@@ -69,14 +61,14 @@ export async function onRequest(context: Context) {
     }
 
     const pressure = buildSpxGexPressureMatrix(snapshots);
-    const response = json({
+    const response = withSpxObservability(json({
       status: "READY",
       errorCode: null,
       selectedDate,
       pressure,
       warnings: pressure.warnings,
-    }, {}, "public, max-age=15");
-    cacheResponse(context, response);
+    }, {}, "public, max-age=15"), Date.now() - startedAt);
+    writeSpxEdgeCache(context, response);
     return response;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

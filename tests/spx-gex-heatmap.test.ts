@@ -33,6 +33,8 @@ import {
 import { loadCanonicalSpxGexForTelegram } from "../scripts/worker-spx-bot";
 import { onRequest as getSpxGexHeatmapApi } from "../functions/api/spx-gex-heatmap";
 import { onRequest as getSpxGexPressureApi } from "../functions/api/spx-gex-pressure";
+import { onRequest as getSpxGexCellDetailApi } from "../functions/api/spx-gex-cell-detail";
+import { canonicalSpxCacheRequest } from "../functions/api/_spx-edge-cache";
 import { buildSpxGexUatFixture } from "../src/lib/spx-gex-uat-fixture";
 import {
   buildSpxGexOneMinuteSpotSegments,
@@ -45,6 +47,36 @@ import {
 } from "../src/lib/spx-gex-pressure-matrix";
 import { parseSpxGexBoardSelection } from "../src/components/spx-gex-heatmap-page";
 import { getSpxGexTooltipPosition } from "../src/lib/spx-gex-tooltip";
+import { parseJsonResponse, SafeJsonResponseError } from "../src/lib/safe-json-response";
+import { getSpxSpotLivePulseKey } from "../src/lib/spx-spot-live-pulse";
+
+it("normalizes volatile refresh keys into one SPX edge-cache key", () => {
+  const first = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?date=2026-07-17&_=1"));
+  const second = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?date=2026-07-17&refresh=2"));
+  assert.equal(first.url, "https://example.com/api/spx-gex-pressure?date=2026-07-17");
+  assert.equal(first.url, second.url);
+});
+
+it("rejects Cloudflare text failures without attempting JSON parsing", async () => {
+  await assert.rejects(
+    () => parseJsonResponse(new Response("error code: 1102", {
+      status: 503,
+      headers: { "content-type": "text/plain; charset=UTF-8", "cf-ray": "unit-ray" },
+    }), "/api/spx-gex-pressure"),
+    (error: unknown) => error instanceof SafeJsonResponseError
+      && error.message.includes("Cloudflare 1102")
+      && error.message.includes("Ray unit-ray"),
+  );
+});
+
+it("replays the live spot pulse only for a changed candle or canonical snapshot", () => {
+  const first = getSpxSpotLivePulseKey({ price: 7488.66, timeEt: "11:42", resolution: "1m" });
+  assert.equal(first, getSpxSpotLivePulseKey({ price: 7488.66, timeEt: "11:42", resolution: "1m" }));
+  assert.notEqual(first, getSpxSpotLivePulseKey({ price: 7488.66, timeEt: "11:43", resolution: "1m" }));
+  assert.notEqual(first, getSpxSpotLivePulseKey({ price: 7489.01, timeEt: "11:42", resolution: "1m" }));
+  assert.equal(getSpxSpotLivePulseKey({ price: 7488.66, timeEt: "11:45", resolution: "15m-fallback" }), "15m-fallback:11:45:7488.6600");
+  assert.equal(getSpxSpotLivePulseKey({ price: null, timeEt: "11:45", resolution: "1m" }), null);
+});
 
 it("does not turn a missing snapshot hash parameter into snapshot minute zero", () => {
   assert.deepEqual(parseSpxGexBoardSelection("#/work/spx-gex-heatmap"), {
@@ -1576,6 +1608,8 @@ describe("SPX GEX heatmap API", () => {
     assert.equal(latestPayload.selectedSnapshot.snapshotMinuteEt, 9 * 60 + 45);
     assert.equal(latestPayload.selectedSnapshot.collectedTimeEt, "10:00");
     assert.equal(latestPayload.heatmap.quote.last, 6010);
+    assert.equal(latestPayload.heatmap.cells[0]?.model, undefined, "initial Board payload omits tooltip-only audit fields");
+    assert.equal(latestPayload.heatmap.cells[0]?.callGex !== undefined, true, "initial Board payload retains visible exposure fields");
 
     const selectedResponse = await getSpxGexHeatmapApi({
       request: new Request("https://example.com/api/spx-gex-heatmap?date=2026-05-27&snapshot=570"),
@@ -1613,6 +1647,22 @@ describe("SPX GEX heatmap API", () => {
     assert.equal(defaultPayload.selectedDate, "2026-05-28");
     assert.equal(defaultPayload.selectedSnapshot.snapshotMinuteEt, 10 * 60);
     assert.equal(defaultPayload.heatmap.quote.last, 6020);
+  });
+
+  it("loads complete audit evidence only for the requested Board cell", async () => {
+    const db = new MemoryD1();
+    const heatmap = buildStructuredHeatmap("2026-05-27T13:45:00.000Z", 6000);
+    await upsertSpxGexHeatmap(db, "2026-05-27", heatmap);
+    const target = heatmap.cells[0]!;
+    const response = await getSpxGexCellDetailApi({
+      request: new Request(`https://example.com/api/spx-gex-cell-detail?date=2026-05-27&snapshot=570&strike=${target.strike}&expiry=${target.expdate}`),
+      env: { SPX_RECAP_DB: db },
+    });
+    const payload = await response.json() as { status: string; detail: SpxGexHeatmapModel["cells"][number] | null };
+    assert.equal(response.status, 200);
+    assert.equal(payload.status, "READY");
+    assert.equal(payload.detail?.model, target.model);
+    assert.deepEqual(payload.detail?.repairNotes, target.repairNotes);
   });
 
   it("returns no data instead of legacy fallback when only daily legacy rows exist", async () => {

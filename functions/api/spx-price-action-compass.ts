@@ -8,6 +8,7 @@ import {
   type SpxPriceActionCandle,
   type SpxPriceActionSource,
 } from "../../src/lib/spx-price-action-compass";
+import { readSpxEdgeCache, withSpxObservability, writeSpxEdgeCache } from "./_spx-edge-cache";
 
 interface Env {
   SPX_PRICE_ACTION_TEST_CANDLES?: SpxPriceActionCandle[];
@@ -19,27 +20,29 @@ interface Context {
   waitUntil?: (promise: Promise<unknown>) => void;
 }
 
-const json = (body: unknown, init: ResponseInit = {}) =>
-  new Response(JSON.stringify(body), {
+const json = (body: unknown, init: ResponseInit = {}) => {
+  const text = JSON.stringify(body);
+  return new Response(text, {
     ...init,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       "Cache-Control": "public, max-age=30",
+      "X-SPX-Payload-Bytes": String(new TextEncoder().encode(text).byteLength),
       ...(init.headers || {}),
     },
   });
+};
 
 export async function onRequest(context: Context) {
+  const startedAt = Date.now();
   const url = new URL(context.request.url);
   const isPriceOverlay = url.searchParams.get("view") === "price-overlay";
   const timeframe = isPriceOverlay ? "1m" : normalizeSpxPriceActionTimeframe(url.searchParams.get("timeframe"));
   const config = getSpxPriceActionFetchConfig(timeframe);
   const fetchedAt = new Date().toISOString();
-  const edgeCache = Array.isArray(context.env.SPX_PRICE_ACTION_TEST_CANDLES) || typeof caches === "undefined"
-    ? null
-    : caches.default;
-  if (context.request.method === "GET" && edgeCache) {
-    const cached = await edgeCache.match(context.request);
+  const allowCache = !Array.isArray(context.env.SPX_PRICE_ACTION_TEST_CANDLES);
+  if (allowCache) {
+    const cached = await readSpxEdgeCache(context.request);
     if (cached) return cached;
   }
 
@@ -71,7 +74,7 @@ export async function onRequest(context: Context) {
       };
 
     const warnings = candles.length === 0 ? ["No SPX OHLCV candles returned from source."] : [];
-    const response = json(isPriceOverlay
+      const response = withSpxObservability(json(isPriceOverlay
       ? {
         ticker: "SPX",
         timeframe: "1m",
@@ -82,16 +85,13 @@ export async function onRequest(context: Context) {
         },
         warnings,
       }
-      : buildSpxPriceActionCompassResponse({
+        : buildSpxPriceActionCompassResponse({
         timeframe,
         candles,
         source,
         warnings,
-      }));
-    if (edgeCache && context.request.method === "GET") {
-      const write = edgeCache.put(context.request, response.clone()).catch(() => undefined);
-      context.waitUntil?.(write);
-    }
+        })), Date.now() - startedAt);
+      if (allowCache) writeSpxEdgeCache(context, response);
     return response;
   } catch (error) {
     return json(

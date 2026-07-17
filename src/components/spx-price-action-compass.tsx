@@ -26,6 +26,7 @@ import {
   type SpxPriceActionTrend,
   type SpxPriceActionZone,
 } from "@/lib/spx-price-action-compass";
+import { parseJsonResponse } from "@/lib/safe-json-response";
 type SignalDirectionFilter = "all" | SpxPriceActionPattern["direction"];
 
 interface SignalFilterState {
@@ -138,13 +139,17 @@ export function SpxPriceActionCompass() {
   const [showVolume, setShowVolume] = useState(true);
   const [practiceChoice, setPracticeChoice] = useState<"LONG" | "SHORT" | "SKIP" | null>(null);
   const [practiceRevealed, setPracticeRevealed] = useState(false);
+  const refreshInFlightRef = useRef(false);
 
-  const loadCompass = async (nextTimeframe = timeframe, bypassCache = false) => {
+  const loadCompass = async (nextTimeframe = timeframe) => {
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`/api/spx-price-action-compass?timeframe=${nextTimeframe}`, bypassCache ? { cache: "no-store" } : undefined);
-      const payload = await response.json() as SpxPriceActionCompassResponse & { warnings?: string[] };
+      const requestUrl = `/api/spx-price-action-compass?timeframe=${nextTimeframe}`;
+      const response = await fetch(requestUrl);
+      const payload = await parseJsonResponse<SpxPriceActionCompassResponse & { warnings?: string[] }>(response, requestUrl);
       if (!response.ok) throw new Error(payload.warnings?.join(" ") || "SPX Price Action Compass API failed");
       setData(payload);
       setSelectedPattern(payload.summary.latestPattern || payload.patterns[0] || null);
@@ -154,6 +159,7 @@ export function SpxPriceActionCompass() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "SPX Price Action Compass failed");
     } finally {
+      refreshInFlightRef.current = false;
       setLoading(false);
     }
   };
@@ -301,7 +307,7 @@ export function SpxPriceActionCompass() {
             </ToolbarToggle>
             <button
               type="button"
-              onClick={() => void loadCompass(timeframe, true)}
+              onClick={() => void loadCompass(timeframe)}
               disabled={loading}
               className="inline-flex h-9 w-9 items-center justify-center border border-cyan-300/20 bg-cyan-300/10 text-cyan-100 transition-colors hover:bg-cyan-300/20 disabled:opacity-50"
               title="Refresh"
@@ -312,7 +318,7 @@ export function SpxPriceActionCompass() {
           </div>
         </div>
 
-        {error && <Notice tone="red" text={error} />}
+        {error && <Notice tone="red" text={`${data.candles.length > 0 ? "Refresh failed; showing the last verified Price Action Compass. " : ""}${error}`} />}
         {data.warnings.length > 0 && <Notice tone="amber" text={data.warnings.join(" ")} />}
 
         <div className="grid gap-2 xl:grid-cols-[minmax(0,1fr)_360px]">
