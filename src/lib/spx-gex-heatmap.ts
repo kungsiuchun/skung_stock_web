@@ -368,11 +368,28 @@ export type SpxGexGenerationResult =
   | { status: "skipped_existing"; date: string; snapshotMinuteEt: number; snapshotTimeEt: string; collectedMinuteEt: number; collectedTimeEt: string }
   | { status: "skipped"; date: string; reason: string };
 
+export type SpxGexInvalidSnapshotReasonCode =
+  | "SNAPSHOT_JSON_MALFORMED"
+  | "SESSION_CONTRACT_INCOMPLETE"
+  | "NO_AUDITED_BLENDED_IV_CELLS";
+
+export interface SpxGexInvalidSnapshotSummary {
+  snapshotMinuteEt: number;
+  snapshotTimeEt: string;
+  reasonCode: SpxGexInvalidSnapshotReasonCode;
+}
+
+export interface SpxGexIntradaySnapshotAudit {
+  snapshots: SpxGexHeatmapModel[];
+  invalidSnapshots: SpxGexInvalidSnapshotSummary[];
+}
+
 interface D1SpxGexIntradayRow {
   trading_date: string;
   snapshot_minute_et: number;
   snapshot_time_et: string;
   generated_at: string;
+  ticker?: string;
   spot: number;
   snapshot_json: string;
 }
@@ -383,6 +400,12 @@ interface D1SpxGexSessionRow {
   snapshot_time_et: string;
   generated_at: string;
   spot: number;
+}
+
+interface D1SpxGexInvalidSnapshotRow {
+  snapshot_minute_et: number;
+  snapshot_time_et: string;
+  reason_code: SpxGexInvalidSnapshotReasonCode;
 }
 
 const toDateKey = (year: number, month: number, day: number) =>
@@ -2023,6 +2046,115 @@ const isAuditedBlendedCell = (cell: SpxGexHeatmapCell) => (
   && Number.isFinite(cell.gammaIv)
 );
 
+export class SpxGexSnapshotValidationError extends Error {
+  constructor(
+    readonly reasonCode: SpxGexInvalidSnapshotReasonCode,
+    message: string,
+  ) {
+    super(`${reasonCode}: ${message}`);
+    this.name = "SpxGexSnapshotValidationError";
+  }
+}
+
+export const validateSpxGexSnapshotContract = (
+  heatmap: SpxGexHeatmapModel,
+): SpxGexInvalidSnapshotReasonCode | null => {
+  if (!hasCompletePressureSessionContract(heatmap.session)) return "SESSION_CONTRACT_INCOMPLETE";
+  if (!heatmap.canonical
+    || heatmap.canonical.schemaVersion !== SPX_GEX_SNAPSHOT_SCHEMA_VERSION
+    || heatmap.canonical.replayGrade !== "NORMALIZED_CANONICAL"
+    || !heatmap.canonical.snapshotId
+    || !heatmap.canonical.payloadHash) return "SESSION_CONTRACT_INCOMPLETE";
+  return heatmap.cells.some(isAuditedBlendedCell) ? null : "NO_AUDITED_BLENDED_IV_CELLS";
+};
+
+const quarantineSpxGexSnapshot = async (
+  db: D1DatabaseLike,
+  heatmap: SpxGexHeatmapModel,
+  reasonCode: SpxGexInvalidSnapshotReasonCode,
+  retentionTradingDays: number,
+) => {
+  const session = heatmap.session;
+  if (!session || !heatmap.canonical) return;
+  await writeSpxGexQuarantineRow(db, {
+    tradingDate: session.tradingDate,
+    snapshotMinuteEt: session.snapshotMinuteEt,
+    snapshotTimeEt: session.snapshotTimeEt,
+    generatedAt: heatmap.generatedAt,
+    ticker: heatmap.ticker,
+    spot: heatmap.quote.last,
+    snapshotJson: JSON.stringify(heatmap),
+    snapshotId: heatmap.canonical.snapshotId,
+    payloadHash: heatmap.canonical.payloadHash,
+    provider: heatmap.canonical.provider,
+    reasonCode,
+  }, retentionTradingDays);
+};
+
+interface SpxGexQuarantineRowInput {
+  tradingDate: string;
+  snapshotMinuteEt: number;
+  snapshotTimeEt: string;
+  generatedAt: string;
+  ticker: string;
+  spot: number;
+  snapshotJson: string;
+  snapshotId: string;
+  payloadHash: string;
+  provider: string;
+  reasonCode: SpxGexInvalidSnapshotReasonCode;
+}
+
+const prepareSpxGexQuarantineStatements = (
+  db: D1DatabaseLike,
+  row: SpxGexQuarantineRowInput,
+  retentionTradingDays: number,
+) => {
+  const quarantinedAt = new Date().toISOString();
+  const insert = db.prepare(`
+    INSERT INTO spx_gex_invalid_snapshots (
+      trading_date, snapshot_minute_et, snapshot_time_et, generated_at, ticker, spot,
+      snapshot_json, snapshot_id, payload_hash, provider, reason_code, quarantined_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(trading_date, snapshot_minute_et, payload_hash) DO NOTHING
+  `).bind(
+    row.tradingDate,
+    row.snapshotMinuteEt,
+    row.snapshotTimeEt,
+    row.generatedAt,
+    row.ticker,
+    row.spot,
+    row.snapshotJson,
+    row.snapshotId,
+    row.payloadHash,
+    row.provider,
+    row.reasonCode,
+    quarantinedAt,
+  );
+  const prune = db.prepare(`
+    DELETE FROM spx_gex_invalid_snapshots
+    WHERE trading_date NOT IN (
+      SELECT trading_date FROM (
+        SELECT DISTINCT trading_date FROM spx_gex_invalid_snapshots ORDER BY trading_date DESC LIMIT ?
+      )
+    )
+  `).bind(retentionTradingDays);
+  return { insert, prune };
+};
+
+const writeSpxGexQuarantineRow = async (
+  db: D1DatabaseLike,
+  row: SpxGexQuarantineRowInput,
+  retentionTradingDays: number,
+) => {
+  const { insert, prune } = prepareSpxGexQuarantineStatements(db, row, retentionTradingDays);
+  if (db.batch) await db.batch([insert, prune]);
+  else {
+    await insert.run();
+    await prune.run();
+  }
+};
+
 const normalizeStoredCellAuditMetadata = (cell: SpxGexHeatmapCell): SpxGexHeatmapCell => {
   if (isAuditedBlendedCell(cell)) {
     return {
@@ -2262,6 +2394,27 @@ const hasCompletePressureSessionContract = (session: unknown): session is SpxGex
     && Number.isFinite(candidate.spot);
 };
 
+const normalizeSpxGexSnapshotForContract = (
+  heatmap: SpxGexHeatmapModel,
+  session: SpxGexSnapshotMeta,
+): SpxGexHeatmapModel => {
+  const baseHeatmap: Omit<SpxGexHeatmapModel, "premarketInterpretation"> = {
+    ...heatmap,
+    source: canonicalSourceMetadata(heatmap.source),
+    strikeProfiles: heatmap.strikeProfiles?.length ? heatmap.strikeProfiles : [],
+  };
+  const strikeProfiles = heatmap.strikeProfiles?.length
+    ? addKeyLevelAnnotations(heatmap.strikeProfiles, heatmap.zeroDte, heatmap.quote.last)
+    : addKeyLevelAnnotations(buildStrikeProfileFromLegacyCells(baseHeatmap), heatmap.zeroDte, heatmap.quote.last);
+  const normalized = normalizeBlendedIvExposure({
+    ...heatmap,
+    source: canonicalSourceMetadata(heatmap.source),
+    strikeProfiles,
+    session,
+  });
+  return withCanonicalSpxGexSnapshotEnvelope(normalized);
+};
+
 const rowToIntradayHeatmap = (
   row: D1SpxGexIntradayRow,
   options: { requireCompleteSession?: boolean } = {},
@@ -2281,23 +2434,56 @@ const rowToIntradayHeatmap = (
     generatedAt: parsedSession?.generatedAt ?? row.generated_at,
     spot: parsedSession?.spot ?? Number(row.spot),
   };
-  const baseHeatmap: Omit<SpxGexHeatmapModel, "premarketInterpretation"> = {
-    ...parsed,
-    source: canonicalSourceMetadata(parsed.source),
-    strikeProfiles: parsed.strikeProfiles?.length ? parsed.strikeProfiles : [],
+  const normalized = normalizeSpxGexSnapshotForContract(parsed, session);
+  return normalized.cells.some(isAuditedBlendedCell) ? normalized : null;
+};
+
+const inspectSpxGexIntradayRow = (
+  row: D1SpxGexIntradayRow,
+  options: { requireCompleteSession?: boolean } = {},
+): { snapshot: SpxGexHeatmapModel | null; reasonCode: SpxGexInvalidSnapshotReasonCode | null } => {
+  let parsed: SpxGexHeatmapModel;
+  try {
+    parsed = parseJsonField<SpxGexHeatmapModel>(row.snapshot_json);
+  } catch {
+    return { snapshot: null, reasonCode: "SNAPSHOT_JSON_MALFORMED" };
+  }
+  if (options.requireCompleteSession && !hasCompletePressureSessionContract(parsed.session)) {
+    return { snapshot: null, reasonCode: "SESSION_CONTRACT_INCOMPLETE" };
+  }
+  try {
+    const snapshot = rowToIntradayHeatmap(row);
+    return snapshot
+      ? { snapshot, reasonCode: null }
+      : { snapshot: null, reasonCode: "NO_AUDITED_BLENDED_IV_CELLS" };
+  } catch {
+    return { snapshot: null, reasonCode: "SNAPSHOT_JSON_MALFORMED" };
+  }
+};
+
+const storedSpxGexRowToQuarantineInput = (
+  row: D1SpxGexIntradayRow,
+  reasonCode: SpxGexInvalidSnapshotReasonCode,
+): SpxGexQuarantineRowInput => {
+  let parsed: Partial<SpxGexHeatmapModel> = {};
+  try {
+    parsed = parseJsonField<Partial<SpxGexHeatmapModel>>(row.snapshot_json);
+  } catch {
+    // The raw normalized payload remains the quarantine evidence.
+  }
+  return {
+    tradingDate: row.trading_date,
+    snapshotMinuteEt: Number(row.snapshot_minute_et),
+    snapshotTimeEt: row.snapshot_time_et,
+    generatedAt: row.generated_at,
+    ticker: row.ticker || parsed.ticker || "SPX",
+    spot: Number(row.spot),
+    snapshotJson: row.snapshot_json,
+    snapshotId: parsed.canonical?.snapshotId || `spx-gex:${row.trading_date}:${row.snapshot_minute_et}:unknown`,
+    payloadHash: parsed.canonical?.payloadHash || fnv1a64(row.snapshot_json),
+    provider: parsed.canonical?.provider || parsed.source?.provider || "unknown",
+    reasonCode,
   };
-  const strikeProfiles = parsed.strikeProfiles?.length
-    ? addKeyLevelAnnotations(parsed.strikeProfiles, parsed.zeroDte, parsed.quote.last)
-    : addKeyLevelAnnotations(buildStrikeProfileFromLegacyCells(baseHeatmap), parsed.zeroDte, parsed.quote.last);
-  const normalized = normalizeBlendedIvExposure({
-    ...parsed,
-    source: canonicalSourceMetadata(parsed.source),
-    strikeProfiles,
-    session,
-  });
-  return normalized.cells.some(isAuditedBlendedCell)
-    ? withCanonicalSpxGexSnapshotEnvelope(normalized)
-    : null;
 };
 
 const rowToSessionSummary = (row: D1SpxGexSessionRow): SpxGexSessionSummary => {
@@ -2350,6 +2536,51 @@ export const listSpxGexIntradaySnapshots = async (
   date: string,
   options: { requireCompleteSession?: boolean } = {},
 ): Promise<SpxGexHeatmapModel[]> => {
+  const audit = await auditSpxGexIntradaySnapshots(db, date, options);
+  const invalid = audit.invalidSnapshots[0];
+  if (invalid) {
+    if (invalid.reasonCode === "SESSION_CONTRACT_INCOMPLETE") {
+      throw new Error(`SPX GEX pressure snapshot JSON has an incomplete session contract at ${date}:${invalid.snapshotMinuteEt}.`);
+    }
+    if (invalid.reasonCode === "SNAPSHOT_JSON_MALFORMED") {
+      throw new Error(`Malformed SPX GEX intraday snapshot JSON at ${date}:${invalid.snapshotMinuteEt}.`);
+    }
+    throw new Error(`Invalid SPX GEX intraday snapshot JSON at ${date}:${invalid.snapshotMinuteEt}.`);
+  }
+  return audit.snapshots;
+};
+
+export const listSpxGexInvalidSnapshots = async (
+  db: D1DatabaseLike,
+  date: string,
+): Promise<SpxGexInvalidSnapshotSummary[]> => {
+  const result = await db.prepare(`
+    SELECT snapshot_minute_et, snapshot_time_et, reason_code
+    FROM spx_gex_invalid_snapshots
+    WHERE trading_date = ?
+    ORDER BY snapshot_minute_et ASC
+  `).bind(date).all<D1SpxGexInvalidSnapshotRow>();
+  return (result.results || []).map((row) => ({
+    snapshotMinuteEt: Number(row.snapshot_minute_et),
+    snapshotTimeEt: row.snapshot_time_et,
+    reasonCode: row.reason_code,
+  }));
+};
+
+export const listSpxGexInvalidSnapshotDates = async (db: D1DatabaseLike): Promise<string[]> => {
+  const result = await db.prepare(`
+    SELECT DISTINCT trading_date
+    FROM spx_gex_invalid_snapshots
+    ORDER BY trading_date DESC
+  `).all<{ trading_date: string }>();
+  return (result.results || []).map((row) => row.trading_date);
+};
+
+export const auditSpxGexIntradaySnapshots = async (
+  db: D1DatabaseLike,
+  date: string,
+  options: { requireCompleteSession?: boolean } = {},
+): Promise<SpxGexIntradaySnapshotAudit> => {
   const result = await db
     .prepare(`
       SELECT * FROM spx_gex_intraday_snapshots
@@ -2358,11 +2589,21 @@ export const listSpxGexIntradaySnapshots = async (
     `)
     .bind(date)
     .all<D1SpxGexIntradayRow>();
-  return (result.results || []).map((row) => {
-    const snapshot = rowToIntradayHeatmap(row, options);
-    if (!snapshot) throw new Error(`Invalid SPX GEX intraday snapshot JSON at ${row.trading_date}:${row.snapshot_minute_et}.`);
-    return snapshot;
-  });
+  const snapshots: SpxGexHeatmapModel[] = [];
+  const invalidSnapshots: SpxGexInvalidSnapshotSummary[] = [];
+  for (const row of result.results || []) {
+    const inspected = inspectSpxGexIntradayRow(row, options);
+    if (!inspected.snapshot) {
+      invalidSnapshots.push({
+        snapshotMinuteEt: Number(row.snapshot_minute_et),
+        snapshotTimeEt: row.snapshot_time_et,
+        reasonCode: inspected.reasonCode || "SNAPSHOT_JSON_MALFORMED",
+      });
+      continue;
+    }
+    snapshots.push(inspected.snapshot);
+  }
+  return { snapshots, invalidSnapshots };
 };
 
 export const readSpxGexIntradaySnapshot = async (
@@ -2405,9 +2646,46 @@ export const upsertSpxGexIntradaySnapshot = async (
   heatmap: SpxGexHeatmapModel,
   options: { retentionTradingDays?: number } = {},
 ) => {
-  if (!heatmap.session) throw new Error("Intraday heatmap snapshot requires session metadata.");
-  const canonicalHeatmap = withCanonicalSpxGexSnapshotEnvelope(heatmap);
+  if (!heatmap.session) {
+    throw new SpxGexSnapshotValidationError("SESSION_CONTRACT_INCOMPLETE", "Intraday heatmap snapshot requires session metadata.");
+  }
+  const session = heatmap.session;
+  const canonicalHeatmap = normalizeSpxGexSnapshotForContract(heatmap, session);
   const retentionTradingDays = options.retentionTradingDays ?? 7;
+  const invalidReason = validateSpxGexSnapshotContract(canonicalHeatmap);
+  if (invalidReason) {
+    await quarantineSpxGexSnapshot(db, canonicalHeatmap, invalidReason, retentionTradingDays);
+    throw new SpxGexSnapshotValidationError(invalidReason, `Rejected SPX GEX snapshot ${session.tradingDate}:${session.snapshotMinuteEt}.`);
+  }
+  const existingRow = await db.prepare(`
+    SELECT * FROM spx_gex_intraday_snapshots
+    WHERE trading_date = ? AND snapshot_minute_et = ?
+  `).bind(
+    session.tradingDate,
+    session.snapshotMinuteEt,
+  ).first<D1SpxGexIntradayRow>();
+  let replacementQuarantine: ReturnType<typeof prepareSpxGexQuarantineStatements> | null = null;
+  let deleteInvalidExisting: ReturnType<D1DatabaseLike["prepare"]> | null = null;
+  if (existingRow) {
+    const existing = inspectSpxGexIntradayRow(existingRow, { requireCompleteSession: true });
+    if (existing.snapshot) return existing.snapshot;
+    if (!db.batch) {
+      throw new Error("Atomic D1 batch support is required to replace an invalid SPX GEX snapshot.");
+    }
+    replacementQuarantine = prepareSpxGexQuarantineStatements(
+      db,
+      storedSpxGexRowToQuarantineInput(existingRow, existing.reasonCode || "SNAPSHOT_JSON_MALFORMED"),
+      retentionTradingDays,
+    );
+    deleteInvalidExisting = db.prepare(`
+      DELETE FROM spx_gex_intraday_snapshots
+      WHERE trading_date = ? AND snapshot_minute_et = ? AND snapshot_json = ?
+    `).bind(
+      existingRow.trading_date,
+      existingRow.snapshot_minute_et,
+      existingRow.snapshot_json,
+    );
+  }
   const upsert = db.prepare(`
     INSERT INTO spx_gex_intraday_snapshots (
       trading_date, snapshot_minute_et, snapshot_time_et, generated_at, ticker, spot,
@@ -2435,7 +2713,15 @@ export const upsertSpxGexIntradaySnapshot = async (
     )
   `).bind(retentionTradingDays);
 
-  if (db.batch) await db.batch([upsert, prune]);
+  if (replacementQuarantine && deleteInvalidExisting && db.batch) {
+    await db.batch([
+      replacementQuarantine.insert,
+      deleteInvalidExisting,
+      upsert,
+      prune,
+      replacementQuarantine.prune,
+    ]);
+  } else if (db.batch) await db.batch([upsert, prune]);
   else {
     await upsert.run();
     await prune.run();
@@ -2535,19 +2821,25 @@ export const generateAndStoreSpxGexHeatmap = async (options: {
     marketContext,
     onFetched: (payload) => options.onStage?.("FETCHED", payload),
   });
+  const canonicalHeatmap = normalizeSpxGexSnapshotForContract(heatmap, heatmap.session!);
+  const invalidReason = validateSpxGexSnapshotContract(canonicalHeatmap);
+  if (invalidReason) {
+    await quarantineSpxGexSnapshot(options.db, canonicalHeatmap, invalidReason, 7);
+    throw new SpxGexSnapshotValidationError(invalidReason, `Rejected SPX GEX snapshot ${date}:${generationStatus.snapshotMinuteEt}.`);
+  }
   await options.onStage?.("NORMALIZED", {
-    snapshotId: heatmap.canonical?.snapshotId || null,
-    payloadHash: heatmap.canonical?.payloadHash || null,
-    schemaVersion: heatmap.canonical?.schemaVersion || null,
-    provider: heatmap.canonical?.provider || null,
-    fallbackFrom: heatmap.canonical?.fallbackFrom || null,
-    sourceTimestamp: heatmap.canonical?.sourceTimestamp || null,
-    dataQuality: heatmap.dataQuality || null,
-    cellCount: heatmap.cells.length,
-    expiryCount: heatmap.selectedExpiries.length,
+    snapshotId: canonicalHeatmap.canonical?.snapshotId || null,
+    payloadHash: canonicalHeatmap.canonical?.payloadHash || null,
+    schemaVersion: canonicalHeatmap.canonical?.schemaVersion || null,
+    provider: canonicalHeatmap.canonical?.provider || null,
+    fallbackFrom: canonicalHeatmap.canonical?.fallbackFrom || null,
+    sourceTimestamp: canonicalHeatmap.canonical?.sourceTimestamp || null,
+    dataQuality: canonicalHeatmap.dataQuality || null,
+    cellCount: canonicalHeatmap.cells.length,
+    expiryCount: canonicalHeatmap.selectedExpiries.length,
   });
 
-  const persistedHeatmap = await upsertSpxGexHeatmap(options.db, date, heatmap, { retentionTradingDays: 7 });
+  const persistedHeatmap = await upsertSpxGexHeatmap(options.db, date, canonicalHeatmap, { retentionTradingDays: 7 });
   await options.onStage?.("PERSISTED", {
     snapshotId: persistedHeatmap.canonical?.snapshotId || null,
     payloadHash: persistedHeatmap.canonical?.payloadHash || null,

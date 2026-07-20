@@ -18,11 +18,16 @@ import {
 import { SpxGexInlineTooltip, SpxGexTooltip } from "./spx-gex-tooltip";
 
 interface PressureResponse {
-  status: "READY" | "EMPTY" | "BINDING_MISSING" | "STORAGE_UNAVAILABLE" | "ERROR";
+  status: "READY" | "DEGRADED" | "EMPTY" | "BINDING_MISSING" | "STORAGE_UNAVAILABLE" | "ERROR";
   errorCode: string | null;
   error?: string;
   selectedDate: string | null;
   pressure: SpxGexPressureMatrixModel | null;
+  invalidSnapshots: Array<{
+    snapshotMinuteEt: number;
+    snapshotTimeEt: string;
+    reasonCode: "SNAPSHOT_JSON_MALFORMED" | "SESSION_CONTRACT_INCOMPLETE" | "NO_AUDITED_BLENDED_IV_CELLS";
+  }>;
   warnings: string[];
 }
 
@@ -269,7 +274,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
         if (dataRef.current?.pressure && dataRef.current.selectedDate === selectedDate) {
           setRefreshError(message);
         } else {
-          setData({ status: "ERROR", errorCode: "SPX_GEX_PRESSURE_REQUEST_FAILED", error: message, selectedDate, pressure: null, warnings: [] });
+          setData({ status: "ERROR", errorCode: "SPX_GEX_PRESSURE_REQUEST_FAILED", error: message, selectedDate, pressure: null, invalidSnapshots: [], warnings: [] });
         }
       } finally {
         if (!controller.signal.aborted) setReconnecting(false);

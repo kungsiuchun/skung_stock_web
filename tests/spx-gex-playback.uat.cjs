@@ -278,7 +278,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
         spotResolution: spotLine?.getAttribute("data-spx-gex-pressure-spot-resolution") || "",
         spotPointCount: pointCount,
         renderedPolylinePoints: (spotPolyline?.getAttribute("points") || "").trim().split(/\s+/).filter(Boolean).length,
-        majorTickLabels: [...document.querySelectorAll('[data-pressure-axis-major="true"]')].map((node) => node.querySelector("span")?.textContent?.trim() || ""),
+        majorTickLabels: [...document.querySelectorAll('[data-pressure-axis-major="true"]')].map((node) => node.querySelector('span:not([aria-hidden="true"])')?.textContent?.trim() || ""),
         rotatedTimeLabels: document.querySelectorAll('[data-pressure-axis-major] .-rotate-45').length,
         missingColumns: document.querySelectorAll('[data-pressure-column-status="MISSING"]').length,
         spotGuide: Boolean(document.querySelector('[data-spx-gex-pressure-spot-guide="true"]')),

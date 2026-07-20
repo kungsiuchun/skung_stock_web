@@ -13,6 +13,7 @@ import {
   getSpxGexGenerationStatus,
   listSpxGexHeatmapDates,
   listSpxGexHeatmapSessions,
+  listSpxGexInvalidSnapshots,
   readSpxGexHeatmap,
   toTelegramGexSummary,
   upsertSpxGexHeatmap,
@@ -1315,24 +1316,62 @@ class MemoryD1Statement {
 
     if (this.query.includes("INSERT INTO spx_gex_intraday_snapshots")) {
       const key = `${this.values[0]}:${this.values[1]}`;
-      this.db.intraday.set(key, {
-        trading_date: this.values[0],
-        snapshot_minute_et: this.values[1],
-        snapshot_time_et: this.values[2],
-        generated_at: this.values[3],
-        ticker: this.values[4],
-        spot: this.values[5],
-        snapshot_json: this.values[6],
-      });
+      if (!this.query.includes("DO NOTHING") || !this.db.intraday.has(key)) {
+        this.db.intraday.set(key, {
+          trading_date: this.values[0],
+          snapshot_minute_et: this.values[1],
+          snapshot_time_et: this.values[2],
+          generated_at: this.values[3],
+          ticker: this.values[4],
+          spot: this.values[5],
+          snapshot_json: this.values[6],
+        });
+      }
+    }
+
+    if (this.query.includes("INSERT INTO spx_gex_invalid_snapshots")) {
+      const key = `${this.values[0]}:${this.values[1]}:${this.values[8]}`;
+      if (!this.db.invalidSnapshots.has(key)) {
+        this.db.invalidSnapshots.set(key, {
+          trading_date: this.values[0],
+          snapshot_minute_et: this.values[1],
+          snapshot_time_et: this.values[2],
+          generated_at: this.values[3],
+          ticker: this.values[4],
+          spot: this.values[5],
+          snapshot_json: this.values[6],
+          snapshot_id: this.values[7],
+          payload_hash: this.values[8],
+          provider: this.values[9],
+          reason_code: this.values[10],
+          quarantined_at: this.values[11],
+        });
+      }
     }
 
     if (this.query.includes("DELETE FROM spx_gex_intraday_snapshots")) {
-      const keepDates = Array.from(new Set([...this.db.intraday.values()].map((row) => String(row.trading_date))))
+      if (this.query.includes("snapshot_json = ?")) {
+        const key = `${this.values[0]}:${this.values[1]}`;
+        const row = this.db.intraday.get(key);
+        if (row?.snapshot_json === this.values[2]) this.db.intraday.delete(key);
+      } else {
+        const keepDates = Array.from(new Set([...this.db.intraday.values()].map((row) => String(row.trading_date))))
+          .sort()
+          .reverse()
+          .slice(0, Number(this.values[0]));
+        for (const [key, row] of [...this.db.intraday.entries()]) {
+          if (!keepDates.includes(String(row.trading_date))) this.db.intraday.delete(key);
+        }
+      }
+    }
+
+    if (this.query.includes("DELETE FROM spx_gex_invalid_snapshots")) {
+      const keepDates = Array.from(new Set([...this.db.invalidSnapshots.values()].map((row) => String(row.trading_date))))
         .sort()
         .reverse()
         .slice(0, Number(this.values[0]));
-      for (const [key, row] of [...this.db.intraday.entries()]) {
-        if (!keepDates.includes(String(row.trading_date))) this.db.intraday.delete(key);
+      for (const [key, row] of [...this.db.invalidSnapshots.entries()]) {
+        if (!keepDates.includes(String(row.trading_date))) this.db.invalidSnapshots.delete(key);
       }
     }
 
@@ -1399,6 +1438,29 @@ class MemoryD1Statement {
   }
 
   async all<T = Record<string, unknown>>() {
+    if (this.query.includes("SELECT DISTINCT trading_date") && this.query.includes("FROM spx_gex_invalid_snapshots")) {
+      return {
+        results: Array.from(new Set([...this.db.invalidSnapshots.values()].map((row) => String(row.trading_date))))
+          .sort()
+          .reverse()
+          .map((trading_date) => ({ trading_date })) as T[],
+      };
+    }
+
+    if (this.query.includes("FROM spx_gex_invalid_snapshots") && this.query.includes("WHERE trading_date = ?")) {
+      const date = String(this.values[0]);
+      return {
+        results: [...this.db.invalidSnapshots.values()]
+          .filter((row) => row.trading_date === date)
+          .sort((a, b) => Number(a.snapshot_minute_et) - Number(b.snapshot_minute_et))
+          .map((row) => ({
+            snapshot_minute_et: row.snapshot_minute_et,
+            snapshot_time_et: row.snapshot_time_et,
+            reason_code: row.reason_code,
+          })) as T[],
+      };
+    }
+
     if (this.query.includes("SELECT DISTINCT trading_date")) {
       return {
         results: Array.from(new Set([...this.db.intraday.values()].map((row) => String(row.trading_date))))
@@ -1438,6 +1500,7 @@ class MemoryD1Statement {
 
 class MemoryD1 {
   readonly intraday = new Map<string, Record<string, unknown>>();
+  readonly invalidSnapshots = new Map<string, Record<string, unknown>>();
   readonly legacy = new Map<string, Record<string, unknown>>();
   readonly cboeCache = new Map<string, Record<string, unknown>>();
 
@@ -1488,6 +1551,45 @@ const seedLegacyHeatmapRow = (db: MemoryD1, date: string, heatmap: SpxGexHeatmap
 };
 
 describe("SPX GEX intraday D1 storage", () => {
+  it("quarantines a semantic-invalid snapshot instead of persisting it as active", async () => {
+    const db = new MemoryD1();
+    const invalid = buildStructuredHeatmap("2026-05-27T13:45:00.000Z", 6000);
+    invalid.cells = invalid.cells.map((cell) => ({
+      ...cell,
+      netGex: null,
+      callIv: null,
+      putIv: null,
+      gammaIv: null,
+    }));
+
+    await assert.rejects(
+      () => upsertSpxGexHeatmap(db, "2026-05-27", invalid),
+      /NO_AUDITED_BLENDED_IV_CELLS/,
+    );
+
+    assert.equal(await readSpxGexHeatmap(db, "2026-05-27", 570), null);
+    assert.deepEqual(await listSpxGexInvalidSnapshots(db, "2026-05-27"), [{
+      snapshotMinuteEt: 570,
+      snapshotTimeEt: "09:30",
+      reasonCode: "NO_AUDITED_BLENDED_IV_CELLS",
+    }]);
+  });
+
+  it("replaces an invalid active row with a contract-valid retry for the same slot", async () => {
+    const db = new MemoryD1();
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T13:45:00.000Z", 6000));
+    const invalidRow = db.intraday.get("2026-05-27:570");
+    assert.ok(invalidRow);
+    const invalidSnapshot = JSON.parse(String(invalidRow.snapshot_json)) as SpxGexHeatmapModel;
+    invalidSnapshot.cells = invalidSnapshot.cells.map((cell) => ({ ...cell, netGex: null, callIv: null, putIv: null, gammaIv: null }));
+    invalidRow.snapshot_json = JSON.stringify(invalidSnapshot);
+
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildStructuredHeatmap("2026-05-27T13:45:00.000Z", 6010));
+
+    assert.equal((await readSpxGexHeatmap(db, "2026-05-27", 570))?.quote.last, 6010);
+    assert.equal((await listSpxGexInvalidSnapshots(db, "2026-05-27"))[0]?.reasonCode, "NO_AUDITED_BLENDED_IV_CELLS");
+  });
+
   it("keeps canonical payload hash and snapshot id stable after audited D1 read normalization", async () => {
     const db = new MemoryD1();
     const fixture = buildSpxGexUatFixture();
@@ -1787,6 +1889,44 @@ const createFakeDataClient = () => {
 };
 
 describe("SPX GEX intraday automation runner", () => {
+  it("never emits NORMALIZED or PERSISTED for a snapshot that fails the shared contract", async () => {
+    const db = new MemoryD1();
+    const { client } = createFakeDataClient();
+    const invalidClient: SpxGexDataClient = {
+      ...client,
+      async getOptionsChain(expiry?: string) {
+        const chain = await client.getOptionsChain(expiry) as SpxGexOptionChain;
+        const stripPricing = (leg: SpxGexOptionChain["calls"][number]) => ({
+          ...leg,
+          impliedVolatility: null,
+          bid: null,
+          ask: null,
+          lastPrice: null,
+        });
+        return {
+          ...chain,
+          calls: chain.calls.map(stripPricing),
+          puts: chain.puts.map(stripPricing),
+        };
+      },
+    };
+    const lifecycleStages: string[] = [];
+
+    await assert.rejects(
+      () => generateAndStoreSpxGexHeatmap({
+        db,
+        dataClient: invalidClient,
+        now: new Date("2026-05-27T13:45:00Z"),
+        onStage: async (stage) => { lifecycleStages.push(stage); },
+      }),
+      /NO_AUDITED_BLENDED_IV_CELLS/,
+    );
+
+    assert.deepEqual(lifecycleStages, ["FETCHED"]);
+    assert.deepEqual(await listSpxGexHeatmapSessions(db, "2026-05-27"), []);
+    assert.equal((await listSpxGexInvalidSnapshots(db, "2026-05-27"))[0]?.reasonCode, "NO_AUDITED_BLENDED_IV_CELLS");
+  });
+
   it("generates once per 15-minute slot and skips only the same slot", async () => {
     const db = new MemoryD1();
     const { client, calls } = createFakeDataClient();
@@ -2094,7 +2234,9 @@ describe("SPX GEX pressure API", () => {
     snapshotListQueries = 0;
 
     override prepare(query: string) {
-      if (query.includes("SELECT * FROM spx_gex_intraday_snapshots") && query.includes("WHERE trading_date = ?")) {
+      if (query.includes("SELECT * FROM spx_gex_intraday_snapshots")
+        && query.includes("WHERE trading_date = ?")
+        && !query.includes("snapshot_minute_et = ?")) {
         this.snapshotListQueries += 1;
       }
       return super.prepare(query);
@@ -2122,6 +2264,87 @@ describe("SPX GEX pressure API", () => {
     assert.equal(text.includes("snapshot_json"), false);
   });
 
+  it("keeps valid pressure frames available when one persisted snapshot has no audited cells", async () => {
+    const db = new CountingD1();
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, { 6000: 100 }));
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildPressureSnapshot("2026-05-27T14:00:00.000Z", 6005, { 6000: 150 }));
+    const invalidRow = db.intraday.get("2026-05-27:570");
+    assert.ok(invalidRow);
+    const invalidSnapshot = JSON.parse(String(invalidRow.snapshot_json)) as SpxGexHeatmapModel;
+    invalidSnapshot.cells = invalidSnapshot.cells.map((cell) => ({
+      ...cell,
+      netGex: null,
+      callIv: null,
+      putIv: null,
+      gammaIv: null,
+    }));
+    invalidRow.snapshot_json = JSON.stringify(invalidSnapshot);
+
+    const response = await getSpxGexPressureApi({
+      request: new Request("https://example.com/api/spx-gex-pressure?date=2026-05-27"),
+      env: { SPX_RECAP_DB: db },
+    });
+    const payload = await response.json() as {
+      status: string;
+      pressure: { baseline: { snapshotMinuteEt: number }; timeline: Array<{ snapshotMinuteEt: number; status: string }> };
+      invalidSnapshots: Array<{ snapshotMinuteEt: number; reasonCode: string }>;
+      warnings: string[];
+    };
+
+    assert.equal(response.status, 200);
+    assert.equal(payload.status, "DEGRADED");
+    assert.equal(payload.pressure.baseline.snapshotMinuteEt, 585);
+    assert.equal(payload.pressure.timeline.find((slot) => slot.snapshotMinuteEt === 570)?.status, "MISSING");
+    assert.deepEqual(payload.invalidSnapshots, [{
+      snapshotMinuteEt: 570,
+      snapshotTimeEt: "09:30",
+      reasonCode: "NO_AUDITED_BLENDED_IV_CELLS",
+    }]);
+    assert.match(payload.warnings.join(" "), /09:30 snapshot/i);
+  });
+
+  it("reports quarantined frames as DEGRADED without exposing their payload", async () => {
+    const db = new CountingD1();
+    const invalid = buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, { 6000: 100 });
+    invalid.cells = invalid.cells.map((cell) => ({ ...cell, netGex: null, callIv: null, putIv: null, gammaIv: null }));
+    await assert.rejects(() => upsertSpxGexHeatmap(db, "2026-05-27", invalid), /NO_AUDITED_BLENDED_IV_CELLS/);
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildPressureSnapshot("2026-05-27T14:00:00.000Z", 6005, { 6000: 150 }));
+
+    const response = await getSpxGexPressureApi({
+      request: new Request("https://example.com/api/spx-gex-pressure?date=2026-05-27"),
+      env: { SPX_RECAP_DB: db },
+    });
+    const text = await response.text();
+    const payload = JSON.parse(text) as { status: string; invalidSnapshots: Array<{ snapshotMinuteEt: number; reasonCode: string }> };
+
+    assert.equal(response.status, 200, text);
+    assert.equal(payload.status, "DEGRADED");
+    assert.deepEqual(payload.invalidSnapshots, [{
+      snapshotMinuteEt: 570,
+      snapshotTimeEt: "09:30",
+      reasonCode: "NO_AUDITED_BLENDED_IV_CELLS",
+    }]);
+    assert.equal(text.includes("snapshot_json"), false);
+  });
+
+  it("fails explicitly when a date has quarantined frames but no valid pressure snapshot", async () => {
+    const db = new CountingD1();
+    const invalid = buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, { 6000: 100 });
+    invalid.cells = invalid.cells.map((cell) => ({ ...cell, netGex: null, callIv: null, putIv: null, gammaIv: null }));
+    await assert.rejects(() => upsertSpxGexHeatmap(db, "2026-05-27", invalid), /NO_AUDITED_BLENDED_IV_CELLS/);
+
+    const response = await getSpxGexPressureApi({
+      request: new Request("https://example.com/api/spx-gex-pressure?date=2026-05-27"),
+      env: { SPX_RECAP_DB: db },
+    });
+    const payload = await response.json() as { status: string; errorCode: string; invalidSnapshots: unknown[] };
+
+    assert.equal(response.status, 500);
+    assert.equal(payload.status, "ERROR");
+    assert.equal(payload.errorCode, "SPX_GEX_PRESSURE_NO_VALID_SNAPSHOTS");
+    assert.equal(payload.invalidSnapshots.length, 1);
+  });
+
   it("returns explicit binding, storage, and malformed-snapshot failures", async () => {
     const binding = await getSpxGexPressureApi({ request: new Request("https://example.com/api/spx-gex-pressure"), env: {} });
     assert.equal(binding.status, 503);
@@ -2146,9 +2369,9 @@ describe("SPX GEX pressure API", () => {
       env: { SPX_RECAP_DB: db },
     });
     assert.equal(incomplete.status, 500);
-    const incompletePayload = await incomplete.json() as { status: string; error: string };
+    const incompletePayload = await incomplete.json() as { status: string; invalidSnapshots: Array<{ reasonCode: string }> };
     assert.equal(incompletePayload.status, "ERROR");
-    assert.match(incompletePayload.error, /incomplete session contract/);
+    assert.equal(incompletePayload.invalidSnapshots[0]?.reasonCode, "SESSION_CONTRACT_INCOMPLETE");
 
     row.snapshot_json = "{";
     const malformed = await getSpxGexPressureApi({
@@ -2156,6 +2379,8 @@ describe("SPX GEX pressure API", () => {
       env: { SPX_RECAP_DB: db },
     });
     assert.equal(malformed.status, 500);
-    assert.equal(((await malformed.json()) as { status: string }).status, "ERROR");
+    const malformedPayload = (await malformed.json()) as { status: string; invalidSnapshots: Array<{ reasonCode: string }> };
+    assert.equal(malformedPayload.status, "ERROR");
+    assert.equal(malformedPayload.invalidSnapshots[0]?.reasonCode, "SNAPSHOT_JSON_MALFORMED");
   });
 });

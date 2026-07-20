@@ -1,6 +1,8 @@
 import {
+  auditSpxGexIntradaySnapshots,
   listSpxGexHeatmapDates,
-  listSpxGexIntradaySnapshots,
+  listSpxGexInvalidSnapshotDates,
+  listSpxGexInvalidSnapshots,
 } from "../../src/lib/spx-gex-heatmap";
 import { buildSpxGexPressureMatrix } from "../../src/lib/spx-gex-pressure-matrix";
 import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
@@ -44,28 +46,60 @@ async function onRequestUncached(context: Context) {
       error: "SPX_RECAP_DB binding is not configured.",
       selectedDate: null,
       pressure: null,
+      invalidSnapshots: [],
       warnings: ["SPX_RECAP_DB binding is not configured."],
     }, { status: 503 });
   }
 
   try {
     await context.env.SPX_RECAP_DB.prepare("SELECT 1 FROM spx_gex_intraday_snapshots LIMIT 1").first();
-    const dates = await listSpxGexHeatmapDates(context.env.SPX_RECAP_DB);
+    const [activeDates, invalidDates] = await Promise.all([
+      listSpxGexHeatmapDates(context.env.SPX_RECAP_DB),
+      listSpxGexInvalidSnapshotDates(context.env.SPX_RECAP_DB),
+    ]);
+    const dates = [...new Set([...activeDates, ...invalidDates])].sort().reverse();
     const requestedDate = url.searchParams.get("date");
     const selectedDate = isValidDate(requestedDate) && dates.includes(requestedDate!) ? requestedDate! : dates[0] || null;
-    const snapshots = selectedDate
-      ? await listSpxGexIntradaySnapshots(context.env.SPX_RECAP_DB, selectedDate, { requireCompleteSession: true })
-      : [];
-    if (!selectedDate || snapshots.length === 0) {
-      return json({ status: "EMPTY", errorCode: null, selectedDate, pressure: null, warnings: [] });
+    const [audit, quarantinedSnapshots] = selectedDate
+      ? await Promise.all([
+        auditSpxGexIntradaySnapshots(context.env.SPX_RECAP_DB, selectedDate, { requireCompleteSession: true }),
+        listSpxGexInvalidSnapshots(context.env.SPX_RECAP_DB, selectedDate),
+      ])
+      : [{ snapshots: [], invalidSnapshots: [] }, []];
+    const invalidSnapshots = [...audit.invalidSnapshots, ...quarantinedSnapshots]
+      .filter((snapshot, index, all) => all.findIndex((candidate) =>
+        candidate.snapshotMinuteEt === snapshot.snapshotMinuteEt
+        && candidate.reasonCode === snapshot.reasonCode) === index)
+      .sort((a, b) => a.snapshotMinuteEt - b.snapshotMinuteEt);
+    if (!selectedDate) {
+      return json({ status: "EMPTY", errorCode: null, selectedDate, pressure: null, invalidSnapshots: [], warnings: [] });
+    }
+    if (audit.snapshots.length === 0 && invalidSnapshots.length > 0) {
+      return json({
+        status: "ERROR",
+        errorCode: "SPX_GEX_PRESSURE_NO_VALID_SNAPSHOTS",
+        error: "SPX GEX pressure has no contract-valid snapshots for the selected date.",
+        selectedDate,
+        pressure: null,
+        invalidSnapshots,
+        warnings: ["All persisted SPX GEX snapshots failed the pressure data contract."],
+      }, { status: 500 });
+    }
+    if (audit.snapshots.length === 0) {
+      return json({ status: "EMPTY", errorCode: null, selectedDate, pressure: null, invalidSnapshots: [], warnings: [] });
     }
 
-    const pressure = buildSpxGexPressureMatrix(snapshots);
+    const builtPressure = buildSpxGexPressureMatrix(audit.snapshots);
+    const invalidWarnings = invalidSnapshots.map((snapshot) =>
+      `${snapshot.snapshotTimeEt} snapshot did not pass the pressure data contract and was excluded.`);
+    const pressure = { ...builtPressure, warnings: [...builtPressure.warnings, ...invalidWarnings] };
+    const status = invalidSnapshots.length > 0 ? "DEGRADED" : "READY";
     const response = withSpxObservability(json({
-      status: "READY",
+      status,
       errorCode: null,
       selectedDate,
       pressure,
+      invalidSnapshots,
       warnings: pressure.warnings,
     }, {}, "public, max-age=15"), Date.now() - startedAt);
     await writeSpxEdgeCache(context, response);
@@ -79,6 +113,7 @@ async function onRequestUncached(context: Context) {
       error: missingTable ? "SPX GEX intraday storage migration is not applied." : `SPX GEX pressure build failed: ${message}`,
       selectedDate: null,
       pressure: null,
+      invalidSnapshots: [],
       warnings: [missingTable ? "SPX GEX intraday storage migration is not applied." : `SPX GEX pressure build failed: ${message}`],
     }, { status: missingTable ? 503 : 500 });
   }
