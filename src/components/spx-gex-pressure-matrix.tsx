@@ -257,7 +257,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
       setLoading(true);
       try {
         const params = new URLSearchParams({ date: selectedDate });
-        const response = await runSpxRequest(() => fetch(`/api/spx-gex-pressure?${params.toString()}`, { signal: controller.signal }), {
+        const response = await runSpxRequest((attemptSignal) => fetch(`/api/spx-gex-pressure?${params.toString()}`, { signal: attemptSignal }), {
           signal: controller.signal,
           onRetry: () => setReconnecting(true),
         });
@@ -291,7 +291,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
     const load = async () => {
       try {
         const params = new URLSearchParams({ timeframe: "1m", view: "price-overlay" });
-        const response = await runSpxRequest(() => fetch(`/api/spx-price-action-compass?${params.toString()}`, { signal: controller.signal }), {
+        const response = await runSpxRequest((attemptSignal) => fetch(`/api/spx-price-action-compass?${params.toString()}`, { signal: attemptSignal }), {
           signal: controller.signal,
           onRetry: () => setReconnecting(true),
         });

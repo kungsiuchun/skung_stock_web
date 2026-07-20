@@ -291,7 +291,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
       if (snapshotMinute !== null && snapshotMinute !== undefined) params.set("snapshot", String(snapshotMinute));
       const requestUrl = `/api/spx-gex-heatmap${params.toString() ? `?${params.toString()}` : ""}`;
       setRequestState({ phase: "LOADING", requestUrl, httpStatus: null, errorCode: null, message: null });
-      const response = await runSpxRequest(() => fetch(requestUrl, { signal: controller.signal }), {
+      const response = await runSpxRequest((attemptSignal) => fetch(requestUrl, { signal: attemptSignal }), {
         signal: controller.signal,
         onRetry: () => setReconnecting(true),
       });

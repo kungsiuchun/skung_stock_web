@@ -41,16 +41,18 @@ import {
   buildSpxGexOneMinuteSpotSegments,
   buildSpxGexPressureAxisTicks,
   buildSpxGexPressureChartGeometry,
+  buildSpxGexPressureMatrixFromFrames,
   buildSpxGexPressureMatrix,
   extendSpxGexPressureForSession,
   getLatestSpxGexSpotPoint,
   getSpxGexPressureTooltipPosition,
+  toSpxGexPressureFrame,
 } from "../src/lib/spx-gex-pressure-matrix";
 import { parseSpxGexBoardSelection } from "../src/components/spx-gex-heatmap-page";
 import { getSpxGexTooltipPosition } from "../src/lib/spx-gex-tooltip";
 import { parseJsonResponse, SafeJsonResponseError } from "../src/lib/safe-json-response";
 import { getSpxSpotLivePulseKey } from "../src/lib/spx-spot-live-pulse";
-import { resetSpxRequestLaneForTests, runSpxRequest } from "../src/lib/spx-request-lane";
+import { resetSpxRequestLaneForTests, runSpxRequest, SpxRequestTimeoutError } from "../src/lib/spx-request-lane";
 
 it("normalizes volatile refresh keys into one SPX edge-cache key", () => {
   const first = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?date=2026-07-17&_=1"));
@@ -91,11 +93,11 @@ it("serializes SPX requests and retries only transient 503 responses", async () 
   const second = runSpxRequest(async () => {
     order.push("compass");
     transientAttempts += 1;
-    return new Response("compass", { status: transientAttempts < 3 ? 503 : 200 });
-  }, { retryDelaysMs: [0, 0] });
+    return new Response("compass", { status: transientAttempts < 2 ? 503 : 200 });
+  }, { retryDelaysMs: [0] });
   assert.equal((await first).status, 200);
   assert.equal((await second).status, 200);
-  assert.deepEqual(order, ["heatmap", "compass", "compass", "compass"]);
+  assert.deepEqual(order, ["heatmap", "compass", "compass"]);
 });
 
 it("drops an obsolete queued SPX request before it reaches the origin", async () => {
@@ -116,6 +118,53 @@ it("drops an obsolete queued SPX request before it reaches the origin", async ()
   await first;
   await assert.rejects(obsolete, (error: unknown) => error instanceof DOMException && error.name === "AbortError");
   assert.equal(obsoleteOriginCalls, 0);
+});
+
+it("times out a hung SPX request and releases the serial lane", async () => {
+  resetSpxRequestLaneForTests();
+  let attempts = 0;
+  let timedOutAttemptsAborted = 0;
+  const hung = runSpxRequest((signal) => new Promise<Response>(() => {
+    attempts += 1;
+    signal.addEventListener("abort", () => { timedOutAttemptsAborted += 1; }, { once: true });
+  }), { retries: 1, retryDelaysMs: [0], attemptTimeoutMs: 10 });
+  const next = runSpxRequest(async () => new Response("next", { status: 200 }));
+
+  await assert.rejects(hung, (error: unknown) => error instanceof SpxRequestTimeoutError);
+  assert.equal((await next).status, 200);
+  assert.equal(attempts, 2);
+  assert.equal(timedOutAttemptsAborted, 2);
+});
+
+it("does not retry an in-flight SPX request after caller abort", async () => {
+  resetSpxRequestLaneForTests();
+  const controller = new AbortController();
+  let attempts = 0;
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const request = runSpxRequest((signal) => new Promise<Response>((_resolve, reject) => {
+    attempts += 1;
+    markStarted();
+    signal.addEventListener("abort", () => reject(new DOMException("cancelled", "AbortError")), { once: true });
+  }), { signal: controller.signal, retries: 1, retryDelaysMs: [0], attemptTimeoutMs: 100 });
+  await started;
+  controller.abort();
+
+  await assert.rejects(request, (error: unknown) => error instanceof DOMException && error.name === "AbortError");
+  assert.equal(attempts, 1);
+});
+
+it("does not retry a non-transport SPX task failure", async () => {
+  resetSpxRequestLaneForTests();
+  let attempts = 0;
+  await assert.rejects(
+    runSpxRequest(async () => {
+      attempts += 1;
+      throw new Error("programmer failure");
+    }, { retries: 1, retryDelaysMs: [0] }),
+    /programmer failure/,
+  );
+  assert.equal(attempts, 1);
 });
 
 it("coalesces concurrent cold-cache producers into one response", async () => {
@@ -1470,6 +1519,59 @@ class MemoryD1Statement {
       };
     }
 
+    if (this.query.includes("SPX_GEX_PRESSURE_PROJECTION")) {
+      const date = String(this.values[0]);
+      return {
+        results: [...this.db.intraday.values()]
+          .filter((row) => row.trading_date === date)
+          .sort((a, b) => Number(a.snapshot_minute_et) - Number(b.snapshot_minute_et))
+          .map((row) => {
+            let snapshot: Partial<SpxGexHeatmapModel> = {};
+            let jsonIsValid = 1;
+            try {
+              snapshot = JSON.parse(String(row.snapshot_json)) as Partial<SpxGexHeatmapModel>;
+            } catch {
+              jsonIsValid = 0;
+            }
+            const expiry = snapshot.zeroDte?.expiry || snapshot.selectedExpiries?.[0] || null;
+            const cells = Array.isArray(snapshot.cells) ? snapshot.cells : [];
+            const auditedCells = cells.filter((cell) => cell.model === "black_scholes_gamma_exposure_blended_iv"
+              && typeof cell.netGex === "number"
+              && typeof cell.callIv === "number"
+              && typeof cell.putIv === "number"
+              && typeof cell.gammaIv === "number");
+            return {
+              trading_date: row.trading_date,
+              snapshot_minute_et: row.snapshot_minute_et,
+              snapshot_time_et: row.snapshot_time_et,
+              json_is_valid: jsonIsValid,
+              session_trading_date: snapshot.session?.tradingDate,
+              session_snapshot_minute_et: snapshot.session?.snapshotMinuteEt,
+              session_snapshot_time_et: snapshot.session?.snapshotTimeEt,
+              session_collected_minute_et: snapshot.session?.collectedMinuteEt,
+              session_collected_time_et: snapshot.session?.collectedTimeEt,
+              session_generated_at: snapshot.session?.generatedAt,
+              session_spot: snapshot.session?.spot,
+              canonical_schema_version: snapshot.canonical?.schemaVersion,
+              canonical_replay_grade: snapshot.canonical?.replayGrade,
+              canonical_snapshot_id: snapshot.canonical?.snapshotId,
+              canonical_payload_hash: snapshot.canonical?.payloadHash,
+              provider: snapshot.canonical?.provider || snapshot.source?.provider || "unknown",
+              fallback_from: snapshot.canonical?.fallbackFrom ?? snapshot.source?.fallbackFrom ?? null,
+              source_timestamp: snapshot.canonical?.sourceTimestamp ?? snapshot.source?.sourceTimestamp ?? null,
+              calculation_engine_version: snapshot.source?.calculationEngineVersion
+                ?? snapshot.canonical?.calculationEngineVersion
+                ?? 1,
+              expiry,
+              audited_cell_count: auditedCells.length,
+              gex_json: JSON.stringify(cells
+                .filter((cell) => cell.expdate === expiry && typeof cell.strike === "number" && typeof cell.netGex === "number")
+                .map((cell) => ({ strike: cell.strike, netGex: cell.netGex }))),
+            };
+          }) as T[],
+      };
+    }
+
     if (this.query.includes("FROM spx_gex_intraday_snapshots") && this.query.includes("WHERE trading_date = ?")) {
       const date = String(this.values[0]);
       const includeSnapshotJson = this.query.includes("snapshot_json") || this.query.includes("SELECT *");
@@ -2059,6 +2161,17 @@ describe("SPX 0DTE pressure matrix", () => {
   const baselineValues = { 5970: 100, 5975: 100, 5980: -100, 5985: -100, 5990: 100, 5995: -100, 6000: 0 };
   const currentValues = { 5970: 150, 5975: 50, 5980: -150, 5985: -50, 5990: -25, 5995: 25, 6000: 50, 6005: 75 };
 
+  it("builds the same public matrix from compact pressure frames", () => {
+    const snapshots = [
+      buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, baselineValues),
+      buildPressureSnapshot("2026-05-27T14:00:00.000Z", 6005, currentValues),
+    ];
+    assert.deepEqual(
+      buildSpxGexPressureMatrixFromFrames(snapshots.map(toSpxGexPressureFrame)),
+      buildSpxGexPressureMatrix(snapshots),
+    );
+  });
+
   it("classifies all pressure states, keeps a missing slot, and handles a zero baseline", () => {
     const baseline = buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, baselineValues);
     const current = buildPressureSnapshot("2026-05-27T14:15:00.000Z", 6010, currentValues);
@@ -2231,13 +2344,15 @@ describe("SPX 0DTE pressure matrix", () => {
 
 describe("SPX GEX pressure API", () => {
   class CountingD1 extends MemoryD1 {
-    snapshotListQueries = 0;
+    pressureProjectionQueries = 0;
+    fullSnapshotListQueries = 0;
 
     override prepare(query: string) {
+      if (query.includes("SPX_GEX_PRESSURE_PROJECTION")) this.pressureProjectionQueries += 1;
       if (query.includes("SELECT * FROM spx_gex_intraday_snapshots")
         && query.includes("WHERE trading_date = ?")
         && !query.includes("snapshot_minute_et = ?")) {
-        this.snapshotListQueries += 1;
+        this.fullSnapshotListQueries += 1;
       }
       return super.prepare(query);
     }
@@ -2260,8 +2375,43 @@ describe("SPX GEX pressure API", () => {
     assert.equal(payload.status, "READY");
     assert.equal(payload.pressure.timeline.length, 2);
     assert.equal(payload.pressure.movers.length > 0, true);
-    assert.equal(db.snapshotListQueries, 1);
+    assert.equal(db.pressureProjectionQueries, 1);
+    assert.equal(db.fullSnapshotListQueries, 0);
+    assert.equal(response.headers.get("x-spx-frame-count"), "2");
+    assert.equal(Number(response.headers.get("x-spx-projection-bytes")) < 150_000, true);
     assert.equal(text.includes("snapshot_json"), false);
+  });
+
+  it("keeps a 27-frame pressure projection below 150 KB without returning the 16 MB source payload", async () => {
+    const db = new CountingD1();
+    for (let index = 0; index < 27; index += 1) {
+      const generatedAt = new Date(Date.parse("2026-05-27T13:45:00.000Z") + index * 15 * 60_000).toISOString();
+      await upsertSpxGexHeatmap(db, "2026-05-27", buildPressureSnapshot(generatedAt, 6000 + index, {
+        5995: -100 - index,
+        6000: 100 + index,
+      }));
+      const minute = 570 + index * 15;
+      const row = db.intraday.get(`2026-05-27:${minute}`);
+      assert.ok(row);
+      const source = JSON.parse(String(row.snapshot_json)) as SpxGexHeatmapModel & { unusedSourcePadding?: string };
+      source.unusedSourcePadding = "x".repeat(590_000);
+      row.snapshot_json = JSON.stringify(source);
+    }
+    const sourceBytes = [...db.intraday.values()]
+      .reduce((total, row) => total + new TextEncoder().encode(String(row.snapshot_json)).byteLength, 0);
+
+    const response = await getSpxGexPressureApi({
+      request: new Request("https://example.com/api/spx-gex-pressure?date=2026-05-27"),
+      env: { SPX_RECAP_DB: db },
+    });
+    const text = await response.text();
+
+    assert.equal(response.status, 200, text);
+    assert.equal(sourceBytes > 15_000_000, true);
+    assert.equal(response.headers.get("x-spx-frame-count"), "27");
+    assert.equal(Number(response.headers.get("x-spx-projection-bytes")) < 150_000, true);
+    assert.equal(text.includes("unusedSourcePadding"), false);
+    assert.equal(db.fullSnapshotListQueries, 0);
   });
 
   it("keeps valid pressure frames available when one persisted snapshot has no audited cells", async () => {

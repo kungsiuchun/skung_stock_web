@@ -150,7 +150,7 @@ export function SpxPriceActionCompass({ enabled = true, onInitialLoadSettled }: 
     setError(null);
     try {
       const requestUrl = `/api/spx-price-action-compass?timeframe=${nextTimeframe}`;
-      const response = await runSpxRequest(() => fetch(requestUrl), { onRetry: () => setReconnecting(true) });
+      const response = await runSpxRequest((attemptSignal) => fetch(requestUrl, { signal: attemptSignal }), { onRetry: () => setReconnecting(true) });
       const payload = await parseJsonResponse<SpxPriceActionCompassResponse & { warnings?: string[] }>(response, requestUrl);
       if (!response.ok) throw new Error(payload.warnings?.join(" ") || "SPX Price Action Compass API failed");
       setData(payload);

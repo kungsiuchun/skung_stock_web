@@ -1,10 +1,10 @@
 import {
-  auditSpxGexIntradaySnapshots,
   listSpxGexHeatmapDates,
   listSpxGexInvalidSnapshotDates,
   listSpxGexInvalidSnapshots,
 } from "../../src/lib/spx-gex-heatmap";
-import { buildSpxGexPressureMatrix } from "../../src/lib/spx-gex-pressure-matrix";
+import { listSpxGexPressureFrames } from "../../src/lib/spx-gex-pressure-d1";
+import { buildSpxGexPressureMatrixFromFrames } from "../../src/lib/spx-gex-pressure-matrix";
 import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
 import { coalesceSpxEdgeRequest, readSpxEdgeCache, withSpxObservability, writeSpxEdgeCache } from "./_spx-edge-cache";
 
@@ -62,10 +62,10 @@ async function onRequestUncached(context: Context) {
     const selectedDate = isValidDate(requestedDate) && dates.includes(requestedDate!) ? requestedDate! : dates[0] || null;
     const [audit, quarantinedSnapshots] = selectedDate
       ? await Promise.all([
-        auditSpxGexIntradaySnapshots(context.env.SPX_RECAP_DB, selectedDate, { requireCompleteSession: true }),
+        listSpxGexPressureFrames(context.env.SPX_RECAP_DB, selectedDate),
         listSpxGexInvalidSnapshots(context.env.SPX_RECAP_DB, selectedDate),
       ])
-      : [{ snapshots: [], invalidSnapshots: [] }, []];
+      : [{ frames: [], invalidSnapshots: [], projectionBytes: 0 }, []];
     const invalidSnapshots = [...audit.invalidSnapshots, ...quarantinedSnapshots]
       .filter((snapshot, index, all) => all.findIndex((candidate) =>
         candidate.snapshotMinuteEt === snapshot.snapshotMinuteEt
@@ -74,7 +74,7 @@ async function onRequestUncached(context: Context) {
     if (!selectedDate) {
       return json({ status: "EMPTY", errorCode: null, selectedDate, pressure: null, invalidSnapshots: [], warnings: [] });
     }
-    if (audit.snapshots.length === 0 && invalidSnapshots.length > 0) {
+    if (audit.frames.length === 0 && invalidSnapshots.length > 0) {
       return json({
         status: "ERROR",
         errorCode: "SPX_GEX_PRESSURE_NO_VALID_SNAPSHOTS",
@@ -85,11 +85,11 @@ async function onRequestUncached(context: Context) {
         warnings: ["All persisted SPX GEX snapshots failed the pressure data contract."],
       }, { status: 500 });
     }
-    if (audit.snapshots.length === 0) {
+    if (audit.frames.length === 0) {
       return json({ status: "EMPTY", errorCode: null, selectedDate, pressure: null, invalidSnapshots: [], warnings: [] });
     }
 
-    const builtPressure = buildSpxGexPressureMatrix(audit.snapshots);
+    const builtPressure = buildSpxGexPressureMatrixFromFrames(audit.frames);
     const invalidWarnings = invalidSnapshots.map((snapshot) =>
       `${snapshot.snapshotTimeEt} snapshot did not pass the pressure data contract and was excluded.`);
     const pressure = { ...builtPressure, warnings: [...builtPressure.warnings, ...invalidWarnings] };
@@ -101,7 +101,12 @@ async function onRequestUncached(context: Context) {
       pressure,
       invalidSnapshots,
       warnings: pressure.warnings,
-    }, {}, "public, max-age=15"), Date.now() - startedAt);
+    }, {
+      headers: {
+        "X-SPX-Frame-Count": String(audit.frames.length),
+        "X-SPX-Projection-Bytes": String(audit.projectionBytes),
+      },
+    }, "public, max-age=15"), Date.now() - startedAt);
     await writeSpxEdgeCache(context, response);
     return response;
   } catch (error) {

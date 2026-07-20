@@ -120,6 +120,22 @@ export interface SpxGexPressureChartGeometry {
   spotGuide: { price: number; y: number; timeEt: string } | null;
 }
 
+export interface SpxGexPressureFrame {
+  tradingDate: string;
+  snapshotMinuteEt: number;
+  snapshotTimeEt: string;
+  collectedMinuteEt: number;
+  collectedTimeEt: string;
+  spot: number;
+  expiry: string;
+  calculationEngineVersion: number;
+  provider: string;
+  fallbackFrom: string | null;
+  sourceTimestamp: string | null;
+  snapshotId: string | null;
+  gexByStrike: Array<{ strike: number; netGex: number }>;
+}
+
 export interface SpxGexPressureTooltipPositionInput {
   anchor: { left: number; top: number; width: number; height: number };
   viewport: { width: number; height: number };
@@ -355,53 +371,70 @@ const frontGexByStrike = (snapshot: SpxGexHeatmapModel, expiry: string) => {
   return values;
 };
 
-export const buildSpxGexPressureMatrix = (input: SpxGexHeatmapModel[]): SpxGexPressureMatrixModel => {
+export const toSpxGexPressureFrame = (snapshot: SpxGexHeatmapModel): SpxGexPressureFrame => {
+  if (!snapshot.session) throw new Error("SPX GEX pressure snapshot is missing session metadata.");
+  const expiry = frontExpiry(snapshot);
+  if (!expiry) throw new Error("SPX GEX pressure snapshot is missing a 0DTE expiry.");
+  return {
+    tradingDate: snapshot.session.tradingDate,
+    snapshotMinuteEt: snapshot.session.snapshotMinuteEt,
+    snapshotTimeEt: snapshot.session.snapshotTimeEt,
+    collectedMinuteEt: snapshot.session.collectedMinuteEt,
+    collectedTimeEt: snapshot.session.collectedTimeEt,
+    spot: snapshot.quote.last,
+    expiry,
+    calculationEngineVersion: snapshot.source.calculationEngineVersion
+      ?? snapshot.canonical?.calculationEngineVersion
+      ?? 1,
+    provider: snapshot.canonical?.provider || snapshot.source.provider || "unknown",
+    fallbackFrom: snapshot.canonical?.fallbackFrom ?? snapshot.source.fallbackFrom ?? null,
+    sourceTimestamp: snapshot.canonical?.sourceTimestamp ?? snapshot.source.sourceTimestamp ?? null,
+    snapshotId: snapshot.canonical?.snapshotId ?? null,
+    gexByStrike: [...frontGexByStrike(snapshot, expiry)].map(([strike, netGex]) => ({ strike, netGex })),
+  };
+};
+
+export const buildSpxGexPressureMatrixFromFrames = (input: SpxGexPressureFrame[]): SpxGexPressureMatrixModel => {
   if (input.length === 0) throw new Error("SPX GEX pressure matrix requires at least one snapshot.");
-  const sortedSnapshots = [...input].sort((a, b) => (a.session?.snapshotMinuteEt ?? 0) - (b.session?.snapshotMinuteEt ?? 0));
-  const engineVersion = (snapshot: SpxGexHeatmapModel) => snapshot.source.calculationEngineVersion
-    ?? snapshot.canonical?.calculationEngineVersion
-    ?? 1;
-  const latestEngineVersion = engineVersion(sortedSnapshots[sortedSnapshots.length - 1]);
+  const sortedSnapshots = [...input].sort((a, b) => a.snapshotMinuteEt - b.snapshotMinuteEt);
+  const latestEngineVersion = sortedSnapshots[sortedSnapshots.length - 1].calculationEngineVersion;
   let compatibleStart = sortedSnapshots.length - 1;
-  while (compatibleStart > 0 && engineVersion(sortedSnapshots[compatibleStart - 1]) === latestEngineVersion) compatibleStart -= 1;
+  while (compatibleStart > 0 && sortedSnapshots[compatibleStart - 1].calculationEngineVersion === latestEngineVersion) compatibleStart -= 1;
   const snapshots = sortedSnapshots.slice(compatibleStart);
   const compatibilityWarning = compatibleStart > 0
     ? `Calculation engine changed to v${latestEngineVersion}; baseline reset to the first compatible snapshot.`
     : null;
   const first = snapshots[0];
   const latest = snapshots[snapshots.length - 1];
-  if (!first.session || !latest.session) throw new Error("SPX GEX pressure snapshot is missing session metadata.");
-  const tradingDate = first.session.tradingDate;
-  const expiry = frontExpiry(first);
-  if (!expiry) throw new Error("SPX GEX pressure snapshot is missing a 0DTE expiry.");
+  const tradingDate = first.tradingDate;
+  const expiry = first.expiry;
 
-  const byMinute = new Map<number, SpxGexHeatmapModel>();
+  const byMinute = new Map<number, SpxGexPressureFrame>();
   for (const snapshot of snapshots) {
-    if (!snapshot.session) throw new Error("SPX GEX pressure snapshot is missing session metadata.");
-    if (snapshot.session.tradingDate !== tradingDate) throw new Error("SPX GEX pressure snapshots span multiple trading dates.");
-    if (frontExpiry(snapshot) !== expiry) throw new Error(`SPX GEX pressure expiry changed within ${tradingDate}.`);
-    if ((snapshot.session.snapshotMinuteEt - OPEN_MINUTE_ET) % SLOT_MINUTES !== 0) {
-      throw new Error(`SPX GEX pressure snapshot ${snapshot.session.snapshotTimeEt} is not on a 15-minute slot.`);
+    if (snapshot.tradingDate !== tradingDate) throw new Error("SPX GEX pressure snapshots span multiple trading dates.");
+    if (snapshot.expiry !== expiry) throw new Error(`SPX GEX pressure expiry changed within ${tradingDate}.`);
+    if ((snapshot.snapshotMinuteEt - OPEN_MINUTE_ET) % SLOT_MINUTES !== 0) {
+      throw new Error(`SPX GEX pressure snapshot ${snapshot.snapshotTimeEt} is not on a 15-minute slot.`);
     }
-    if (byMinute.has(snapshot.session.snapshotMinuteEt)) throw new Error(`Duplicate SPX GEX pressure slot ${snapshot.session.snapshotTimeEt}.`);
-    byMinute.set(snapshot.session.snapshotMinuteEt, snapshot);
+    if (byMinute.has(snapshot.snapshotMinuteEt)) throw new Error(`Duplicate SPX GEX pressure slot ${snapshot.snapshotTimeEt}.`);
+    byMinute.set(snapshot.snapshotMinuteEt, snapshot);
   }
 
   const timeline: SpxGexPressureTimelineSlot[] = [];
-  for (let minute = OPEN_MINUTE_ET; minute <= latest.session.snapshotMinuteEt; minute += SLOT_MINUTES) {
+  for (let minute = OPEN_MINUTE_ET; minute <= latest.snapshotMinuteEt; minute += SLOT_MINUTES) {
     const snapshot = byMinute.get(minute);
     timeline.push({
       snapshotMinuteEt: minute,
       snapshotTimeEt: formatMinuteEt(minute),
-      collectedMinuteEt: snapshot?.session?.collectedMinuteEt ?? null,
-      collectedTimeEt: snapshot?.session?.collectedTimeEt ?? null,
+      collectedMinuteEt: snapshot?.collectedMinuteEt ?? null,
+      collectedTimeEt: snapshot?.collectedTimeEt ?? null,
       status: snapshot ? "READY" : "MISSING",
-      spot: snapshot?.quote.last ?? null,
-      sourceTimestamp: snapshot?.canonical?.sourceTimestamp ?? null,
+      spot: snapshot?.spot ?? null,
+      sourceTimestamp: snapshot?.sourceTimestamp ?? null,
     });
   }
 
-  const spots = snapshots.map((snapshot) => snapshot.quote.last).filter(finite);
+  const spots = snapshots.map((snapshot) => snapshot.spot).filter(finite);
   if (spots.length !== snapshots.length) throw new Error("SPX GEX pressure snapshot is missing a finite spot.");
   const lower = Math.floor((Math.min(...spots) - STRIKE_BUFFER) / STRIKE_STEP) * STRIKE_STEP;
   const upper = Math.ceil((Math.max(...spots) + STRIKE_BUFFER) / STRIKE_STEP) * STRIKE_STEP;
@@ -409,9 +442,9 @@ export const buildSpxGexPressureMatrix = (input: SpxGexHeatmapModel[]): SpxGexPr
   for (let strike = upper; strike >= lower; strike -= STRIKE_STEP) strikes.push(strike);
 
   const gexByMinute = new Map<number, Map<number, number>>();
-  for (const snapshot of snapshots) gexByMinute.set(snapshot.session!.snapshotMinuteEt, frontGexByStrike(snapshot, expiry));
-  const baselineValues = gexByMinute.get(first.session.snapshotMinuteEt)!;
-  const latestValues = gexByMinute.get(latest.session.snapshotMinuteEt)!;
+  for (const snapshot of snapshots) gexByMinute.set(snapshot.snapshotMinuteEt, new Map(snapshot.gexByStrike.map(({ strike, netGex }) => [strike, netGex])));
+  const baselineValues = gexByMinute.get(first.snapshotMinuteEt)!;
+  const latestValues = gexByMinute.get(latest.snapshotMinuteEt)!;
 
   let dailyMaxDelta = 0;
   const rawRows = strikes.map((strike) => {
@@ -439,7 +472,7 @@ export const buildSpxGexPressureMatrix = (input: SpxGexHeatmapModel[]): SpxGexPr
     })),
   }));
 
-  const latestMinute = latest.session.snapshotMinuteEt;
+  const latestMinute = latest.snapshotMinuteEt;
   const moverCandidates = rows
     .map((row) => ({ row, cell: row.cells.find((cell) => cell.snapshotMinuteEt === latestMinute) }))
     .filter((entry): entry is { row: SpxGexPressureRow; cell: SpxGexPressureCell & { baselineGex: number; currentGex: number; deltaGex: number } } =>
@@ -462,38 +495,41 @@ export const buildSpxGexPressureMatrix = (input: SpxGexHeatmapModel[]): SpxGexPr
 
   const warnings: string[] = [];
   if (compatibilityWarning) warnings.push(compatibilityWarning);
-  if (first.session.snapshotMinuteEt !== OPEN_MINUTE_ET) {
-    warnings.push(`09:30 ET snapshot is missing; baseline uses ${first.session.snapshotTimeEt} ET.`);
+  if (first.snapshotMinuteEt !== OPEN_MINUTE_ET) {
+    warnings.push(`09:30 ET snapshot is missing; baseline uses ${first.snapshotTimeEt} ET.`);
   }
 
   return {
     tradingDate,
     mode: "0DTE",
     expiry,
-    delayMinutes: first.session.collectedMinuteEt - first.session.snapshotMinuteEt,
+    delayMinutes: first.collectedMinuteEt - first.snapshotMinuteEt,
     baseline: {
-      snapshotMinuteEt: first.session.snapshotMinuteEt,
-      snapshotTimeEt: first.session.snapshotTimeEt,
-      collectedMinuteEt: first.session.collectedMinuteEt,
-      collectedTimeEt: first.session.collectedTimeEt,
-      isOfficialOpen: first.session.snapshotMinuteEt === OPEN_MINUTE_ET,
+      snapshotMinuteEt: first.snapshotMinuteEt,
+      snapshotTimeEt: first.snapshotTimeEt,
+      collectedMinuteEt: first.collectedMinuteEt,
+      collectedTimeEt: first.collectedTimeEt,
+      isOfficialOpen: first.snapshotMinuteEt === OPEN_MINUTE_ET,
     },
     latest: {
-      snapshotMinuteEt: latest.session.snapshotMinuteEt,
-      snapshotTimeEt: latest.session.snapshotTimeEt,
-      collectedTimeEt: latest.session.collectedTimeEt,
-      spot: latest.quote.last,
+      snapshotMinuteEt: latest.snapshotMinuteEt,
+      snapshotTimeEt: latest.snapshotTimeEt,
+      collectedTimeEt: latest.collectedTimeEt,
+      spot: latest.spot,
     },
     timeline,
     strikeRange: { lower, upper, step: STRIKE_STEP },
     rows,
     movers,
     source: {
-      provider: latest.canonical?.provider || latest.source.provider || "unknown",
-      fallbackFrom: latest.canonical?.fallbackFrom ?? latest.source.fallbackFrom ?? null,
-      sourceTimestamp: latest.canonical?.sourceTimestamp ?? latest.source.sourceTimestamp ?? null,
-      snapshotId: latest.canonical?.snapshotId ?? null,
+      provider: latest.provider,
+      fallbackFrom: latest.fallbackFrom,
+      sourceTimestamp: latest.sourceTimestamp,
+      snapshotId: latest.snapshotId,
     },
     warnings,
   };
 };
+
+export const buildSpxGexPressureMatrix = (input: SpxGexHeatmapModel[]): SpxGexPressureMatrixModel =>
+  buildSpxGexPressureMatrixFromFrames(input.map(toSpxGexPressureFrame));

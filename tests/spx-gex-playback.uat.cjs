@@ -186,6 +186,26 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.ok(await page.$('[data-pa-chart-surface="true"]'), "Compass must retain its last verified chart after refresh failure");
     forceCompassTextFailure = false;
 
+    await page.evaluate(() => {
+      const nativeFetch = window.fetch.bind(window);
+      window.__restoreSpxUatFetch = () => { window.fetch = nativeFetch; };
+      window.fetch = (input, init) => String(input).startsWith("/api/spx-gex-pressure")
+        ? new Promise(() => {})
+        : nativeFetch(input, init);
+    });
+    await page.click('button[title="Refresh latest SPX and GEX sources"]');
+    await page.waitForSelector('[data-spx-gex-pressure-refresh-stale="true"]', { timeout: 20_000 });
+    const pressureAfterTimeout = await page.evaluate(() => ({
+      busy: document.querySelector('[data-spx-gex-pressure-matrix="true"]')?.getAttribute("aria-busy"),
+      matrixVisible: Boolean(document.querySelector('[data-spx-gex-pressure-grid="true"]')),
+      warning: document.querySelector('[data-spx-gex-pressure-refresh-stale="true"]')?.textContent || "",
+    }));
+    assert.equal(pressureAfterTimeout.busy, "false", "a terminal pressure timeout must stop aria-busy");
+    assert.equal(pressureAfterTimeout.matrixVisible, true, "a pressure timeout must retain the last verified matrix");
+    assert.match(pressureAfterTimeout.warning, /timed out after 8000ms/i);
+    await page.evaluate(() => window.__restoreSpxUatFetch?.());
+    await page.$eval('[data-pa-chart-surface="true"]', (element) => element.scrollIntoView({ block: "center" }));
+
     const signalHitTargets = await page.$$eval('[data-pa-pattern-badge="true"]', (badges) => badges.map((badge) => {
       const label = badge.querySelector("text")?.textContent?.trim() || "";
       const labelRect = badge.querySelector("text")?.getBoundingClientRect();
@@ -471,8 +491,8 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     await page.click('[data-spx-gex-playback-error="true"] button');
     await page.waitForFunction((minute) => !document.querySelector('[data-spx-gex-playback-error="true"]')
       && document.querySelector('button[class*="text-yellow-300"]')?.textContent === minute, {}, formatMinute(secondMinute));
-    assert.equal(secondSnapshotAttempts, 4, "bounded retries must keep one failed playback frame, then the explicit retry may advance it");
-    assert.equal(consoleErrors.length, 6, `only deliberately injected Compass and playback 503 responses may reach console: ${consoleErrors.join(" | ")}`);
+    assert.equal(secondSnapshotAttempts, 4, "one bounded retry must keep the failed playback frame, then the explicit retry may advance it");
+    assert.equal(consoleErrors.length, 5, `only deliberately injected Compass and playback 503 responses may reach console: ${consoleErrors.join(" | ")}`);
     assert.ok(consoleErrors.every((error) => /503 \(Service Unavailable\)/.test(error)));
     console.log("SPX GEX pressure + playback UAT passed: matrix renders with aligned spot/tape, and failed replay retries deterministically.");
   } finally {
