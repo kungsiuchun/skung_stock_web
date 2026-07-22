@@ -47,8 +47,8 @@ export const FINANCE_ANALYZER_SOURCE_MAP = [
     displayLayer: "多時段 K 線型態",
     endpoint: "/api/candlestick-patterns",
     tools: [],
-    source: "Yahoo Finance chart API plus local deterministic candlestick rules",
-    displaySource: "Yahoo Finance 行情 + 本地固定型態規則",
+    source: "Yahoo Finance chart API plus local deterministic candlestick and swing-zone rules",
+    displaySource: "Yahoo Finance 行情 + 本地型態及支撐阻力規則",
     deterministic: true,
   },
   {

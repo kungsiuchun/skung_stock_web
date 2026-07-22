@@ -12,8 +12,12 @@ import {
   threeblackcrows,
   threewhitesoldiers,
 } from "technicalindicators";
+import {
+  deriveSupportResistanceAnalysis,
+  type SupportResistanceAnalysis,
+} from "./support-resistance";
 
-export const CANDLESTICK_SCHEMA_VERSION = "v1" as const;
+export const CANDLESTICK_SCHEMA_VERSION = "v2" as const;
 export const CANDLESTICK_INTERVALS = ["1d", "1wk", "1mo"] as const;
 
 export type CandlestickInterval = typeof CANDLESTICK_INTERVALS[number];
@@ -45,6 +49,7 @@ export interface CandlestickAnalysis {
   trendContext: CandlestickTrendContext;
   latestMatches: CandlestickPatternMatch[];
   recentMatches: CandlestickPatternMatch[];
+  supportResistance: SupportResistanceAnalysis;
 }
 
 export interface CandlestickPatternData {
@@ -215,7 +220,16 @@ export const deriveTrendContext = (bars: CandlestickBar[]): CandlestickTrendCont
   return "neutral";
 };
 
-export const analyzeCandlestickBars = (bars: CandlestickBar[]): CandlestickAnalysis => {
+const SUPPORT_RESISTANCE_CONFIG: Record<CandlestickInterval, { swingRadius: number; tolerancePercent: number }> = {
+  "1d": { swingRadius: 3, tolerancePercent: 0.005 },
+  "1wk": { swingRadius: 2, tolerancePercent: 0.01 },
+  "1mo": { swingRadius: 2, tolerancePercent: 0.015 },
+};
+
+export const analyzeCandlestickBars = (
+  bars: CandlestickBar[],
+  interval: CandlestickInterval = "1d",
+): CandlestickAnalysis => {
   const recentMatches: CandlestickPatternMatch[] = [];
 
   for (let endIndex = 0; endIndex < bars.length; endIndex += 1) {
@@ -253,6 +267,7 @@ export const analyzeCandlestickBars = (bars: CandlestickBar[]): CandlestickAnaly
     trendContext: deriveTrendContext(bars),
     latestMatches,
     recentMatches,
+    supportResistance: deriveSupportResistanceAnalysis(bars, SUPPORT_RESISTANCE_CONFIG[interval]),
   };
 };
 
@@ -374,6 +389,6 @@ export const buildCandlestickPatternData = (input: {
     partialBarExcluded,
     rejectedBarCount,
     bars,
-    analysis: analyzeCandlestickBars(bars),
+    analysis: analyzeCandlestickBars(bars, input.interval),
   };
 };

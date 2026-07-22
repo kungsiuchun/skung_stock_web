@@ -15,6 +15,21 @@ type CacheRow = {
 class MemoryD1 implements D1DatabaseLike {
   private readonly rows = new Map<string, CacheRow>();
 
+  keys() {
+    return [...this.rows.keys()];
+  }
+
+  seed(cacheKey: string, payload: unknown) {
+    this.rows.set(cacheKey, {
+      cache_key: cacheKey,
+      payload_json: JSON.stringify(payload),
+      source_as_of: null,
+      cached_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      last_refresh_error: null,
+    });
+  }
+
   expireAll() {
     for (const row of this.rows.values()) row.expires_at = "1970-01-01T00:00:00.000Z";
   }
@@ -95,6 +110,8 @@ test("API maps each supported interval to its fixed Yahoo range and bypasses abs
       const body = await parse(response);
       assert.equal(response.status, 200);
       assert.equal(body.data.interval, interval);
+      assert.equal(body.data.schemaVersion, "v2");
+      assert.equal(body.data.analysis.supportResistance.method, "swing_cluster");
       assert.equal(body.cache.status, "bypassed");
       assert.match(requested[requested.length - 1], new RegExp(`interval=${interval}.*range=${range}`));
     }
@@ -156,6 +173,7 @@ test("API returns an explicit 206 stale response after refresh failure", async (
     const request = new Request("http://localhost/api/candlestick-patterns?symbol=MSFT&interval=1d");
     const fresh = await onRequestGet({ request, env: { MARKET_CACHE_DB: db } });
     assert.equal(fresh.status, 200);
+    assert.ok(db.keys().some((key) => key.startsWith("candlestick-patterns-v2:MSFT:")));
     db.expireAll();
     fail = true;
 
@@ -165,6 +183,31 @@ test("API returns an explicit 206 stale response after refresh failure", async (
     assert.equal(body.cache.status, "stale");
     assert.match(body.cache.refreshError, /Yahoo unavailable/);
     assert.equal(body.data.symbol, "MSFT");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("API ignores legacy v1 cache rows and writes the v2 contract under a new scope", async () => {
+  const originalFetch = globalThis.fetch;
+  const db = new MemoryD1();
+  db.seed('candlestick-patterns-v1:AAPL:{"interval":"1d"}', { schemaVersion: "v1", symbol: "AAPL" });
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return new Response(JSON.stringify(yahooPayload()), { status: 200 });
+  };
+
+  try {
+    const response = await onRequestGet({
+      request: new Request("http://localhost/api/candlestick-patterns?symbol=AAPL&interval=1d"),
+      env: { MARKET_CACHE_DB: db },
+    });
+    const body = await parse(response);
+    assert.equal(response.status, 200);
+    assert.equal(fetchCalls, 1);
+    assert.equal(body.data.schemaVersion, "v2");
+    assert.ok(db.keys().some((key) => key.startsWith("candlestick-patterns-v2:AAPL:")));
   } finally {
     globalThis.fetch = originalFetch;
   }

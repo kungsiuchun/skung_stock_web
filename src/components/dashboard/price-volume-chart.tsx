@@ -8,7 +8,7 @@ import {
   type SeriesMarker,
   type Time,
 } from "lightweight-charts";
-import { AlertCircle, Eye, EyeOff, Loader2 } from "lucide-react";
+import { AlertCircle, ArrowDownToLine, ArrowUpToLine, Eye, EyeOff, Loader2 } from "lucide-react";
 import type {
   CandlestickBias,
   CandlestickInterval,
@@ -17,6 +17,7 @@ import type {
   CandlestickTrendContext,
 } from "@/lib/candlestick-patterns";
 import type { MarketCacheMetadata } from "@/lib/market-data-cache";
+import type { SupportResistanceRole, SupportResistanceZone } from "@/lib/support-resistance";
 
 interface ChartDataPoint {
   date_iso?: string;
@@ -109,6 +110,84 @@ const buildMarkers = (matches: CandlestickPatternMatch[]): SeriesMarker<Time>[] 
     })
     .sort((left, right) => String(left.time).localeCompare(String(right.time)));
 };
+
+const formatZonePrice = (value: number) => value < 1 ? value.toFixed(4) : value.toFixed(2);
+
+const zoneTone = (role: SupportResistanceRole) => role === "support"
+  ? {
+    card: "border-emerald-100 bg-emerald-50/80",
+    label: "text-emerald-800",
+    price: "text-emerald-800",
+    track: "bg-emerald-100",
+    bar: "bg-emerald-500",
+  }
+  : {
+    card: "border-red-100 bg-red-50/80",
+    label: "text-red-800",
+    price: "text-red-800",
+    track: "bg-red-100",
+    bar: "bg-red-500",
+  };
+
+const touchTypeLabel = (zone: SupportResistanceZone) => {
+  if (zone.touchType === "mixed") return "高低點轉換";
+  return zone.touchType === "high" ? "擺動高點" : "擺動低點";
+};
+
+function SupportResistanceTile({
+  label,
+  role,
+  zone,
+  maxTouches,
+}: {
+  label: string;
+  role: SupportResistanceRole;
+  zone: SupportResistanceZone | null;
+  maxTouches: number;
+}) {
+  const tone = zoneTone(role);
+  const Icon = role === "support" ? ArrowUpToLine : ArrowDownToLine;
+  if (!zone) {
+    return (
+      <div className={`min-w-0 rounded-xl border p-3 ${tone.card}`}>
+        <div className={`flex items-center gap-1.5 text-[10px] font-black ${tone.label}`}>
+          <Icon className="h-3.5 w-3.5 shrink-0" />
+          <span>{label}</span>
+        </div>
+        <p className="mt-3 text-lg font-black text-gray-400">N/A</p>
+        <p className="mt-1 text-[10px] font-semibold text-gray-500">有效觸碰不足</p>
+      </div>
+    );
+  }
+
+  const relativeStrength = Math.max(8, Math.round((zone.touchCount / Math.max(1, maxTouches)) * 100));
+  const distanceLabel = zone.distancePct <= 0
+    ? `低於現價 ${Math.abs(zone.distancePct).toFixed(2)}%`
+    : `高於現價 ${Math.abs(zone.distancePct).toFixed(2)}%`;
+
+  return (
+    <div className={`min-w-0 rounded-xl border p-3 ${tone.card}`}>
+      <div className={`flex items-center gap-1.5 text-[10px] font-black ${tone.label}`}>
+        <Icon className="h-3.5 w-3.5 shrink-0" />
+        <span>{label}</span>
+      </div>
+      <p className={`mt-2 truncate font-mono text-lg font-black tracking-tight ${tone.price}`}>${formatZonePrice(zone.price)}</p>
+      <p className="mt-1 truncate text-[9px] font-semibold text-gray-500">
+        ${formatZonePrice(zone.lowerBound)}–${formatZonePrice(zone.upperBound)}
+      </p>
+      <div className="mt-2 flex items-center justify-between gap-2 text-[9px] font-bold text-gray-600">
+        <span>觸碰 {zone.touchCount} 次</span>
+        <span className="truncate text-right">{distanceLabel}</span>
+      </div>
+      <div className={`mt-1.5 h-1.5 overflow-hidden rounded-full ${tone.track}`} aria-hidden="true">
+        <div className={`h-full rounded-full ${tone.bar}`} style={{ width: `${relativeStrength}%` }} />
+      </div>
+      <p className="mt-2 truncate text-[9px] font-semibold text-gray-500">
+        {touchTypeLabel(zone)}｜最近 {zone.lastTouchTime}
+      </p>
+    </div>
+  );
+}
 
 export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -277,10 +356,11 @@ export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
     };
   }, [chartData, markers]);
 
-  const latestMatches = selected?.data.analysis.latestMatches || [];
   const recentMatches = selected?.data.analysis.recentMatches.slice(-5).reverse() || [];
   const patternBias = selected?.data.analysis.patternBias || "neutral";
   const trendContext = selected?.data.analysis.trendContext || "unavailable";
+  const supportResistance = selected?.data.analysis.supportResistance;
+  const maxZoneTouches = supportResistance?.zones.reduce((highest, zone) => Math.max(highest, zone.touchCount), 0) || 1;
   const conflictsWithTrend = selected
     && patternBias !== "neutral"
     && trendContext !== "neutral"
@@ -381,22 +461,21 @@ export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
 
           <div className="mt-4 grid gap-4 lg:grid-cols-2">
             <div className="rounded-xl border border-white bg-white p-4 shadow-sm">
-              <p className="text-xs font-black text-gray-900">最新已完成 K 線</p>
-              {latestMatches.length > 0 ? (
-                <div className="mt-3 space-y-3">
-                  {latestMatches.map((match) => (
-                    <div key={`${match.id}:${match.endTime}`}>
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="text-sm font-black text-gray-900">{match.nameZh}</p>
-                        <span className={`rounded-full px-2 py-1 text-[9px] font-black ${biasClasses(match.bias)}`}>{BIAS_LABELS[match.bias]}</span>
-                      </div>
-                      <p className="mt-1 text-xs font-medium leading-5 text-gray-600">{match.ruleSummary}</p>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="mt-3 text-xs font-semibold leading-5 text-gray-500">最新已完成 K 線未識別到指定型態，因此型態傾向為中性。</p>
-              )}
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-xs font-black text-gray-900">支撐與阻力</p>
+                <span className="shrink-0 rounded-full border border-cyan-200 bg-cyan-50 px-2 py-1 text-[9px] font-black text-cyan-800">
+                  {supportResistance?.lookbackBars || 0} 支已完成 K 線
+                </span>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2.5">
+                <SupportResistanceTile label="最近阻力" role="resistance" zone={supportResistance?.displayLevels.nearestResistance || null} maxTouches={maxZoneTouches} />
+                <SupportResistanceTile label="主要阻力" role="resistance" zone={supportResistance?.displayLevels.majorResistance || null} maxTouches={maxZoneTouches} />
+                <SupportResistanceTile label="最近支撐" role="support" zone={supportResistance?.displayLevels.nearestSupport || null} maxTouches={maxZoneTouches} />
+                <SupportResistanceTile label="主要支撐" role="support" zone={supportResistance?.displayLevels.majorSupport || null} maxTouches={maxZoneTouches} />
+              </div>
+              <p className="mt-3 text-[9px] font-semibold leading-4 text-gray-500">
+                由同時段擺動高低點聚類；強度條只比較本批區域觸碰次數，不代表準確率或買賣信號。
+              </p>
             </div>
 
             <div className="rounded-xl border border-white bg-white p-4 shadow-sm">
@@ -417,7 +496,7 @@ export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
           </div>
 
           <div className="mt-4 flex flex-col gap-1 border-t border-gray-200 pt-3 text-[10px] font-semibold text-gray-500 sm:flex-row sm:items-center sm:justify-between">
-            <span>Yahoo Finance 行情 + 本地固定型態規則｜資料截至 {selected.data.sourceAsOf}</span>
+            <span>Yahoo Finance 行情 + 本地型態及支撐阻力規則｜資料截至 {selected.data.sourceAsOf}</span>
             <span>
               {selected.cache.status === "stale"
                 ? `舊資料 ${selected.cache.ageSeconds}s｜更新失敗：${selected.cache.refreshError || "原因未提供"}`

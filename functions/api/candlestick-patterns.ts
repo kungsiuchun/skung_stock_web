@@ -58,7 +58,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   try {
     const resolved = await resolveMarketCache({
       db: context.env.MARKET_CACHE_DB,
-      scope: "candlestick-patterns-v1",
+      scope: "candlestick-patterns-v2",
       symbol,
       params: { interval },
       sourceAsOf: (value) => value.sourceAsOf,
@@ -98,6 +98,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       latestPatternIds: resolved.value.analysis.latestMatches.map((match) => match.id),
       patternBias: resolved.value.analysis.patternBias,
       trendContext: resolved.value.analysis.trendContext,
+      supportResistanceZoneCount: resolved.value.analysis.supportResistance.zones.length,
       durationMs: Date.now() - startedAt,
     }));
     return json({ data: resolved.value, cache: resolved.cache }, resolved.cache.status === "stale" ? 206 : 200);
