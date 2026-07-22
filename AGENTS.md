@@ -196,7 +196,8 @@ ADANOS_API_KEY=...
 
 - Watcher and Finance Analyzer use the optional `MARKET_CACHE_DB` D1 binding as a 60-second shared market snapshot cache; `migrations/0009_market_data_cache.sql` owns its schema.
 - Keep `MARKET_CACHE_DB` separate from `SPX_RECAP_DB`. The latter is an SPX decision/audit ledger, not a general cache.
-- Without the binding (local development before provisioning), API responses explicitly report `cache.status="bypassed"`; never claim a shared-cache hit.
+- Production Pages binds `MARKET_CACHE_DB` to the isolated `market-cache-db` D1 database (`c629da02-21ce-4b1c-87f2-59ba54be922e`). Apply only `migrations/0009_market_data_cache.sql` to this database with `wrangler d1 execute market-cache-db --remote --file=./migrations/0009_market_data_cache.sql`; never run the shared SPX migration sequence against it.
+- Without the binding (for example, local development before initializing local D1), API responses explicitly report `cache.status="bypassed"`; never claim a shared-cache hit.
 - Expired entries may be shown only as visibly stale data with the refresh failure reason. Do not recreate a demo fallback for market-source failures.
 
 ---

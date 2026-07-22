@@ -10,3 +10,8 @@ id = "d885526d2249419eaf921dcb7dd27488"
 binding = "SPX_RECAP_DB"
 database_name = "spx-recap-db"
 database_id = "00a4729d-1792-42d1-bd86-ed58dfe1f95f"
+
+[[d1_databases]]
+binding = "MARKET_CACHE_DB"
+database_name = "market-cache-db"
+database_id = "c629da02-21ce-4b1c-87f2-59ba54be922e"
