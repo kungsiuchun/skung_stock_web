@@ -43,6 +43,15 @@ export const FINANCE_ANALYZER_SOURCE_MAP = [
     deterministic: true,
   },
   {
+    layer: "Candlestick pattern analysis",
+    displayLayer: "多時段 K 線型態",
+    endpoint: "/api/candlestick-patterns",
+    tools: [],
+    source: "Yahoo Finance chart API plus local deterministic candlestick rules",
+    displaySource: "Yahoo Finance 行情 + 本地固定型態規則",
+    deterministic: true,
+  },
+  {
     layer: "Stock options exposure",
     displayLayer: "期權曝險",
     endpoint: "/api/agent/chat",

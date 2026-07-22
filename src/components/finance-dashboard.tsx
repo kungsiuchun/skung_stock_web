@@ -615,7 +615,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
                       </div>
                     </div>
                     <div className="space-y-2">
-                      {FINANCE_ANALYZER_SOURCE_MAP.slice(0, 7).map((item) => (
+                      {FINANCE_ANALYZER_SOURCE_MAP.slice(0, 8).map((item) => (
                         <div
                           key={item.layer}
                           title={`${item.layer} | ${item.endpoint}`}
