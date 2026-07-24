@@ -119,6 +119,24 @@ const readCollectionSlot = async (
   }
 };
 
+const readCollectionAttempts = async (
+  db: D1DatabaseLike,
+  tradingDate: string | null,
+  warnings: string[],
+) => {
+  if (!tradingDate) return [];
+  try {
+    return await new D1SpxGexCollectionStore(db).listAttemptsForDate(tradingDate, 3);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/no such table:\s*spx_gex_collection_(?:runs|events)/i.test(message)) {
+      warnings.push("GEX collection lifecycle migration is not applied yet.");
+      return [];
+    }
+    throw error;
+  }
+};
+
 const readDecisionCockpit = async (
   db: D1DatabaseLike,
   snapshotId: string | undefined,
@@ -155,6 +173,7 @@ async function onRequestUncached(context: Context) {
       heatmap: null,
       decision: null,
       collection: null,
+      collectionAttempts: [],
       warnings: ["SPX_RECAP_DB binding is not configured."],
     }, { status: 503 });
   }
@@ -167,7 +186,7 @@ async function onRequestUncached(context: Context) {
     const requestedSnapshot = parseSnapshotMinute(url.searchParams.get("snapshot"));
     const selectedSnapshot = requestedSnapshot ?? sessions[sessions.length - 1]?.snapshotMinuteEt ?? null;
     const heatmap = selectedDate ? await readSpxGexHeatmap(context.env.SPX_RECAP_DB, selectedDate, selectedSnapshot) : null;
-    const [decision, collection, collectionHealth] = await Promise.all([
+    const [decision, collection, collectionHealth, collectionAttempts] = await Promise.all([
       readDecisionCockpit(context.env.SPX_RECAP_DB, heatmap?.canonical?.snapshotId, warnings),
       readCollectionSlot(
         context.env.SPX_RECAP_DB,
@@ -175,6 +194,7 @@ async function onRequestUncached(context: Context) {
         warnings,
       ),
       readCollectionHealth(context.env.SPX_RECAP_DB, selectedDate, warnings),
+      readCollectionAttempts(context.env.SPX_RECAP_DB, selectedDate, warnings),
     ]);
 
     const status = heatmap ? "READY" : "EMPTY";
@@ -188,6 +208,7 @@ async function onRequestUncached(context: Context) {
       heatmap: heatmap ? compactHeatmap(heatmap) : null,
       decision,
       collection,
+      collectionAttempts,
       collectionHealth,
       warnings: [...new Set(warnings)],
     }, {}, status === "READY" ? "public, max-age=15" : "no-store"), Date.now() - startedAt);
@@ -210,6 +231,7 @@ async function onRequestUncached(context: Context) {
         heatmap: null,
         decision: null,
         collection: null,
+        collectionAttempts: [],
         warnings: [missingTable ? "SPX GEX intraday storage migration is not applied." : `D1 read failed: ${message}`],
       },
       { status: missingTable ? 503 : 500 },

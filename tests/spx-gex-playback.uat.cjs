@@ -301,6 +301,8 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
         majorTickLabels: [...document.querySelectorAll('[data-pressure-axis-major="true"]')].map((node) => node.querySelector('span:not([aria-hidden="true"])')?.textContent?.trim() || ""),
         rotatedTimeLabels: document.querySelectorAll('[data-pressure-axis-major] .-rotate-45').length,
         missingColumns: document.querySelectorAll('[data-pressure-column-status="MISSING"]').length,
+        openingBucketBadge: document.querySelector('[data-spx-gex-opening-bucket="true"]')?.textContent?.includes("OPENING BUCKET") || false,
+        openingBucketColumns: document.querySelectorAll('[data-pressure-opening-bucket="true"]').length,
         spotGuide: Boolean(document.querySelector('[data-spx-gex-pressure-spot-guide="true"]')),
         spotLiveChip: Boolean(document.querySelector('[data-spx-gex-pressure-live-spot="true"]')),
         spotCallout: Boolean(document.querySelector('[data-spx-gex-pressure-spot-callout="true"]')),
@@ -342,6 +344,8 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.deepEqual(pressureLayout.majorTickLabels, ["09:30", "10:30", "11:30", "12:30", "13:30", "14:30", "15:30", "16:00"], "time rail must show only hourly and session-end labels");
     assert.equal(pressureLayout.rotatedTimeLabels, 0, "time labels must not be rotated");
     assert.ok(pressureLayout.missingColumns > 0, "an internal missing GEX column must be visibly represented");
+    assert.equal(pressureLayout.openingBucketBadge, true, "09:30 must be identified as the OPENING BUCKET");
+    assert.equal(pressureLayout.openingBucketColumns, 1, "the pressure matrix must render exactly one opening bucket column");
     assert.equal(pressureLayout.spotGuide, true, "current SPX guide must render");
     assert.equal(pressureLayout.spotLiveChip, true, "latest SPX price must render outside the chart body");
     assert.equal(pressureLayout.spotCallout, false, "chart body must not contain an SPX price card that obscures the line");

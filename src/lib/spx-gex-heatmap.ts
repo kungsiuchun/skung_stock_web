@@ -280,6 +280,23 @@ export interface SpxGexDataQualitySummary {
   excluded: number;
 }
 
+export type SpxGexCollectionCacheStatus = "miss" | "fresh" | "stale" | "force_refreshed";
+
+export interface SpxGexCollectionQualitySummary {
+  rawLegCount: number;
+  parsedLegCount: number;
+  zeroIvCount: number;
+  missingIvCount: number;
+  invalidBidAskCount: number;
+  missingOpenInterestCount: number;
+  pricedCellCount: number | null;
+  repairedCellCount: number | null;
+  partialCellCount: number | null;
+  unpricedCellCount: number | null;
+  sourceTimestamp: string | null;
+  cacheStatus: SpxGexCollectionCacheStatus;
+}
+
 export interface SpxGexSessionSummary {
   tradingDate: string;
   snapshotMinuteEt: number;
@@ -316,6 +333,7 @@ export interface SpxGexDataClient {
   getOptionsChain?: (expiry?: string) => Promise<SpxGexOptionChain>;
   getOptionsPcr?: () => Promise<number | null>;
   getMarketContext?: () => Promise<SpxGexMarketContext>;
+  getCollectionQualitySummary?: () => SpxGexCollectionQualitySummary | null;
 }
 
 export interface CanonicalSpxGexSnapshotEnvelope {
@@ -2760,6 +2778,7 @@ const buildFromStructuredChains = async (options: {
     provider: source?.provider || "unknown",
     fallbackFrom: source?.fallbackFrom || null,
     sourceTimestamp: source?.timestamp || null,
+    collectionQuality: options.dataClient.getCollectionQualitySummary?.() || null,
   });
   return buildSpxGexHeatmapFromOptionChains({
     generatedAt: options.now.toISOString(),
@@ -2835,6 +2854,13 @@ export const generateAndStoreSpxGexHeatmap = async (options: {
     fallbackFrom: canonicalHeatmap.canonical?.fallbackFrom || null,
     sourceTimestamp: canonicalHeatmap.canonical?.sourceTimestamp || null,
     dataQuality: canonicalHeatmap.dataQuality || null,
+    collectionQuality: {
+      ...(options.dataClient.getCollectionQualitySummary?.() || {}),
+      pricedCellCount: canonicalHeatmap.dataQuality?.priced ?? null,
+      repairedCellCount: canonicalHeatmap.dataQuality?.repaired ?? null,
+      partialCellCount: canonicalHeatmap.dataQuality?.partial ?? null,
+      unpricedCellCount: canonicalHeatmap.dataQuality?.unpriced ?? null,
+    },
     cellCount: canonicalHeatmap.cells.length,
     expiryCount: canonicalHeatmap.selectedExpiries.length,
   });

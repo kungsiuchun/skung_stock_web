@@ -1,4 +1,5 @@
 import type { D1DatabaseLike } from "./spx-recap-d1";
+import type { SpxGexCollectionQualitySummary } from "./spx-gex-heatmap";
 
 export const SPX_GEX_COLLECTION_STAGES = [
   "SCHEDULED",
@@ -43,6 +44,17 @@ export interface SpxGexCollectionCoverage {
   failedSlotIds: string[];
 }
 
+export interface SpxGexCollectionAttempt {
+  slotId: string;
+  snapshotMinuteEt: number;
+  attempt: number;
+  status: "PENDING" | "FAILED" | "ACCEPTED";
+  occurredAt: string;
+  acceptedAt: string | null;
+  failureReason: string | null;
+  quality: SpxGexCollectionQualitySummary | null;
+}
+
 interface CollectionRow {
   slot_id: string;
   trading_date: string;
@@ -59,6 +71,15 @@ interface CollectionRow {
 
 interface AttemptRow {
   next_attempt: number;
+}
+
+interface CollectionEventRow {
+  slot_id: string;
+  snapshot_minute_et: number;
+  stage: SpxGexCollectionStage;
+  attempt: number;
+  occurred_at: string;
+  payload_json: string;
 }
 
 const stageRank = new Map<SpxGexCollectionStage, number>([
@@ -254,6 +275,56 @@ export class D1SpxGexCollectionStore {
       ORDER BY snapshot_minute_et
     `).bind(tradingDate).all<CollectionRow>();
     return (result.results || []).map(rowToRecord);
+  }
+
+  async listAttemptsForDate(tradingDate: string, limit = 3): Promise<SpxGexCollectionAttempt[]> {
+    const boundedLimit = Math.max(1, Math.min(3, Math.floor(limit)));
+    const result = await this.db.prepare(`
+      SELECT e.slot_id, r.snapshot_minute_et, e.stage, e.attempt, e.occurred_at, e.payload_json
+      FROM spx_gex_collection_events e
+      INNER JOIN spx_gex_collection_runs r ON r.slot_id = e.slot_id
+      WHERE r.trading_date = ? AND e.attempt > 0
+      ORDER BY r.snapshot_minute_et, e.attempt, e.occurred_at
+    `).bind(tradingDate).all<CollectionEventRow>();
+    const attempts = new Map<string, SpxGexCollectionAttempt>();
+    for (const row of result.results || []) {
+      const key = `${row.slot_id}:${row.attempt}`;
+      const payload = (() => {
+        try {
+          const parsed = JSON.parse(row.payload_json);
+          return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
+        } catch {
+          return {};
+        }
+      })();
+      const current = attempts.get(key) || {
+        slotId: row.slot_id,
+        snapshotMinuteEt: Number(row.snapshot_minute_et),
+        attempt: Number(row.attempt),
+        status: "PENDING" as const,
+        occurredAt: row.occurred_at,
+        acceptedAt: null,
+        failureReason: null,
+        quality: null,
+      };
+      current.occurredAt = row.occurred_at;
+      if (payload.collectionQuality && typeof payload.collectionQuality === "object") {
+        current.quality = payload.collectionQuality as SpxGexCollectionQualitySummary;
+      }
+      if (row.stage === "FAILED") {
+        current.status = payload.retryStatus === "OPENING_RETRY_PENDING" ? "PENDING" : "FAILED";
+        current.failureReason = String(payload.error || "unknown_collection_failure");
+      } else if (row.stage === "PERSISTED") {
+        current.status = "ACCEPTED";
+        current.acceptedAt = row.occurred_at;
+        current.failureReason = null;
+      }
+      attempts.set(key, current);
+    }
+    return [...attempts.values()]
+      .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
+      .slice(0, boundedLimit)
+      .sort((a, b) => a.snapshotMinuteEt - b.snapshotMinuteEt || a.attempt - b.attempt);
   }
 }
 

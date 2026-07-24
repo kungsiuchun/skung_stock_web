@@ -28,6 +28,16 @@ interface PressureResponse {
     snapshotTimeEt: string;
     reasonCode: "SNAPSHOT_JSON_MALFORMED" | "SESSION_CONTRACT_INCOMPLETE" | "NO_AUDITED_BLENDED_IV_CELLS";
   }>;
+  collectionAttempts: Array<{
+    slotId: string;
+    snapshotMinuteEt: number;
+    attempt: number;
+    status: "PENDING" | "FAILED" | "ACCEPTED";
+    occurredAt: string;
+    acceptedAt: string | null;
+    failureReason: string | null;
+    quality: Record<string, unknown> | null;
+  }>;
   warnings: string[];
 }
 
@@ -123,6 +133,12 @@ const etClock = () => {
 };
 
 const formatPercent = (value: number | null) => value === null ? "n/a" : `${value >= 0 ? "+" : ""}${value.toFixed(1)}%`;
+const formatEtTime = (value: string) => new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+}).format(new Date(value));
 
 const MoverTape = ({ movers, latestTime, matrixHeight }: { movers: SpxGexPressureMover[]; latestTime: string; matrixHeight: number }) => {
   const topMover = movers[0] || null;
@@ -274,7 +290,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
         if (dataRef.current?.pressure && dataRef.current.selectedDate === selectedDate) {
           setRefreshError(message);
         } else {
-          setData({ status: "ERROR", errorCode: "SPX_GEX_PRESSURE_REQUEST_FAILED", error: message, selectedDate, pressure: null, invalidSnapshots: [], warnings: [] });
+          setData({ status: "ERROR", errorCode: "SPX_GEX_PRESSURE_REQUEST_FAILED", error: message, selectedDate, pressure: null, invalidSnapshots: [], collectionAttempts: [], warnings: [] });
         }
       } finally {
         if (!controller.signal.aborted) setReconnecting(false);
@@ -314,6 +330,10 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
   }, [enabled, refreshKey, selectedDate]);
 
   const pressure = data?.selectedDate === selectedDate ? data.pressure : null;
+  const openingAttempts = data?.selectedDate === selectedDate
+    ? (data.collectionAttempts || []).filter((attempt) => attempt.snapshotMinuteEt === 9 * 60 + 30)
+    : [];
+  const acceptedOpeningRetry = openingAttempts.find((attempt) => attempt.attempt > 1 && attempt.status === "ACCEPTED");
   const latestYahooPoint = useMemo(() => pressure && priceOverlay?.data
     ? getLatestSpxGexSpotPoint(priceOverlay.data.candles, pressure.tradingDate)
     : null, [pressure, priceOverlay?.data]);
@@ -403,6 +423,14 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
         </div>
       ) : (
         <>
+            <div className="flex flex-wrap items-center gap-2 border-b border-cyan-300/20 bg-cyan-300/5 px-3 py-2 font-mono text-[10px] font-black text-cyan-100" data-spx-gex-opening-bucket="true">
+              <span>09:30 ET · OPENING BUCKET</span>
+              {acceptedOpeningRetry?.acceptedAt && (
+                <span className="border border-green-300/40 bg-green-300/10 px-1.5 py-0.5 text-green-200" data-spx-gex-opening-retry-accepted="true">
+                  RETRY {acceptedOpeningRetry.attempt} · ACCEPTED {formatEtTime(acceptedOpeningRetry.acceptedAt)} ET
+                </span>
+              )}
+            </div>
             {pressure.warnings.length > 0 && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-warning="true">{pressure.warnings.join(" ")}</div>}
             {reconnecting && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status">Reconnecting SPX source…</div>}
             {refreshError && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-refresh-stale="true">Refresh failed; showing the last verified GEX matrix. {refreshError}</div>}
@@ -430,11 +458,15 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
                         aria-current={slot.snapshotMinuteEt === selectedMinute ? "time" : undefined}
                         data-pressure-axis-major={slot.isMajor ? "true" : "false"}
                         data-pressure-column-status={slot.status}
+                        data-pressure-opening-bucket={slot.snapshotMinuteEt === 9 * 60 + 30 ? "true" : undefined}
                         data-pressure-selected-slot={slot.snapshotMinuteEt === selectedMinute ? "true" : undefined}
                       >
                         {slot.snapshotMinuteEt === selectedMinute && <span className="absolute inset-x-0 top-0 h-0.5 bg-cyan-200 shadow-[0_0_8px_rgba(34,211,238,.9)]" aria-hidden="true" />}
                         {(slot.isMajor || slot.snapshotMinuteEt === selectedMinute) && <span className="whitespace-nowrap text-[9px]">{slot.snapshotTimeEt}</span>}
                         {!slot.isMajor && slot.snapshotMinuteEt !== selectedMinute && <span className="mt-1 h-1.5 w-px bg-cyan-200/25" aria-hidden="true" />}
+                        {slot.snapshotMinuteEt === 9 * 60 + 30 && (
+                          <span className={`absolute whitespace-nowrap text-[6px] tracking-[-0.05em] text-cyan-300 ${slot.status === "READY" ? "bottom-1" : "bottom-3.5"}`}>OPENING BUCKET</span>
+                        )}
                         {slot.status === "MISSING" && <span className="absolute bottom-1 text-[8px] font-black tracking-[-0.08em]">MISSING</span>}
                         {slot.status === "PENDING" && <span className="absolute bottom-1 text-[8px] font-black tracking-[-0.08em]">PENDING</span>}
                       </div>

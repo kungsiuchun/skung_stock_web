@@ -1,4 +1,11 @@
-import type { SpxGexDataClient, SpxGexMarketContext, SpxGexOptionChain, SpxGexOptionLeg } from "./spx-gex-heatmap";
+import type {
+  SpxGexCollectionCacheStatus,
+  SpxGexCollectionQualitySummary,
+  SpxGexDataClient,
+  SpxGexMarketContext,
+  SpxGexOptionChain,
+  SpxGexOptionLeg,
+} from "./spx-gex-heatmap";
 import type { D1DatabaseLike } from "./spx-recap-d1";
 import { NativeSpxGexYahooClient } from "./stocks-native-yahoo";
 
@@ -8,6 +15,7 @@ const MARKET_TIME_ZONE = "America/New_York";
 
 type OptionSide = "C" | "P";
 type FetchJson = () => Promise<unknown>;
+export type SpxGexCboeCachePolicy = "default" | "force_refresh";
 
 const CBOE_FETCH_TIMEOUT_MS = 12_000;
 const CBOE_FETCH_ATTEMPTS = 2;
@@ -232,6 +240,59 @@ const normalizeChainsForCache = (chains: SpxGexOptionChain[]) =>
     };
   });
 
+const summarizeParsedChains = (
+  chains: SpxGexOptionChain[],
+  rawLegCount: number,
+  cacheStatus: SpxGexCollectionCacheStatus,
+): SpxGexCollectionQualitySummary => {
+  const legs = chains.flatMap((chain) => [...chain.calls, ...chain.puts]);
+  return {
+    rawLegCount,
+    parsedLegCount: legs.length,
+    zeroIvCount: legs.filter((leg) => leg.impliedVolatility === 0).length,
+    missingIvCount: legs.filter((leg) => leg.impliedVolatility === null || leg.impliedVolatility === undefined).length,
+    invalidBidAskCount: legs.filter((leg) => {
+      const bid = leg.bid;
+      const ask = leg.ask;
+      return bid === null || bid === undefined || ask === null || ask === undefined
+        || !Number.isFinite(bid) || !Number.isFinite(ask) || bid < 0 || ask <= 0 || ask < bid;
+    }).length,
+    missingOpenInterestCount: legs.filter((leg) => leg.openInterest === null || leg.openInterest === undefined).length,
+    pricedCellCount: null,
+    repairedCellCount: null,
+    partialCellCount: null,
+    unpricedCellCount: null,
+    sourceTimestamp: chains[0]?.source?.timestamp || null,
+    cacheStatus,
+  };
+};
+
+export const summarizeCboePayloadQuality = (
+  payload: unknown,
+  cacheStatus: SpxGexCollectionCacheStatus,
+): SpxGexCollectionQualitySummary => {
+  const root = asRecord(payload);
+  const rows: Record<string, any>[] = Array.isArray(asRecord(root.data).options)
+    ? asRecord(root.data).options.map(asRecord)
+    : [];
+  const legs = rows.map(normalizeCboeLeg).filter((leg): leg is CboeNormalizedLeg => Boolean(leg));
+  const summary = summarizeParsedChains([{
+    symbol: "SPX",
+    spot: 0,
+    expiries: [],
+    selectedExpiry: null,
+    calls: legs.filter((leg) => leg.side === "C"),
+    puts: legs.filter((leg) => leg.side === "P"),
+    source: {
+      provider: CBOE_CACHE_PROVIDER,
+      label: "Cboe delayed",
+      timestamp: typeof root.timestamp === "string" ? root.timestamp : null,
+      url: CBOE_SPX_OPTIONS_URL,
+    },
+  }], rows.length, cacheStatus);
+  return summary;
+};
+
 export const calculateCboePcrFromChains = (chains: SpxGexOptionChain[]) => {
   let totalCallVolume = 0;
   let totalPutVolume = 0;
@@ -375,12 +436,23 @@ export class CboeSpxGexDataClient implements SpxGexDataClient {
   private readonly fetchJson: FetchJson;
   private readonly now: () => Date;
   private readonly cache: CboeD1Cache | null;
+  private readonly cachePolicy: SpxGexCboeCachePolicy;
+  private readonly allowStaleCache: boolean;
+  private collectionQuality: SpxGexCollectionQualitySummary | null = null;
   private chainsPromise: Promise<SpxGexOptionChain[]> | null = null;
 
-  constructor(options: { db?: D1DatabaseLike; fetchJson?: FetchJson; now?: () => Date } = {}) {
+  constructor(options: {
+    db?: D1DatabaseLike;
+    fetchJson?: FetchJson;
+    now?: () => Date;
+    cachePolicy?: SpxGexCboeCachePolicy;
+    allowStaleCache?: boolean;
+  } = {}) {
     this.fetchJson = options.fetchJson || fetchCboeJson;
     this.now = options.now || (() => new Date());
     this.cache = options.db ? new CboeD1Cache(options.db, { now: this.now }) : null;
+    this.cachePolicy = options.cachePolicy || "default";
+    this.allowStaleCache = options.allowStaleCache !== false;
   }
 
   private async loadChains() {
@@ -389,14 +461,27 @@ export class CboeSpxGexDataClient implements SpxGexDataClient {
     const collectedMinuteEt = cboeCacheBucketMinuteEt(now);
     const cacheKey = buildCboeCacheKey(tradingDate, collectedMinuteEt);
 
-    const freshCache = this.cache ? await this.cache.readFresh(cacheKey).catch(() => null) : null;
-    if (freshCache) return freshCache.chains;
+    const freshCache = this.cachePolicy === "default" && this.cache
+      ? await this.cache.readFresh(cacheKey).catch(() => null)
+      : null;
+    if (freshCache) {
+      this.collectionQuality = summarizeParsedChains(
+        freshCache.chains,
+        freshCache.chains.flatMap((chain) => [...chain.calls, ...chain.puts]).length,
+        "fresh",
+      );
+      return freshCache.chains;
+    }
 
     try {
       const fetched = normalizeFetchResult(await this.fetchJson());
       const parsed = parseCboeSpxOptionsPayload(fetched.payload, { todayEt: tradingDate });
       const chains = normalizeChainsForCache(parsed);
       if (chains.length === 0) throw new Error("Cboe delayed options returned no active SPX expiries.");
+      this.collectionQuality = summarizeCboePayloadQuality(
+        fetched.payload,
+        this.cachePolicy === "force_refresh" ? "force_refreshed" : "miss",
+      );
       if (this.cache) {
         await this.cache.write({
           cacheKey,
@@ -412,8 +497,17 @@ export class CboeSpxGexDataClient implements SpxGexDataClient {
       }
       return chains;
     } catch (error) {
-      const staleCache = this.cache ? await this.cache.getLatestStaleCboeCacheForToday(tradingDate).catch(() => null) : null;
-      if (staleCache) return staleCache.chains;
+      const staleCache = this.allowStaleCache && this.cachePolicy === "default" && this.cache
+        ? await this.cache.getLatestStaleCboeCacheForToday(tradingDate).catch(() => null)
+        : null;
+      if (staleCache) {
+        this.collectionQuality = summarizeParsedChains(
+          staleCache.chains,
+          staleCache.chains.flatMap((chain) => [...chain.calls, ...chain.puts]).length,
+          "stale",
+        );
+        return staleCache.chains;
+      }
       throw error;
     }
   }
@@ -463,12 +557,17 @@ export class CboeSpxGexDataClient implements SpxGexDataClient {
     if (!chain) throw new Error(`Cboe delayed options returned no SPX chain for ${selectedExpiry || "front expiry"}.`);
     return chain;
   }
+
+  getCollectionQualitySummary() {
+    return this.collectionQuality;
+  }
 }
 
 export class FallbackSpxGexDataClient implements SpxGexDataClient {
   private readonly primary: SpxGexDataClient;
   private readonly fallback: SpxGexDataClient;
   private selectedClientPromise: Promise<SpxGexDataClient> | null = null;
+  private selectedClientResolved: SpxGexDataClient | null = null;
 
   constructor(options: { primary: SpxGexDataClient; fallback: SpxGexDataClient }) {
     this.primary = options.primary;
@@ -481,8 +580,10 @@ export class FallbackSpxGexDataClient implements SpxGexDataClient {
         if (!this.primary.getOptionsChain) return this.fallback;
         try {
           await this.primary.getOptionsChain();
+          this.selectedClientResolved = this.primary;
           return this.primary;
         } catch {
+          this.selectedClientResolved = this.fallback;
           return this.fallback;
         }
       })();
@@ -540,14 +641,39 @@ export class FallbackSpxGexDataClient implements SpxGexDataClient {
       warnings: ["Cboe delayed source selected; Yahoo market context skipped to keep heatmap generation independent of Yahoo crumb/4xx failures."],
     };
   }
+
+  getCollectionQualitySummary() {
+    return this.selectedClientResolved?.getCollectionQualitySummary?.() || null;
+  }
 }
 
-export const createSpxGexIntradayDataClient = (options: { db?: D1DatabaseLike; fetchJson?: FetchJson; now?: Date | (() => Date) } = {}) =>
-  new FallbackSpxGexDataClient({
-    primary: new CboeSpxGexDataClient({
+export const createCboeOnlySpxGexDataClient = (options: {
+  db?: D1DatabaseLike;
+  fetchJson?: FetchJson;
+  now?: Date | (() => Date);
+  cachePolicy?: SpxGexCboeCachePolicy;
+  allowStaleCache?: boolean;
+} = {}) =>
+  new CboeSpxGexDataClient({
+    db: options.db,
+    fetchJson: options.fetchJson,
+    now: typeof options.now === "function" ? options.now : options.now ? () => options.now as Date : undefined,
+    cachePolicy: options.cachePolicy,
+    allowStaleCache: options.allowStaleCache,
+  });
+
+export const createSpxGexIntradayDataClient = (options: {
+  db?: D1DatabaseLike;
+  fetchJson?: FetchJson;
+  now?: Date | (() => Date);
+} = {}) => {
+  const primary = createCboeOnlySpxGexDataClient({
       db: options.db,
       fetchJson: options.fetchJson,
-      now: typeof options.now === "function" ? options.now : options.now ? () => options.now as Date : undefined,
-    }),
+      now: options.now,
+    });
+  return new FallbackSpxGexDataClient({
+    primary,
     fallback: new NativeSpxGexYahooClient(),
   });
+};

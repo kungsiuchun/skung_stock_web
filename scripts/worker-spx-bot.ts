@@ -1,8 +1,8 @@
 import { RSI, BollingerBands, SMA, MACD, EMA } from 'technicalindicators';
 import { PERSONAS, ORCHESTRATOR_PROMPT, AUDIT_AGENT_PROMPT } from './prompts';
 import { readAgentCalibrationWeights, readPendingAgentSignalOutcomes, updateAgentSignalOutcomeResults, upsertAgentSignalOutcome, upsertRecapDay, type D1DatabaseLike } from '../src/lib/spx-recap-d1';
-import { generateAndStoreSpxGexHeatmap, getSpxGexGenerationStatus, readSpxGexHeatmap, toTelegramGexSummary, type SpxGexDataClient, type SpxGexHeatmapModel, type SpxGexTelegramSummary } from '../src/lib/spx-gex-heatmap';
-import { createSpxGexIntradayDataClient } from '../src/lib/spx-gex-cboe';
+import { generateAndStoreSpxGexHeatmap, getSpxGexGenerationStatus, readSpxGexHeatmap, SpxGexSnapshotValidationError, toTelegramGexSummary, type SpxGexDataClient, type SpxGexHeatmapModel, type SpxGexTelegramSummary } from '../src/lib/spx-gex-heatmap';
+import { createCboeOnlySpxGexDataClient, createSpxGexIntradayDataClient } from '../src/lib/spx-gex-cboe';
 import {
   applyRiskGate,
   applyPositionTransitionGuard,
@@ -31,8 +31,12 @@ import { D1SpxGexCollectionStore, querySpxGexCollectionCoverage } from '../src/l
 import { D1SpxOperationalHealthStore, classifySpxOperationalFailure, type SpxOperationalJob } from '../src/lib/spx-operational-health';
 import {
   EMPTY_SPX_SCHEDULER_STATE,
+  SPX_GEX_OPENING_COLLECTION_MINUTE_ET,
+  SPX_GEX_OPENING_SNAPSHOT_MINUTE_ET,
   SPX_SCHEDULER_STORAGE_KEY,
+  advanceSpxGexOpeningRetryState,
   canonicalQuarterHourUtc,
+  createSpxGexOpeningRetryState,
   dueMissingRunIds,
   nextSchedulerAlarmAt,
   shouldRunScheduledTick,
@@ -2079,6 +2083,8 @@ const SPX_STALE_RUN_MS = 13 * 60_000;
 
 interface ScheduledRunOptions {
   force?: boolean;
+  openingRetryAttempt?: 2 | 3;
+  fetchNow?: Date;
   debugReportPreview?: boolean;
   deliveryMode?: SpxDeliveryMode;
   runMode?: "LIVE" | "UAT_REPLAY";
@@ -4094,30 +4100,42 @@ async function runEndOfDayAudit(env: Env, now: Date = new Date(), options: Sched
 async function runSpxGexHeatmapGeneration(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}) {
   if (!env.SPX_RECAP_DB) {
     console.log('[SPX_GEX_HEATMAP] Skip: SPX_RECAP_DB binding is missing.');
-    return { status: 'FAILED' as const, failureCode: 'D1_OPERATION_FAILED' };
+    return { status: 'FAILED' as const, failureCode: 'D1_OPERATION_FAILED', retryableOpeningFailure: false };
   }
 
   const generationStatus = getSpxGexGenerationStatus(now);
   const collectionStore = new D1SpxGexCollectionStore(env.SPX_RECAP_DB);
   const slotId = `${generationStatus.etDateKey}:${generationStatus.snapshotMinuteEt}`;
+  const isOpeningSlot = generationStatus.snapshotMinuteEt === SPX_GEX_OPENING_SNAPSHOT_MINUTE_ET
+    && generationStatus.collectedMinuteEt === SPX_GEX_OPENING_COLLECTION_MINUTE_ET;
+  const attempt = options.openingRetryAttempt || (isOpeningSlot ? 1 : 0);
+  const occurredAt = () => (options.fetchNow || new Date()).toISOString();
+  const dataClient = options.openingRetryAttempt
+    ? createCboeOnlySpxGexDataClient({
+      db: env.SPX_RECAP_DB,
+      now: options.fetchNow || new Date(),
+      cachePolicy: 'force_refresh',
+      allowStaleCache: false,
+    })
+    : createSpxGexIntradayDataClient({ db: env.SPX_RECAP_DB, now });
 
   try {
-    await collectionStore.scheduleDate(generationStatus.etDateKey, now.toISOString());
+    await collectionStore.scheduleDate(generationStatus.etDateKey, occurredAt());
     const result = await generateAndStoreSpxGexHeatmap({
       db: env.SPX_RECAP_DB,
-      dataClient: createSpxGexIntradayDataClient({ db: env.SPX_RECAP_DB, now }),
+      dataClient,
       now,
       force: options.force,
-      onStage: (stage, payload) => collectionStore.appendStage(slotId, stage, payload, new Date().toISOString()),
+      onStage: (stage, payload) => collectionStore.appendStage(slotId, stage, payload, occurredAt(), attempt),
     });
     if (result.status === 'skipped_existing') {
       const existing = await readSpxGexHeatmap(env.SPX_RECAP_DB, result.date, result.snapshotMinuteEt);
       const current = await collectionStore.getSlot(slotId);
       if (current?.currentStage === 'SCHEDULED' || current?.currentStage === 'FAILED') {
-        await collectionStore.appendStage(slotId, 'FETCHED', { reusedExistingSnapshot: true }, new Date().toISOString());
+        await collectionStore.appendStage(slotId, 'FETCHED', { reusedExistingSnapshot: true }, occurredAt(), attempt);
       }
       if (current?.currentStage === 'SCHEDULED' || current?.currentStage === 'FETCHED' || current?.currentStage === 'FAILED') {
-        await collectionStore.appendStage(slotId, 'NORMALIZED', { reusedExistingSnapshot: true }, new Date().toISOString());
+        await collectionStore.appendStage(slotId, 'NORMALIZED', { reusedExistingSnapshot: true }, occurredAt(), attempt);
       }
       if (current?.currentStage !== 'PERSISTED') {
         await collectionStore.appendStage(slotId, 'PERSISTED', {
@@ -4126,17 +4144,25 @@ async function runSpxGexHeatmapGeneration(env: Env, now: Date = new Date(), opti
           payloadHash: existing?.canonical?.payloadHash || null,
           provider: existing?.canonical?.provider || null,
           fallbackFrom: existing?.canonical?.fallbackFrom || null,
-        }, new Date().toISOString());
+        }, occurredAt(), attempt);
       }
     }
     console.log(`[SPX_GEX_HEATMAP] ${result.status} ${result.date}${'reason' in result ? ` ${result.reason}` : ''}`);
-    return { status: 'SUCCEEDED' as const, failureCode: null };
+    return { status: 'SUCCEEDED' as const, failureCode: null, retryableOpeningFailure: false };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await collectionStore.appendStage(slotId, 'FAILED', { error: classifySpxOperationalFailure(error, 'GEX_COLLECTION_FAILED') }, new Date().toISOString())
+    const failureCode = error instanceof SpxGexSnapshotValidationError
+      ? error.reasonCode
+      : classifySpxOperationalFailure(error, 'GEX_COLLECTION_FAILED');
+    const retryableOpeningFailure = isOpeningSlot && failureCode === 'NO_AUDITED_BLENDED_IV_CELLS';
+    await collectionStore.appendStage(slotId, 'FAILED', {
+      error: failureCode,
+      retryStatus: retryableOpeningFailure && attempt < 3 ? 'OPENING_RETRY_PENDING' : 'TERMINAL',
+      collectionQuality: dataClient.getCollectionQualitySummary?.() || null,
+    }, occurredAt(), attempt)
       .catch((persistError) => console.error('[SPX_GEX_HEATMAP] failed to persist terminal collection state', persistError instanceof Error ? persistError.message : String(persistError)));
     console.error('[SPX_GEX_HEATMAP] Generation failed', message);
-    return { status: 'FAILED' as const, failureCode: classifySpxOperationalFailure(error, 'GEX_COLLECTION_FAILED') };
+    return { status: 'FAILED' as const, failureCode, retryableOpeningFailure };
   }
 }
 
@@ -4244,10 +4270,21 @@ export async function runSupervisedSpxMarketTick(env: Env, now: Date = new Date(
       job: 'GEX_COLLECTION',
       runId: null,
       status: gex.status === 'SUCCEEDED' ? 'SUCCEEDED' : 'FAILED',
-      stage: 'TERMINAL',
+      stage: gex.status === 'FAILED' && gex.retryableOpeningFailure ? 'OPENING_RETRY_PENDING' : 'TERMINAL',
       failureCode: gex.failureCode,
     }, new Date().toISOString());
     if (gex.status === 'FAILED') {
+      if (gex.retryableOpeningFailure) {
+        await health.finish({
+          tickId,
+          job: 'MARKET_TICK',
+          runId: null,
+          status: 'FAILED',
+          stage: 'OPENING_RETRY_PENDING',
+          failureCode: gex.failureCode,
+        }, new Date().toISOString());
+        return { status: 'OPENING_RETRY_PENDING' as const, failureCode: gex.failureCode };
+      }
       await sendOperationalHealthAlert(env, health, tickId, 'GEX_COLLECTION', 'GEX 更新失敗；系統只會使用已持久化且新鮮的 snapshot，否則本輪會 fail-closed。');
       await health.finish({ tickId, job: 'MARKET_TICK', runId: null, status: 'FAILED', stage: 'GEX_FAILED', failureCode: gex.failureCode }, new Date().toISOString());
       return { status: 'FAILED' as const, failureCode: gex.failureCode };
@@ -4308,7 +4345,8 @@ export class SpxMarketScheduler {
   constructor(private readonly state: SpxSchedulerStateHandle, private readonly env: Env) {}
 
   private async readState() {
-    return (await this.state.storage.get<SpxSchedulerState>(SPX_SCHEDULER_STORAGE_KEY)) || { ...EMPTY_SPX_SCHEDULER_STATE };
+    const stored = await this.state.storage.get<SpxSchedulerState>(SPX_SCHEDULER_STORAGE_KEY);
+    return stored ? { ...EMPTY_SPX_SCHEDULER_STATE, ...stored } : { ...EMPTY_SPX_SCHEDULER_STATE };
   }
 
   private async writeState(value: SpxSchedulerState) {
@@ -4323,11 +4361,84 @@ export class SpxMarketScheduler {
     return next;
   }
 
+  private async armOpeningRetry(state: SpxSchedulerState, retry: NonNullable<SpxSchedulerState['openingRetry']>) {
+    const next = { ...state, openingRetry: retry, nextAlarmAt: retry.nextAttemptAtMs };
+    await this.writeState(next);
+    await this.state.storage.setAlarm(retry.nextAttemptAtMs);
+    return next;
+  }
+
+  private async executeOpeningRetry(scheduler: SpxSchedulerState) {
+    const retry = scheduler.openingRetry;
+    if (!retry) return { status: 'NO_OPENING_RETRY' as const, scheduler };
+    const now = new Date();
+    const nowMs = now.getTime();
+    if (scheduler.nextAlarmAt !== retry.nextAttemptAtMs) {
+      return { status: 'STALE_OPENING_RETRY' as const, scheduler };
+    }
+    const result = await runSpxGexHeatmapGeneration(
+      this.env,
+      new Date(retry.canonicalScheduledAtMs),
+      { force: true, openingRetryAttempt: retry.attempt, fetchNow: now },
+    );
+    if (result.status === 'SUCCEEDED') {
+      const next = await this.scheduleNext({
+        ...scheduler,
+        openingRetry: null,
+        lastSucceededAt: retry.canonicalScheduledAtMs,
+        lastFailureCode: null,
+        lastFailureAt: null,
+      }, retry.canonicalScheduledAtMs, nowMs);
+      return { status: 'OPENING_RETRY_SUCCEEDED' as const, scheduler: next };
+    }
+    if (result.retryableOpeningFailure) {
+      const advanced = advanceSpxGexOpeningRetryState(retry);
+      if (advanced) {
+        const next = await this.armOpeningRetry({
+          ...scheduler,
+          lastFailureCode: result.failureCode,
+          lastFailureAt: nowMs,
+        }, advanced);
+        return { status: 'OPENING_RETRY_PENDING' as const, scheduler: next };
+      }
+      const health = this.env.SPX_RECAP_DB ? new D1SpxOperationalHealthStore(this.env.SPX_RECAP_DB) : null;
+      if (health) {
+        await sendOperationalHealthAlert(
+          this.env,
+          health,
+          operationalTickId(new Date(retry.canonicalScheduledAtMs)),
+          'GEX_COLLECTION',
+          '09:30 opening bucket 三次 CBOE 收集均未通過 IV 壓力資料合約；slot 維持 MISSING，沒有重播交易決策。',
+        );
+      }
+      const next = await this.scheduleNext({
+        ...scheduler,
+        openingRetry: null,
+        lastFailureCode: result.failureCode,
+        lastFailureAt: nowMs,
+      }, retry.canonicalScheduledAtMs, nowMs);
+      return { status: 'OPENING_RETRY_EXHAUSTED' as const, scheduler: next };
+    }
+    scheduler = await this.scheduleNext({
+      ...scheduler,
+      openingRetry: null,
+      lastFailureCode: result.failureCode || 'GEX_COLLECTION_FAILED',
+      lastFailureAt: nowMs,
+    }, retry.canonicalScheduledAtMs, nowMs);
+    throw new Error(`SPX opening retry failed: ${scheduler.lastFailureCode}`);
+  }
+
   private async execute(requestedAtMs: number) {
-    const scheduledAtMs = canonicalQuarterHourUtc(requestedAtMs);
     const now = new Date();
     const nowMs = now.getTime();
     let scheduler = await this.readState();
+    if (scheduler.openingRetry && requestedAtMs === scheduler.openingRetry.nextAttemptAtMs) {
+      return this.executeOpeningRetry(scheduler);
+    }
+    if (requestedAtMs % 900_000 !== 0) {
+      return { status: 'STALE_NON_QUARTER_ALARM' as const, scheduler };
+    }
+    const scheduledAtMs = canonicalQuarterHourUtc(requestedAtMs);
     if ((scheduler.lastSucceededAt || 0) >= scheduledAtMs) return { status: 'DUPLICATE' as const, scheduler };
 
     const health = this.env.SPX_RECAP_DB ? new D1SpxOperationalHealthStore(this.env.SPX_RECAP_DB) : null;
@@ -4346,6 +4457,19 @@ export class SpxMarketScheduler {
     scheduler = { ...scheduler, lastStartedAt: scheduledAtMs, lastFailureCode: null, lastFailureAt: null };
     await this.writeState(scheduler);
     const result = await runSupervisedSpxMarketTick(this.env, new Date(scheduledAtMs));
+    if (result.status === 'OPENING_RETRY_PENDING') {
+      const generation = getSpxGexGenerationStatus(new Date(scheduledAtMs));
+      const retry = createSpxGexOpeningRetryState(
+        `${generation.etDateKey}:${generation.snapshotMinuteEt}`,
+        scheduledAtMs,
+      );
+      scheduler = await this.armOpeningRetry({
+        ...scheduler,
+        lastFailureCode: result.failureCode,
+        lastFailureAt: nowMs,
+      }, retry);
+      return { status: 'OPENING_RETRY_PENDING' as const, scheduler };
+    }
     if (result.status === 'FAILED') {
       scheduler = { ...scheduler, lastFailureCode: result.failureCode || 'MARKET_TICK_FAILED', lastFailureAt: nowMs };
       await this.writeState(scheduler);
@@ -4363,6 +4487,10 @@ export class SpxMarketScheduler {
   private async ensure() {
     const now = new Date();
     const scheduler = await this.readState();
+    if (scheduler.openingRetry && scheduler.nextAlarmAt === scheduler.openingRetry.nextAttemptAtMs) {
+      await this.state.storage.setAlarm(scheduler.nextAlarmAt);
+      return { status: 'ARMED' as const, scheduler };
+    }
     const isQuarterHour = scheduler.nextAlarmAt != null && scheduler.nextAlarmAt % 900_000 === 0;
     if (scheduler.nextAlarmAt && scheduler.nextAlarmAt > now.getTime() && isQuarterHour) return { status: 'ARMED' as const, scheduler };
     const next = await this.scheduleNext(scheduler, now.getTime() - 900_000, now.getTime());

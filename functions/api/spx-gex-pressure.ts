@@ -6,6 +6,7 @@ import {
 import { listSpxGexPressureFrames } from "../../src/lib/spx-gex-pressure-d1";
 import { buildSpxGexPressureMatrixFromFrames } from "../../src/lib/spx-gex-pressure-matrix";
 import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
+import { D1SpxGexCollectionStore } from "../../src/lib/spx-gex-collection-lifecycle";
 import { coalesceSpxEdgeRequest, readSpxEdgeCache, withSpxObservability, writeSpxEdgeCache } from "./_spx-edge-cache";
 
 interface Env {
@@ -47,6 +48,7 @@ async function onRequestUncached(context: Context) {
       selectedDate: null,
       pressure: null,
       invalidSnapshots: [],
+      collectionAttempts: [],
       warnings: ["SPX_RECAP_DB binding is not configured."],
     }, { status: 503 });
   }
@@ -60,19 +62,22 @@ async function onRequestUncached(context: Context) {
     const dates = [...new Set([...activeDates, ...invalidDates])].sort().reverse();
     const requestedDate = url.searchParams.get("date");
     const selectedDate = isValidDate(requestedDate) && dates.includes(requestedDate!) ? requestedDate! : dates[0] || null;
-    const [audit, quarantinedSnapshots] = selectedDate
+    const [audit, quarantinedSnapshots, collectionAttempts] = selectedDate
       ? await Promise.all([
         listSpxGexPressureFrames(context.env.SPX_RECAP_DB, selectedDate),
         listSpxGexInvalidSnapshots(context.env.SPX_RECAP_DB, selectedDate),
+        new D1SpxGexCollectionStore(context.env.SPX_RECAP_DB).listAttemptsForDate(selectedDate, 3),
       ])
-      : [{ frames: [], invalidSnapshots: [], projectionBytes: 0 }, []];
+      : [{ frames: [], invalidSnapshots: [], projectionBytes: 0 }, [], []];
+    const validSnapshotMinutes = new Set(audit.frames.map((frame) => frame.snapshotMinuteEt));
     const invalidSnapshots = [...audit.invalidSnapshots, ...quarantinedSnapshots]
+      .filter((snapshot) => !validSnapshotMinutes.has(snapshot.snapshotMinuteEt))
       .filter((snapshot, index, all) => all.findIndex((candidate) =>
         candidate.snapshotMinuteEt === snapshot.snapshotMinuteEt
         && candidate.reasonCode === snapshot.reasonCode) === index)
       .sort((a, b) => a.snapshotMinuteEt - b.snapshotMinuteEt);
     if (!selectedDate) {
-      return json({ status: "EMPTY", errorCode: null, selectedDate, pressure: null, invalidSnapshots: [], warnings: [] });
+      return json({ status: "EMPTY", errorCode: null, selectedDate, pressure: null, invalidSnapshots: [], collectionAttempts, warnings: [] });
     }
     if (audit.frames.length === 0 && invalidSnapshots.length > 0) {
       return json({
@@ -82,11 +87,12 @@ async function onRequestUncached(context: Context) {
         selectedDate,
         pressure: null,
         invalidSnapshots,
+        collectionAttempts,
         warnings: ["All persisted SPX GEX snapshots failed the pressure data contract."],
       }, { status: 500 });
     }
     if (audit.frames.length === 0) {
-      return json({ status: "EMPTY", errorCode: null, selectedDate, pressure: null, invalidSnapshots: [], warnings: [] });
+      return json({ status: "EMPTY", errorCode: null, selectedDate, pressure: null, invalidSnapshots: [], collectionAttempts, warnings: [] });
     }
 
     const builtPressure = buildSpxGexPressureMatrixFromFrames(audit.frames);
@@ -100,6 +106,7 @@ async function onRequestUncached(context: Context) {
       selectedDate,
       pressure,
       invalidSnapshots,
+      collectionAttempts,
       warnings: pressure.warnings,
     }, {
       headers: {
@@ -119,6 +126,7 @@ async function onRequestUncached(context: Context) {
       selectedDate: null,
       pressure: null,
       invalidSnapshots: [],
+      collectionAttempts: [],
       warnings: [missingTable ? "SPX GEX intraday storage migration is not applied." : `SPX GEX pressure build failed: ${message}`],
     }, { status: missingTable ? 503 : 500 });
   }

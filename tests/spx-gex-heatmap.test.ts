@@ -644,6 +644,66 @@ describe("SPX GEX Cboe delayed source adapter", () => {
     assert.equal(secondChain.source?.label, "Cboe delayed cache");
   });
 
+  it("force_refresh bypasses fresh cache, overwrites the bucket, and reports safe quality counters", async () => {
+    const db = new MemoryD1();
+    const now = () => new Date("2026-06-24T14:00:00Z");
+    await new CboeSpxGexDataClient({
+      db,
+      fetchJson: async () => buildDenseCboePayload(),
+      now,
+    }).getOptionsChain();
+
+    let forceFetches = 0;
+    const refreshedPayload = buildDenseCboePayload() as any;
+    refreshedPayload.data.current_price = 7401.25;
+    const forceClient = new CboeSpxGexDataClient({
+      db,
+      fetchJson: async () => {
+        forceFetches += 1;
+        return refreshedPayload;
+      },
+      now,
+      cachePolicy: "force_refresh",
+      allowStaleCache: false,
+    });
+    const refreshed = await forceClient.getOptionsChain();
+    const cached = await new CboeSpxGexDataClient({
+      db,
+      fetchJson: async () => { throw new Error("overwritten cache should be reused"); },
+      now,
+    }).getOptionsChain();
+
+    assert.equal(forceFetches, 1);
+    assert.equal(refreshed.spot, 7401.25);
+    assert.equal(cached.spot, 7401.25);
+    assert.equal(forceClient.getCollectionQualitySummary()?.cacheStatus, "force_refreshed");
+    assert.ok((forceClient.getCollectionQualitySummary()?.rawLegCount || 0) > 0);
+    assert.equal(
+      forceClient.getCollectionQualitySummary()?.parsedLegCount,
+      refreshedPayload.data.options.length,
+    );
+  });
+
+  it("force_refresh fails closed without reading fresh or stale Cboe cache", async () => {
+    const db = new MemoryD1();
+    const now = () => new Date("2026-06-24T14:00:00Z");
+    await new CboeSpxGexDataClient({
+      db,
+      fetchJson: async () => buildDenseCboePayload(),
+      now,
+    }).getOptionsChain();
+
+    const forceClient = new CboeSpxGexDataClient({
+      db,
+      fetchJson: async () => { throw new Error("forced Cboe refresh unavailable"); },
+      now,
+      cachePolicy: "force_refresh",
+      allowStaleCache: false,
+    });
+
+    await assert.rejects(() => forceClient.getOptionsChain(), /forced Cboe refresh unavailable/);
+  });
+
   it("ignores expired exact cache rows and refetches Cboe", async () => {
     const db = new MemoryD1();
     const cache = new CboeD1Cache(db, { now: () => new Date("2026-06-24T14:00:00Z") });
@@ -2475,6 +2535,25 @@ describe("SPX GEX pressure API", () => {
       reasonCode: "NO_AUDITED_BLENDED_IV_CELLS",
     }]);
     assert.equal(text.includes("snapshot_json"), false);
+  });
+
+  it("treats a contract-valid opening retry as READY even when earlier attempts remain quarantined for audit", async () => {
+    const db = new CountingD1();
+    const invalid = buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, { 6000: 100 });
+    invalid.cells = invalid.cells.map((cell) => ({ ...cell, netGex: null, callIv: null, putIv: null, gammaIv: null }));
+    await assert.rejects(() => upsertSpxGexHeatmap(db, "2026-05-27", invalid), /NO_AUDITED_BLENDED_IV_CELLS/);
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6001, { 6000: 120 }));
+
+    const response = await getSpxGexPressureApi({
+      request: new Request("https://example.com/api/spx-gex-pressure?date=2026-05-27"),
+      env: { SPX_RECAP_DB: db },
+    });
+    const payload = await response.json() as { status: string; invalidSnapshots: unknown[]; warnings: string[] };
+
+    assert.equal(response.status, 200);
+    assert.equal(payload.status, "READY");
+    assert.deepEqual(payload.invalidSnapshots, []);
+    assert.equal(payload.warnings.some((warning) => /09:30 snapshot/i.test(warning)), false);
   });
 
   it("fails explicitly when a date has quarantined frames but no valid pressure snapshot", async () => {
