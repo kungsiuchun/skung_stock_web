@@ -8,15 +8,19 @@ import {
   type SeriesMarker,
   type Time,
 } from "lightweight-charts";
-import { AlertCircle, ArrowDownToLine, ArrowUpToLine, Eye, EyeOff, Loader2 } from "lucide-react";
+import { AlertCircle, ArrowDownToLine, ArrowUpToLine, Eye, EyeOff, Loader2, RotateCw } from "lucide-react";
 import type {
   CandlestickBias,
   CandlestickInterval,
-  CandlestickPatternData,
   CandlestickPatternMatch,
   CandlestickTrendContext,
 } from "@/lib/candlestick-patterns";
-import type { MarketCacheMetadata } from "@/lib/market-data-cache";
+import {
+  fetchCandlestickAnalysis,
+  getCandlestickErrorForSelection,
+  type CandlestickClientRequestError,
+  type CandlestickClientResult,
+} from "@/lib/candlestick-pattern-client";
 import type { SupportResistanceRole, SupportResistanceZone } from "@/lib/support-resistance";
 
 interface ChartDataPoint {
@@ -35,16 +39,7 @@ interface PriceVolumeChartProps {
   symbol: string;
 }
 
-interface CandlestickApiResponse {
-  data?: CandlestickPatternData;
-  cache?: MarketCacheMetadata;
-  error?: string;
-}
-
-interface CachedAnalysis {
-  data: CandlestickPatternData;
-  cache: MarketCacheMetadata;
-}
+type CachedAnalysis = CandlestickClientResult;
 
 const INTERVAL_LABELS: Record<CandlestickInterval, string> = {
   "1d": "日線",
@@ -192,56 +187,59 @@ function SupportResistanceTile({
 export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<ReturnType<typeof createChart> | null>(null);
+  const requestGenerationRef = useRef(0);
   const [patternsEnabled, setPatternsEnabled] = useState(false);
   const [interval, setInterval] = useState<CandlestickInterval>("1d");
   const [cacheByInterval, setCacheByInterval] = useState<Partial<Record<CandlestickInterval, CachedAnalysis>>>({});
   const [loadingInterval, setLoadingInterval] = useState<CandlestickInterval | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [requestError, setRequestError] = useState<CandlestickClientRequestError | null>(null);
+  const [retryNonce, setRetryNonce] = useState(0);
 
   useEffect(() => {
     setPatternsEnabled(false);
     setInterval("1d");
     setCacheByInterval({});
     setLoadingInterval(null);
-    setError(null);
+    setRequestError(null);
+    setRetryNonce(0);
   }, [symbol]);
 
   useEffect(() => {
     if (!patternsEnabled || cacheByInterval[interval]) return;
     const controller = new AbortController();
-    let current = true;
+    const generation = ++requestGenerationRef.current;
     setLoadingInterval(interval);
-    setError(null);
+    setRequestError(null);
 
-    fetch(`/api/candlestick-patterns?symbol=${encodeURIComponent(symbol)}&interval=${interval}`, {
+    fetchCandlestickAnalysis({
+      symbol,
+      interval,
       signal: controller.signal,
     })
-      .then(async (response) => {
-        const payload = await response.json() as CandlestickApiResponse;
-        if ((!response.ok && response.status !== 206) || !payload.data || !payload.cache) {
-          throw new Error(payload.error || `K 線型態 API 回傳 HTTP ${response.status}。`);
-        }
-        return { data: payload.data, cache: payload.cache };
-      })
       .then((resolved) => {
-        if (!current) return;
+        if (requestGenerationRef.current !== generation) return;
         setCacheByInterval((previous) => ({ ...previous, [interval]: resolved }));
       })
       .catch((requestError) => {
-        if (!current || requestError instanceof DOMException && requestError.name === "AbortError") return;
-        setError(requestError instanceof Error ? requestError.message : String(requestError));
+        if (requestGenerationRef.current !== generation || requestError instanceof Error && requestError.name === "AbortError") return;
+        setRequestError({
+          symbol,
+          interval,
+          message: requestError instanceof Error ? requestError.message : String(requestError),
+        });
       })
       .finally(() => {
-        if (current) setLoadingInterval(null);
+        if (requestGenerationRef.current === generation) setLoadingInterval(null);
       });
 
     return () => {
-      current = false;
       controller.abort();
+      if (requestGenerationRef.current === generation) requestGenerationRef.current += 1;
     };
-  }, [cacheByInterval, interval, patternsEnabled, symbol]);
+  }, [cacheByInterval, interval, patternsEnabled, retryNonce, symbol]);
 
   const selected = patternsEnabled ? cacheByInterval[interval] : undefined;
+  const error = getCandlestickErrorForSelection(requestError, symbol, interval);
   const chartData = useMemo<ChartDataPoint[]>(() => {
     if (!selected) return data;
     return selected.data.bars.map((bar) => ({
@@ -398,7 +396,7 @@ export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
             aria-pressed={patternsEnabled}
             onClick={() => {
               setPatternsEnabled((current) => !current);
-              setError(null);
+              setRequestError(null);
             }}
             className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-[10px] font-black transition ${patternsEnabled ? "border-blue-200 bg-blue-50 text-blue-700" : "border-gray-200 bg-white text-gray-600 hover:border-blue-200 hover:text-blue-700"}`}
           >
@@ -430,6 +428,17 @@ export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
           <div>
             <p className="font-black">{INTERVAL_LABELS[interval]}型態分析失敗</p>
             <p className="mt-1 text-xs font-semibold">{error} 原有日線圖已保留，系統沒有產生替代訊號。</p>
+            <button
+              type="button"
+              onClick={() => {
+                setRequestError(null);
+                setRetryNonce((current) => current + 1);
+              }}
+              className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-[10px] font-black text-red-800 transition hover:border-red-400"
+            >
+              <RotateCw className="h-3.5 w-3.5" />
+              重試{INTERVAL_LABELS[interval]}分析
+            </button>
           </div>
         </div>
       )}

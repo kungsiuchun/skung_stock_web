@@ -37,6 +37,19 @@ export interface ResolveMarketCacheOptions<T> {
   sourceAsOf?: (value: T) => string | null | undefined;
   load: () => Promise<T>;
   now?: () => Date;
+  deadlineMs?: number;
+  requestId?: string;
+  signal?: AbortSignal;
+}
+
+export class MarketCacheTimeoutError extends Error {
+  constructor(
+    public readonly phase: string,
+    public readonly timeoutMs: number,
+  ) {
+    super(`Market cache ${phase} exceeded ${timeoutMs}ms.`);
+    this.name = "MarketCacheTimeoutError";
+  }
 }
 
 const inFlight = new Map<string, Promise<MarketCacheResolution<unknown>>>();
@@ -127,9 +140,78 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
   const now = options.now || (() => new Date());
   const cacheKey = buildMarketCacheKey(options.scope, options.symbol, options.params);
   const startedAt = Date.now();
+  const deadlineMs = options.deadlineMs && options.deadlineMs > 0 ? Math.floor(options.deadlineMs) : null;
+  const deadlineAt = deadlineMs === null ? null : startedAt + deadlineMs;
+  const d1PhaseCapMs = deadlineMs === null ? undefined : Math.min(2_000, Math.max(25, Math.floor(deadlineMs / 4)));
+  const staleReserveMs = deadlineMs === null ? 0 : Math.min(2_000, Math.max(25, Math.floor(deadlineMs / 5)));
+  const phaseMs: Record<string, number> = {};
+
+  const runPhase = async <R>(
+    phase: string,
+    operation: () => Promise<R>,
+    maxMs?: number,
+    phaseSignal: AbortSignal | null | undefined = options.signal,
+  ): Promise<R> => {
+    const phaseStartedAt = Date.now();
+    const signal = phaseSignal === null ? undefined : phaseSignal;
+    const remainingMs = deadlineAt === null ? null : deadlineAt - phaseStartedAt;
+    if (remainingMs !== null && remainingMs <= 0) {
+      throw new MarketCacheTimeoutError(phase, deadlineMs!);
+    }
+    const timeoutMs = remainingMs === null ? null : Math.max(1, Math.min(remainingMs, maxMs ?? remainingMs));
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let abortHandler: (() => void) | undefined;
+    try {
+      if (signal?.aborted) {
+        const error = new Error("Market cache request was aborted.");
+        error.name = "AbortError";
+        throw error;
+      }
+      const racers: Promise<R>[] = [operation()];
+      if (timeoutMs !== null) {
+        racers.push(new Promise<R>((_, reject) => {
+          timeout = setTimeout(() => reject(new MarketCacheTimeoutError(phase, timeoutMs)), timeoutMs);
+        }));
+      }
+      if (signal) {
+        racers.push(new Promise<R>((_, reject) => {
+          abortHandler = () => {
+            const error = new Error("Market cache request was aborted.");
+            error.name = "AbortError";
+            reject(error);
+          };
+          signal.addEventListener("abort", abortHandler, { once: true });
+          if (signal.aborted) abortHandler();
+        }));
+      }
+      return await Promise.race(racers);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      if (abortHandler) signal?.removeEventListener("abort", abortHandler);
+      phaseMs[phase] = (phaseMs[phase] || 0) + (Date.now() - phaseStartedAt);
+    }
+  };
+
+  const log = (input: Record<string, unknown>) => logCache({
+    requestId: options.requestId,
+    scope: options.scope,
+    symbol: options.symbol,
+    phaseMs,
+    ...input,
+  });
+  const failureFields = (error: unknown) => ({
+    errorClass: error instanceof Error ? error.name : "unknown",
+    ...(error instanceof MarketCacheTimeoutError ? { timeoutPhase: error.phase, timeoutMs: error.timeoutMs } : {}),
+  });
 
   if (!options.db) {
-    const value = await options.load();
+    let value: T;
+    try {
+      value = await runPhase("upstream", options.load);
+    } catch (error) {
+      log({ status: "failed", totalMs: Date.now() - startedAt, ...failureFields(error) });
+      throw error;
+    }
     const at = now();
     const cache = {
       status: "bypassed" as const,
@@ -138,34 +220,55 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
       ageSeconds: 0,
       sourceAsOf: options.sourceAsOf?.(value) || null,
     };
-    logCache({ scope: options.scope, symbol: options.symbol, status: cache.status, totalMs: Date.now() - startedAt });
+    log({ status: cache.status, totalMs: Date.now() - startedAt });
     return { value, cache };
   }
 
   const initialNow = now();
-  const existing = await readRow(options.db, cacheKey);
+  let existing: MarketCacheRow | null;
+  try {
+    existing = await runPhase("cache-read", () => readRow(options.db!, cacheKey), d1PhaseCapMs);
+  } catch (error) {
+    log({ status: "failed", totalMs: Date.now() - startedAt, ...failureFields(error) });
+    throw error;
+  }
   if (!options.force && existing && Date.parse(existing.expires_at) > initialNow.getTime()) {
     const cache = metadataFromRow(existing, "hit", initialNow);
-    logCache({ scope: options.scope, symbol: options.symbol, status: cache.status, ageSeconds: cache.ageSeconds, totalMs: Date.now() - startedAt });
+    log({ status: cache.status, ageSeconds: cache.ageSeconds, totalMs: Date.now() - startedAt });
     return { value: parseRow<T>(existing), cache };
   }
 
   const pending = inFlight.get(cacheKey) as Promise<MarketCacheResolution<T>> | undefined;
-  if (pending) return pending;
+  if (pending) {
+    try {
+      const resolved = await runPhase("inflight-wait", () => pending);
+      log({ status: resolved.cache.status, coalesced: true, totalMs: Date.now() - startedAt });
+      return resolved;
+    } catch (error) {
+      log({ status: "failed", coalesced: true, totalMs: Date.now() - startedAt, ...failureFields(error) });
+      throw error;
+    }
+  }
 
   const refresh = (async (): Promise<MarketCacheResolution<T>> => {
     const upstreamStartedAt = Date.now();
     try {
-      const value = await options.load();
+      const upstreamMaxMs = deadlineAt === null
+        ? undefined
+        : Math.max(1, deadlineAt - Date.now() - staleReserveMs);
+      const value = await runPhase("upstream", options.load, upstreamMaxMs, null);
       const refreshedAt = now();
-      const written = await writeSuccess(options.db!, {
+      const cacheWriteMaxMs = deadlineAt === null
+        ? d1PhaseCapMs
+        : Math.max(1, Math.min(d1PhaseCapMs!, deadlineAt - Date.now() - staleReserveMs));
+      const written = await runPhase("cache-write", () => writeSuccess(options.db!, {
         cacheKey,
         scope: options.scope,
         symbol: options.symbol,
         value,
         sourceAsOf: options.sourceAsOf?.(value) || null,
         now: refreshedAt,
-      });
+      }), cacheWriteMaxMs, null);
       const cache: MarketCacheMetadata = {
         status: "refreshed",
         cachedAt: written.cachedAt,
@@ -173,19 +276,40 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
         ageSeconds: 0,
         sourceAsOf: options.sourceAsOf?.(value) || null,
       };
-      logCache({ scope: options.scope, symbol: options.symbol, status: cache.status, upstreamMs: Date.now() - upstreamStartedAt, totalMs: Date.now() - startedAt });
+      log({ status: cache.status, upstreamMs: Date.now() - upstreamStartedAt, totalMs: Date.now() - startedAt });
       return { value, cache };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const failedAt = now();
-      const stale = await readRow(options.db!, cacheKey);
+      let stale = existing;
+      if (!stale) {
+        try {
+          stale = await runPhase("stale-read", () => readRow(options.db!, cacheKey), d1PhaseCapMs, null);
+        } catch (fallbackError) {
+          log({
+            status: "failed",
+            upstreamMs: Date.now() - upstreamStartedAt,
+            totalMs: Date.now() - startedAt,
+            originalErrorClass: error instanceof Error ? error.name : "unknown",
+            originalFailurePhase: error instanceof MarketCacheTimeoutError ? error.phase : undefined,
+            fallbackErrorClass: fallbackError instanceof Error ? fallbackError.name : "unknown",
+            fallbackFailurePhase: fallbackError instanceof MarketCacheTimeoutError ? fallbackError.phase : undefined,
+          });
+          throw fallbackError;
+        }
+      }
       if (stale) {
-        await recordRefreshError(options.db!, cacheKey, failedAt, message);
+        let recordErrorClass: string | undefined;
+        try {
+          await runPhase("record-error", () => recordRefreshError(options.db!, cacheKey, failedAt, message), d1PhaseCapMs, null);
+        } catch (recordError) {
+          recordErrorClass = recordError instanceof Error ? recordError.name : "unknown";
+        }
         const cache = metadataFromRow(stale, "stale", failedAt, message);
-        logCache({ scope: options.scope, symbol: options.symbol, status: cache.status, ageSeconds: cache.ageSeconds, upstreamMs: Date.now() - upstreamStartedAt, totalMs: Date.now() - startedAt, errorClass: error instanceof Error ? error.name : "unknown" });
+        log({ status: cache.status, ageSeconds: cache.ageSeconds, upstreamMs: Date.now() - upstreamStartedAt, totalMs: Date.now() - startedAt, ...failureFields(error), recordErrorClass });
         return { value: parseRow<T>(stale), cache };
       }
-      logCache({ scope: options.scope, symbol: options.symbol, status: "failed", upstreamMs: Date.now() - upstreamStartedAt, totalMs: Date.now() - startedAt, errorClass: error instanceof Error ? error.name : "unknown" });
+      log({ status: "failed", upstreamMs: Date.now() - upstreamStartedAt, totalMs: Date.now() - startedAt, ...failureFields(error) });
       throw error;
     } finally {
       inFlight.delete(cacheKey);
@@ -193,5 +317,10 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
   })();
 
   inFlight.set(cacheKey, refresh as Promise<MarketCacheResolution<unknown>>);
-  return refresh;
+  try {
+    return await runPhase("refresh-wait", () => refresh);
+  } catch (error) {
+    log({ status: "failed", waitOnly: true, totalMs: Date.now() - startedAt, ...failureFields(error) });
+    throw error;
+  }
 }

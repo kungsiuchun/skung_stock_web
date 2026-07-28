@@ -4,7 +4,7 @@ import {
   CandlestickDataError,
   type CandlestickInterval,
 } from "../../src/lib/candlestick-patterns";
-import { resolveMarketCache } from "../../src/lib/market-data-cache";
+import { MarketCacheTimeoutError, resolveMarketCache } from "../../src/lib/market-data-cache";
 import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
 
 interface Env {
@@ -17,11 +17,14 @@ const INTERVAL_RANGE: Record<CandlestickInterval, string> = {
   "1mo": "10y",
 };
 
-const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+export const CANDLESTICK_API_DEADLINE_MS = 10_000;
+
+const json = (body: unknown, status = 200, requestId?: string) => new Response(JSON.stringify(body), {
   status,
   headers: {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
+    ...(requestId ? { "X-Request-ID": requestId } : {}),
   },
 });
 
@@ -38,13 +41,17 @@ const validInterval = (value: unknown): CandlestickInterval => {
 };
 
 const errorStatus = (error: unknown) => {
+  if (error instanceof MarketCacheTimeoutError) return 504;
   if (!(error instanceof CandlestickDataError)) return 502;
   if (error.code === "INSUFFICIENT_BARS") return 422;
+  if (error.code === "YAHOO_TIMEOUT") return 504;
   return 502;
 };
 
-export async function onRequestGet(context: { request: Request; env: Env }) {
+export async function onRequestGet(context: { request: Request; env: Env; deadlineMs?: number }) {
   const startedAt = Date.now();
+  const requestId = crypto.randomUUID();
+  const apiDeadlineMs = context.deadlineMs ?? CANDLESTICK_API_DEADLINE_MS;
   const url = new URL(context.request.url);
   let symbol: string;
   let interval: CandlestickInterval;
@@ -52,7 +59,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     symbol = validSymbol(url.searchParams.get("symbol"));
     interval = validInterval(url.searchParams.get("interval"));
   } catch (error) {
-    return json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    return json({ error: error instanceof Error ? error.message : String(error), requestId }, 400, requestId);
   }
 
   try {
@@ -61,10 +68,18 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       scope: "candlestick-patterns-v2",
       symbol,
       params: { interval },
+      deadlineMs: apiDeadlineMs,
+      requestId,
+      signal: context.request.signal,
       sourceAsOf: (value) => value.sourceAsOf,
       load: async () => {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort("Yahoo Finance chart request exceeded 8 seconds."), 8_000);
+        let timedOut = false;
+        const yahooTimeoutMs = Math.min(8_000, Math.max(1, apiDeadlineMs - 2_000));
+        const timeout = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, yahooTimeoutMs);
         try {
           const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${INTERVAL_RANGE[interval]}&events=history`;
           const response = await fetch(yahooUrl, {
@@ -79,6 +94,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             throw new CandlestickDataError("MALFORMED_PAYLOAD", "Yahoo Finance chart response was not valid JSON.");
           }
           return buildCandlestickPatternData({ symbol, interval, payload });
+        } catch (error) {
+          if (timedOut) {
+            throw new CandlestickDataError("YAHOO_TIMEOUT", `Yahoo Finance chart request exceeded ${yahooTimeoutMs}ms.`);
+          }
+          throw error;
         } finally {
           clearTimeout(timeout);
         }
@@ -87,6 +107,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
     console.log(JSON.stringify({
       event: "candlestick_pattern_analysis",
+      requestId,
       symbol,
       interval,
       status: "success",
@@ -101,17 +122,19 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       supportResistanceZoneCount: resolved.value.analysis.supportResistance.zones.length,
       durationMs: Date.now() - startedAt,
     }));
-    return json({ data: resolved.value, cache: resolved.cache }, resolved.cache.status === "stale" ? 206 : 200);
+    return json({ data: resolved.value, cache: resolved.cache, requestId }, resolved.cache.status === "stale" ? 206 : 200, requestId);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(JSON.stringify({
       event: "candlestick_pattern_analysis",
+      requestId,
       symbol,
       interval,
       status: "failed",
       errorClass: error instanceof Error ? error.name : "unknown",
+      ...(error instanceof MarketCacheTimeoutError ? { timeoutPhase: error.phase, timeoutMs: error.timeoutMs } : {}),
       durationMs: Date.now() - startedAt,
     }));
-    return json({ error: message }, errorStatus(error));
+    return json({ error: message, requestId }, errorStatus(error), requestId);
   }
 }

@@ -535,6 +535,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
               {/* Chart Section */}
               <div className="bg-white border border-gray-200 rounded-3xl p-6 lg:p-8 shadow-sm relative mt-8">
                  <PriceVolumeChart 
+                   key={activeData?.symbol || "---"}
                    data={activeData?.chartData || []} 
                    symbol={activeData?.symbol || "---"}
                  />
