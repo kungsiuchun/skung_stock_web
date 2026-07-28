@@ -50,7 +50,7 @@ test("SPX Worker persists normalized replay context without claiming raw source 
   assert.match(workerSource, /marketSnapshot\.normalizedContext\s*=\s*extendedContext/);
   assert.match(workerSource, /replayGrade:\s*canonicalGex\s*\?\s*'NORMALIZED_CANONICAL'\s*:\s*'PARTIAL_NORMALIZED'/);
   for (const series of ["spx15m", "spx5m", "spxD1", "spxH1", "vix15m", "vix9d"]) {
-    assert.match(workerSource, new RegExp(`${series}:\\s*normalizeReplaySeries`));
+    assert.match(workerSource, new RegExp(`${series}:\\s*normalizeSpxReplaySeries`));
   }
   assert.match(workerSource, /snapshotId:\s*canonicalGex\.snapshotId/);
   assert.match(workerSource, /payloadHash:\s*canonicalGex\.payloadHash/);
@@ -70,7 +70,7 @@ test("Telegram GEX section is wired from the canonical Board summary", () => {
 test("scheduled market work is supervised by one tick with stale-run recovery", () => {
   assert.match(workerSource, /runSupervisedSpxMarketTick/);
   assert.match(workerSource, /recoverStaleTradingRuns/);
-  assert.match(workerSource, /runSpxGexHeatmapGeneration\(env, now\)[\s\S]*?runTradingAgents\(env, now\)/);
+  assert.match(workerSource, /runSpxGexHeatmapGeneration\(env, now\)[\s\S]*?runLiveSpxDecisionRun\(env, now\)/);
   assert.equal(workerSource.includes("const TRADING_CRON"), false);
 });
 

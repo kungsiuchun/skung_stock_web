@@ -26,6 +26,7 @@ import {
   parseOrchestratorResponseContent,
   runCouncilAnalyses,
   runSpxGpt5CompatibilityProbe,
+  runLiveSpxDecisionRun,
   runStructuredOpenRouterRequest,
   runSpxUatLlm,
   runSpxUatReplay,
@@ -50,6 +51,12 @@ const forbiddenVisibleFragments = [
   "analysis failed",
   "parse failed",
 ];
+
+test("live SPX decision adapter skips an off-hours manual request before touching the execution pipeline", async () => {
+  const result = await runLiveSpxDecisionRun({} as any, new Date("2026-07-12T14:45:00.000Z"));
+
+  assert.deepEqual(result, { status: "SKIPPED", runId: null, failureCode: null });
+});
 
 test("SPX decision Telegram payload escapes model punctuation before HTML delivery", () => {
   const payload = buildSpxDecisionTelegramPayload("chat", "QM｜price < VWAP & invalidation > 0");

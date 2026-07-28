@@ -39,8 +39,20 @@ import {
 import {
   getDashboardNarrativeStatus,
 } from "@/lib/finance-dashboard-narrative";
+import {
+  sanitizeDashboardHistory,
+  hasLegacyDeepEarData as hasPersistedLegacyDeepEarData,
+  normalizeStoredDashboardData as normalizePersistedDashboardData,
+} from "@/lib/finance-dashboard-persistence";
+import {
+  applyDashboardSnapshot,
+  beginDashboardAnalysis,
+  completeDashboardAnalysis,
+  EMPTY_DASHBOARD_SNAPSHOT_STATE,
+  failDashboardAnalysis,
+} from "@/lib/finance-dashboard-state";
 
-interface HistoryItem {
+export interface HistoryItem {
   symbol: string;
   timestamp: string;
   score: number;
@@ -54,7 +66,7 @@ interface FinanceDashboardProps {
 
 const LEGACY_DEEPEAR_PATTERN = /DeepEar|高頻|get_financial_signals/i;
 
-const hasLegacyDeepEarData = (data: unknown) => {
+export const hasLegacyDeepEarData = (data: unknown) => {
   if (!data || typeof data !== "object") return false;
   const value = data as { financialSignals?: unknown; finalAnalysis?: unknown };
   return Boolean(
@@ -63,7 +75,7 @@ const hasLegacyDeepEarData = (data: unknown) => {
   );
 };
 
-const normalizeStoredDashboardData = (data: unknown): DashboardData | null => {
+export const normalizeStoredDashboardData = (data: unknown): DashboardData | null => {
   if (!data || typeof data !== "object") return null;
   const stored = data as DashboardData & { quantStrategies?: unknown };
   const normalizedStrategies = normalizeQuantStrategiesFromAgentResponse({ quant_strategies: stored.quantStrategies });
@@ -89,19 +101,6 @@ const normalizeStoredDashboardData = (data: unknown): DashboardData | null => {
     recommendedTrade: hasCurrentQuantSchema ? selectRecommendedQuantTrade(quantStrategies) : null,
     dashboardNarrative: stored.dashboardNarrative || getDashboardNarrativeStatus(stored.finalAnalysis),
   };
-};
-
-const sanitizeHistory = (items: unknown): HistoryItem[] => {
-  if (!Array.isArray(items)) return [];
-  return items
-    .filter((item): item is HistoryItem => Boolean(item && typeof item === "object" && "symbol" in item))
-    .map((item) => {
-      if (hasLegacyDeepEarData(item.fullData)) return { ...item, fullData: undefined };
-      return {
-        ...item,
-        fullData: item.fullData ? normalizeStoredDashboardData(item.fullData) || undefined : undefined,
-      };
-    });
 };
 
 function FinanceDashboardLoading({ phase, symbol }: { phase: DashboardLoadingPhase; symbol: string }) {
@@ -155,18 +154,9 @@ function FinanceDashboardLoading({ phase, symbol }: { phase: DashboardLoadingPha
 }
 
 export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashboardProps) {
-  const [valuationData, setValuationData] = useState<any>(null);
-  const [technicalData, setTechnicalData] = useState<any>(null);
-
-  // Focus specific data sets based on natural language
-  const [activeData, setActiveData] = useState<DashboardData | null>(null);
+  const [dashboardSnapshot, setDashboardSnapshot] = useState(EMPTY_DASHBOARD_SNAPSHOT_STATE);
+  const { activeData, cache, error, history, loading, loadingPhase, technicalData, valuationData, vixData } = dashboardSnapshot;
   const [symbol, setSymbol] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [loadingPhase, setLoadingPhase] = useState<DashboardLoadingPhase | null>(null);
-  const [vixData, setVixData] = useState<any>(null);
-  const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [cache, setCache] = useState<MarketCacheMetadata | null>(null);
   const [showHistory, setShowHistory] = useState(false);
 
   // 1. Load from localStorage on mount
@@ -174,8 +164,8 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
     const savedHistory = localStorage.getItem("finance_dashboard_history");
     if (savedHistory) {
       try {
-        const sanitizedHistory = sanitizeHistory(JSON.parse(savedHistory));
-        setHistory(sanitizedHistory);
+        const sanitizedHistory = sanitizeDashboardHistory(JSON.parse(savedHistory));
+        setDashboardSnapshot((current) => ({ ...current, history: sanitizedHistory }));
         localStorage.setItem("finance_dashboard_history", JSON.stringify(sanitizedHistory));
       } catch (e) {
         console.error("Failed to parse history", e);
@@ -186,12 +176,12 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
     if (savedActiveData) {
       try {
         const parsedActiveData = JSON.parse(savedActiveData);
-        if (hasLegacyDeepEarData(parsedActiveData)) {
+        if (hasPersistedLegacyDeepEarData(parsedActiveData)) {
           localStorage.removeItem("finance_dashboard_active_data");
         } else {
-          const normalizedActiveData = normalizeStoredDashboardData(parsedActiveData);
+          const normalizedActiveData = normalizePersistedDashboardData(parsedActiveData);
           if (normalizedActiveData) {
-            setActiveData(normalizedActiveData);
+            setDashboardSnapshot((current) => ({ ...current, activeData: normalizedActiveData }));
           } else {
             localStorage.removeItem("finance_dashboard_active_data");
           }
@@ -216,7 +206,10 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
   useEffect(() => {
     if (!loadingPhase) return;
     const timer = window.setInterval(() => {
-      setLoadingPhase((current) => current ? getNextDashboardLoadingPhase(current) : current);
+      setDashboardSnapshot((current) => ({
+        ...current,
+        loadingPhase: current.loadingPhase ? getNextDashboardLoadingPhase(current.loadingPhase) : null,
+      }));
     }, DASHBOARD_LOADING_PHASE_MS);
     return () => window.clearInterval(timer);
   }, [loadingPhase]);
@@ -225,10 +218,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
     if (!symbol.trim() || loading) return;
 
     try {
-      setLoading(true);
-      setLoadingPhase("market");
-      setError(null);
-      setActiveData(null);
+      setDashboardSnapshot(beginDashboardAnalysis);
 
       const response = await fetch("/api/finance-dashboard/snapshot", {
         method: "POST",
@@ -245,24 +235,19 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
       if (!response.ok && response.status !== 206) throw new Error(payload.error || "分析快照請求失敗");
       if (!payload.data || !payload.cache) throw new Error("分析快照回應格式無效。");
 
-      setVixData(payload.data.vixData);
-      setValuationData(payload.data.valuationData);
-      setTechnicalData(payload.data.technicalData);
-      setCache(payload.cache);
-      setActiveData(payload.data.data);
-      
-      const newHistory = [
-        { symbol: symbol.toUpperCase(), timestamp: new Date().toLocaleTimeString(), score: payload.data.data.algoRating, fullData: payload.data.data },
-        ...history.filter(h => h.symbol !== symbol.toUpperCase()).slice(0, 4)
-      ];
-      setHistory(newHistory);
+      setDashboardSnapshot((current) => applyDashboardSnapshot(
+        current,
+        payload.data as FinanceDashboardSnapshotPayload,
+        payload.cache as MarketCacheMetadata,
+        symbol,
+        new Date().toLocaleTimeString(),
+      ));
 
     } catch (err: any) {
       console.error("Analysis Error:", err);
-      setError(err.message || "分析過程中發生錯誤");
+      setDashboardSnapshot((current) => failDashboardAnalysis(current, err.message || "分析過程中發生錯誤"));
     } finally {
-      setLoading(false);
-      setLoadingPhase(null);
+      setDashboardSnapshot(completeDashboardAnalysis);
     }
   };
 
@@ -341,7 +326,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
                   <div className="p-2 border-b border-gray-100 flex items-center justify-between">
                     <span className="text-[10px] font-black uppercase tracking-widest text-gray-400 px-3 py-1">最近搜尋記錄</span>
                     <button 
-                      onClick={() => { setHistory([]); localStorage.removeItem("finance_dashboard_history"); }}
+                      onClick={() => { setDashboardSnapshot((current) => ({ ...current, history: [] })); localStorage.removeItem("finance_dashboard_history"); }}
                       className="text-[10px] font-bold text-red-500 px-3 py-1 hover:bg-red-50 rounded-lg transition-colors"
                     >
                       清除歷史
@@ -353,7 +338,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
                         key={i}
                         onClick={() => {
                           if (h.fullData) {
-                            setActiveData(normalizeStoredDashboardData(h.fullData));
+                            setDashboardSnapshot((current) => ({ ...current, activeData: normalizePersistedDashboardData(h.fullData) }));
                             setSymbol(h.symbol);
                           } else {
                             setSymbol(h.symbol);
@@ -443,7 +428,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
                         key={i}
                         onClick={() => { 
                           if (h.fullData) {
-                            setActiveData(normalizeStoredDashboardData(h.fullData));
+                            setDashboardSnapshot((current) => ({ ...current, activeData: normalizePersistedDashboardData(h.fullData) }));
                           } else {
                             setSymbol(h.symbol);
                           }
