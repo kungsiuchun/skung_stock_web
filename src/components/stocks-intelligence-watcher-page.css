@@ -963,6 +963,8 @@
 
 .siw-news-panel,
 .siw-earnings-panel,
+.siw-valuation-panel,
+.siw-financials-panel,
 .siw-key-metrics-panel {
   min-height: 180px;
 }
@@ -1175,6 +1177,8 @@
 
 .siw-news-panel,
 .siw-earnings-panel,
+.siw-valuation-panel,
+.siw-financials-panel,
 .siw-key-metrics-panel {
   min-height: 210px;
 }

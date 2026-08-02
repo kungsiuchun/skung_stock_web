@@ -3,6 +3,7 @@ import type { StocksNativeToolResult, StocksNativeToolSummary } from "./stocks-n
 import { STOCKS_WATCHER_UNIVERSE } from "./stocks-watcher-universe";
 import type { StocksWatcherUniverseStock } from "./stocks-watcher-universe";
 import type { MarketCacheMetadata } from "./market-data-cache";
+import type { WatcherCoverageStatus, WatcherFinancialQuarter, WatcherValuationBands } from "./stocks-watcher-valuation-data";
 
 export type StocksWatcherChartMode = "oi" | "volume" | "gex";
 
@@ -126,6 +127,9 @@ export interface StocksWatcherSnapshot {
   history: StocksWatcherHistoryPoint[];
   recentNews: StocksWatcherNewsItem[];
   earnings: StocksWatcherEarningsSnapshot;
+  valuation: WatcherValuationBands | null;
+  financials: WatcherFinancialQuarter | null;
+  valuationCoverage?: WatcherCoverageStatus;
   marketContext: {
     breadth: string;
     relativeStrength: string;
@@ -718,6 +722,8 @@ export const buildDemoStocksWatcherSnapshot = (symbol: string, warning: string):
     history: buildSyntheticHistory(upperSymbol, base),
     recentNews: [],
     earnings: emptyEarningsSnapshot("Demo fallback has no Yahoo earningsHistory."),
+    valuation: null,
+    financials: null,
     marketContext: {
       breadth: "Demo breadth context. Live mode uses native Yahoo data.",
       relativeStrength: `Demo relative strength for ${upperSymbol} versus ${DEFAULT_WATCHLIST.filter((item) => item !== upperSymbol).join(", ")}.`,
@@ -1054,6 +1060,8 @@ export const buildStocksWatcherSnapshotFromNative = async (
     history: history.length > 3 ? history : demoBase.history,
     recentNews: newsFromRawResult(newsResult.raw),
     earnings: earningsFromRawResult(earningsResult.raw),
+    valuation: null,
+    financials: null,
     marketContext: {
       breadth: summariseTool("market_breadth", breadthText),
       relativeStrength: summariseTool("basket_relative_strength", relativeStrengthText),

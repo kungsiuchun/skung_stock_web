@@ -41,7 +41,9 @@ import {
   getStocksWatcherTopTabToolPlan,
   normalizeWatcherExpiryForYahoo,
 } from "../src/lib/stocks-intelligence-watcher-session";
-import { onRequest as stocksWatcherApi } from "../functions/api/stocks-intelligence-watcher";
+import { attachPublishedWatcherData, onRequest as stocksWatcherApi } from "../functions/api/stocks-intelligence-watcher";
+import { onRequestPost as coverageAdminApi } from "../functions/api/stocks-intelligence-watcher/admin";
+import { getWatcherCoverageStatus, loadWatcherValuationBands, requestWatcherCoverage, type R2BucketLike } from "../src/lib/stocks-watcher-valuation-data";
 
 class FakeStocksNativeClient implements StocksWatcherToolClient {
   async listTools() {
@@ -194,6 +196,114 @@ class FakeStocksNativeClient implements StocksWatcherToolClient {
     return { text, raw: null };
   }
 }
+
+const freshPublishedAt = () => new Date().toISOString();
+const fakeR2 = (objects: Record<string, unknown>): R2BucketLike => ({
+  get: async (key) => objects[key] === undefined ? null : { json: async () => objects[key] },
+});
+const writableFakeR2 = (objects: Record<string, unknown>): R2BucketLike => ({
+  get: async (key) => objects[key] === undefined ? null : { json: async () => objects[key] },
+  put: async (key, value) => { objects[key] = JSON.parse(value); },
+});
+const fakePublishedR2 = (objects: Record<string, unknown>): R2BucketLike => fakeR2({
+  "current.json": { schemaVersion: "1.0", releaseId: "release-1", generatedAt: freshPublishedAt() },
+  ...Object.fromEntries(Object.entries(objects).map(([key, value]) => [`releases/release-1/${key}`, value])),
+});
+const valuationFixture = (generatedAt = freshPublishedAt()) => ({
+  schemaVersion: "1.0",
+  source: "ValuationCalculation hybrid valuation model",
+  symbol: "TSM",
+  generatedAt,
+  dataAsOf: "2026-07-30",
+  metric: "pe",
+  window: "3Y",
+  latest: { date: "2026-07-30", price: 200, bands: { mean: 180, up1: 220, up2: 260, down1: 140, down2: 100 } },
+  points: [{ date: "2026-07-30", price: 200, bands: { mean: 180, up1: 220, up2: 260, down1: 140, down2: 100 } }],
+});
+const financialsFixture = (generatedAt = freshPublishedAt()) => ({
+  schemaVersion: "1.0", source: "FMP quarterly statements transformed by ValuationCalculation", symbol: "TSM", generatedAt, dataAsOf: "2026-06-30",
+  quarters: [{ date: "2026-06-30", filingDate: "2026-07-16", fiscalYear: "2026", period: "Q2", currency: "USD", revenue: 100, netIncome: 20, eps: 2, operatingCashFlow: 30, freeCashFlow: 15, revenue_qoq: 1, revenue_yoy: 10, netIncome_qoq: 2, netIncome_yoy: 11, eps_qoq: 2, eps_yoy: 11, operatingCashFlow_qoq: 3, operatingCashFlow_yoy: 12 }],
+});
+
+test("missing published valuation returns an observable coverage status instead of Yahoo fallback", async () => {
+  const response = await stocksWatcherApi({
+    request: new Request("https://example.test/api/stocks-intelligence-watcher", { method: "POST", body: JSON.stringify({ tool: "get_valuation_bands", params: { symbol: "IBM" } }) }),
+    env: { VALUATION_DATA: fakeR2({ "current.json": { schemaVersion: "1.0", releaseId: "release-1", generatedAt: freshPublishedAt() }, "coverage/universe.json": { schemaVersion: "1.0", updatedAt: freshPublishedAt(), symbols: [{ symbol: "IBM", requestedAt: freshPublishedAt(), state: "queued" }] } }) },
+  });
+  const body = await response.json() as { ok: boolean; coverageStatus: string; error: string };
+  assert.equal(response.status, 404);
+  assert.equal(body.ok, false);
+  assert.equal(body.coverageStatus, "queued");
+  assert.match(body.error, /VALUATION_DATA_NOT_PUBLISHED/);
+});
+
+test("admin coverage tool rejects unauthenticated calls and queues an authenticated ticker once", async () => {
+  const objects: Record<string, unknown> = {
+    "current.json": { schemaVersion: "1.0", releaseId: "release-1", generatedAt: freshPublishedAt() },
+    "releases/release-1/manifest.json": { schemaVersion: "1.0", symbols: [{ symbol: "TSM" }] },
+  };
+  const bucket = writableFakeR2(objects);
+  const request = (token?: string, scheme = "Bearer") => new Request("https://example.test/api/stocks-intelligence-watcher/admin", {
+    method: "POST",
+    headers: token ? { Authorization: `${scheme} ${token}` } : undefined,
+    body: JSON.stringify({ tool: "request_valuation_coverage", params: { symbol: "ibm" } }),
+  });
+  const env = { VALUATION_DATA: bucket, STOCKS_WATCHER_ADMIN_TOKEN: "test-admin-token" };
+  const rejected = await coverageAdminApi({ request: request(), env });
+  assert.equal(rejected.status, 401);
+  assert.deepEqual(await rejected.json(), { ok: false, error: "ADMIN_AUTH_REQUIRED" });
+
+  const invalid = await coverageAdminApi({ request: request("wrong-token"), env });
+  assert.equal(invalid.status, 401);
+  assert.deepEqual(await invalid.json(), { ok: false, error: "ADMIN_AUTH_REQUIRED" });
+
+  const first = await coverageAdminApi({ request: request("test-admin-token"), env });
+  const second = await coverageAdminApi({ request: request("test-admin-token"), env });
+  assert.equal((await first.json() as { raw: { status: string } }).raw.status, "queued");
+  assert.equal((await second.json() as { raw: { status: string } }).raw.status, "already_queued");
+  const lowercaseScheme = await coverageAdminApi({ request: request("test-admin-token", "bearer"), env });
+  assert.equal(lowercaseScheme.status, 200);
+  assert.equal(await getWatcherCoverageStatus(bucket, "IBM"), "queued");
+});
+
+test("admin coverage tool fails closed when its server-side credential is not configured", async () => {
+  const response = await coverageAdminApi({
+    request: new Request("https://example.test/api/stocks-intelligence-watcher/admin", {
+      method: "POST",
+      headers: { Authorization: "Bearer any-value" },
+      body: JSON.stringify({ tool: "request_valuation_coverage", params: { symbol: "IBM" } }),
+    }),
+    env: { VALUATION_DATA: writableFakeR2({}) },
+  });
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { ok: false, error: "ADMIN_AUTH_UNCONFIGURED" });
+});
+
+test("coverage queue retries an R2 conditional-write conflict without dropping another ticker", async () => {
+  let registry: unknown = null;
+  let putCalls = 0;
+  const bucket: R2BucketLike = {
+    get: async (key) => {
+      if (key !== "coverage/universe.json" || registry === null) return null;
+      return { httpEtag: `etag-${putCalls}`, json: async () => registry };
+    },
+    put: async (_key, value, options) => {
+      putCalls += 1;
+      assert.ok(options?.onlyIf);
+      if (putCalls === 1) {
+        registry = { schemaVersion: "1.0", updatedAt: freshPublishedAt(), symbols: [{ symbol: "MSFT", requestedAt: freshPublishedAt(), state: "queued" }] };
+        return null;
+      }
+      registry = JSON.parse(value);
+      return {};
+    },
+  };
+  const result = await requestWatcherCoverage(bucket, "IBM");
+  assert.equal(result.status, "queued");
+  assert.equal(putCalls, 2);
+  assert.deepEqual((registry as { symbols: { symbol: string }[] }).symbols.map((entry) => entry.symbol), ["MSFT", "IBM"]);
+});
 
 test("demo snapshot is deterministic enough for the watcher shell", () => {
   const snapshot = buildDemoStocksWatcherSnapshot("NVDA", "fallback");
@@ -830,4 +940,45 @@ test("POST endpoint keeps the native tool-call contract", async () => {
   assert.equal(payload.raw.symbols.includes("SPX"), true);
   assert.equal(Array.isArray((payload.raw as { stocks?: unknown }).stocks), true);
   assert.match(payload.text, /NVDA/);
+});
+
+test("published valuation and financial tools expose typed R2 data without Yahoo fallback", async () => {
+  const r2 = fakePublishedR2({
+    "valuation/TSM/pe/3Y.json": valuationFixture(),
+    "financials/TSM.json": financialsFixture(),
+  });
+  const valuationResponse = await stocksWatcherApi({ request: new Request("https://example.com/api/stocks-intelligence-watcher", { method: "POST", body: JSON.stringify({ tool: "get_valuation_bands", params: { symbol: "TSM", metric: "pe", window: "3Y" } }) }), env: { VALUATION_DATA: r2 } });
+  const valuationPayload = await valuationResponse.json() as { ok: boolean; raw: { latest: { bands: { mean: number } } } };
+  assert.equal(valuationResponse.status, 200);
+  assert.equal(valuationPayload.ok, true);
+  assert.equal(valuationPayload.raw.latest.bands.mean, 180);
+
+  const financialResponse = await stocksWatcherApi({ request: new Request("https://example.com/api/stocks-intelligence-watcher", { method: "POST", body: JSON.stringify({ tool: "get_financial_statements", params: { symbol: "TSM", periods: 1 } }) }), env: { VALUATION_DATA: r2 } });
+  const financialPayload = await financialResponse.json() as { ok: boolean; raw: { quarters: { freeCashFlow: number }[] } };
+  assert.equal(financialResponse.status, 200);
+  assert.equal(financialPayload.ok, true);
+  assert.equal(financialPayload.raw.quarters[0]?.freeCashFlow, 15);
+});
+
+test("published valuation rejects bad input, missing objects, and stale data", async () => {
+  await assert.rejects(() => loadWatcherValuationBands(fakePublishedR2({}), { symbol: "TSM", metric: "pe", window: "3Y" }), /NOT_PUBLISHED/);
+  await assert.rejects(() => loadWatcherValuationBands(fakePublishedR2({ "valuation/TSM/pe/3Y.json": valuationFixture("2020-01-01T00:00:00.000Z") }), { symbol: "TSM", metric: "pe", window: "3Y" }), /STALE/);
+  await assert.rejects(() => loadWatcherValuationBands(fakePublishedR2({}), { symbol: "TSM", metric: "bad", window: "3Y" }), /metric must be/);
+  await assert.rejects(() => loadWatcherValuationBands(fakePublishedR2({ "valuation/TSM/pe/3Y.json": { ...valuationFixture(), schemaVersion: "9.9" } }), { symbol: "TSM", metric: "pe", window: "3Y" }), /contract mismatch/);
+});
+
+test("snapshot keeps published valuation when only financial data is unavailable", async () => {
+  const snapshot = await attachPublishedWatcherData(buildDemoStocksWatcherSnapshot("TSM", "fallback"), fakePublishedR2({ "valuation/TSM/pe/3Y.json": valuationFixture() }));
+  assert.equal(snapshot.valuation?.latest.bands.mean, 180);
+  assert.equal(snapshot.financials, null);
+  assert.ok(snapshot.warnings.some((warning) => warning.includes("financials/TSM.json")));
+});
+
+test("snapshot makes unpublished valuation data observable without a Yahoo substitute", async () => {
+  const snapshot = await attachPublishedWatcherData(buildDemoStocksWatcherSnapshot("TSM", "fallback"), fakeR2({}));
+  assert.equal(snapshot.valuation, null);
+  assert.equal(snapshot.financials, null);
+  assert.ok(snapshot.warnings.some((warning) => warning.includes("VALUATION_DATA_NOT_PUBLISHED")));
+  assert.ok(snapshot.availableTools.some((tool) => tool.name === "get_valuation_bands"));
+  assert.ok(!snapshot.availableTools.some((tool) => tool.name === "request_valuation_coverage"));
 });

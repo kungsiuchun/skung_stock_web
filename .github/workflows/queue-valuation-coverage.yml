@@ -1,0 +1,31 @@
+name: Queue valuation coverage
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbol:
+        description: "US ticker symbol to add to the next ValuationCalculation batch"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  queue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate ticker and queue coverage
+        shell: pwsh
+        env:
+          STOCKS_WATCHER_ADMIN_TOKEN: ${{ secrets.STOCKS_WATCHER_ADMIN_TOKEN }}
+          SYMBOL: ${{ inputs.symbol }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $symbol = $env:SYMBOL.Trim().ToUpperInvariant()
+          if ($symbol -notmatch '^[A-Z][A-Z0-9.\-]{0,14}$') { throw 'Invalid ticker symbol.' }
+          if ([string]::IsNullOrWhiteSpace($env:STOCKS_WATCHER_ADMIN_TOKEN)) { throw 'STOCKS_WATCHER_ADMIN_TOKEN is not configured.' }
+          $body = @{ tool = 'request_valuation_coverage'; params = @{ symbol = $symbol } } | ConvertTo-Json -Compress
+          $response = Invoke-RestMethod -Method Post -Uri 'https://sius-ai-workshop.pages.dev/api/stocks-intelligence-watcher/admin' -Headers @{ Authorization = "Bearer $($env:STOCKS_WATCHER_ADMIN_TOKEN)" } -ContentType 'application/json' -Body $body
+          if (-not $response.ok) { throw "Coverage request failed: $($response.error)" }
+          Write-Host "Coverage status for $symbol: $($response.raw.status)"

@@ -200,6 +200,13 @@ ADANOS_API_KEY=...
 - Without the binding (for example, local development before initializing local D1), API responses explicitly report `cache.status="bypassed"`; never claim a shared-cache hit.
 - Expired entries may be shown only as visibly stale data with the refresh failure reason. Do not recreate a demo fallback for market-source failures.
 
+## Stock Watcher Valuation Coverage
+
+- `VALUATION_DATA` is a private R2 binding. Published releases live below `releases/<releaseId>/`; `current.json` is the only active-release pointer.
+- Missing valuation/financial data must remain explicit (`NOT_PUBLISHED`, `queued`, or `unavailable`); never substitute Yahoo data for this published calculation layer.
+- New ticker coverage is written only through `/api/stocks-intelligence-watcher/admin`. It requires `Authorization: Bearer <STOCKS_WATCHER_ADMIN_TOKEN>`; configure that value as a Pages secret and never embed it in the public UI. The public snapshot/tool route is read-only.
+- The daily ValuationCalculation workflow reads `coverage/universe.json`, unions it with its default universe, and publishes only after the entire resolved universe validates. R2 release retention and the export-size cap bound storage growth.
+
 ---
 
 ## AlphaEar Skills Available

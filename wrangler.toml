@@ -15,3 +15,7 @@ database_id = "00a4729d-1792-42d1-bd86-ed58dfe1f95f"
 binding = "MARKET_CACHE_DB"
 database_name = "market-cache-db"
 database_id = "c629da02-21ce-4b1c-87f2-59ba54be922e"
+
+[[r2_buckets]]
+binding = "VALUATION_DATA"
+bucket_name = "valuation-watcher-data"

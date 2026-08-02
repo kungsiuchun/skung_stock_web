@@ -3137,6 +3137,14 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     const recentNews = snapshot?.recentNews?.slice(0, 3) || [];
     const earnings = snapshot?.earnings || null;
     const earningsMove = earnings?.priceMove;
+    const valuation = snapshot?.valuation || null;
+    const valuationBands = valuation?.latest.bands;
+    const valuationPrice = valuation?.latest.price ?? null;
+    const valuationGap = valuationBands?.mean && valuationPrice !== null
+      ? ((valuationPrice - valuationBands.mean) / valuationBands.mean) * 100
+      : null;
+    const financials = snapshot?.financials || null;
+    const valuationCoverage = snapshot?.valuationCoverage || "unavailable";
 
     return (
       <section className="siw-overview-grid" data-primary-tab-panel="Overview">
@@ -3275,6 +3283,58 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 <em>{earningsMove ? `${earningsMove.eventTradingDate} close-to-close` : "Needs checking from Yahoo chart history"}</em>
               </div>
             </div>
+          </div>
+
+          <div className="siw-panel siw-valuation-panel" data-overview-tertiary-panel="valuation">
+            <div className="siw-overview-head">
+              <h2>Valuation</h2>
+              <span>{valuation ? `${valuation?.metric.toUpperCase()} ${valuation?.window} · ${valuation?.dataAsOf}` : "Needs checking"}</span>
+            </div>
+            {valuation && valuationBands ? (
+              <div className="siw-earnings-summary">
+                <div>
+                  <span>Current vs mean</span>
+                  <strong className={(valuationGap || 0) <= 0 ? "siw-up" : "siw-down"}>{formatSignedPercent(valuationGap)}</strong>
+                  <em>Price {currency(valuation.latest.price || 0)} · Mean {currency(valuationBands.mean || 0)}</em>
+                </div>
+                <div>
+                  <span>Upside band</span>
+                  <strong>{currency(valuationBands.up1 || 0)}</strong>
+                  <em>+2σ {currency(valuationBands.up2 || 0)}</em>
+                </div>
+                <div>
+                  <span>Downside band</span>
+                  <strong>{currency(valuationBands.down1 || 0)}</strong>
+                  <em>-2σ {currency(valuationBands.down2 || 0)} · {valuation.source}</em>
+                </div>
+              </div>
+            ) : <div className="siw-data-empty"><strong>{valuationCoverage === "queued" ? "Coverage queued" : "Needs checking"}</strong><span>{valuationCoverage === "queued" ? "This ticker is queued for the next daily ValuationCalculation batch. Yahoo data is not used as a substitute." : "Published ValuationCalculation data is unavailable, invalid, or stale. Yahoo data is not used as a substitute."}</span></div>}
+          </div>
+
+          <div className="siw-panel siw-financials-panel" data-overview-tertiary-panel="financials">
+            <div className="siw-overview-head">
+              <h2>Financials</h2>
+              <span>{financials?.filingDate || financials?.date || "Needs checking"}</span>
+            </div>
+            {financials ? (
+              <div className="siw-earnings-summary">
+                <div>
+                  <span>Revenue</span>
+                  <strong>{formatNumber(financials.revenue || 0)}</strong>
+                  <em>QoQ {formatSignedPercent(financials.revenue_qoq)} · YoY {formatSignedPercent(financials.revenue_yoy)}</em>
+                </div>
+                <div>
+                  <span>EPS / Net income</span>
+                  <strong>{formatOptionalNumber(financials.eps)}</strong>
+                  <em>Net income {formatNumber(financials.netIncome || 0)} · {financials.currency || "N/A"}</em>
+                </div>
+                <div>
+                  <span>Free cash flow</span>
+                  <strong>{formatNumber(financials.freeCashFlow || 0)}</strong>
+                  <em>OCF {formatNumber(financials.operatingCashFlow || 0)} · {financials.fiscalYear || ""} {financials.period || ""}</em>
+                </div>
+              </div>
+            ) : <div className="siw-data-empty"><strong>{valuationCoverage === "queued" ? "Coverage queued" : "Needs checking"}</strong><span>{valuationCoverage === "queued" ? "Financial statements will be published with the next daily valuation batch." : "Published quarterly financial statements are unavailable, invalid, or stale."}</span></div>}
           </div>
 
           <div className="siw-panel siw-key-metrics-panel" data-overview-tertiary-panel="metrics">

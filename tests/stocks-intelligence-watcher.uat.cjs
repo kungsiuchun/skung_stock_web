@@ -175,6 +175,22 @@ const buildSnapshot = (symbol, overrides = {}) => {
         basis: "close_to_close",
       },
     },
+    valuation: {
+      schemaVersion: "1.0",
+      source: "ValuationCalculation hybrid valuation model",
+      symbol,
+      generatedAt: "2026-07-09T21:33:00.000Z",
+      dataAsOf: "2026-07-09",
+      metric: "pe",
+      window: "3Y",
+      latest: { date: "2026-07-09", price, bands: { mean: price - 15, up1: price + 20, up2: price + 40, down1: price - 35, down2: price - 55 } },
+      points: [],
+    },
+    financials: {
+      date: "2026-06-30", filingDate: "2026-07-16", fiscalYear: "2026", period: "Q2", currency: "USD",
+      revenue: 100_000_000, netIncome: 20_000_000, eps: 2, operatingCashFlow: 30_000_000, freeCashFlow: 15_000_000,
+      revenue_qoq: 1, revenue_yoy: 10, netIncome_qoq: 2, netIncome_yoy: 11, eps_qoq: 2, eps_yoy: 11, operatingCashFlow_qoq: 3, operatingCashFlow_yoy: 12,
+    },
     marketContext: {
       breadth: "Watcher breadth mock response.",
       relativeStrength: "Relative strength mock response.",
@@ -188,6 +204,8 @@ const buildSnapshot = (symbol, overrides = {}) => {
       { name: "get_options_greeks", description: "Local Greek approximation", inputKeys: ["ticker", "expiry", "strike"] },
       { name: "get_options_iv_intraday", description: "IV snapshot", inputKeys: ["ticker", "expiry"] },
       { name: "get_options_mispricing", description: "Mispricing scan", inputKeys: ["ticker", "expiry"] },
+      { name: "get_valuation_bands", description: "Published valuation bands", inputKeys: ["symbol", "metric", "window"] },
+      { name: "get_financial_statements", description: "Published financial statements", inputKeys: ["symbol", "periods"] },
     ],
     toolRuns: [
       { name: "get_quotes", status: "ok", detail: "mocked" },
@@ -551,15 +569,16 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
         return { left: rect.left, top: rect.top, width: rect.width };
       }),
     );
-    assert.equal(tertiaryBoxes.length, 3, "overview must render news, earnings, and key metrics panels");
+    assert.equal(tertiaryBoxes.length, 5, "overview must render news, earnings, valuation, financials, and key metrics panels");
     assert.ok(
-      tertiaryBoxes.every((box) => Math.abs(box.top - tertiaryBoxes[0].top) <= 2),
-      `overview tertiary panels should share one row; got ${JSON.stringify(tertiaryBoxes)}`,
+      tertiaryBoxes.slice(0, 3).every((box) => Math.abs(box.top - tertiaryBoxes[0].top) <= 2),
+      `first overview tertiary row should remain aligned; got ${JSON.stringify(tertiaryBoxes)}`,
     );
     assert.ok(
       tertiaryBoxes[0].left < tertiaryBoxes[1].left && tertiaryBoxes[1].left < tertiaryBoxes[2].left,
       "overview tertiary panels should be side by side left-to-right",
     );
+    assert.ok(tertiaryBoxes[3].top > tertiaryBoxes[0].top && tertiaryBoxes[4].top > tertiaryBoxes[0].top, "valuation and financials panels should form the second tertiary row");
     const overviewText = await visibleText(page);
     assert.match(overviewText, /High\s+205\.15/i, "hero high must come from quote OHLC, not copied price fallback");
     assert.match(overviewText, /Low\s+195\.11/i, "hero low must come from quote OHLC, not copied price fallback");
@@ -839,6 +858,16 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await clickText(page, "Overview");
     assert.equal(await page.$$eval(".siw-news-list a", (nodes) => nodes.length), 3);
     assert.match(await visibleText(page), /Yahoo quoteSummary calendarEvents \+ earningsHistory|Next earnings/i);
+
+    for (const symbol of ["TSM", "NVDA", "AMZN"]) {
+      await page.setViewport({ width: 1600, height: 1000, deviceScaleFactor: 1 });
+      await page.goto(`${baseUrl}/#/work/stocks-intelligence-watcher?symbol=${symbol}`, { waitUntil: "domcontentloaded" });
+      await page.waitForSelector("[data-watcher-replica]");
+      await wait(350);
+      const cardText = await page.$$eval("[data-overview-tertiary-panel='valuation'], [data-overview-tertiary-panel='financials']", (nodes) => nodes.map((node) => node.textContent || "").join("\n"));
+      assert.match(cardText, /Valuation|Current vs mean/i, `${symbol} must render its valuation card`);
+      assert.match(cardText, /Financials|Revenue/i, `${symbol} must render its financials card`);
+    }
 
     await page.setViewport({ width: 1180, height: 820, deviceScaleFactor: 1 });
     await wait(300);
