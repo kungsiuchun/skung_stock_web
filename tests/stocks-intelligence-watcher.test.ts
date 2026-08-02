@@ -44,6 +44,10 @@ import {
 import { attachPublishedWatcherData, onRequest as stocksWatcherApi } from "../functions/api/stocks-intelligence-watcher";
 import { onRequestPost as coverageAdminApi } from "../functions/api/stocks-intelligence-watcher/admin";
 import { getWatcherCoverageStatus, loadWatcherValuationBands, requestWatcherCoverage, type R2BucketLike } from "../src/lib/stocks-watcher-valuation-data";
+import { createWatcherSession, verifyWatcherSession } from "../src/lib/stocks-watcher-auth";
+import { onRequestGet as authLoginApi } from "../functions/api/stocks-intelligence-watcher/auth/login";
+import { onRequestGet as authCallbackApi } from "../functions/api/stocks-intelligence-watcher/auth/callback";
+import { onRequestGet as authSessionApi } from "../functions/api/stocks-intelligence-watcher/auth/session";
 
 class FakeStocksNativeClient implements StocksWatcherToolClient {
   async listTools() {
@@ -266,6 +270,22 @@ test("admin coverage tool rejects unauthenticated calls and queues an authentica
   assert.equal(await getWatcherCoverageStatus(bucket, "IBM"), "queued");
 });
 
+test("admin coverage tool rejects malformed ticker text before touching R2", async () => {
+  const env = { VALUATION_DATA: writableFakeR2({}), STOCKS_WATCHER_ADMIN_TOKEN: "test-admin-token" };
+  for (const symbol of ["not valid", "IBM<script>"]) {
+    const response = await coverageAdminApi({
+      request: new Request("https://example.test/api/stocks-intelligence-watcher/admin", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-admin-token" },
+        body: JSON.stringify({ tool: "request_valuation_coverage", params: { symbol } }),
+      }),
+      env,
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { ok: false, error: "ADMIN_TOOL_INVALID: symbol is invalid." });
+  }
+});
+
 test("admin coverage tool fails closed when its server-side credential is not configured", async () => {
   const response = await coverageAdminApi({
     request: new Request("https://example.test/api/stocks-intelligence-watcher/admin", {
@@ -278,6 +298,32 @@ test("admin coverage tool fails closed when its server-side credential is not co
 
   assert.equal(response.status, 503);
   assert.deepEqual(await response.json(), { ok: false, error: "ADMIN_AUTH_UNCONFIGURED" });
+
+  const unavailable = await coverageAdminApi({
+    request: new Request("https://example.test/api/stocks-intelligence-watcher/admin", {
+      method: "POST",
+      headers: { Authorization: "Bearer configured-token" },
+      body: JSON.stringify({ tool: "request_valuation_coverage", params: { symbol: "IBM" } }),
+    }),
+    env: { STOCKS_WATCHER_ADMIN_TOKEN: "configured-token" },
+  });
+  assert.equal(unavailable.status, 503);
+  assert.deepEqual(await unavailable.json(), { ok: false, error: "VALUATION_DATA_UNAVAILABLE: R2 write binding is not configured." });
+});
+
+test("owner session is signed, expires, and authorizes the admin coverage route", async () => {
+  const now = Date.now();
+  const session = await createWatcherSession("Kungsiuchun0@gmail.com", "test-session-secret", now);
+  assert.deepEqual(await verifyWatcherSession(session, "test-session-secret", now + 1_000), { email: "kungsiuchun0@gmail.com", issuedAt: now, expiresAt: now + 8 * 60 * 60 * 1000 });
+  assert.equal(await verifyWatcherSession(`${session}tampered`, "test-session-secret", now), null);
+  assert.equal(await verifyWatcherSession(session, "test-session-secret", now + 8 * 60 * 60 * 1000), null);
+
+  const objects: Record<string, unknown> = { "current.json": { schemaVersion: "1.0", releaseId: "release-1", generatedAt: freshPublishedAt() }, "releases/release-1/manifest.json": { schemaVersion: "1.0", symbols: [{ symbol: "TSM" }] } };
+  const response = await coverageAdminApi({
+    request: new Request("https://example.test/api/stocks-intelligence-watcher/admin", { method: "POST", headers: { Cookie: `stocks_watcher_session=${session}` }, body: JSON.stringify({ tool: "request_valuation_coverage", params: { symbol: "ibm" } }) }),
+    env: { VALUATION_DATA: writableFakeR2(objects), STOCKS_WATCHER_SESSION_SECRET: "test-session-secret", STOCKS_WATCHER_ALLOWED_EMAIL: "Kungsiuchun0@gmail.com" },
+  });
+  assert.equal(response.status, 200);
 });
 
 test("coverage queue retries an R2 conditional-write conflict without dropping another ticker", async () => {
@@ -963,6 +1009,7 @@ test("published valuation and financial tools expose typed R2 data without Yahoo
 test("published valuation rejects bad input, missing objects, and stale data", async () => {
   await assert.rejects(() => loadWatcherValuationBands(fakePublishedR2({}), { symbol: "TSM", metric: "pe", window: "3Y" }), /NOT_PUBLISHED/);
   await assert.rejects(() => loadWatcherValuationBands(fakePublishedR2({ "valuation/TSM/pe/3Y.json": valuationFixture("2020-01-01T00:00:00.000Z") }), { symbol: "TSM", metric: "pe", window: "3Y" }), /STALE/);
+  await assert.rejects(() => loadWatcherValuationBands(fakePublishedR2({ "valuation/TSM/pe/3Y.json": valuationFixture(new Date(Date.now() + 60 * 60 * 1000).toISOString()) }), { symbol: "TSM", metric: "pe", window: "3Y" }), /in the future/);
   await assert.rejects(() => loadWatcherValuationBands(fakePublishedR2({}), { symbol: "TSM", metric: "bad", window: "3Y" }), /metric must be/);
   await assert.rejects(() => loadWatcherValuationBands(fakePublishedR2({ "valuation/TSM/pe/3Y.json": { ...valuationFixture(), schemaVersion: "9.9" } }), { symbol: "TSM", metric: "pe", window: "3Y" }), /contract mismatch/);
 });
@@ -981,4 +1028,69 @@ test("snapshot makes unpublished valuation data observable without a Yahoo subst
   assert.ok(snapshot.warnings.some((warning) => warning.includes("VALUATION_DATA_NOT_PUBLISHED")));
   assert.ok(snapshot.availableTools.some((tool) => tool.name === "get_valuation_bands"));
   assert.ok(!snapshot.availableTools.some((tool) => tool.name === "request_valuation_coverage"));
+});
+
+test("owner OAuth login creates a short-lived state cookie and callback rejects CSRF or provider denial", async () => {
+  const loginResponse = await authLoginApi({
+    request: new Request("https://watcher.example/api/stocks-intelligence-watcher/auth/login"),
+    env: { GITHUB_CLIENT_ID: "client-id", STOCKS_WATCHER_AUTH_ORIGIN: "https://watcher.example" },
+  });
+  assert.equal(loginResponse.status, 302);
+  assert.match(loginResponse.headers.get("location") || "", /github\.com\/login\/oauth\/authorize/);
+  assert.match(loginResponse.headers.get("set-cookie") || "", /stocks_watcher_oauth_state=.*Max-Age=600/);
+
+  const invalidState = await authCallbackApi({
+    request: new Request("https://watcher.example/api/stocks-intelligence-watcher/auth/callback?state=bad&code=code", { headers: { Cookie: "stocks_watcher_oauth_state=other" } }),
+    env: {},
+  });
+  assert.equal(invalidState.status, 400);
+
+  const denied = await authCallbackApi({
+    request: new Request("https://watcher.example/api/stocks-intelligence-watcher/auth/callback?error=access_denied"),
+    env: {},
+  });
+  assert.equal(denied.status, 400);
+  assert.deepEqual(await denied.json(), { ok: false, error: "AUTH_PROVIDER_DENIED" });
+});
+
+test("owner OAuth callback exchanges GitHub identity and clears the one-time state cookie", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/login/oauth/access_token")) return new Response(JSON.stringify({ access_token: "github-token" }), { status: 200 });
+    if (url.endsWith("/user")) return new Response(JSON.stringify({ email: null }), { status: 200 });
+    if (url.endsWith("/user/emails")) return new Response(JSON.stringify([{ email: "owner@example.com", verified: true }]), { status: 200 });
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  try {
+    const response = await authCallbackApi({
+      request: new Request("https://watcher.example/api/stocks-intelligence-watcher/auth/callback?state=state-123&code=oauth-code", { headers: { Cookie: "stocks_watcher_oauth_state=state-123" } }),
+      env: {
+        GITHUB_CLIENT_ID: "client-id",
+        GITHUB_CLIENT_SECRET: "client-secret",
+        STOCKS_WATCHER_SESSION_SECRET: "session-secret",
+        STOCKS_WATCHER_ALLOWED_EMAIL: "owner@example.com",
+        STOCKS_WATCHER_AUTH_ORIGIN: "https://watcher.example",
+      },
+    });
+    assert.equal(response.status, 302);
+    assert.match(response.headers.get("location") || "", /#\/work\/stocks-intelligence-watcher\?auth=success/);
+    const cookies = response.headers.get("set-cookie") || "";
+    assert.match(cookies, /stocks_watcher_session=.*Max-Age=28800/);
+    assert.match(cookies, /stocks_watcher_oauth_state=; Max-Age=0/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("owner session endpoint exposes only the normalized allowed owner identity", async () => {
+  const session = await createWatcherSession("Owner@Example.com", "session-secret");
+  const response = await authSessionApi({
+    request: new Request("https://watcher.example/api/stocks-intelligence-watcher/auth/session", { headers: { Cookie: `stocks_watcher_session=${session}` } }),
+    env: { STOCKS_WATCHER_SESSION_SECRET: "session-secret", STOCKS_WATCHER_ALLOWED_EMAIL: "owner@example.com" },
+  });
+  const payload = await response.json() as { authenticated: boolean; user?: { email: string } };
+  assert.equal(response.status, 200);
+  assert.equal(payload.authenticated, true);
+  assert.equal(payload.user?.email, "owner@example.com");
 });

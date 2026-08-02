@@ -4,9 +4,20 @@
 
 ## Production setup
 
-1. Generate a high-entropy value in a password manager.
-2. Set it as the Cloudflare Pages secret `STOCKS_WATCHER_ADMIN_TOKEN` for the `sius-ai-workshop` project.
-3. Keep it in the trusted caller's server-side secret store. Do not put it in React, browser storage, a URL, or a public tool drawer.
+The owner UI uses GitHub OAuth and a signed, HttpOnly session cookie. Configure these Cloudflare Pages secrets:
+
+- `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` for the GitHub OAuth app.
+- `STOCKS_WATCHER_ALLOWED_EMAIL` with the single owner email (or a comma-separated allow-list).
+- `STOCKS_WATCHER_SESSION_SECRET` with a high-entropy value from a password manager.
+- Optional `STOCKS_WATCHER_AUTH_ORIGIN` to pin the callback origin; otherwise the request origin is used.
+
+Set the GitHub OAuth callback URL to `https://<watcher-origin>/api/stocks-intelligence-watcher/auth/callback`. The browser only receives the signed session cookie; it never receives a GitHub client secret or admin token.
+
+`STOCKS_WATCHER_ADMIN_TOKEN` remains an optional server-to-server credential for trusted automation. Keep it in the caller's server-side secret store, never in React, browser storage, a URL, or a public tool drawer.
+
+## Access boundary decision
+
+The current canonical host is the Cloudflare Pages `pages.dev` hostname. Cloudflare Access self-hosted applications cannot be attached to that Pages hostname in this setup, so the admin route uses GitHub OAuth plus the signed owner session as the equivalent owner-only gate. This is an explicit deployment decision, not an unprotected fallback. If a custom hostname is introduced later, put Cloudflare Access in front of the site and retain the session check as defense in depth.
 
 The route fails closed: an unset secret returns `503 ADMIN_AUTH_UNCONFIGURED`; missing or invalid credentials return `401 ADMIN_AUTH_REQUIRED`.
 
@@ -24,4 +35,6 @@ The response is `queued`, `already_queued`, or `already_published`. A queued tic
 
 ## Owner workflow
 
-The repository workflow `.github/workflows/queue-valuation-coverage.yml` accepts a ticker through **Actions -> Queue valuation coverage -> Run workflow**. Configure the same value as the repository Actions secret `STOCKS_WATCHER_ADMIN_TOKEN`; GitHub then calls the Pages admin route without exposing it to the browser.
+After signing in with the configured GitHub owner account, the Stock Watcher overview shows a **Coverage request** panel. Submitting a ticker calls the admin route with the HttpOnly session cookie and returns `queued`, `already_queued`, or `already_published`. A queued ticker is calculated only in the next daily ValuationCalculation batch.
+
+The repository workflow `.github/workflows/queue-valuation-coverage.yml` remains an automation fallback. It accepts a ticker through **Actions -> Queue valuation coverage -> Run workflow** and uses the server-side `STOCKS_WATCHER_ADMIN_TOKEN` secret.

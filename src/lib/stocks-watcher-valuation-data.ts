@@ -84,6 +84,7 @@ export const parseWatcherValuationWindow = (value: unknown): WatcherValuationWin
 const assertFresh = (generatedAt: string) => {
   const timestamp = Date.parse(generatedAt);
   if (!Number.isFinite(timestamp)) fail("generatedAt is invalid");
+  if (timestamp > Date.now() + 15 * 60 * 1000) throw new Error("VALUATION_DATA_INVALID: generatedAt is in the future.");
   if (Date.now() - timestamp > 72 * 60 * 60 * 1000) throw new Error("VALUATION_DATA_STALE: published data is older than 72 hours.");
 };
 

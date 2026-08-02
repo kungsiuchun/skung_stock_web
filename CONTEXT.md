@@ -1,5 +1,11 @@
 # Context Glossary
 
+## Stock Watcher valuation coverage
+
+Stock Watcher reads valuation bands and quarterly financials from private R2 through same-domain Pages Functions. Python ValuationCalculation remains the only calculation source of truth.
+
+Coverage writes are owner-only: GitHub OAuth establishes a signed HttpOnly session, and the overview's Coverage request panel submits `request_valuation_coverage`. The canonical `pages.dev` host cannot take a Cloudflare Access self-hosted application in this setup, so OAuth is the explicit replacement gate; a future custom host may add Access defense in depth. The existing bearer token is retained only for trusted server-to-server automation. Queued tickers are picked up by the next daily batch; public visitors never trigger calculation or Yahoo fallback data.
+
 ## About Page
 
 The About Page presents SIU as the subject. The Nikon D3500 is supporting evidence for SIU's visual practice, not the main product being showcased.

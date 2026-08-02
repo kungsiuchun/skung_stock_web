@@ -965,6 +965,7 @@
 .siw-earnings-panel,
 .siw-valuation-panel,
 .siw-financials-panel,
+.siw-admin-coverage-panel,
 .siw-key-metrics-panel {
   min-height: 180px;
 }
@@ -1179,6 +1180,7 @@
 .siw-earnings-panel,
 .siw-valuation-panel,
 .siw-financials-panel,
+.siw-admin-coverage-panel,
 .siw-key-metrics-panel {
   min-height: 210px;
 }
@@ -1200,7 +1202,8 @@
 
 .siw-news-list a,
 .siw-data-empty,
-.siw-earnings-summary > div {
+.siw-earnings-summary > div,
+.siw-admin-coverage-form {
   display: flex;
   min-height: 54px;
   flex-direction: column;
@@ -1211,6 +1214,57 @@
   background: rgba(4, 12, 20, 0.72);
   padding: 10px 12px;
   text-decoration: none;
+}
+
+.siw-admin-coverage-form {
+  align-items: stretch;
+  margin: 16px;
+  gap: 10px;
+}
+
+.siw-admin-coverage-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--siw-muted);
+  font-size: 11px;
+}
+
+.siw-admin-coverage-form input {
+  width: 100%;
+  border: 1px solid var(--siw-line);
+  border-radius: 5px;
+  background: rgba(4, 12, 20, 0.86);
+  color: var(--siw-text);
+  padding: 9px 10px;
+  font: inherit;
+  letter-spacing: 0.08em;
+}
+
+.siw-admin-coverage-form button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  border: 1px solid rgba(17, 135, 255, 0.72);
+  border-radius: 5px;
+  background: rgba(17, 135, 255, 0.14);
+  color: var(--siw-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.siw-admin-coverage-form button:disabled {
+  cursor: progress;
+  opacity: 0.65;
+}
+
+.siw-admin-coverage-status {
+  color: var(--siw-muted);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .siw-news-list a:hover {

@@ -569,7 +569,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
         return { left: rect.left, top: rect.top, width: rect.width };
       }),
     );
-    assert.equal(tertiaryBoxes.length, 5, "overview must render news, earnings, valuation, financials, and key metrics panels");
+    assert.equal(tertiaryBoxes.length, 6, "overview must render news, earnings, valuation, financials, owner coverage, and key metrics panels");
     assert.ok(
       tertiaryBoxes.slice(0, 3).every((box) => Math.abs(box.top - tertiaryBoxes[0].top) <= 2),
       `first overview tertiary row should remain aligned; got ${JSON.stringify(tertiaryBoxes)}`,
@@ -579,6 +579,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       "overview tertiary panels should be side by side left-to-right",
     );
     assert.ok(tertiaryBoxes[3].top > tertiaryBoxes[0].top && tertiaryBoxes[4].top > tertiaryBoxes[0].top, "valuation and financials panels should form the second tertiary row");
+    assert.ok(tertiaryBoxes[5].top >= tertiaryBoxes[4].top, "key metrics panel should remain below the valuation row when owner coverage is present");
     const overviewText = await visibleText(page);
     assert.match(overviewText, /High\s+205\.15/i, "hero high must come from quote OHLC, not copied price fallback");
     assert.match(overviewText, /Low\s+195\.11/i, "hero low must come from quote OHLC, not copied price fallback");
@@ -593,6 +594,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.match(overviewText, /Last earnings\s+2026-05-20/i);
     assert.match(overviewText, /EPS 1\.87 vs 1\.77/i);
     assert.match(overviewText, /Earnings-date move\s+\+1\.30%/i);
+    assert.match(overviewText, /Coverage request/i, "overview must expose the owner-only coverage request panel");
     const indexSparklineBoxes = await page.$$eval("[data-market-index-card]", (cards) =>
       cards.map((card) => {
         const cardRect = card.getBoundingClientRect();

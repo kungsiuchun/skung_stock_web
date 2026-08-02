@@ -134,6 +134,11 @@ interface NativeToolResult {
   raw: unknown;
 }
 
+interface WatcherOwnerSession {
+  email: string;
+  expiresAt: number;
+}
+
 interface ToolRunLogEntry {
   id: string;
   name: string;
@@ -1529,10 +1534,36 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [toolSearch, setToolSearch] = useState("");
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [now, setNow] = useState(Date.now());
+  const [ownerSession, setOwnerSession] = useState<WatcherOwnerSession | null>(null);
+  const [ownerAuthLoading, setOwnerAuthLoading] = useState(true);
+  const [coverageRequestSymbol, setCoverageRequestSymbol] = useState(selectedSymbol);
+  const [coverageRequestStatus, setCoverageRequestStatus] = useState<string | null>(null);
+  const [coverageRequestLoading, setCoverageRequestLoading] = useState(false);
 
   useEffect(() => {
     selectedSymbolRef.current = selectedSymbol;
   }, [selectedSymbol]);
+
+  useEffect(() => {
+    setCoverageRequestSymbol(selectedSymbol);
+    setCoverageRequestStatus(null);
+  }, [selectedSymbol]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/stocks-intelligence-watcher/auth/session", { credentials: "include" })
+      .then(async (response) => {
+        const payload = await response.json() as { authenticated?: boolean; user?: WatcherOwnerSession };
+        if (!cancelled) setOwnerSession(response.ok && payload.authenticated && payload.user ? payload.user : null);
+      })
+      .catch(() => {
+        if (!cancelled) setOwnerSession(null);
+      })
+      .finally(() => {
+        if (!cancelled) setOwnerAuthLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -1618,6 +1649,32 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       throw requestError;
     }
   }, []);
+
+  const requestCoverage = useCallback(async () => {
+    const symbol = normalizeSymbol(coverageRequestSymbol || selectedSymbol);
+    if (!/^[A-Z][A-Z0-9.\-]{0,9}$/.test(symbol)) {
+      setCoverageRequestStatus("Enter a valid ticker symbol.");
+      return;
+    }
+    setCoverageRequestLoading(true);
+    setCoverageRequestStatus(null);
+    try {
+      const response = await fetch("/api/stocks-intelligence-watcher/admin", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool: "request_valuation_coverage", params: { symbol } }),
+      });
+      const payload = await response.json() as { ok?: boolean; queued?: boolean; error?: string; symbol?: string };
+      if (!response.ok || payload.ok === false) throw new Error(payload.error || `Coverage request failed with HTTP ${response.status}`);
+      setCoverageRequestStatus(`${payload.symbol || symbol} queued for the next daily batch.`);
+      setCoverageRequestSymbol(symbol);
+    } catch (requestError) {
+      setCoverageRequestStatus(requestError instanceof Error ? requestError.message : String(requestError));
+    } finally {
+      setCoverageRequestLoading(false);
+    }
+  }, [coverageRequestSymbol, selectedSymbol]);
 
   const fetchSnapshotData = async (symbol: string, options: { signal?: AbortSignal } = {}) => {
     const nextSymbol = normalizeSymbol(symbol);
@@ -3335,6 +3392,39 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 </div>
               </div>
             ) : <div className="siw-data-empty"><strong>{valuationCoverage === "queued" ? "Coverage queued" : "Needs checking"}</strong><span>{valuationCoverage === "queued" ? "Financial statements will be published with the next daily valuation batch." : "Published quarterly financial statements are unavailable, invalid, or stale."}</span></div>}
+          </div>
+
+          <div className="siw-panel siw-admin-coverage-panel" data-overview-tertiary-panel="admin-coverage">
+            <div className="siw-overview-head">
+              <h2>Coverage request</h2>
+              <span>{ownerSession ? ownerSession.email : "Owner only"}</span>
+            </div>
+            {ownerAuthLoading ? (
+              <div className="siw-data-empty"><strong>Checking owner session</strong><span>Please wait…</span></div>
+            ) : ownerSession ? (
+              <div className="siw-admin-coverage-form">
+                <label>
+                  <span>Queue a ticker for ValuationCalculation</span>
+                  <input
+                    value={coverageRequestSymbol}
+                    onChange={(event) => setCoverageRequestSymbol(event.target.value.toUpperCase())}
+                    maxLength={10}
+                    pattern="[A-Z][A-Z0-9.\\-]{0,9}"
+                    aria-label="Ticker symbol to queue"
+                  />
+                </label>
+                <button type="button" onClick={() => void requestCoverage()} disabled={coverageRequestLoading}>
+                  {coverageRequestLoading ? <Loader2 size={14} className="animate-spin" /> : "Queue coverage"}
+                </button>
+                {coverageRequestStatus && <span className="siw-admin-coverage-status">{coverageRequestStatus}</span>}
+              </div>
+            ) : (
+              <div className="siw-data-empty">
+                <strong>Sign in to queue a ticker</strong>
+                <span>Only the configured GitHub owner can add permanent daily coverage.</span>
+                <a href="/api/stocks-intelligence-watcher/auth/login">Sign in with GitHub</a>
+              </div>
+            )}
           </div>
 
           <div className="siw-panel siw-key-metrics-panel" data-overview-tertiary-panel="metrics">
