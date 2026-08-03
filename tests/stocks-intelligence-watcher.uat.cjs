@@ -566,20 +566,21 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     const tertiaryBoxes = await page.$$eval("[data-overview-tertiary-panel]", (nodes) =>
       nodes.map((node) => {
         const rect = node.getBoundingClientRect();
-        return { left: rect.left, top: rect.top, width: rect.width };
+        return { panel: node.getAttribute("data-overview-tertiary-panel"), left: rect.left, top: rect.top, width: rect.width };
       }),
     );
     assert.equal(tertiaryBoxes.length, 6, "overview must render news, earnings, valuation, financials, owner coverage, and key metrics panels");
+    const tertiaryByPanel = Object.fromEntries(tertiaryBoxes.map((box) => [box.panel, box]));
     assert.ok(
-      tertiaryBoxes.slice(0, 3).every((box) => Math.abs(box.top - tertiaryBoxes[0].top) <= 2),
-      `first overview tertiary row should remain aligned; got ${JSON.stringify(tertiaryBoxes)}`,
+      ["news", "earnings", "metrics"].every((panel) => Math.abs(tertiaryByPanel[panel].top - tertiaryByPanel.news.top) <= 2),
+      `news, earnings, and key metrics must remain aligned in the first overview tertiary row; got ${JSON.stringify(tertiaryBoxes)}`,
     );
     assert.ok(
-      tertiaryBoxes[0].left < tertiaryBoxes[1].left && tertiaryBoxes[1].left < tertiaryBoxes[2].left,
-      "overview tertiary panels should be side by side left-to-right",
+      tertiaryByPanel.news.left < tertiaryByPanel.earnings.left && tertiaryByPanel.earnings.left < tertiaryByPanel.metrics.left,
+      "key metrics must swap into valuation's prior top-right position",
     );
-    assert.ok(tertiaryBoxes[3].top > tertiaryBoxes[0].top && tertiaryBoxes[4].top > tertiaryBoxes[0].top, "valuation and financials panels should form the second tertiary row");
-    assert.ok(tertiaryBoxes[5].top >= tertiaryBoxes[4].top, "key metrics panel should remain below the valuation row when owner coverage is present");
+    assert.ok(tertiaryByPanel.financials.top > tertiaryByPanel.news.top && tertiaryByPanel.valuation.top > tertiaryByPanel.news.top, "valuation must swap below with key metrics");
+    assert.ok(tertiaryByPanel.financials.left < tertiaryByPanel.valuation.left && tertiaryByPanel.valuation.left < tertiaryByPanel['admin-coverage'].left, "valuation must swap with coverage request in the second tertiary row");
     const overviewText = await visibleText(page);
     assert.match(overviewText, /High\s+205\.15/i, "hero high must come from quote OHLC, not copied price fallback");
     assert.match(overviewText, /Low\s+195\.11/i, "hero low must come from quote OHLC, not copied price fallback");
@@ -808,6 +809,26 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
 
     await clickText(page, "Options");
     await wait(900);
+    await page.setViewport({ width: 1248, height: 986, deviceScaleFactor: 1 });
+    await wait(300);
+    const watcherLayout = await page.evaluate(() => {
+      const rect = (selector) => {
+        const node = document.querySelector(selector);
+        const { top, bottom, height } = node.getBoundingClientRect();
+        return { top, bottom, height };
+      };
+      const actions = rect(".siw-sidebar-actions");
+      const sidebar = rect(".siw-sidebar");
+      const rail = rect(".siw-expiry-rail");
+      const list = rect(".siw-expiry-list");
+      const head = rect(".siw-expiry-head");
+      const viewAll = rect(".siw-view-all");
+      return { actions, sidebar, rail, list, head, viewAll };
+    });
+    assert.ok(watcherLayout.actions.bottom <= watcherLayout.sidebar.bottom + 1, `add-ticker and settings actions must stay fully inside the sidebar; got ${JSON.stringify(watcherLayout)}`);
+    assert.ok(watcherLayout.list.height >= watcherLayout.rail.height - watcherLayout.head.height - watcherLayout.viewAll.height - 28, `expiry list must use the available rail height; got ${JSON.stringify(watcherLayout)}`);
+    const aiSummaryText = await page.$eval("[data-ai-summary-panel]", (node) => node.textContent || "");
+    assert.doesNotMatch(aiSummaryText, /\|\s*[-:]+\s*\|/, "AI summary must not expose Markdown table structure");
     await clickText(page, "GEX", true);
     await wait(500);
     assert.equal(await page.$$eval("[data-watcher-replica] [data-chart-bar]", (items) => items.length > 5), true);

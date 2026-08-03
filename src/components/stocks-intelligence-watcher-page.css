@@ -38,6 +38,8 @@
 }
 
 .siw-sidebar {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   height: 100%;
   overflow: hidden;
@@ -379,8 +381,8 @@
 }
 
 .siw-watchlist {
-  height: calc(100vh - 312px);
-  min-height: 260px;
+  min-height: 0;
+  flex: 1 1 auto;
   overflow: auto;
   border-bottom: 1px solid var(--siw-line-soft);
 }
@@ -477,6 +479,7 @@
 }
 
 .siw-sidebar-actions {
+  flex: 0 0 auto;
   gap: 0;
   padding: 10px 18px;
 }
@@ -977,6 +980,14 @@
   gap: 12px;
 }
 
+/* Keep the compact, actionable GEX metrics above valuation; source-order remains stable for assistive technology. */
+.siw-news-panel { order: 1; }
+.siw-earnings-panel { order: 2; }
+.siw-key-metrics-panel { order: 3; }
+.siw-financials-panel { order: 4; }
+.siw-valuation-panel { order: 5; }
+.siw-admin-coverage-panel { order: 6; }
+
 .siw-overview-head {
   display: flex;
   align-items: center;
@@ -1322,6 +1333,7 @@
   grid-template-columns: 300px minmax(0, 1fr);
   gap: 12px;
   min-height: 640px;
+  align-items: stretch;
 }
 
 .siw-expiry-rail,
@@ -1330,6 +1342,12 @@
   border: 1px solid var(--siw-line);
   border-radius: 7px;
   background: rgba(8, 19, 31, 0.86);
+}
+
+.siw-expiry-rail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .siw-expiry-head,
@@ -1350,7 +1368,8 @@
 }
 
 .siw-expiry-list {
-  max-height: 540px;
+  min-height: 0;
+  flex: 1 1 auto;
   overflow: auto;
 }
 

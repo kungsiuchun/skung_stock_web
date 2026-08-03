@@ -8,6 +8,7 @@ import {
   getFreshStocksWatcherCacheEntry,
   getGammaFlipLevel,
   getStocksWatcherMarketSession,
+  formatStocksWatcherRelativeAge,
   getStocksWatcherRowQuotesFromRawResult,
   getStocksWatcherVisibleSymbols,
   getNearestSpotStrike,
@@ -430,6 +431,26 @@ test("AI summary is deterministic and does not depend on model output", () => {
   assert.ok(summary.headline.includes("TSLA"));
   assert.ok(summary.whatItTellsUs.length > 0);
   assert.ok(summary.howToAct.some((item) => item.includes("not a standalone buy or sell trigger")));
+});
+
+test("AI summary turns Markdown market-breadth tables into readable prose", () => {
+  const snapshot = buildDemoStocksWatcherSnapshot("NVDA", "fallback");
+  const payload = buildStocksWatcherAiSummaryPayload(snapshot, {
+    marketBreadth: "# Market breadth\n| Advancers | Decliners |\n| --- | --- |\n| 10 | 2 |",
+  });
+  const summary = buildStocksWatcherDeterministicSummary(payload);
+
+  assert.doesNotMatch(payload.marketBreadth, /\|/);
+  assert.match(summary.whyItMatters[2], /secondary confirmation/i);
+});
+
+test("watcher refresh age uses human-sized units", () => {
+  assert.equal(formatStocksWatcherRelativeAge(null), "--");
+  assert.equal(formatStocksWatcherRelativeAge(59), "59 sec ago");
+  assert.equal(formatStocksWatcherRelativeAge(60), "1 min ago");
+  assert.equal(formatStocksWatcherRelativeAge(3_599), "59 min ago");
+  assert.equal(formatStocksWatcherRelativeAge(3_600), "1 hour ago");
+  assert.equal(formatStocksWatcherRelativeAge(86_400), "1 day ago");
 });
 
 test("watchlist removal removes favorites, hides defaults, and chooses the next visible ticker", () => {

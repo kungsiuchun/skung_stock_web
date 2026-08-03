@@ -46,6 +46,19 @@ export const getStocksWatcherMarketSession = (marketState: string | null | undef
   }
 };
 
+/** Formats a known elapsed refresh age without implying that stale data is live. */
+export const formatStocksWatcherRelativeAge = (seconds: number | null): string => {
+  if (seconds === null || !Number.isFinite(seconds)) return "--";
+  const elapsed = Math.max(0, Math.floor(seconds));
+  if (elapsed < 60) return `${elapsed} sec ago`;
+  const minutes = Math.floor(elapsed / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+};
+
 export interface StocksWatcherNewsItem {
   title: string;
   publisher: string;

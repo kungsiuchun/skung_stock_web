@@ -52,6 +52,19 @@ const trimText = (value: unknown, fallback: string) => {
   return (text || fallback).slice(0, STOCKS_WATCHER_AI_SUMMARY_LIMITS.text);
 };
 
+const normalizeMarketBreadthText = (value: unknown) => {
+  const raw = String(value || "").trim();
+  if (!raw) return "Market breadth unavailable.";
+
+  // Tool output can be Markdown tables. The summary is a bullet list, so a raw table
+  // becomes unreadable there and must not be passed through as prose.
+  if (raw.split(/\r?\n/).some((line) => line.includes("|"))) {
+    return "Market breadth data is available from the selected snapshot; use it as secondary confirmation.";
+  }
+
+  return trimText(raw.replace(/^#{1,6}\s*/gm, ""), "Market breadth unavailable.");
+};
+
 export const buildStocksWatcherAiSummaryPayload = (
   snapshot: StocksWatcherSnapshot,
   options: {
@@ -96,7 +109,7 @@ export const buildStocksWatcherAiSummaryPayload = (
     callOpenInterestTotal,
     putOpenInterestTotal,
     topAbsGexStrikes,
-    marketBreadth: trimText(options.marketBreadth || snapshot.marketContext.breadth, "Market breadth unavailable."),
+    marketBreadth: normalizeMarketBreadthText(options.marketBreadth || snapshot.marketContext.breadth),
   };
 };
 

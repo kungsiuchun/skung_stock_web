@@ -35,6 +35,7 @@ import {
   getGammaFlipLevel,
   getNearestSpotStrike,
   getStocksWatcherMarketSession,
+  formatStocksWatcherRelativeAge,
   getStocksWatcherRowQuotesFromRawResult,
   getStocksWatcherVisibleSymbols,
   mergeStocksWatcherRowQuoteMap,
@@ -3822,7 +3823,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 valueFormatter={currency}
                 placement="bottom"
               />
-              <span>Updated {updatedSecondsAgo === null ? "--" : `${updatedSecondsAgo}s ago`}</span>
+              <span>Updated {formatStocksWatcherRelativeAge(updatedSecondsAgo)}</span>
             </div>
 
             <button
@@ -4262,7 +4263,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 {snapshot?.quote.companyName || "Stocks Intelligence watcher"} - {formatQuoteAsOf(snapshot?.quote.asOf)}
               </p>
               <p className="mt-1 text-xs text-slate-500">
-                {updatedSecondsAgo === null ? "updated --" : `updated ${updatedSecondsAgo}s ago`}
+                {`updated ${formatStocksWatcherRelativeAge(updatedSecondsAgo)}`}
               </p>
             </div>
 
