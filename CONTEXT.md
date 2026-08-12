@@ -121,3 +121,17 @@ Stocks Intelligence Watcher uses a repo-native Yahoo backend; the browser receiv
 In Stocks Intelligence Watcher, an expiry row is a selectable expiration summary row. Clicking it changes the right-side Options panel to that expiration's OI, volume, GEX, DEX, Greeks, P/C, or chain data.
 
 Contract rows belong in the Chain tab or strike drilldown. They are not the left-side expiry selector.
+
+## S&P 500 Market Breadth
+
+S&P 500 Market Breadth is a standalone Market Lab Work Item at `#/work/market-breadth`.
+
+It publishes one latest daily snapshot with three panels: sector ETF performance and proxy contribution, the percentage of current SPY holdings above SMA5/20/50/100/200, and the change in each sector ETF's SMA200 over 5/20/50/100/200 trading sessions.
+
+The SPY universe, weights, and one-sector-only membership mapping come from the dated State Street SPY and Select Sector SPDR holdings workbooks. Split-adjusted EOD prices come from Massive under an account with public display rights.
+
+Missing constituent history is unavailable and excluded from the eligible breadth denominator. It is never converted to zero or treated as below a moving average.
+
+GitHub Actions owns the batch computation and writes bounded normalized objects to the dedicated Standard-class `market-breadth-data` R2 bucket. Price state and READY snapshots use independent A/B slots, refresh audit uses a 64-slot ring, and the status pointer always moves last. Pages owns a read-only R2 API. The feature uses no D1 and no scheduled Cloudflare Worker, and must not share `MARKET_CACHE_DB`, `SPX_RECAP_DB`, or the SPX trading Worker.
+
+A failed refresh preserves the last READY snapshot and makes the public API report `STALE` with a safe error class. No source failure may create demo data or overwrite the last-good snapshot.
