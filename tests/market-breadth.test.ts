@@ -219,6 +219,71 @@ describe("S&P 500 Market Breadth calculations", () => {
     );
   });
 
+  it("serializes Massive requests and enforces the configured minimum interval", async () => {
+    let clock = 0;
+    const requestTimes: number[] = [];
+    const sleepDelays: number[] = [];
+    const client = createMarketBreadthDataClient({
+      apiKey: "test-key",
+      massiveMinRequestIntervalMs: 13_000,
+      now: () => clock,
+      sleep: async (delayMs) => {
+        sleepDelays.push(delayMs);
+        clock += delayMs;
+      },
+      fetcher: (async (url: string | URL | Request) => {
+        requestTimes.push(clock);
+        const isGrouped = String(url).includes("/grouped/");
+        return new Response(JSON.stringify(isGrouped
+          ? { status: "OK", results: [{ T: "AAPL", c: 200 }] }
+          : { status: "OK", results: [{ t: Date.parse("2026-08-11T00:00:00.000Z"), c: 200 }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as typeof fetch,
+    });
+
+    await Promise.all([
+      client.fetchDailySummary("2026-08-11"),
+      client.fetchCustomBars("AAPL", "2025-01-01", "2026-08-11"),
+    ]);
+
+    assert.deepEqual(requestTimes, [0, 13_000]);
+    assert.deepEqual(sleepDelays, [13_000]);
+  });
+
+  it("keeps the Massive interval after a failed request and rejects invalid limiter config", async () => {
+    let clock = 0;
+    let requestCount = 0;
+    const requestTimes: number[] = [];
+    const client = createMarketBreadthDataClient({
+      apiKey: "test-key",
+      massiveMinRequestIntervalMs: 13_000,
+      now: () => clock,
+      sleep: async (delayMs) => { clock += delayMs; },
+      fetcher: (async () => {
+        requestTimes.push(clock);
+        requestCount += 1;
+        return requestCount === 1
+          ? new Response("unavailable", { status: 500 })
+          : new Response(JSON.stringify({ status: "OK", results: [{ T: "AAPL", c: 200 }] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+      }) as typeof fetch,
+    });
+
+    await assert.rejects(() => client.fetchDailySummary("2026-08-11"), (error: unknown) =>
+      error instanceof MarketBreadthSourceError && error.errorClass === "PROVIDER_UNAVAILABLE",
+    );
+    await client.fetchDailySummary("2026-08-11");
+    assert.deepEqual(requestTimes, [0, 13_000]);
+    assert.throws(() => createMarketBreadthDataClient({
+      apiKey: "test-key",
+      massiveMinRequestIntervalMs: Number.NaN,
+    }), (error: unknown) => error instanceof MarketBreadthSourceError && error.errorClass === "RATE_LIMIT_CONFIG_INVALID");
+  });
+
   it("normalizes State Street share-class tickers for Massive", () => {
     assert.equal(normalizeMarketBreadthTicker(" BRK.B "), "BRK-B");
     assert.equal(normalizeMarketBreadthTicker("BF/B"), "BF-B");

@@ -117,11 +117,34 @@ export const createMarketBreadthDataClient = (input: {
   fetcher?: typeof fetch;
   massiveBaseUrl?: string;
   requestTimeoutMs?: number;
+  massiveMinRequestIntervalMs?: number;
+  now?: () => number;
+  sleep?: (delayMs: number) => Promise<void>;
 }): MarketBreadthDataClient => {
   if (!input.apiKey) throw new MarketBreadthSourceError("SECRET_MISSING", "MASSIVE_API_KEY is not configured.");
   const fetcher = input.fetcher || fetch;
   const massiveBaseUrl = (input.massiveBaseUrl || "https://api.massive.com").replace(/\/$/, "");
   const requestTimeoutMs = Math.max(100, Math.min(60_000, input.requestTimeoutMs || 20_000));
+  const requestedIntervalMs = input.massiveMinRequestIntervalMs ?? 13_000;
+  if (!Number.isFinite(requestedIntervalMs) || requestedIntervalMs < 0) {
+    throw new MarketBreadthSourceError("RATE_LIMIT_CONFIG_INVALID", "Massive request interval must be a finite non-negative number.");
+  }
+  const massiveMinRequestIntervalMs = Math.min(60_000, requestedIntervalMs);
+  const now = input.now || Date.now;
+  const sleep = input.sleep || ((delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
+  let nextMassiveRequestAt = 0;
+  let massiveRequestTail = Promise.resolve();
+
+  const runMassiveRequest = <T>(request: () => Promise<T>): Promise<T> => {
+    const pending = massiveRequestTail.then(async () => {
+      const delayMs = Math.max(0, nextMassiveRequestAt - now());
+      if (delayMs > 0) await sleep(delayMs);
+      nextMassiveRequestAt = now() + massiveMinRequestIntervalMs;
+      return request();
+    });
+    massiveRequestTail = pending.then(() => undefined, () => undefined);
+    return pending;
+  };
 
   return {
     fetchUniverse: async () => {
@@ -151,22 +174,22 @@ export const createMarketBreadthDataClient = (input: {
       });
     },
     fetchDailySummary: async (date) => {
-      const payload = await fetchJson(
+      const payload = await runMassiveRequest(() => fetchJson(
         fetcher,
         `${massiveBaseUrl}/v2/aggs/grouped/locale/us/market/stocks/${date}?adjusted=true&include_otc=false`,
         input.apiKey,
         requestTimeoutMs,
-      );
+      ));
       return parseMassiveDailySummary(payload, date);
     },
     fetchCustomBars: async (ticker, fromDate, toDate) => {
       const normalizedTicker = toMassiveTicker(ticker);
-      const payload = await fetchJson(
+      const payload = await runMassiveRequest(() => fetchJson(
         fetcher,
         `${massiveBaseUrl}/v2/aggs/ticker/${encodeURIComponent(normalizedTicker)}/range/1/day/${fromDate}/${toDate}?adjusted=true&sort=asc&limit=50000`,
         input.apiKey,
         requestTimeoutMs,
-      );
+      ));
       return parseMassiveCustomBars(payload);
     },
   };
