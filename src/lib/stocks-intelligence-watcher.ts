@@ -4,6 +4,11 @@ import { STOCKS_WATCHER_UNIVERSE } from "./stocks-watcher-universe";
 import type { StocksWatcherUniverseStock } from "./stocks-watcher-universe";
 import type { MarketCacheMetadata } from "./market-data-cache";
 import type { WatcherCoverageStatus, WatcherFinancialQuarter, WatcherValuationBands } from "./stocks-watcher-valuation-data";
+import {
+  assertRobinhoodSpotCompatible,
+  toRobinhoodOptionsView,
+  type RobinhoodOptionsPublishedSnapshot,
+} from "./stocks-watcher-robinhood-options";
 
 export type StocksWatcherChartMode = "oi" | "volume" | "gex";
 
@@ -150,8 +155,23 @@ export interface StocksWatcherSnapshot {
   availableTools: { name: string; description: string; inputKeys: string[] }[];
   toolRuns: StocksWatcherToolRun[];
   warnings: string[];
+  /** Present only for curated symbols with a validated private EOD options release. */
+  optionsSnapshot?: {
+    provider: "robinhood_mcp";
+    methodology: "OI-signed GEX proxy";
+    runId: string;
+    capturedAt: string;
+    expectedSymbols: number;
+    completedSymbols: number;
+  };
+  optionsUnavailable?: string;
   /** The snapshot is always backed by the native Yahoo adapter. */
   source: "native_yahoo";
+}
+
+export interface StocksWatcherPublishedOptionsInput {
+  snapshot?: RobinhoodOptionsPublishedSnapshot;
+  unavailableReason?: string;
 }
 
 export interface StocksWatcherToolClient {
@@ -840,6 +860,7 @@ const rowsFromRawOptionChain = (raw: unknown): {
 export const buildStocksWatcherSnapshotFromNative = async (
   symbol: string,
   client: StocksWatcherToolClient,
+  publishedOptions?: StocksWatcherPublishedOptionsInput,
 ): Promise<StocksWatcherSnapshot> => {
   const upperSymbol = normalizeStocksWatcherSymbol(symbol);
   const warnings: string[] = [];
@@ -882,19 +903,35 @@ export const buildStocksWatcherSnapshotFromNative = async (
     warnings.push(`Native Yahoo quote change fields unavailable for ${upperSymbol}.`);
   }
 
-  const optionsResult = await callToolStructuredWithVariants(client, "get_options", [
-    { ticker: upperSymbol, strikesAroundAtm: 25 },
-  ], toolRuns);
-  const rawOptions = rowsFromRawOptionChain(optionsResult.raw);
-  const optionsText = optionsResult.text;
-  const expiries = rawOptions.expiries.length > 0 ? rawOptions.expiries : extractAvailableExpiries(optionsText);
-  const frontExpiry = expiries[0];
-  const gexText = frontExpiry ? await callToolWithVariants(client, "get_options_gex", [
-    { ticker: upperSymbol, expiry: frontExpiry, topRows: 20 },
-  ], toolRuns) : "";
-  const zeroDteText = await callToolWithVariants(client, "get_options_0dte", [
-    { ticker: upperSymbol },
-  ], toolRuns);
+  let rawOptions = { expiries: [] as string[], selectedExpiry: null as string | null, rows: [] as StocksWatcherExpiryRow[] };
+  let optionsText = "";
+  let gexText = "";
+  let zeroDteText = "";
+  let robinhoodView: ReturnType<typeof toRobinhoodOptionsView> | null = null;
+  if (publishedOptions?.snapshot) {
+    assertRobinhoodSpotCompatible(publishedOptions.snapshot.spot, price);
+    robinhoodView = toRobinhoodOptionsView(publishedOptions.snapshot);
+    toolRuns.push({ name: "robinhood_options_snapshot", status: "ok", detail: `validated EOD release ${publishedOptions.snapshot.releaseId}` });
+  } else if (publishedOptions?.unavailableReason) {
+    warnings.push(`Robinhood EOD options unavailable: ${publishedOptions.unavailableReason}`);
+    toolRuns.push({ name: "robinhood_options_snapshot", status: "failed", detail: publishedOptions.unavailableReason });
+    toolRuns.push({ name: "get_options", status: "skipped", detail: "curated ticker must not fall back to Yahoo options" });
+    toolRuns.push({ name: "get_options_gex", status: "skipped", detail: "curated ticker must not fall back to Yahoo GEX" });
+    toolRuns.push({ name: "get_options_0dte", status: "skipped", detail: "curated ticker must not fall back to Yahoo options" });
+  } else {
+    const optionsResult = await callToolStructuredWithVariants(client, "get_options", [
+      { ticker: upperSymbol, strikesAroundAtm: 25 },
+    ], toolRuns);
+    rawOptions = rowsFromRawOptionChain(optionsResult.raw);
+    optionsText = optionsResult.text;
+    const frontExpiry = rawOptions.expiries.length > 0 ? rawOptions.expiries[0] : extractAvailableExpiries(optionsText)[0];
+    gexText = frontExpiry ? await callToolWithVariants(client, "get_options_gex", [
+      { ticker: upperSymbol, expiry: frontExpiry, topRows: 20 },
+    ], toolRuns) : "";
+    zeroDteText = await callToolWithVariants(client, "get_options_0dte", [
+      { ticker: upperSymbol },
+    ], toolRuns);
+  }
   const intradayResult = await callToolStructuredWithVariants(client, "get_intraday", [
     { ticker: upperSymbol },
   ], toolRuns);
@@ -918,8 +955,9 @@ export const buildStocksWatcherSnapshotFromNative = async (
   ], toolRuns);
 
   const parsedExpiries = parseOptionRows(optionsText, price);
-  const expiryRows = buildExpirySummaryRows(expiries, [...rawOptions.rows, ...parsedExpiries]);
-  const strikes = completeRows(upperSymbol, price, parseGexRows(`${gexText}\n${zeroDteText}`, price));
+  const expiries = robinhoodView?.availableExpiries || (rawOptions.expiries.length > 0 ? rawOptions.expiries : extractAvailableExpiries(optionsText));
+  const expiryRows = robinhoodView?.expiryRows || buildExpirySummaryRows(expiries, [...rawOptions.rows, ...parsedExpiries]);
+  const strikes = robinhoodView?.strikes || (publishedOptions?.unavailableReason ? [] : completeRows(upperSymbol, price, parseGexRows(`${gexText}\n${zeroDteText}`, price)));
   const rawIntradayHistory = historyFromRawResult(intradayResult.raw);
   const rawDailyHistory = historyFromRawResult(historyResult.raw);
   const parsedIntradayHistory = parseHistory(intradayText);
@@ -961,12 +999,12 @@ export const buildStocksWatcherSnapshotFromNative = async (
     gexRegime: netGex >= 0 ? "Pinning" : "Amplifying",
     putCallOpenInterest: round(putOi / Math.max(1, callOi), 2),
     putCallVolume: round(putVol / Math.max(1, callVol), 2),
-    sweeps: zeroDteText.match(/\bsweep/i) ? 1 : 0,
+    sweeps: robinhoodView ? 0 : (zeroDteText.match(/\bsweep/i) ? 1 : 0),
     // Keep the provider-advertised expiry list, but expose rows only when the
     // provider returned actual option data for that expiry.
     availableExpiries: expiries,
     selectedExpiry: expiryRows.length > 0
-      ? rawOptions.selectedExpiry || expiryRows[0]?.expiry || null
+      ? robinhoodView?.selectedExpiry || rawOptions.selectedExpiry || expiryRows[0]?.expiry || null
       : null,
     expiryRows,
     expiries: expiryRows,
@@ -983,6 +1021,17 @@ export const buildStocksWatcherSnapshotFromNative = async (
     availableTools,
     toolRuns,
     warnings,
+    ...(publishedOptions?.snapshot ? {
+      optionsSnapshot: {
+        provider: "robinhood_mcp" as const,
+        methodology: "OI-signed GEX proxy" as const,
+        runId: publishedOptions.snapshot.runId,
+        capturedAt: publishedOptions.snapshot.capturedAt,
+        expectedSymbols: publishedOptions.snapshot.manifest.expectedSymbols,
+        completedSymbols: publishedOptions.snapshot.manifest.completedSymbols,
+      },
+    } : {}),
+    ...(publishedOptions?.unavailableReason ? { optionsUnavailable: publishedOptions.unavailableReason } : {}),
     source: "native_yahoo",
   };
 };

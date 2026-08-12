@@ -2227,6 +2227,13 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     .some((leg) => optionLegNumber(leg.openInterest) > 0));
   const hasYahooGex = hasYahooOpenInterest && selectedExposures.some((row) =>
     typeof row.netGex === "number" && Number.isFinite(row.netGex));
+  const optionsSourceLabel = snapshot?.optionsSnapshot
+    ? `Robinhood MCP EOD · ${snapshot.optionsSnapshot.capturedAt}`
+    : snapshot?.optionsUnavailable
+      ? "Robinhood MCP EOD unavailable"
+      : snapshot?.source === "native_yahoo"
+        ? "Native Yahoo"
+        : "Source unavailable";
   const modeAvailable = mode === "volume" || (mode === "oi" ? hasYahooOpenInterest : hasYahooGex);
   const chartRows = rows.sort((a, b) => a.strike - b.strike);
   const focusedRows = (() => {
@@ -2388,7 +2395,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         </div>
         <div className="flex flex-wrap justify-end gap-2 text-xs font-black">
           <span className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-300">
-            {snapshot?.source === "native_yahoo" ? "Native Yahoo" : "Source unavailable"}
+            {optionsSourceLabel}
           </span>
           <span className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-300">
             Updated {snapshot ? new Date(snapshot.generatedAt).toLocaleString() : "--"}
@@ -2400,6 +2407,12 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           )}
         </div>
       </div>
+
+      {snapshot?.optionsSnapshot && (
+        <p className="mb-3 rounded-md border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100" data-options-robinhood-provenance>
+          Robinhood MCP EOD snapshot · run {snapshot.optionsSnapshot.runId} · coverage {snapshot.optionsSnapshot.completedSymbols}/{snapshot.optionsSnapshot.expectedSymbols} · GEX = OI-signed proxy, not dealer GEX.
+        </p>
+      )}
 
       <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs font-black">
         <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-blue-100">Exp {formatExpiryDate(currentExpiry, "compact")}</span>
@@ -2424,7 +2437,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
       {!hasYahooOpenInterest && selectedChain && (
         <p className="mb-3 rounded-md border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100" data-options-oi-unavailable>
-          Yahoo returned no positive open interest for this expiry. OI, P/C OI, GEX, walls and flip levels are unavailable; volume remains source data.
+          The active options source returned no positive open interest for this expiry. OI, P/C OI, GEX, walls and flip levels are unavailable; volume remains source data.
         </p>
       )}
 
@@ -3996,7 +4009,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           <footer className="siw-status-bar">
             <span><b /> Market: Open</span>
             <span>Data: Yahoo Finance <em>(Delayed 15-20 min)</em></span>
-                <span>Source: {snapshot?.source === "native_yahoo" ? "Yahoo options chain + local Greek approximation" : "Unavailable"}</span>
+                <span>Source: {snapshot?.optionsSnapshot ? "Robinhood MCP EOD · OI-signed GEX proxy" : snapshot?.optionsUnavailable ? "Robinhood MCP EOD unavailable" : snapshot?.source === "native_yahoo" ? "Yahoo options chain + local Greek approximation" : "Unavailable"}</span>
             <span>Not financial advice</span>
             <button type="button" onClick={() => setSettingsOpen((value) => !value)}>Help</button>
           </footer>
