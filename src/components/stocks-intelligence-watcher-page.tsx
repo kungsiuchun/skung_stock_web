@@ -34,7 +34,6 @@ import {
   getFreshStocksWatcherCacheEntry,
   getGammaFlipLevel,
   getNearestSpotStrike,
-  getStocksWatcherMarketSession,
   formatStocksWatcherRelativeAge,
   getStocksWatcherRowQuotesFromRawResult,
   getStocksWatcherVisibleSymbols,
@@ -1185,6 +1184,9 @@ const StatsPanel = ({ result }: { result: NativeToolResult }) => {
   const stats = rawRecord(summary?.defaultKeyStatistics);
   const financial = rawRecord(summary?.financialData);
   const profile = rawRecord(summary?.assetProfile);
+  const companyDescription = typeof profile?.longBusinessSummary === "string" && profile.longBusinessSummary.trim()
+    ? profile.longBusinessSummary.trim()
+    : null;
   const fmt = (value: unknown) => {
     const record = rawRecord(value);
     if (typeof record?.fmt === "string") return record.fmt;
@@ -1204,13 +1206,21 @@ const StatsPanel = ({ result }: { result: NativeToolResult }) => {
   ];
 
   return (
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      {metrics.map(([label, value]) => (
-        <div key={label} className="rounded-md border border-slate-800 bg-[#05080d] p-4">
-          <p className="text-[0.65rem] font-black uppercase tracking-[0.12em] text-slate-500">{label}</p>
-          <p className="mt-2 min-w-0 truncate text-lg font-black tabular-nums text-blue-100">{value}</p>
-        </div>
-      ))}
+    <div className="space-y-3">
+      <dl data-fundamentals-metrics className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {metrics.map(([label, value]) => (
+          <div key={label} className="min-w-0 rounded-md border border-slate-800 bg-[#05080d] p-4">
+            <dt className="text-[0.65rem] font-black uppercase tracking-[0.12em] text-slate-500">{label}</dt>
+            <dd className="mt-2 break-words text-lg font-black tabular-nums text-blue-100">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <article data-company-description className="rounded-md border border-slate-800 bg-[#05080d] p-4">
+        <h4 className="text-[0.65rem] font-black uppercase tracking-[0.12em] text-slate-500">Company Description</h4>
+        <p className="mt-2 text-sm leading-6 text-slate-300">
+          {companyDescription || "Company description unavailable from Yahoo."}
+        </p>
+      </article>
     </div>
   );
 };
@@ -1487,6 +1497,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [query, setQuery] = useState("");
   const [searchError, setSearchError] = useState<string | null>(null);
   const [mode, setMode] = useState<StocksWatcherChartMode>("volume");
+  const [strikeZoom, setStrikeZoom] = useState(1);
   const [watchlistCollapsed, setWatchlistCollapsed] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1511,7 +1522,6 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [customStocks, setCustomStocks] = useState<StocksWatcherUniverseStock[]>(() => readStoredCustomStocks());
   const [rowQuotesBySymbol, setRowQuotesBySymbol] = useState<Record<string, StocksWatcherRowQuote>>({});
   const [watchlistRefreshing, setWatchlistRefreshing] = useState(false);
-  const [pageRefreshing, setPageRefreshing] = useState(false);
   const [refreshingSymbols, setRefreshingSymbols] = useState<string[]>([]);
   const [cacheVersion, setCacheVersion] = useState(0);
   const [sectorFilter, setSectorFilter] = useState("All Sectors");
@@ -2112,33 +2122,6 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     }
   };
 
-  const refreshPageData = async () => {
-    if (pageRefreshing) return;
-
-    const symbol = snapshot?.symbol || selectedSymbol;
-    const activePanelRefresh = activeTab === "Options"
-      ? activeSubTab === "Overview"
-        ? loadExpiryOverview(currentExpiry, true)
-        : loadOptionsSubTab(activeSubTab, true)
-      : activeTab === "Overview"
-        ? Promise.resolve()
-        : loadTopTab(activeTab, true);
-
-    setPageRefreshing(true);
-    tabDataCache.current.clear();
-
-    try {
-      await Promise.all([
-        loadSnapshot(symbol, { force: true }),
-        refreshAllWatchers(),
-        loadNativeWatchlist(),
-        activePanelRefresh,
-      ]);
-    } finally {
-      setPageRefreshing(false);
-    }
-  };
-
   const openStrikeDrawer = async (strike: number, expiry?: string | null) => {
     const nextExpiry = toYahooExpiry(expiry || currentExpiry || snapshot?.expiries[0]?.expiry) || "";
     const requestId = strikeDrawerRequestRef.current + 1;
@@ -2246,7 +2229,15 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     typeof row.netGex === "number" && Number.isFinite(row.netGex));
   const modeAvailable = mode === "volume" || (mode === "oi" ? hasYahooOpenInterest : hasYahooGex);
   const chartRows = rows.sort((a, b) => a.strike - b.strike);
-  const focusedRows = chartRows;
+  const focusedRows = (() => {
+    if (!snapshot || strikeZoom <= 1 || chartRows.length <= 7) return chartRows;
+    const closestIndex = chartRows.reduce((bestIndex, row, index) => (
+      Math.abs(row.strike - snapshot.spot) < Math.abs(chartRows[bestIndex].strike - snapshot.spot) ? index : bestIndex
+    ), 0);
+    const targetCount = Math.max(7, Math.ceil(chartRows.length / strikeZoom));
+    const start = Math.max(0, Math.min(chartRows.length - targetCount, closestIndex - Math.floor(targetCount / 2)));
+    return chartRows.slice(start, start + targetCount);
+  })();
   const maxValue = mode === "gex"
     ? Math.max(1, ...(focusedRows.length > 0 ? focusedRows : chartRows).map((row) => Math.abs(row.netGex)))
     : getMaxForMode(focusedRows.length > 0 ? focusedRows : chartRows, mode);
@@ -2275,7 +2266,6 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const sessionOpen = snapshot?.quote.open ?? null;
   const sessionHigh = snapshot?.quote.high ?? null;
   const sessionLow = snapshot?.quote.low ?? null;
-  const marketSession = getStocksWatcherMarketSession(snapshot?.quote.marketState);
   const totalCallGex = chartRows.reduce((sum, row) => sum + Math.max(0, row.callGex), 0);
   const totalPutGex = chartRows.reduce((sum, row) => sum + Math.min(0, row.putGex), 0);
   const axisTicks = mode === "gex"
@@ -2451,13 +2441,51 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         <OptionsEmptyState expiry={currentExpiry} onRetry={() => void loadExpiryOverview(currentExpiry, true)} />
       )}
 
-      {modeAvailable && chartRows.length > 0 && (
-      <div
-        ref={chartViewportRef}
-        data-options-chart-viewport
-        className="relative mt-2 min-h-[22rem] flex-1 overflow-x-hidden overflow-y-hidden rounded-md border border-slate-800 bg-[#07111d] shadow-[inset_0_1px_0_rgba(148,163,184,0.08)]"
-        onMouseLeave={() => setChartTooltip(null)}
-      >
+      {chartRows.length > 0 && (
+        <>
+          <div data-options-chart-controls className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-800 bg-slate-950/70 px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2 text-xs font-black">
+              <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-400">
+                GEX Pinning <b className="ml-1 text-slate-100">{hasYahooGex && gammaFlipLevel !== null ? currency(gammaFlipLevel) : "Unavailable"}</b>
+              </span>
+              <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-400">
+                P/C OI <b className="ml-1 text-slate-100">{hasYahooOpenInterest ? (snapshot?.putCallOpenInterest ?? 0).toFixed(2) : "Unavailable"}</b>
+              </span>
+              <button
+                type="button"
+                data-options-sweeps-control
+                aria-label="Open sweeps"
+                onClick={() => {
+                  setActiveSubTab("Sweeps");
+                  void loadOptionsSubTab("Sweeps", true);
+                }}
+                className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-400 hover:border-blue-400 hover:text-blue-100"
+              >
+                Sweeps <b className="ml-1 text-slate-100">View</b>
+              </button>
+            </div>
+            <label className="flex items-center gap-2 text-xs font-black text-slate-400">
+              Strike Zoom
+              <input
+                aria-label="Strike zoom"
+                type="range"
+                min="1"
+                max="3"
+                step="0.25"
+                value={strikeZoom}
+                onChange={(event) => setStrikeZoom(Number(event.target.value))}
+                className="h-1 w-24 accent-blue-400"
+              />
+              <b className="min-w-8 text-right text-blue-200">x{strikeZoom.toFixed(2)}</b>
+            </label>
+          </div>
+          {modeAvailable && (
+          <div
+            ref={chartViewportRef}
+            data-options-chart-viewport
+            className="relative mt-2 min-h-[22rem] flex-1 overflow-x-hidden overflow-y-hidden rounded-md border border-slate-800 bg-[#07111d] shadow-[inset_0_1px_0_rgba(148,163,184,0.08)]"
+            onMouseLeave={() => setChartTooltip(null)}
+          >
         <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_0%,rgba(59,130,246,0.12),transparent_34%),linear-gradient(180deg,rgba(148,163,184,0.045)_0,rgba(148,163,184,0)_42%)]" />
         {mode === "gex" && (
           <div className="pointer-events-none absolute bottom-12 left-0 right-0 top-10 min-w-0">
@@ -2633,6 +2661,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           })}
         </div>
       </div>
+      )}
+      </>
       )}
     </div>
   );
@@ -2867,6 +2897,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     const targetMean = display(["targetMeanPrice", "meanTargetPrice"], "n/a", "money");
     const marketCap = display(["marketCap"], "n/a", "money");
     const enterpriseValue = display(["enterpriseValue"], "n/a", "money");
+    const companyDescription = String(fromRaw(["longBusinessSummary"]) || "").trim();
     const sector = String(fromRaw(["sector", "sectorDisp"]) || getStocksWatcherUniverseStock(selectedSymbol)?.sector || "n/a");
     const industry = String(fromRaw(["industry", "industryDisp"]) || "n/a");
     const rows = [
@@ -2940,10 +2971,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             <strong>{targetMean}</strong>
             <em>Yahoo analyst target</em>
           </div>
-          <div className="siw-panel siw-stat-card">
-            <span>Earnings and Price Context</span>
-            <strong>{display(["earningsDate"], "n/a")}</strong>
-            <em>Not financial advice</em>
+          <div className="siw-panel siw-stat-card siw-description-card" data-company-description>
+            <span>Company Description</span>
+            <p>{companyDescription || "Company description unavailable from Yahoo."}</p>
           </div>
         </div>
 
@@ -3813,19 +3843,6 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
               <span>Updated {formatStocksWatcherRelativeAge(updatedSecondsAgo)}</span>
             </div>
 
-            <button
-              type="button"
-              className={`siw-market-pill is-${marketSession.tone}`}
-              onClick={() => void refreshPageData()}
-              disabled={pageRefreshing}
-              aria-label={`Refresh all live watcher data; market ${marketSession.label}`}
-              title={`Refresh all live watcher data; market ${marketSession.label}`}
-            >
-              <span />
-              <b>Market</b>
-              <strong>{marketSession.label}</strong>
-              <RefreshCw className={`h-3.5 w-3.5 ${loading || watchlistRefreshing || pageRefreshing ? "animate-spin" : ""}`} />
-            </button>
           </header>
 
           <nav className="siw-main-tabs" aria-label="Stocks watcher sections">

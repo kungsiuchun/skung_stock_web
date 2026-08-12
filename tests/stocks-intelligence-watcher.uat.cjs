@@ -354,7 +354,11 @@ const buildToolResponse = (tool, params = {}) => {
       raw: {
         quote: { exchange: "NMS", marketState: "REGULAR" },
         summary: {
-          assetProfile: { sector: "Technology", industry: "Semiconductors" },
+          assetProfile: {
+            sector: "Technology",
+            industry: "Semiconductors",
+            longBusinessSummary: "NVIDIA designs accelerated computing platforms for data centers, professional visualization, and gaming.",
+          },
           defaultKeyStatistics: { forwardPE: { raw: 18.5 }, enterpriseValue: { raw: 4500000000000 }, beta: { raw: 2.2 } },
           summaryDetail: { marketCap: { raw: 4400000000000 }, dividendYield: { raw: 0.001 } },
           financialData: { targetMeanPrice: { raw: 300 }, operatingCashflow: { raw: 125000000000 }, freeCashflow: { raw: 46000000000 } },
@@ -831,8 +835,17 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.match(await visibleText(page), /Native Yahoo Stats/i);
     assert.match(await visibleText(page), /NMS/);
     assert.match(await visibleText(page), /Semiconductors/);
+    assert.match(await page.$eval("[data-primary-tab-panel='Stats'] [data-company-description]", (node) => node.textContent || ""), /NVIDIA designs accelerated computing/i, "Stats must show the Yahoo company description instead of an empty earnings card");
+    assert.equal(await page.$eval(".siw-financial-summary .siw-stat-table thead th:nth-child(2)", (node) => getComputedStyle(node).textAlign), "center", "Financial Summary value header must be centered");
+    assert.equal(await page.$eval(".siw-financial-summary .siw-stat-table thead th:nth-child(3)", (node) => getComputedStyle(node).textAlign), "center", "Financial Summary context header must be centered");
     assert.doesNotMatch(await page.$eval("[data-primary-tab-panel='Stats']", (node) => node.textContent || ""), /Needs checking/i, "Stats must render Yahoo values or n\/a, never a placeholder");
     await page.screenshot({ path: path.join(screenshotsDir, "04-stats-fundamentals-earnings-desktop.png") });
+
+    await clickText(page, "Fundamentals");
+    await wait(500);
+    assert.equal(await page.$("[data-fundamentals-metrics]") !== null, true, "Fundamentals must use the readable native metrics grid");
+    assert.match(await page.$eval("[data-primary-tab-panel='Fundamentals'] [data-company-description]", (node) => node.textContent || ""), /NVIDIA designs accelerated computing/i, "Fundamentals must include the Yahoo company description");
+    assert.equal(await page.$$eval("[data-fundamentals-metrics] dd", (nodes) => nodes.every((node) => node.scrollWidth <= node.clientWidth)), true, "Fundamentals metric values must not be clipped");
 
     await clickText(page, "Options");
     await wait(900);
@@ -854,8 +867,18 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     });
     assert.ok(watcherLayout.actions.bottom <= watcherLayout.sidebar.bottom + 1, `add-ticker and settings actions must stay fully inside the sidebar; got ${JSON.stringify(watcherLayout)}`);
     assert.ok(watcherLayout.list.height >= watcherLayout.rail.height - watcherLayout.head.height - watcherLayout.viewAll.height - 28, `expiry list must use the available rail height; got ${JSON.stringify(watcherLayout)}`);
+    const watchlistScroll = await page.$eval("[data-watchlist-scope]", (node) => ({
+      clientWidth: node.clientWidth,
+      scrollWidth: node.scrollWidth,
+      childWidths: [...node.children].slice(0, 3).map((child) => ({ clientWidth: child.clientWidth, scrollWidth: child.scrollWidth })),
+    }));
+    assert.equal(watchlistScroll.scrollWidth <= watchlistScroll.clientWidth, true, `desktop watchlist must not show a horizontal scrollbar: ${JSON.stringify(watchlistScroll)}`);
     assert.equal(await page.$eval(".siw-expiry-list", (node) => node.scrollWidth <= node.clientWidth), true, "desktop expiry rail must not show a horizontal scrollbar");
     assert.equal(await page.$("[data-options-summary]") === null, true, "obsolete options KPI strip must be removed");
+    assert.equal(await page.$("[data-options-chart-controls]") !== null, true, "Options chart header controls must remain available");
+    assert.equal(await page.$("input[aria-label='Strike zoom']") !== null, true, "Strike zoom must be in the Options chart header");
+    assert.equal(await page.$("[data-options-sweeps-control]") !== null, true, "Sweeps must remain reachable from the Options chart header");
+    assert.equal(await page.$(".siw-market-pill") === null, true, "the redundant hero market refresh button must be removed");
     assert.match(await page.$eval("[data-expiry-row='2026-07-10']", (node) => node.textContent || ""), /Load\s*on select/, "unloaded expiries must not receive fabricated OI, volume, or strike values");
     const aiSummaryText = await page.$eval("[data-ai-summary-panel]", (node) => node.textContent || "");
     assert.doesNotMatch(aiSummaryText, /\|\s*[-:]+\s*\|/, "AI summary must not expose Markdown table structure");
@@ -903,6 +926,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await page.waitForFunction(() => document.querySelector(".siw-hero-identity h1")?.textContent === "TSLA", { timeout: 5000 });
     await wait(450);
     assert.equal(await page.$("[data-options-oi-unavailable]") !== null, true, "Yahoo zero OI must show an explicit unavailable state");
+    assert.match(await page.$eval("[data-options-chart-controls]", (node) => node.textContent || ""), /GEX Pinning\s+Unavailable[\s\S]*P\/C OI\s+Unavailable/i, "zero OI must leave GEX and P\/C controls unavailable");
     assert.equal(await page.$eval(".siw-options-subtabs button", (node) => node.disabled), true, "OI must be disabled when Yahoo returns zero OI");
     await page.evaluate(() => {
       const detail = document.querySelector("[data-detail-stack]");

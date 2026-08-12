@@ -81,7 +81,6 @@
 .siw-back-button,
 .siw-icon-button,
 .siw-logo-card button,
-.siw-market-pill,
 .siw-view-all,
 .siw-add-button,
 .siw-tool-runs button,
@@ -98,7 +97,6 @@
 .siw-back-button:hover,
 .siw-icon-button:hover,
 .siw-logo-card button:hover,
-.siw-market-pill:hover,
 .siw-view-all:hover,
 .siw-add-button:hover,
 .siw-tool-catalog button:hover,
@@ -367,9 +365,9 @@
 
 .siw-watchlist-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 84px 82px;
-  gap: 10px;
-  padding: 12px 36px 8px 68px;
+  grid-template-columns: minmax(0, 1fr) 68px 66px;
+  gap: 6px;
+  padding: 12px 28px 8px 54px;
   border-bottom: 1px solid var(--siw-line-soft);
   color: var(--siw-muted);
   font-size: 11px;
@@ -380,17 +378,18 @@
 .siw-watchlist {
   min-height: 0;
   flex: 1 1 auto;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   border-bottom: 1px solid var(--siw-line-soft);
 }
 
 .siw-watch-row {
   display: grid;
-  grid-template-columns: 28px 40px minmax(0, 1fr) 78px 78px 28px;
-  gap: 10px;
+  grid-template-columns: 24px 34px minmax(0, 1fr) 64px 64px 22px;
+  gap: 6px;
   align-items: center;
   min-height: 58px;
-  padding: 7px 14px 7px 18px;
+  padding: 7px 8px 7px 14px;
   border-bottom: 1px solid var(--siw-line-soft);
   background: transparent;
   color: var(--siw-text);
@@ -404,7 +403,6 @@
 
 .siw-watch-row.is-selected {
   box-shadow: inset 3px 0 0 var(--siw-blue);
-  transform: translateX(2px);
 }
 
 .siw-watch-row input {
@@ -415,8 +413,8 @@
 
 .siw-watch-row > button {
   display: inline-flex;
-  width: 28px;
-  height: 28px;
+  width: 22px;
+  height: 22px;
   align-items: center;
   justify-content: center;
   border: 0;
@@ -828,59 +826,6 @@
   margin-top: 7px;
   color: var(--siw-muted);
   font-size: 11px;
-}
-
-.siw-market-pill {
-  --siw-market-state: var(--siw-muted);
-  --siw-market-glow: rgba(143, 161, 183, 0.45);
-  display: grid;
-  min-width: 116px;
-  grid-template-columns: 12px 1fr auto;
-  gap: 4px 8px;
-  align-items: center;
-  margin-left: auto;
-  padding: 12px 14px;
-  border-radius: 7px;
-  text-transform: uppercase;
-}
-
-.siw-market-pill > span {
-  width: 10px;
-  height: 10px;
-  border-radius: 999px;
-  background: var(--siw-market-state);
-  box-shadow: 0 0 14px var(--siw-market-glow);
-}
-
-.siw-market-pill b {
-  color: var(--siw-muted);
-  font-size: 12px;
-}
-
-.siw-market-pill strong {
-  grid-column: 2;
-  color: var(--siw-market-state);
-  font-size: 13px;
-}
-
-.siw-market-pill.is-open {
-  --siw-market-state: var(--siw-green);
-  --siw-market-glow: rgba(22, 219, 114, 0.72);
-}
-
-.siw-market-pill.is-extended {
-  --siw-market-state: var(--siw-yellow);
-  --siw-market-glow: rgba(255, 212, 0, 0.62);
-}
-
-.siw-market-pill.is-closed {
-  --siw-market-state: var(--siw-red);
-  --siw-market-glow: rgba(255, 62, 77, 0.62);
-}
-
-.siw-market-pill svg {
-  grid-row: 1 / span 2;
-  grid-column: 3;
 }
 
 .siw-main-tabs {
@@ -1548,6 +1493,10 @@
   gap: 18px;
 }
 
+.siw-stat-columns > div {
+  min-width: 0;
+}
+
 .siw-stat-columns h3 {
   margin: 0 0 10px;
   color: var(--siw-muted);
@@ -1558,6 +1507,7 @@
 
 .siw-stat-table {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   color: var(--siw-text);
   font-size: 13px;
@@ -1572,6 +1522,7 @@
 }
 
 .siw-stat-table th {
+  width: 48%;
   color: var(--siw-muted);
   font-weight: 700;
   text-align: left;
@@ -1597,6 +1548,13 @@
 .siw-stat-card span,
 .siw-stat-card em {
   display: block;
+}
+
+.siw-description-card p {
+  margin: 10px 0 0;
+  color: var(--siw-text);
+  font-size: 13px;
+  line-height: 1.55;
 }
 
 .siw-stat-card span {
@@ -1638,6 +1596,13 @@
 
 .siw-financial-summary {
   grid-column: 1 / 2;
+}
+
+.siw-financial-summary .siw-stat-table th:nth-child(2),
+.siw-financial-summary .siw-stat-table th:nth-child(3),
+.siw-financial-summary .siw-stat-table td:nth-child(2),
+.siw-financial-summary .siw-stat-table td:nth-child(3) {
+  text-align: center;
 }
 
 .siw-cashflow-panel {
@@ -2106,10 +2071,6 @@
     gap: 16px;
   }
 
-  .siw-market-pill {
-    margin-left: 0;
-  }
-
   .siw-audit-grid {
     grid-template-columns: 1fr;
   }
@@ -2261,8 +2222,7 @@
     font-size: 30px;
   }
 
-  .siw-hero-chart,
-  .siw-market-pill {
+  .siw-hero-chart {
     display: none;
   }
 
