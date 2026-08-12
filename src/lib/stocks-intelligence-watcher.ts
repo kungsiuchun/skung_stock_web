@@ -133,7 +133,8 @@ export interface StocksWatcherSnapshot {
   availableTools: { name: string; description: string; inputKeys: string[] }[];
   toolRuns: StocksWatcherToolRun[];
   warnings: string[];
-  source: "native_yahoo" | "demo_fallback";
+  /** The snapshot is always backed by the native Yahoo adapter. */
+  source: "native_yahoo";
 }
 
 export interface StocksWatcherToolClient {
@@ -544,32 +545,9 @@ const buildSyntheticStrikes = (symbol: string, spot: number): StocksWatcherStrik
   });
 };
 
-const buildSyntheticExpiries = (symbol: string, strikes: StocksWatcherStrikeRow[]): StocksWatcherExpiryRow[] => {
-  const today = new Date("2026-05-28T20:00:00Z");
-  const seed = seeded(symbol);
-
-  return Array.from({ length: 22 }, (_, index) => {
-    const date = new Date(today);
-    date.setDate(today.getDate() + 1 + index * (index < 6 ? 2 : 14));
-    const strikeRow = strikes[(index * 3 + seed) % strikes.length];
-    const type = index % 3 === 1 ? "P" : "C";
-
-    return {
-      expiry: date.toISOString().slice(0, 10),
-      openInterest: type === "C" ? strikeRow.callOpenInterest * (index + 2) : strikeRow.putOpenInterest * (index + 2),
-      primaryStrike: strikeRow.strike,
-      strike: strikeRow.strike,
-      volume: type === "C" ? strikeRow.callVolume : strikeRow.putVolume,
-      dominantType: type,
-      type,
-    };
-  });
-};
-
 const buildExpirySummaryRows = (
   availableExpiries: string[],
   optionRows: StocksWatcherExpiryRow[],
-  fallbackRows: StocksWatcherExpiryRow[],
 ): StocksWatcherExpiryRow[] => {
   const byExpiry = new Map<string, StocksWatcherExpiryRow[]>();
   for (const row of optionRows) {
@@ -577,23 +555,13 @@ const buildExpirySummaryRows = (
     byExpiry.set(normalized, [...(byExpiry.get(normalized) || []), { ...row, expiry: normalized }]);
   }
 
-  const fallbackByExpiry = new Map(fallbackRows.map((row) => [parseDateLike(row.expiry) || row.expiry, row]));
   const sourceExpiries = availableExpiries.length > 0 ? availableExpiries : Array.from(byExpiry.keys());
-  const summaries = sourceExpiries.map((expiry) => {
+  const summaries = sourceExpiries.map((expiry): StocksWatcherExpiryRow | null => {
     const normalized = parseDateLike(expiry) || expiry;
     const rows = byExpiry.get(normalized) || [];
-    const fallback = fallbackByExpiry.get(normalized) || fallbackRows[0];
-    if (rows.length === 0) {
-      const fallbackType: "C" | "P" = fallback?.dominantType ?? fallback?.type ?? "C";
-      return {
-        ...fallback,
-        expiry: normalized,
-        primaryStrike: fallback?.primaryStrike ?? fallback?.strike ?? 0,
-        strike: fallback?.primaryStrike ?? fallback?.strike ?? 0,
-        dominantType: fallbackType,
-        type: fallbackType,
-      };
-    }
+    // An expiry advertised by a tool without any option rows is unavailable;
+    // never manufacture an OI/volume/strike row for it.
+    if (rows.length === 0) return null;
 
     const callInterest = rows.filter((row) => row.type === "C").reduce((sum, row) => sum + row.openInterest, 0);
     const putInterest = rows.filter((row) => row.type === "P").reduce((sum, row) => sum + row.openInterest, 0);
@@ -611,22 +579,12 @@ const buildExpirySummaryRows = (
     };
   });
 
-  return summaries.slice(0, 32);
-};
-
-const buildSyntheticHistory = (symbol: string, spot: number): StocksWatcherHistoryPoint[] => {
-  const seed = seeded(symbol);
-  return Array.from({ length: 18 }, (_, index) => {
-    const drift = (index - 9) * 0.0025;
-    const wave = Math.sin(index * 0.8 + seed) * 0.012;
-    return {
-      label: `${9 + Math.floor(index / 3)}:${String((index % 3) * 20).padStart(2, "0")}`,
-      price: round(spot * (1 + drift + wave), 2),
-    };
-  });
+  return summaries.filter((row): row is StocksWatcherExpiryRow => Boolean(row)).slice(0, 32);
 };
 
 const completeRows = (symbol: string, spot: number, partialRows: Partial<StocksWatcherStrikeRow>[]) => {
+  // Keep the legacy deterministic completion path isolated to the GEX grid.
+  // It must never be reused for quote, history, expiry, news, or earnings data.
   const fallback = buildSyntheticStrikes(symbol, spot);
   const byStrike = new Map(fallback.map((row) => [row.strike, row]));
 
@@ -652,81 +610,6 @@ const completeRows = (symbol: string, spot: number, partialRows: Partial<StocksW
 const summariseTool = (name: string, text: string) => {
   const compact = text.replace(/\s+/g, " ").trim();
   return compact.length > 220 ? `${compact.slice(0, 220)}...` : compact || `${name} returned an empty response.`;
-};
-
-export const buildDemoStocksWatcherSnapshot = (symbol: string, warning: string): StocksWatcherSnapshot => {
-  const upperSymbol = normalizeStocksWatcherSymbol(symbol);
-  const universeStock = STOCKS_WATCHER_UNIVERSE.find((stock) => stock.symbol === upperSymbol);
-  const demoPrices: Record<string, number> = {
-    NVDA: 181.8,
-    IREN: 64.05,
-    QQQI: 50.42,
-    FEPI: 55.18,
-    NTSX: 45.76,
-    UNH: 297.34,
-  };
-  const demoChanges: Record<string, number> = {
-    NVDA: 2.14,
-    IREN: -3.79,
-    QQQI: 0.18,
-    FEPI: -0.22,
-    NTSX: 0.11,
-    UNH: 1.37,
-  };
-  const base = universeStock?.fallbackPrice ?? demoPrices[upperSymbol] ?? 180 + seeded(upperSymbol) % 260;
-  const change = universeStock?.fallbackChange ?? demoChanges[upperSymbol] ?? round(((seeded(upperSymbol) % 31) - 15) / 10, 2);
-  const strikes = buildSyntheticStrikes(upperSymbol, base);
-  const callOi = strikes.reduce((sum, row) => sum + row.callOpenInterest, 0);
-  const putOi = strikes.reduce((sum, row) => sum + row.putOpenInterest, 0);
-  const callVol = strikes.reduce((sum, row) => sum + row.callVolume, 0);
-  const putVol = strikes.reduce((sum, row) => sum + row.putVolume, 0);
-  const syntheticExpiries = buildSyntheticExpiries(upperSymbol, strikes);
-  const syntheticExpiryRows = buildExpirySummaryRows(
-    Array.from(new Set(syntheticExpiries.map((row) => row.expiry))).slice(0, 12),
-    syntheticExpiries,
-    syntheticExpiries,
-  );
-
-  return {
-    generatedAt: new Date().toISOString(),
-    symbol: upperSymbol,
-    quote: {
-      symbol: upperSymbol,
-      companyName: universeStock?.companyName || `${upperSymbol} demo asset`,
-      price: base,
-      open: round(base - change * 0.55),
-      high: round(base * 1.012),
-      low: round(base * 0.986),
-      previousClose: round(base - change),
-      change,
-      changePercent: universeStock?.fallbackChangePercent ?? round((change / base) * 100, 2),
-      marketState: null,
-      asOf: "05/28, 04:00 PM",
-    },
-    spot: base,
-    atm: round(base / 2.5) * 2.5,
-    selectedTimeLabel: "4:50PM",
-    gexRegime: "Pinning",
-    putCallOpenInterest: round(putOi / Math.max(1, callOi), 2),
-    putCallVolume: round(putVol / Math.max(1, callVol), 2),
-    sweeps: seeded(upperSymbol) % 4,
-    availableExpiries: syntheticExpiryRows.map((row) => row.expiry),
-    selectedExpiry: syntheticExpiryRows[0]?.expiry || null,
-    expiryRows: syntheticExpiryRows,
-    expiries: syntheticExpiryRows,
-    strikes,
-    history: buildSyntheticHistory(upperSymbol, base),
-    recentNews: [],
-    earnings: emptyEarningsSnapshot("Demo fallback has no Yahoo earningsHistory."),
-    marketContext: {
-      breadth: "Demo breadth context. Live mode uses native Yahoo data.",
-      relativeStrength: `Demo relative strength for ${upperSymbol} versus ${DEFAULT_WATCHLIST.filter((item) => item !== upperSymbol).join(", ")}.`,
-    },
-    availableTools: [],
-    toolRuns: [{ name: "demo_fallback", status: "ok", detail: warning }],
-    warnings: [warning],
-    source: "demo_fallback",
-  };
 };
 
 const callToolWithVariants = async (
@@ -967,8 +850,20 @@ export const buildStocksWatcherSnapshotFromNative = async (
     ...parseQuoteText(upperSymbol, quoteResult.text),
     ...quoteFromRawResult(upperSymbol, quoteResult.raw),
   };
-  const demoBase = buildDemoStocksWatcherSnapshot(upperSymbol, "Live quote parser fallback.");
-  const price = partialQuote.price || demoBase.quote.price;
+  const price = partialQuote.price;
+  if (typeof price !== "number" || !Number.isFinite(price) || price <= 0) {
+    throw new Error(`Native Yahoo quote missing a finite positive price for ${upperSymbol}.`);
+  }
+
+  const quoteChange = typeof partialQuote.change === "number" && Number.isFinite(partialQuote.change)
+    ? partialQuote.change
+    : 0;
+  const quoteChangePercent = typeof partialQuote.changePercent === "number" && Number.isFinite(partialQuote.changePercent)
+    ? partialQuote.changePercent
+    : 0;
+  if (partialQuote.change === undefined || partialQuote.changePercent === undefined) {
+    warnings.push(`Native Yahoo quote change fields unavailable for ${upperSymbol}.`);
+  }
 
   const optionsResult = await callToolStructuredWithVariants(client, "get_options", [
     { ticker: upperSymbol, strikesAroundAtm: 25 },
@@ -1006,17 +901,21 @@ export const buildStocksWatcherSnapshotFromNative = async (
   ], toolRuns);
 
   const parsedExpiries = parseOptionRows(optionsText, price);
-  const expiryRows = buildExpirySummaryRows(expiries, [...rawOptions.rows, ...parsedExpiries], demoBase.expiryRows);
+  const expiryRows = buildExpirySummaryRows(expiries, [...rawOptions.rows, ...parsedExpiries]);
   const strikes = completeRows(upperSymbol, price, parseGexRows(`${gexText}\n${zeroDteText}`, price));
   const rawIntradayHistory = historyFromRawResult(intradayResult.raw);
   const rawDailyHistory = historyFromRawResult(historyResult.raw);
-  const history = rawIntradayHistory.length > 3
+  const parsedIntradayHistory = parseHistory(intradayText);
+  const parsedDailyHistory = parseHistory(historyText);
+  const history = rawIntradayHistory.length > 0
     ? rawIntradayHistory
-    : rawDailyHistory.length > 3
+    : rawDailyHistory.length > 0
       ? rawDailyHistory
-    : parseHistory(intradayText).length > 3
-      ? parseHistory(intradayText)
-      : parseHistory(historyText);
+      : parsedIntradayHistory.length > 0
+        ? parsedIntradayHistory
+        : parsedDailyHistory;
+  if (expiryRows.length === 0) warnings.push("Options expiry data unavailable.");
+  if (history.length === 0) warnings.push("Price history unavailable.");
   const callOi = strikes.reduce((sum, row) => sum + row.callOpenInterest, 0);
   const putOi = strikes.reduce((sum, row) => sum + row.putOpenInterest, 0);
   const callVol = strikes.reduce((sum, row) => sum + row.callVolume, 0);
@@ -1028,16 +927,16 @@ export const buildStocksWatcherSnapshotFromNative = async (
     symbol: upperSymbol,
     quote: {
       symbol: upperSymbol,
-      companyName: partialQuote.companyName || demoBase.quote.companyName,
+      companyName: partialQuote.companyName || upperSymbol,
       price,
-      change: partialQuote.change ?? demoBase.quote.change,
-      changePercent: partialQuote.changePercent ?? demoBase.quote.changePercent,
-      open: partialQuote.open ?? demoBase.quote.open,
-      high: partialQuote.high ?? demoBase.quote.high,
-      low: partialQuote.low ?? demoBase.quote.low,
-      previousClose: partialQuote.previousClose ?? demoBase.quote.previousClose,
-      marketState: partialQuote.marketState ?? demoBase.quote.marketState,
-      asOf: partialQuote.asOf || demoBase.quote.asOf,
+      change: quoteChange,
+      changePercent: quoteChangePercent,
+      open: partialQuote.open ?? null,
+      high: partialQuote.high ?? null,
+      low: partialQuote.low ?? null,
+      previousClose: partialQuote.previousClose ?? null,
+      marketState: partialQuote.marketState ?? null,
+      asOf: partialQuote.asOf || null,
     },
     spot: price,
     atm: round(price / 2.5) * 2.5,
@@ -1046,12 +945,16 @@ export const buildStocksWatcherSnapshotFromNative = async (
     putCallOpenInterest: round(putOi / Math.max(1, callOi), 2),
     putCallVolume: round(putVol / Math.max(1, callVol), 2),
     sweeps: zeroDteText.match(/\bsweep/i) ? 1 : 0,
-    availableExpiries: expiryRows.map((row) => row.expiry),
-    selectedExpiry: rawOptions.selectedExpiry || expiryRows[0]?.expiry || frontExpiry || null,
+    // Keep the provider-advertised expiry list, but expose rows only when the
+    // provider returned actual option data for that expiry.
+    availableExpiries: expiries,
+    selectedExpiry: expiryRows.length > 0
+      ? rawOptions.selectedExpiry || expiryRows[0]?.expiry || null
+      : null,
     expiryRows,
     expiries: expiryRows,
     strikes,
-    history: history.length > 3 ? history : demoBase.history,
+    history,
     recentNews: newsFromRawResult(newsResult.raw),
     earnings: earningsFromRawResult(earningsResult.raw),
     marketContext: {

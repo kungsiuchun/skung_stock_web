@@ -253,8 +253,8 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
 
   if (showChat) {
     return (
-      <div className="h-full overflow-hidden bg-[#0f141b] p-3 text-[#1e2329] sm:p-4 lg:p-6">
-        <div className="mx-auto flex h-full max-w-[1600px] flex-col gap-4">
+      <div className="min-h-dvh overflow-visible bg-[#0f141b] p-3 text-[#1e2329] lg:h-full lg:min-h-0 lg:overflow-hidden sm:p-4 lg:p-6">
+        <div className="mx-auto flex min-h-[640px] max-w-[1600px] flex-col gap-4 lg:h-full lg:min-h-0">
           <div className="shrink-0 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 sm:px-5">
             <p className="text-[10px] font-black uppercase tracking-[0.22em] text-cyan-300/70">Finance Analyzer</p>
             <div className="mt-1 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">

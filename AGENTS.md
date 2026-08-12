@@ -239,3 +239,13 @@ ADANOS_API_KEY=...
 - Off-hours manual decision triggers use the fixed 2026-07-13 14:45 ET `UAT_REPLAY`, clearly marked non-live, and make no model call. Authenticated `?probe_llm` validates the exact GPT-5 request without Telegram. Authenticated `?uat_llm` first runs that probe, then runs the same fixture through four live Council calls and one CIO call without changing position or signal journals; Telegram requires explicit `?deliver` and starts with `SYSTEM UAT｜非即時訊號｜不可交易`.
 - Regression command: `node --import tsx --test tests\spx-agent-calibration.test.ts tests\spx-decision-pipeline.test.ts tests\spx-gex-collection-lifecycle.test.ts tests\spx-gex-heatmap.test.ts tests\spx-price-action-compass.test.ts tests\spx-worker-agent-output.test.ts tests\spx-worker-data-budget.test.ts`.
 - Production migration or Worker deploy requires explicit user authorization. Apply remote D1 migrations 0007 and 0008 before deploying code that depends on the new tables.
+
+## Agent skills
+
+### Issue tracker
+
+Specs and tickets for this repository are GitHub issues. Use `gh` from this clone; see `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+This is a single-context repository. Read `CONTEXT.md` and the relevant `docs/adr/` decisions before using domain terms; see `docs/agents/domain.md`.

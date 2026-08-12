@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildMarketCacheKey,
+  MAX_CACHE_PRUNE_READ_ROWS,
+  MAX_CACHE_PRUNE_ROWS,
   resolveMarketCache,
 } from "../src/lib/market-data-cache";
 import type { D1DatabaseLike } from "../src/lib/spx-recap-d1";
@@ -18,6 +20,25 @@ type Row = {
 class MemoryD1 implements D1DatabaseLike {
   private readonly rows = new Map<string, Row>();
   private hangInsert = false;
+  lastPrunedRows = 0;
+  lastPrunedRowsRead = 0;
+  omitPruneMetadata = false;
+  pruneRowsReadOverride: number | null = null;
+  lastPruneQuery = "";
+
+  seedExpiredRows(count: number, expiresAt: string) {
+    for (let index = 0; index < count; index += 1) {
+      const cacheKey = `expired:${index}`;
+      this.rows.set(cacheKey, {
+        cache_key: cacheKey,
+        payload_json: JSON.stringify({ expired: index }),
+        source_as_of: null,
+        cached_at: "2026-07-01T00:00:00.000Z",
+        expires_at: expiresAt,
+        last_refresh_error: null,
+      });
+    }
+  }
 
   setHangInsert(value: boolean) {
     this.hangInsert = value;
@@ -49,19 +70,31 @@ class MemoryD1 implements D1DatabaseLike {
             expires_at: String(expiresAt),
             last_refresh_error: null,
           });
+          return { meta: { changes: 1, rows_read: 1, rows_written: 1 } };
         }
         if (query.includes("UPDATE market_cache_entries")) {
           const [error, , cacheKey] = values;
           const row = this.rows.get(String(cacheKey));
           if (row) row.last_refresh_error = String(error);
+          return { meta: { changes: row ? 1 : 0 } };
         }
-        if (query.includes("DELETE FROM market_cache_entries WHERE cached_at")) {
+        if (query.includes("DELETE FROM market_cache_entries") && query.includes("LIMIT ?")) {
+          this.lastPruneQuery = query;
           const cutoff = Date.parse(String(values[0]));
-          for (const [key, row] of this.rows) {
-            if (Date.parse(row.cached_at) < cutoff) this.rows.delete(key);
-          }
+          const limit = Number(values[1]);
+          const candidates = [...this.rows.values()]
+            .filter((row) => Date.parse(row.expires_at) < cutoff)
+            .sort((left, right) => left.expires_at.localeCompare(right.expires_at) || left.cache_key.localeCompare(right.cache_key))
+            .slice(0, limit);
+          for (const row of candidates) this.rows.delete(row.cache_key);
+          this.lastPrunedRows = candidates.length;
+          this.lastPrunedRowsRead = candidates.length;
+          const rowsRead = this.pruneRowsReadOverride ?? candidates.length;
+          return this.omitPruneMetadata
+            ? {}
+            : { meta: { changes: candidates.length, rows_read: rowsRead, rows_written: candidates.length } };
         }
-        return {};
+        return { meta: { changes: 0 } };
       },
     };
     return statement;
@@ -242,6 +275,55 @@ test("aborting the refresh leader does not cancel a coalesced follower", async (
   assert.equal(followerResult.value.price, 123);
   assert.equal(followerResult.cache.status, "refreshed");
   assert.equal(calls, 1);
+});
+
+test("cache prune is indexed, bounded, and reports actual deleted rows", async () => {
+  const db = new MemoryD1();
+  db.seedExpiredRows(MAX_CACHE_PRUNE_ROWS + 17, "2026-07-01T00:00:00.000Z");
+  const resolved = await resolveMarketCache({
+    db,
+    scope: "bounded-prune",
+    symbol: "AAPL",
+    now: () => new Date("2026-07-14T12:00:00.000Z"),
+    load: async () => ({ price: 1 }),
+  });
+
+  assert.equal(db.lastPrunedRows, MAX_CACHE_PRUNE_ROWS);
+  assert.equal(db.lastPrunedRowsRead, MAX_CACHE_PRUNE_ROWS);
+  assert.match(db.lastPruneQuery, /WHERE cache_key IN\s*\(\s*SELECT cache_key/);
+  assert.match(db.lastPruneQuery, /ORDER BY expires_at ASC, cache_key ASC\s+LIMIT \?/);
+  assert.equal(resolved.cache.rowsRead, 1 + 1 + MAX_CACHE_PRUNE_ROWS);
+  assert.equal(resolved.cache.rowsWritten, 1 + MAX_CACHE_PRUNE_ROWS);
+});
+
+test("cache preserves actual prune rows_read above the bounded delete count", async () => {
+  const db = new MemoryD1();
+  db.pruneRowsReadOverride = MAX_CACHE_PRUNE_READ_ROWS + 17;
+  const resolved = await resolveMarketCache({
+    db,
+    scope: "prune-read-metadata",
+    symbol: "AAPL",
+    now: () => new Date("2026-07-14T12:00:00.000Z"),
+    load: async () => ({ price: 1 }),
+  });
+
+  assert.equal(resolved.cache.rowsRead, 1 + 1 + MAX_CACHE_PRUNE_READ_ROWS + 17);
+});
+
+test("cache prune metadata absence reports the bounded worst-case read/write", async () => {
+  const db = new MemoryD1();
+  db.omitPruneMetadata = true;
+  db.seedExpiredRows(MAX_CACHE_PRUNE_ROWS + 3, "2026-07-01T00:00:00.000Z");
+  const resolved = await resolveMarketCache({
+    db,
+    scope: "bounded-prune-fallback",
+    symbol: "AAPL",
+    now: () => new Date("2026-07-14T12:00:00.000Z"),
+    load: async () => ({ price: 1 }),
+  });
+
+  assert.equal(resolved.cache.rowsRead, 1 + 1 + MAX_CACHE_PRUNE_READ_ROWS);
+  assert.equal(resolved.cache.rowsWritten, 1 + MAX_CACHE_PRUNE_ROWS);
 });
 
 test("stale fallback failure emits terminal phase diagnostics", async () => {

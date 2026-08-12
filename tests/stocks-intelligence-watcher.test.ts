@@ -3,7 +3,6 @@ import test from "node:test";
 import {
   STOCKS_WATCHER_CACHE_TTL_MS,
   applyStocksWatcherSymbolRemoval,
-  buildDemoStocksWatcherSnapshot,
   buildStocksWatcherSnapshotFromNative,
   getFreshStocksWatcherCacheEntry,
   getGammaFlipLevel,
@@ -14,6 +13,7 @@ import {
   mergeStocksWatcherRowQuoteMap,
   refreshStocksWatcherSymbolsBatch,
   resolveStocksWatcherSearchSymbol,
+  type StocksWatcherSnapshot,
   type StocksWatcherToolClient,
 } from "../src/lib/stocks-intelligence-watcher";
 import { STOCKS_WATCHER_SYMBOLS, STOCKS_WATCHER_UNIVERSE } from "../src/lib/stocks-watcher-universe";
@@ -41,7 +41,19 @@ import {
   getStocksWatcherTopTabToolPlan,
   normalizeWatcherExpiryForYahoo,
 } from "../src/lib/stocks-intelligence-watcher-session";
-import { onRequest as stocksWatcherApi } from "../functions/api/stocks-intelligence-watcher";
+import {
+  classifyStocksWatcherDataset,
+  onRequest as stocksWatcherApi,
+} from "../functions/api/stocks-intelligence-watcher";
+import {
+  checkMarketCacheD1Quota,
+  evaluateMarketCacheD1Quota,
+  getMarketCacheD1QuotaObservation,
+  getMarketCacheDatasetTtlMs,
+  getMarketCacheFreshnessGuard,
+  isMarketCacheWithin70PercentGuard,
+  resolveMarketCache,
+} from "../src/lib/market-data-cache";
 
 class FakeStocksNativeClient implements StocksWatcherToolClient {
   async listTools() {
@@ -195,21 +207,105 @@ class FakeStocksNativeClient implements StocksWatcherToolClient {
   }
 }
 
-test("demo snapshot is deterministic enough for the watcher shell", () => {
-  const snapshot = buildDemoStocksWatcherSnapshot("NVDA", "fallback");
+// Deterministic test data belongs to the test suite; production code must not
+// export or serve a demo snapshot when Yahoo is unavailable.
+const buildTestSnapshot = (symbol: string, warning = "fixture"): StocksWatcherSnapshot => {
+  const upperSymbol = normalizeStocksWatcherSymbol(symbol);
+  const spot = upperSymbol === "SOFI" ? 12.34 : upperSymbol === "TSLA" ? 406.55 : 181.8;
+  const change = upperSymbol === "SOFI" ? 0.56 : upperSymbol === "TSLA" ? 12.49 : 2.14;
+  const strikes = Array.from({ length: 6 }, (_, index) => {
+    const strike = spot + (index - 3) * (spot > 200 ? 5 : 1);
+    const callOpenInterest = 2_000 + index * 300;
+    const putOpenInterest = 1_400 + (5 - index) * 260;
+    const callGex = 100_000 + index * 25_000;
+    const putGex = -80_000 + index * 12_000;
+    return {
+      strike,
+      callOpenInterest,
+      putOpenInterest,
+      callVolume: 300 + index * 40,
+      putVolume: 260 + (5 - index) * 30,
+      callGex,
+      putGex,
+      netGex: callGex + putGex,
+    };
+  });
+  const expiryRows = [
+    { expiry: "2026-05-29", openInterest: 426_000, primaryStrike: Math.round(spot), strike: Math.round(spot), volume: 98_400, dominantType: "C" as const, type: "C" as const },
+    { expiry: "2026-06-01", openInterest: 56_000, primaryStrike: Math.round(spot) - 5, strike: Math.round(spot) - 5, volume: 17_500, dominantType: "P" as const, type: "P" as const },
+  ];
+  return {
+    generatedAt: "2026-05-28T20:00:00.000Z",
+    symbol: upperSymbol,
+    quote: {
+      symbol: upperSymbol,
+      companyName: upperSymbol === "SOFI" ? "SoFi Technologies Inc." : upperSymbol === "TSLA" ? "Tesla, Inc." : "NVIDIA Corporation",
+      price: spot,
+      open: spot - change * 0.5,
+      high: spot * 1.01,
+      low: spot * 0.99,
+      previousClose: spot - change,
+      change,
+      changePercent: Number(((change / spot) * 100).toFixed(2)),
+      marketState: "REGULAR",
+      asOf: "2026-05-28T20:00:00.000Z",
+    },
+    spot,
+    atm: Math.round(spot),
+    selectedTimeLabel: "live",
+    gexRegime: "Pinning",
+    putCallOpenInterest: 0.8,
+    putCallVolume: 0.7,
+    sweeps: 1,
+    availableExpiries: expiryRows.map((row) => row.expiry),
+    selectedExpiry: expiryRows[0].expiry,
+    expiryRows,
+    expiries: expiryRows,
+    strikes,
+    history: [
+      { date: "2026-05-28T13:30:00.000Z", label: "13:30", price: spot - 1 },
+      { date: "2026-05-28T14:00:00.000Z", label: "14:00", price: spot - 0.5 },
+      { date: "2026-05-28T14:30:00.000Z", label: "14:30", price: spot },
+      { date: "2026-05-28T15:00:00.000Z", label: "15:00", price: spot + 0.1 },
+    ],
+    recentNews: [],
+    earnings: {
+      source: "fixture",
+      nextEarningsDate: null,
+      nextEpsEstimate: null,
+      nextRevenueEstimate: null,
+      lastEarningsDate: null,
+      lastReportedQuarter: null,
+      epsActual: null,
+      epsEstimate: null,
+      epsDifference: null,
+      surprisePercent: null,
+      result: null,
+      priceMove: null,
+    },
+    marketContext: { breadth: "fixture breadth", relativeStrength: "fixture strength" },
+    availableTools: [],
+    toolRuns: [{ name: "fixture", status: "ok", detail: warning }],
+    warnings: [warning],
+    source: "native_yahoo",
+  };
+};
+
+test("test-local fixture is deterministic enough for the watcher shell", () => {
+  const snapshot = buildTestSnapshot("NVDA", "fixture");
 
   assert.equal(snapshot.symbol, "NVDA");
-  assert.equal(snapshot.source, "demo_fallback");
+  assert.equal(snapshot.source, "native_yahoo");
   assert.ok(snapshot.availableExpiries.length > 0);
   assert.equal(snapshot.selectedExpiry, snapshot.availableExpiries[0]);
   assert.equal(snapshot.expiryRows.length, snapshot.availableExpiries.length);
-  assert.ok(snapshot.expiries.length >= 12);
-  assert.ok(snapshot.strikes.length >= 20);
-  assert.ok(snapshot.warnings.includes("fallback"));
+  assert.equal(snapshot.expiries.length, 2);
+  assert.equal(snapshot.strikes.length, 6);
+  assert.ok(snapshot.warnings.includes("fixture"));
 });
 
 test("nearest spot strike chooses one strike when several are close to spot", () => {
-  const snapshot = buildDemoStocksWatcherSnapshot("NVDA", "fallback");
+  const snapshot = buildTestSnapshot("NVDA", "fixture");
   const nearest = getNearestSpotStrike(
     [
       { ...snapshot.strikes[0], strike: 180 },
@@ -223,7 +319,7 @@ test("nearest spot strike chooses one strike when several are close to spot", ()
 });
 
 test("gamma flip uses nearest net-GEX sign crossing, not the smallest absolute bar", () => {
-  const base = buildDemoStocksWatcherSnapshot("GOOG", "fallback").strikes[0];
+  const base = buildTestSnapshot("GOOG", "fixture").strikes[0];
   const rows = [
     { ...base, strike: 220, netGex: 1 },
     { ...base, strike: 360, netGex: -2_000_000 },
@@ -236,7 +332,7 @@ test("gamma flip uses nearest net-GEX sign crossing, not the smallest absolute b
 });
 
 test("gamma flip is unavailable when visible net GEX never changes sign", () => {
-  const base = buildDemoStocksWatcherSnapshot("GOOG", "fallback").strikes[0];
+  const base = buildTestSnapshot("GOOG", "fixture").strikes[0];
   const rows = [
     { ...base, strike: 350, netGex: 100_000 },
     { ...base, strike: 360, netGex: 200_000 },
@@ -247,7 +343,7 @@ test("gamma flip is unavailable when visible net GEX never changes sign", () => 
 });
 
 test("AI summary payload compacts watcher data and changes cache key by expiry", () => {
-  const snapshot = buildDemoStocksWatcherSnapshot("NVDA", "fallback");
+  const snapshot = buildTestSnapshot("NVDA", "fixture");
   const payload = buildStocksWatcherAiSummaryPayload(snapshot, {
     selectedExpiry: snapshot.availableExpiries[0],
     marketBreadth: "Controlled breadth context for unit tests.",
@@ -265,7 +361,7 @@ test("AI summary payload compacts watcher data and changes cache key by expiry",
 });
 
 test("AI summary is deterministic and does not depend on model output", () => {
-  const snapshot = buildDemoStocksWatcherSnapshot("TSLA", "fallback");
+  const snapshot = buildTestSnapshot("TSLA", "fixture");
   const payload = buildStocksWatcherAiSummaryPayload(snapshot);
   const summary = buildStocksWatcherDeterministicSummary(payload);
 
@@ -340,7 +436,7 @@ test("watcher session plans native tool calls and cache keys without UI state", 
 });
 
 test("watcher session resolves snapshot cache and custom stock decisions", () => {
-  const snapshot = buildDemoStocksWatcherSnapshot("SOFI", "fallback");
+  const snapshot = buildTestSnapshot("SOFI", "fixture");
   const cached = { snapshot, fetchedAt: 12345 };
 
   assert.equal(getStocksWatcherSnapshotExpiry(snapshot), snapshot.selectedExpiry);
@@ -579,10 +675,10 @@ test("all-stocks source can render a dynamic universe without stale default-symb
 });
 
 test("snapshot cache returns only fresh entries", () => {
-  const snapshot = buildDemoStocksWatcherSnapshot("NVDA", "fallback");
+  const snapshot = buildTestSnapshot("NVDA", "fixture");
   const cache = new Map([
     ["NVDA", { snapshot, fetchedAt: 1_000 }],
-    ["IREN", { snapshot: buildDemoStocksWatcherSnapshot("IREN", "fallback"), fetchedAt: 1_000 }],
+    ["IREN", { snapshot: buildTestSnapshot("IREN", "fixture"), fetchedAt: 1_000 }],
   ]);
 
   assert.equal(getFreshStocksWatcherCacheEntry(cache, "nvda", 1_000 + STOCKS_WATCHER_CACHE_TTL_MS - 1)?.snapshot.symbol, "NVDA");
@@ -806,28 +902,184 @@ test("native snapshot records a failed optional tool without blocking core ticke
   assert.ok(snapshot.toolRuns.some((run) => run.name === "basket_relative_strength" && run.status === "failed"));
 });
 
-test("POST endpoint keeps the native tool-call contract", async () => {
+test("native snapshot fails closed when the core quote has no finite positive price", async () => {
+  const client = new FakeStocksNativeClient();
+  const originalCallTool = client.callTool.bind(client);
+  client.callTool = async (name, args) => {
+    if (name === "get_quotes") {
+      return { text: "| Ticker | Last |\n| NVDA | n/a |", raw: { quotes: [{ symbol: "NVDA", price: 0 }] } };
+    }
+    return originalCallTool(name, args);
+  };
+
+  await assert.rejects(
+    buildStocksWatcherSnapshotFromNative("NVDA", client),
+    /finite positive price/,
+  );
+});
+
+test("native snapshot leaves history and expiry rows empty when optional data is unavailable", async () => {
+  const client = new FakeStocksNativeClient();
+  const originalCallToolText = client.callToolText.bind(client);
+  client.callToolText = async (name, args) => {
+    if (name === "get_options" || name === "get_intraday" || name === "get_stock_history") return "";
+    return originalCallToolText(name, args);
+  };
+  const originalCallTool = client.callTool.bind(client);
+  client.callTool = async (name, args) => {
+    if (name === "get_options" || name === "get_intraday" || name === "get_stock_history") {
+      return { text: "", raw: {} };
+    }
+    return originalCallTool(name, args);
+  };
+
+  const snapshot = await buildStocksWatcherSnapshotFromNative("NVDA", client);
+  assert.deepEqual(snapshot.availableExpiries, []);
+  assert.deepEqual(snapshot.expiryRows, []);
+  assert.deepEqual(snapshot.history, []);
+  assert.equal(snapshot.selectedExpiry, null);
+  assert.ok(snapshot.warnings.includes("Options expiry data unavailable."));
+  assert.ok(snapshot.warnings.includes("Price history unavailable."));
+  assert.ok(snapshot.strikes.length > 0); // completeRows synthetic GEX path remains independent.
+});
+
+test("POST Watchlist fails closed without the D1 curated-universe binding", async () => {
   const response = await stocksWatcherApi({
     request: new Request("https://example.com/api/stocks-intelligence-watcher", {
       method: "POST",
       body: JSON.stringify({ tool: "get_watchlist", params: {} }),
     }),
   });
-  const payload = await response.json() as {
-    ok: boolean;
-    tool: string;
-    text: string;
-    raw: { symbols: string[]; stocks?: unknown };
-    cache: { status: string };
-  };
+  const payload = await response.json() as { ok: boolean; error: string; observability: { requestId: string; dataset: string; rowsRead: number; rowsWritten: number; source: string } };
 
-  assert.equal(response.status, 200);
-  assert.equal(payload.ok, true);
-  assert.equal(payload.cache.status, "bypassed");
-  assert.equal(payload.tool, "get_watchlist");
-  assert.deepEqual(payload.raw.symbols.slice(0, 6), ["NVDA", "GOOG", "GOOGL", "AAPL", "MSFT", "AMZN"]);
-  assert.equal(payload.raw.symbols.length, 51);
-  assert.equal(payload.raw.symbols.includes("SPX"), true);
-  assert.equal(Array.isArray((payload.raw as { stocks?: unknown }).stocks), true);
-  assert.match(payload.text, /NVDA/);
+  assert.equal(response.status, 503);
+  assert.equal(payload.ok, false);
+  assert.match(payload.error, /MARKET_CACHE_DB is not bound/);
+  assert.equal(payload.observability.requestId, response.headers.get("X-Request-ID"));
+  assert.equal(payload.observability.dataset, "quote");
+  assert.equal(payload.observability.rowsRead, 0);
+  assert.equal(payload.observability.rowsWritten, 0);
+  assert.equal(payload.observability.source, "d1_tracking");
+  assert.equal(response.headers.get("X-Market-Dataset"), "quote");
+  assert.equal(response.headers.get("X-Market-Cache-TTL-Ms"), "60000");
+});
+
+test("market cache dataset TTLs and 70 percent guard are explicit", async () => {
+  assert.equal(getMarketCacheDatasetTtlMs("quote"), 60_000);
+  assert.equal(getMarketCacheDatasetTtlMs("options"), 15 * 60_000);
+  assert.equal(getMarketCacheDatasetTtlMs("history"), 15 * 60_000);
+  assert.equal(getMarketCacheDatasetTtlMs("intraday"), 15 * 60_000);
+  assert.equal(getMarketCacheDatasetTtlMs("news"), 15 * 60_000);
+  assert.equal(getMarketCacheDatasetTtlMs("fundamentals"), 24 * 60 * 60_000);
+  assert.equal(getMarketCacheDatasetTtlMs("earnings"), 24 * 60 * 60_000);
+  assert.equal(getMarketCacheDatasetTtlMs("snapshot"), 60_000);
+
+  const toolDatasetCases: Array<[string, string]> = [
+    ["get_quotes", "quote"],
+    ["get_options", "options"],
+    ["get_options_gex", "options"],
+    ["get_options_greeks", "options"],
+    ["get_options_iv_intraday", "options"],
+    ["get_options_pcr", "options"],
+    ["get_options_dex", "options"],
+    ["get_options_sweeps", "options"],
+    ["get_options_0dte", "options"],
+    ["pre_event_brief", "news"],
+    ["get_stock_stats", "fundamentals"],
+    ["get_beta", "fundamentals"],
+    ["get_holders", "fundamentals"],
+    ["earnings_vol_crush", "earnings"],
+    ["get_stock_history", "history"],
+    ["get_intraday", "intraday"],
+  ];
+  for (const [tool, dataset] of toolDatasetCases) assert.equal(classifyStocksWatcherDataset(tool), dataset, tool);
+
+  const cachedAt = "2026-05-28T00:00:00.000Z";
+  const expiresAt = "2026-05-28T00:10:00.000Z";
+  assert.equal(getMarketCacheFreshnessGuard(cachedAt, expiresAt, new Date("2026-05-28T00:06:00.000Z")), "fresh");
+  assert.equal(getMarketCacheFreshnessGuard(cachedAt, expiresAt, new Date("2026-05-28T00:08:00.000Z")), "near_expiry");
+  assert.equal(isMarketCacheWithin70PercentGuard(cachedAt, expiresAt, new Date("2026-05-28T00:06:00.000Z")), true);
+  assert.equal(isMarketCacheWithin70PercentGuard(cachedAt, expiresAt, new Date("2026-05-28T00:08:00.000Z")), false);
+
+  const bypassed = await resolveMarketCache({
+    scope: "ttl-test",
+    symbol: "NVDA",
+    dataset: "options",
+    load: async () => ({ ok: true }),
+  });
+  assert.equal(bypassed.cache.ttlMs, 15 * 60_000);
+  assert.equal(bypassed.cache.dataset, "options");
+  assert.equal(bypassed.cache.observability.rowRead, "bypassed");
+});
+
+test("D1 quota guard blocks at the 70 percent hard threshold and reports headroom", () => {
+  const readThreshold = 3_500_000;
+  const writeThreshold = 70_000;
+  const readBlocked = evaluateMarketCacheD1Quota({
+    currentUtcDay: "2026-08-10",
+    usage: { dayUtc: "2026-08-10", rowsRead: readThreshold - 1, rowsWritten: 0 },
+    rowsRead: 1,
+    rowsWritten: 0,
+  });
+  assert.equal(readBlocked.allow, false);
+  assert.equal(readBlocked.reason, "read_threshold_exceeded");
+  assert.deepEqual(readBlocked.blockedDimensions, ["read"]);
+  assert.equal(readBlocked.readHeadroom, 0);
+  assert.equal(readBlocked.readRemaining, 1_500_000);
+
+  const writeBlocked = checkMarketCacheD1Quota({
+    currentDayUtc: "2026-08-10",
+    aggregatedUsage: { dayUtc: "2026-08-10", rowsRead: 0, rowsWritten: writeThreshold - 1 },
+    observedRowsRead: 0,
+    observedRowsWritten: 1,
+  });
+  assert.equal(writeBlocked.allow, false);
+  assert.equal(writeBlocked.reason, "write_threshold_exceeded");
+  assert.deepEqual(writeBlocked.blockedDimensions, ["write"]);
+  assert.equal(writeBlocked.writeHeadroom, 0);
+});
+
+test("D1 quota guard resets aggregate usage at a new UTC day", () => {
+  const decision = evaluateMarketCacheD1Quota({
+    currentUtcDay: "2026-08-11",
+    usage: { dayUtc: "2026-08-10", rowsRead: 5_000_000, rowsWritten: 100_000 },
+    rowsRead: 1,
+    rowsWritten: 1,
+  });
+  assert.equal(decision.allow, true);
+  assert.equal(decision.reason, "utc_day_reset");
+  assert.equal(decision.dayReset, true);
+  assert.equal(decision.projectedRowsRead, 1);
+  assert.equal(decision.projectedRowsWritten, 1);
+});
+
+test("D1 quota guard fails closed when either observed dimension is exhausted", async () => {
+  const decision = evaluateMarketCacheD1Quota({
+    currentUtcDay: "2026-08-10",
+    usage: { dayUtc: "2026-08-10", rowsRead: 0, rowsWritten: 70_000 },
+    rowsRead: 0,
+    rowsWritten: 0,
+  });
+  assert.equal(decision.allow, false);
+  assert.equal(decision.reason, "write_threshold_exceeded");
+  assert.equal(decision.remaining.rowsWritten, 30_000);
+
+  await assert.rejects(
+    resolveMarketCache({
+      scope: "quota-blocked",
+      symbol: "NVDA",
+      quotaGuard: () => decision,
+      load: async () => ({ ok: true }),
+    }),
+    (error) => error instanceof Error && error.name === "MarketCacheQuotaExceededError",
+  );
+});
+
+test("cache row observability can feed the quota guard without exposing payloads", async () => {
+  const resolved = await resolveMarketCache({
+    scope: "quota-observation",
+    symbol: "NVDA",
+    load: async () => ({ ok: true }),
+  });
+  assert.deepEqual(getMarketCacheD1QuotaObservation(resolved.cache), { rowsRead: 0, rowsWritten: 0 });
 });

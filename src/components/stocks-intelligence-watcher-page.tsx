@@ -57,11 +57,7 @@ import {
   getStocksWatcherTopTabToolPlan,
 } from "@/lib/stocks-intelligence-watcher-session";
 import {
-  STOCKS_WATCHER_SYMBOLS,
-  STOCKS_WATCHER_UNIVERSE,
-  getStocksWatcherUniverseSectors,
   getStocksWatcherUniverseStock,
-  getStocksWatcherUniverseTypes,
 } from "@/lib/stocks-watcher-universe";
 import type { StocksWatcherUniverseStock } from "@/lib/stocks-watcher-universe";
 import { getStocksWatcherInitialSymbolFromHash, STOCKS_WATCHER_DEFAULT_SYMBOL } from "@/lib/stocks-intelligence-watcher-route";
@@ -70,7 +66,6 @@ interface StocksIntelligenceWatcherPageProps {
   onBackToWork: () => void;
 }
 
-const DEFAULT_WATCHLIST = STOCKS_WATCHER_SYMBOLS;
 const HIDDEN_SYMBOLS_STORAGE_KEY = "stocks-intelligence-hidden-symbols";
 const FAVORITES_STORAGE_KEY = "stocks-intelligence-favorites";
 const FAVORITES_MEMORY_KEY = "stocks-intelligence-favorites";
@@ -102,8 +97,8 @@ const OPTIONS_SUB_TABS = [
   "0DTE",
 ] as const;
 
-const BASE_SECTOR_OPTIONS = ["All Sectors", ...getStocksWatcherUniverseSectors()];
-const BASE_TYPE_OPTIONS = ["All Types", ...getStocksWatcherUniverseTypes()];
+const BASE_SECTOR_OPTIONS = ["All Sectors"];
+const BASE_TYPE_OPTIONS = ["All Types"];
 
 const MARKET_INDEX_DEFINITIONS: MarketIndexDefinition[] = [
   { symbol: "SPX", yahooSymbol: "^GSPC", label: "S&P 500" },
@@ -474,9 +469,9 @@ const stockFromRecord = (record: Record<string, unknown>, fallback?: StocksWatch
     companyName: typeof record.companyName === "string" ? record.companyName : fallback?.companyName || `${symbol} custom stock`,
     sector: typeof record.sector === "string" ? record.sector : fallback?.sector || "Custom",
     type: record.type === "ETF" || record.type === "ADR" || record.type === "Stock" ? record.type : fallback?.type || "Stock",
-    fallbackPrice: typeof record.fallbackPrice === "number" ? record.fallbackPrice : fallback?.fallbackPrice || 0,
-    fallbackChange: typeof record.fallbackChange === "number" ? record.fallbackChange : fallback?.fallbackChange || 0,
-    fallbackChangePercent: typeof record.fallbackChangePercent === "number" ? record.fallbackChangePercent : fallback?.fallbackChangePercent || 0,
+    fallbackPrice: typeof record.fallbackPrice === "number" ? record.fallbackPrice : fallback?.fallbackPrice ?? Number.NaN,
+    fallbackChange: typeof record.fallbackChange === "number" ? record.fallbackChange : fallback?.fallbackChange ?? Number.NaN,
+    fallbackChangePercent: typeof record.fallbackChangePercent === "number" ? record.fallbackChangePercent : fallback?.fallbackChangePercent ?? Number.NaN,
   } satisfies StocksWatcherUniverseStock;
 };
 
@@ -503,11 +498,6 @@ const stringifyPayload = (payload: unknown) => {
   }
 };
 
-const parseSymbolsFromText = (text: string) => {
-  const symbols = Array.from(text.toUpperCase().matchAll(/\b[A-Z][A-Z0-9.]{0,5}\b/g)).map((match) => match[0]);
-  return sanitizeSymbols(symbols.filter((symbol) => !["HTTP", "JSON", "NATIVE", "NYSE", "NASDAQ", "THE"].includes(symbol))).slice(0, 50);
-};
-
 const chunkSymbols = (symbols: string[], size: number) => {
   const chunks: string[][] = [];
   for (let index = 0; index < symbols.length; index += size) {
@@ -526,17 +516,14 @@ const parseWatchlistStocks = (result: NativeToolResult): StocksWatcherUniverseSt
       if (!item || typeof item !== "object" || Array.isArray(item)) return null;
       const record = item as Record<string, unknown>;
       const symbol = typeof record.symbol === "string" ? normalizeSymbol(record.symbol) : "";
-      const fallback = getStocksWatcherUniverseStock(symbol);
       if (!symbol) return null;
-      return stockFromRecord(record, fallback);
+      return stockFromRecord(record);
     })
     .filter((stock): stock is StocksWatcherUniverseStock => Boolean(stock));
 
   if (parsedStocks.length > 0) return parsedStocks;
 
-  return parseSymbolsFromText(result.text)
-    .map((symbol) => getStocksWatcherUniverseStock(symbol))
-    .filter((stock): stock is StocksWatcherUniverseStock => Boolean(stock));
+  return [];
 };
 
 const resultLooksHtml = (result: NativeToolResult | undefined) =>
@@ -1495,7 +1482,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     return readStoredSymbols(HIDDEN_SYMBOLS_STORAGE_KEY, []);
   });
   const [watchlistSource, setWatchlistSource] = useState<"all" | "favorites">("all");
-  const [nativeWatchlist, setNativeWatchlist] = useState<StocksWatcherUniverseStock[]>(STOCKS_WATCHER_UNIVERSE);
+  const [nativeWatchlist, setNativeWatchlist] = useState<StocksWatcherUniverseStock[]>([]);
   const [customStocks, setCustomStocks] = useState<StocksWatcherUniverseStock[]>(() => readStoredCustomStocks());
   const [rowQuotesBySymbol, setRowQuotesBySymbol] = useState<Record<string, StocksWatcherRowQuote>>({});
   const [watchlistRefreshing, setWatchlistRefreshing] = useState(false);
@@ -1723,9 +1710,11 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     try {
       const result = await callNativeTool("get_watchlist", {});
       const parsed = parseWatchlistStocks(result);
-      setNativeWatchlist(parsed.length > 0 ? parsed : STOCKS_WATCHER_UNIVERSE);
-    } catch {
-      setNativeWatchlist(STOCKS_WATCHER_UNIVERSE);
+      if (parsed.length === 0) throw new Error("Curated Watchlist returned no active tracked assets.");
+      setNativeWatchlist(parsed);
+    } catch (requestError) {
+      setNativeWatchlist([]);
+      setError(requestError instanceof Error ? requestError.message : String(requestError));
     }
   }, [callNativeTool]);
 
@@ -1904,7 +1893,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     });
     const bySymbol = new Map(allStocks.map((stock) => [stock.symbol, stock]));
     return visibleSymbols
-      .map((symbol) => bySymbol.get(symbol) || getStocksWatcherUniverseStock(symbol))
+      .map((symbol) => bySymbol.get(symbol))
       .filter((stock): stock is StocksWatcherUniverseStock => Boolean(stock));
   }, [allStocks, favorites, hiddenSymbols, query, searchError, sectorFilter, selectedSymbol, typeFilter, watchlistSource]);
 
@@ -1964,14 +1953,14 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         favorites,
         hiddenSymbols,
         selectedSymbol,
-        defaultSymbols: DEFAULT_WATCHLIST,
+        defaultSymbols: nativeWatchlist.map((stock) => stock.symbol),
       },
       symbol,
     );
 
     setFavorites(result.favorites);
     setHiddenSymbols(result.hiddenSymbols);
-    if (!DEFAULT_WATCHLIST.includes(normalizeSymbol(symbol))) {
+    if (!nativeWatchlist.some((stock) => stock.symbol === normalizeSymbol(symbol))) {
       setCustomStocks((current) => current.filter((stock) => stock.symbol !== normalizeSymbol(symbol)));
     }
     void callNativeTool("save_memory", {
@@ -3406,7 +3395,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   };
 
   return (
-    <section className="siw-app h-full min-h-full w-full overflow-hidden text-slate-100" data-stocks-watcher-root>
+    <section className="siw-app min-h-dvh w-full overflow-visible text-slate-100 lg:h-full lg:min-h-full lg:overflow-hidden" data-stocks-watcher-root>
       <div className={`siw-replica-shell ${watchlistCollapsed ? "is-rail-collapsed" : ""}`} data-watcher-replica>
         <aside className="siw-sidebar">
           <div className="siw-sidebar-head">
@@ -3524,21 +3513,22 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                   const yahooRowQuote = rowQuotesBySymbol[symbol] ?? null;
                   const selectedSnapshotQuote = selected && snapshot?.symbol === symbol ? snapshot.quote : null;
                   const rowQuote = yahooRowQuote || selectedSnapshotQuote;
-                  const change = rowQuote?.change ?? stock.fallbackChange;
-                  const rowPositive = change >= 0;
+                  const hasRowQuote = Boolean(rowQuote && Number.isFinite(rowQuote.price) && rowQuote.price > 0);
+                  const change = hasRowQuote ? rowQuote!.change : null;
+                  const rowPositive = change !== null && change >= 0;
                   const isRowLoading = loadingSymbol === symbol || refreshingSymbols.includes(symbol);
                   const isFavorite = favorites.includes(symbol);
-                  const price = rowQuote?.price ?? stock.fallbackPrice;
-                  const pct = rowQuote?.changePercent ?? stock.fallbackChangePercent;
-                  const rowSource = yahooRowQuote ? "yahoo_quote" : selectedSnapshotQuote ? "selected_snapshot" : "fallback";
+                  const price = hasRowQuote ? rowQuote!.price : null;
+                  const pct = hasRowQuote ? rowQuote!.changePercent : null;
+                  const rowSource = yahooRowQuote ? "yahoo_quote" : selectedSnapshotQuote ? "selected_snapshot" : "unavailable";
                   const rowAsOf = yahooRowQuote?.asOf || selectedSnapshotQuote?.asOf || "";
 
                   return (
                     <div
                       key={symbol}
                       data-watchlist-row={symbol}
-                      data-row-price={price.toFixed(2)}
-                      data-row-change={change.toFixed(2)}
+                      data-row-price={price === null ? "" : price.toFixed(2)}
+                      data-row-change={change === null ? "" : change.toFixed(2)}
                       data-row-source={rowSource}
                       data-row-asof={rowAsOf}
                       data-stock-sector={stock.sector}
@@ -3569,12 +3559,12 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                         <span>{stock.companyName}</span>
                       </div>
                       <div className="siw-row-price">
-                        <strong>{currency(price)}</strong>
+                        <strong>{price === null ? "Unavailable" : currency(price)}</strong>
                         <span>USD</span>
                       </div>
-                      <div className={`siw-row-change ${rowPositive ? "siw-up" : "siw-down"}`}>
-                        <strong>{rowPositive ? "+" : ""}{change.toFixed(2)}</strong>
-                        <span>{rowPositive ? "+" : ""}{pct.toFixed(2)}%</span>
+                      <div className={`siw-row-change ${change === null ? "" : rowPositive ? "siw-up" : "siw-down"}`}>
+                        <strong>{change === null ? "--" : `${rowPositive ? "+" : ""}${change.toFixed(2)}`}</strong>
+                        <span>{pct === null ? "--" : `${rowPositive ? "+" : ""}${pct.toFixed(2)}%`}</span>
                       </div>
                       <button
                         type="button"
@@ -4026,8 +4016,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
               const selected = symbol === selectedSymbol;
               const cachedRowQuote = getFreshStocksWatcherCacheEntry(snapshotCacheRef.current, symbol)?.snapshot.quote ?? null;
               const rowQuote = selected && snapshot?.symbol === symbol ? snapshot.quote : cachedRowQuote;
-              const change = rowQuote?.change ?? stock.fallbackChange;
-              const rowPositive = change >= 0;
+              const change = rowQuote?.change ?? null;
+              const rowPositive = change !== null && change >= 0;
               const isRowLoading = loadingSymbol === symbol;
               const isFavorite = favorites.includes(symbol);
 
@@ -4059,10 +4049,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                     className="h-4 w-4 cursor-pointer accent-blue-400"
                   />
                   <span className="min-w-0 truncate font-black text-white">{symbol}{isRowLoading ? " …" : ""}</span>
-                  <span>{rowQuote ? currency(rowQuote.price) : currency(stock.fallbackPrice)}</span>
-                  <span className={rowPositive ? "text-emerald-400" : "text-red-400"}>{rowPositive ? "+" : ""}{change.toFixed(2)}</span>
-                  <span className={rowPositive ? "text-emerald-400" : "text-red-400"}>
-                    {rowPositive ? "+" : ""}{(rowQuote?.changePercent ?? stock.fallbackChangePercent).toFixed(2)}%
+                  <span>{rowQuote ? currency(rowQuote.price) : "Unavailable"}</span>
+                  <span className={change === null ? "" : rowPositive ? "text-emerald-400" : "text-red-400"}>{change === null ? "--" : `${rowPositive ? "+" : ""}${change.toFixed(2)}`}</span>
+                  <span className={change === null ? "" : rowPositive ? "text-emerald-400" : "text-red-400"}>
+                    {rowQuote ? `${rowPositive ? "+" : ""}${rowQuote.changePercent.toFixed(2)}%` : "--"}
                   </span>
                   <button
                     type="button"
