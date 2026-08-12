@@ -55,7 +55,6 @@
 .siw-sidebar-actions,
 .siw-hero,
 .siw-main-tabs,
-.siw-options-kpis,
 .siw-options-subtabs,
 .siw-status-bar,
 .siw-mobile-nav {
@@ -85,7 +84,6 @@
 .siw-market-pill,
 .siw-view-all,
 .siw-add-button,
-.siw-config-button,
 .siw-tool-runs button,
 .siw-tool-catalog button,
 .siw-settings-panel button,
@@ -103,7 +101,6 @@
 .siw-market-pill:hover,
 .siw-view-all:hover,
 .siw-add-button:hover,
-.siw-config-button:hover,
 .siw-tool-catalog button:hover,
 .siw-settings-panel button:hover,
 .siw-mobile-nav button:hover {
@@ -397,6 +394,7 @@
   border-bottom: 1px solid var(--siw-line-soft);
   background: transparent;
   color: var(--siw-text);
+  transition: background 160ms ease, box-shadow 160ms ease, transform 160ms ease;
 }
 
 .siw-watch-row:hover,
@@ -406,6 +404,7 @@
 
 .siw-watch-row.is-selected {
   box-shadow: inset 3px 0 0 var(--siw-blue);
+  transform: translateX(2px);
 }
 
 .siw-watch-row input {
@@ -468,13 +467,12 @@
 
 .siw-up,
 .siw-row-change.siw-up,
-.siw-tone-positive strong {
+.siw-up {
   color: var(--siw-green);
 }
 
 .siw-down,
-.siw-row-change.siw-down,
-.siw-tone-negative strong {
+.siw-row-change.siw-down {
   color: var(--siw-red);
 }
 
@@ -934,6 +932,50 @@
   padding: 12px 18px 20px;
 }
 
+.siw-ticker-transition {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 14px;
+  border: 1px solid rgba(17, 135, 255, 0.38);
+  border-radius: 7px;
+  background: linear-gradient(100deg, rgba(17, 135, 255, 0.14), rgba(4, 12, 20, 0.78));
+  padding: 14px 16px;
+  animation: siw-ticker-enter 170ms ease-out both;
+}
+
+.siw-ticker-transition span,
+.siw-ticker-transition em {
+  display: block;
+}
+
+.siw-ticker-transition span {
+  color: var(--siw-text);
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.siw-ticker-transition em {
+  margin-top: 4px;
+  color: var(--siw-muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.siw-ticker-transition-skeletons {
+  display: grid;
+  gap: 8px;
+}
+
+@keyframes siw-ticker-enter {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .siw-watch-row,
+  .siw-ticker-transition { animation: none; transition: none; }
+}
+
 .siw-panel {
   overflow: hidden;
   border: 1px solid var(--siw-line);
@@ -961,7 +1003,7 @@
 
 .siw-market-overview,
 .siw-sector-panel {
-  min-height: 350px;
+  min-height: 430px;
 }
 
 .siw-news-panel,
@@ -1330,7 +1372,7 @@
 
 .siw-options-stage {
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: minmax(440px, 470px) minmax(0, 1fr);
   gap: 12px;
   min-height: 640px;
   align-items: stretch;
@@ -1353,7 +1395,7 @@
 .siw-expiry-head,
 .siw-expiry-row {
   display: grid;
-  grid-template-columns: 82px 54px 42px 64px 36px;
+  grid-template-columns: 92px 74px 82px 76px 36px;
   gap: 8px;
   align-items: center;
 }
@@ -1370,7 +1412,8 @@
 .siw-expiry-list {
   min-height: 0;
   flex: 1 1 auto;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .siw-expiry-row {
@@ -1417,11 +1460,12 @@
   flex-direction: column;
 }
 
-.siw-options-kpis {
-  flex-wrap: wrap;
-  gap: 10px;
-  padding: 12px;
+.siw-options-subtabs {
+  height: 48px;
+  gap: 6px;
+  overflow-x: auto;
   border-bottom: 1px solid var(--siw-line-soft);
+  padding: 0 12px;
 }
 
 .siw-metric-tile {
@@ -1450,52 +1494,8 @@
 
 .siw-tone-blue strong { color: var(--siw-blue-2); }
 .siw-tone-yellow strong { color: var(--siw-yellow); }
-
-.siw-strike-zoom {
-  display: flex;
-  min-width: 320px;
-  flex: 1;
-  align-items: center;
-  gap: 10px;
-  color: var(--siw-muted);
-  font-size: 12px;
-  font-weight: 900;
-  text-transform: uppercase;
-}
-
-.siw-strike-zoom button,
-.siw-strike-zoom b {
-  display: inline-flex;
-  height: 32px;
-  min-width: 34px;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--siw-line);
-  border-radius: 5px;
-  background: rgba(4, 12, 20, 0.9);
-  color: var(--siw-text);
-}
-
-.siw-strike-zoom input {
-  min-width: 120px;
-  flex: 1;
-  accent-color: var(--siw-blue);
-}
-
-.siw-config-button {
-  padding: 0 12px;
-  font-size: 12px;
-  font-weight: 900;
-  text-transform: uppercase;
-}
-
-.siw-options-subtabs {
-  height: 48px;
-  gap: 6px;
-  overflow-x: auto;
-  border-bottom: 1px solid var(--siw-line-soft);
-  padding: 0 12px;
-}
+.siw-tone-positive strong { color: var(--siw-green); }
+.siw-tone-negative strong { color: var(--siw-red); }
 
 .siw-options-subtabs button {
   height: 48px;
@@ -2110,25 +2110,18 @@
     margin-left: 0;
   }
 
-  .siw-options-stage,
   .siw-audit-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 1100px) {
+  .siw-options-stage {
     grid-template-columns: 1fr;
   }
 
   .siw-expiry-rail {
-    display: grid;
-    grid-template-columns: 1fr auto;
-  }
-
-  .siw-expiry-list {
-    display: flex;
-    grid-column: 1 / -1;
-    max-height: none;
-    overflow-x: auto;
-  }
-
-  .siw-expiry-row {
-    min-width: 210px;
+    max-height: 420px;
   }
 }
 
@@ -2307,11 +2300,6 @@
     grid-template-columns: 1fr;
   }
 
-  .siw-options-kpis {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-  }
-
   .siw-expiry-head {
     display: none;
   }
@@ -2346,10 +2334,6 @@
     display: none;
   }
 
-  .siw-strike-zoom {
-    grid-column: 1 / -1;
-    min-width: 0;
-  }
 
   .siw-options-content [data-options-chart-viewport] {
     min-height: 340px;

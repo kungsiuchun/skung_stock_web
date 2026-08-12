@@ -124,7 +124,7 @@ const buildSnapshot = (symbol, overrides = {}) => {
     sweeps: 0,
     availableExpiries: expiries,
     selectedExpiry: expiries[0],
-    expiryRows: expiries.map((expiry, index) => ({
+    expiryRows: expiries.slice(0, 1).map((expiry, index) => ({
       expiry,
       openInterest: index === 0 ? 331_000 : 7_400,
       primaryStrike: index === 0 ? 200 : 235,
@@ -133,7 +133,7 @@ const buildSnapshot = (symbol, overrides = {}) => {
       dominantType: "C",
       type: "C",
     })),
-    expiries: expiries.map((expiry, index) => ({
+    expiries: expiries.slice(0, 1).map((expiry, index) => ({
       expiry,
       openInterest: index === 0 ? 331_000 : 7_400,
       primaryStrike: index === 0 ? 200 : 235,
@@ -255,6 +255,7 @@ const historyRows = () => Array.from({ length: 90 }, (_, index) => ({
 }));
 
 let refreshAllMode = false;
+let delayedSnapshotSymbol = null;
 
 const buildToolResponse = (tool, params = {}) => {
   if (tool === "get_watchlist") {
@@ -332,15 +333,35 @@ const buildToolResponse = (tool, params = {}) => {
 
   const rows = optionRows();
   if (tool === "get_options") {
+    const zeroOi = params.ticker === "TSLA";
     const chain = {
       symbol: params.ticker || "NVDA",
       spot: 204.12,
       expiries,
       selectedExpiry: params.expiry || expiries[0],
-      calls: rows.map((row) => row.call),
-      puts: rows.map((row) => row.put),
+      calls: rows.map((row) => ({ ...row.call, openInterest: zeroOi ? 0 : row.call.openInterest })),
+      puts: rows.map((row) => ({ ...row.put, openInterest: zeroOi ? 0 : row.put.openInterest })),
     };
     return { ok: true, tool, params, text: "options chain", raw: { chain }, calledAt: "2026-07-08T21:33:04.000Z" };
+  }
+
+  if (tool === "get_stock_stats") {
+    return {
+      ok: true,
+      tool,
+      params,
+      text: "native Yahoo stats",
+      raw: {
+        quote: { exchange: "NMS", marketState: "REGULAR" },
+        summary: {
+          assetProfile: { sector: "Technology", industry: "Semiconductors" },
+          defaultKeyStatistics: { forwardPE: { raw: 18.5 }, enterpriseValue: { raw: 4500000000000 }, beta: { raw: 2.2 } },
+          summaryDetail: { marketCap: { raw: 4400000000000 }, dividendYield: { raw: 0.001 } },
+          financialData: { targetMeanPrice: { raw: 300 }, operatingCashflow: { raw: 125000000000 }, freeCashflow: { raw: 46000000000 } },
+        },
+      },
+      calledAt: "2026-07-08T21:33:05.000Z",
+    };
   }
 
   if (/options|greeks|dex|iv|pcr|sweeps|mispricing/i.test(tool)) {
@@ -393,7 +414,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     });
     page.on("pageerror", (error) => consoleErrors.push(error.message));
     await page.setRequestInterception(true);
-    page.on("request", (request) => {
+    page.on("request", async (request) => {
       const url = new URL(request.url());
       if (!url.pathname.includes("/api/stocks-intelligence-watcher")) {
         request.continue();
@@ -416,7 +437,10 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       const refreshedRowOverrides = refreshAllMode && ["GOOG", "AAPL", "MSFT"].includes(symbol)
         ? { priceOffset: 7.77, changeOffset: 7.77, changePercentOffset: 1.11 }
         : {};
-      request.respond({
+      if (symbol === delayedSnapshotSymbol) {
+        await wait(220);
+      }
+      await request.respond({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify(buildSnapshot(symbol, refreshedRowOverrides)),
@@ -805,6 +829,9 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await clickText(page, "Stats");
     await wait(700);
     assert.match(await visibleText(page), /Native Yahoo Stats/i);
+    assert.match(await visibleText(page), /NMS/);
+    assert.match(await visibleText(page), /Semiconductors/);
+    assert.doesNotMatch(await page.$eval("[data-primary-tab-panel='Stats']", (node) => node.textContent || ""), /Needs checking/i, "Stats must render Yahoo values or n\/a, never a placeholder");
     await page.screenshot({ path: path.join(screenshotsDir, "04-stats-fundamentals-earnings-desktop.png") });
 
     await clickText(page, "Options");
@@ -827,16 +854,15 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     });
     assert.ok(watcherLayout.actions.bottom <= watcherLayout.sidebar.bottom + 1, `add-ticker and settings actions must stay fully inside the sidebar; got ${JSON.stringify(watcherLayout)}`);
     assert.ok(watcherLayout.list.height >= watcherLayout.rail.height - watcherLayout.head.height - watcherLayout.viewAll.height - 28, `expiry list must use the available rail height; got ${JSON.stringify(watcherLayout)}`);
+    assert.equal(await page.$eval(".siw-expiry-list", (node) => node.scrollWidth <= node.clientWidth), true, "desktop expiry rail must not show a horizontal scrollbar");
+    assert.equal(await page.$("[data-options-summary]") === null, true, "obsolete options KPI strip must be removed");
+    assert.match(await page.$eval("[data-expiry-row='2026-07-10']", (node) => node.textContent || ""), /Load\s*on select/, "unloaded expiries must not receive fabricated OI, volume, or strike values");
     const aiSummaryText = await page.$eval("[data-ai-summary-panel]", (node) => node.textContent || "");
     assert.doesNotMatch(aiSummaryText, /\|\s*[-:]+\s*\|/, "AI summary must not expose Markdown table structure");
     await clickText(page, "GEX", true);
     await wait(500);
     assert.equal(await page.$$eval("[data-watcher-replica] [data-chart-bar]", (items) => items.length > 5), true);
     await page.screenshot({ path: path.join(screenshotsDir, "02-options-overview-gex-desktop.png") });
-    await page.focus("[data-watcher-replica] input[aria-label='Strike zoom']");
-    await page.keyboard.press("Home");
-    await wait(250);
-    assert.equal(await page.$$eval("[data-watcher-replica] [data-chart-bar]", (items) => items.length), 9);
     await page.hover("[data-watcher-replica] [data-chart-bar]");
     await wait(150);
     assert.match(await visibleText(page), /Strike|Call|Put/);
@@ -861,11 +887,23 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await page.click("[data-expiry-row='2026-07-10']");
     await wait(250);
     assert.ok(apiCalls.some((call) => call.params?.expiry === "2026-07-10"), "expiry click should request selected expiry");
-    const configWasOpen = await page.$("[data-settings-panel]") !== null;
-    await clickText(page, "Config");
-    await wait(150);
-    const configIsOpen = await page.$("[data-settings-panel]") !== null;
-    assert.notEqual(configIsOpen, configWasOpen, "config should toggle visible settings panel");
+
+    delayedSnapshotSymbol = "QQQI";
+    await page.click("[data-watcher-replica] [data-watchlist-row='AAPL']");
+    await page.click("[data-watcher-replica] [data-watchlist-row='MSFT']");
+    await page.click("[data-watcher-replica] [data-watchlist-row='QQQI']");
+    await page.waitForFunction(() => document.querySelector("[data-ticker-loading]")?.textContent?.includes("QQQI"), { timeout: 5000 });
+    assert.equal(await page.$eval(".siw-hero", (node) => node.getAttribute("data-selected-symbol")), "QQQI", "latest ticker must become active before its Yahoo response completes");
+    assert.equal(await page.$eval(".siw-hero-identity h1", (node) => node.textContent), "QQQI", "hero identity must not retain the prior ticker while loading");
+    assert.match(await page.$eval("[data-ticker-loading]", (node) => node.textContent || ""), /Previous ticker data is intentionally hidden/i);
+    await page.waitForFunction(() => document.querySelector("[data-ticker-loading]") === null, { timeout: 5000 });
+    delayedSnapshotSymbol = null;
+
+    await page.click("[data-watcher-replica] [data-watchlist-row='TSLA']");
+    await page.waitForFunction(() => document.querySelector(".siw-hero-identity h1")?.textContent === "TSLA", { timeout: 5000 });
+    await wait(450);
+    assert.equal(await page.$("[data-options-oi-unavailable]") !== null, true, "Yahoo zero OI must show an explicit unavailable state");
+    assert.equal(await page.$eval(".siw-options-subtabs button", (node) => node.disabled), true, "OI must be disabled when Yahoo returns zero OI");
     await page.evaluate(() => {
       const detail = document.querySelector("[data-detail-stack]");
       detail?.scrollIntoView({ block: "start" });

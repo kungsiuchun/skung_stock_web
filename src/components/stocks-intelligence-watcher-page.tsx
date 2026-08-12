@@ -234,6 +234,15 @@ interface RawOptionChain {
   puts?: RawOptionLeg[];
 }
 
+interface ExpirySelectorRow {
+  expiry: string;
+  loaded: boolean;
+  openInterest?: number;
+  primaryStrike?: number;
+  volume?: number;
+  dominantType?: "C" | "P";
+}
+
 interface RawOptionExposure {
   strike?: number;
   callGex?: number;
@@ -663,11 +672,9 @@ const optionLegNumber = (value: unknown) => {
 };
 
 const effectiveLegOpenInterest = (leg: RawOptionLeg | undefined, explicit?: unknown) => {
-  const explicitValue = optionLegNumber(explicit);
-  if (explicitValue > 0) return explicitValue;
+  if (explicit !== undefined && explicit !== null) return Math.max(0, optionLegNumber(explicit));
   const openInterest = optionLegNumber(leg?.openInterest);
-  if (openInterest > 0) return openInterest;
-  return optionLegNumber(leg?.volume);
+  return Math.max(0, openInterest);
 };
 
 const effectiveExposureIv = (row: RawOptionExposure) => {
@@ -682,10 +689,9 @@ const effectiveExposureIv = (row: RawOptionExposure) => {
 const buildStrikeRowsFromOptionRaw = (
   chain: RawOptionChain | null,
   exposures: RawOptionExposure[],
-  fallbackRows: StocksWatcherStrikeRow[],
 ) => {
-  if (!chain) return fallbackRows;
-  const spot = optionLegNumber(chain.spot) || fallbackRows[Math.floor(fallbackRows.length / 2)]?.strike || 0;
+  if (!chain) return [];
+  const spot = optionLegNumber(chain.spot);
   const strikes = Array.from(new Set([
     ...(chain.calls || []).map((leg) => optionLegNumber(leg.strike)),
     ...(chain.puts || []).map((leg) => optionLegNumber(leg.strike)),
@@ -703,8 +709,8 @@ const buildStrikeRowsFromOptionRaw = (
     const putOpenInterest = effectiveLegOpenInterest(put, exposure?.putEffectiveOpenInterest ?? exposure?.putOpenInterest);
     const callVolume = optionLegNumber(call?.volume);
     const putVolume = optionLegNumber(put?.volume);
-    const callGex = optionLegNumber(exposure?.callGex) || Math.round(callOpenInterest * Math.max(spot, 1) * 4);
-    const putGex = optionLegNumber(exposure?.putGex) || -Math.round(putOpenInterest * Math.max(spot, 1) * 4);
+    const callGex = optionLegNumber(exposure?.callGex);
+    const putGex = optionLegNumber(exposure?.putGex);
     return {
       strike,
       callOpenInterest,
@@ -718,7 +724,7 @@ const buildStrikeRowsFromOptionRaw = (
   });
 };
 
-const buildExpiryRowsForSelector = (snapshot: StocksWatcherSnapshot | null): StocksWatcherExpiryRow[] => {
+const buildExpiryRowsForSelector = (snapshot: StocksWatcherSnapshot | null): ExpirySelectorRow[] => {
   if (!snapshot) return [];
   const existing = snapshot.expiryRows?.length ? snapshot.expiryRows : snapshot.expiries || [];
   const byExpiry = new Map<string, StocksWatcherExpiryRow[]>();
@@ -735,15 +741,7 @@ const buildExpiryRowsForSelector = (snapshot: StocksWatcherSnapshot | null): Sto
   return expiries.map((expiry) => {
     const rows = byExpiry.get(expiry) || [];
     if (rows.length === 0) {
-      return {
-        expiry,
-        openInterest: 0,
-        primaryStrike: snapshot.atm,
-        strike: snapshot.atm,
-        volume: 0,
-        dominantType: "C",
-        type: "C",
-      };
+      return { expiry, loaded: false };
     }
 
     const callOi = rows.filter((row) => row.type === "C").reduce((sum, row) => sum + row.openInterest, 0);
@@ -753,14 +751,36 @@ const buildExpiryRowsForSelector = (snapshot: StocksWatcherSnapshot | null): Sto
 
     return {
       expiry,
+      loaded: true,
       openInterest: rows.reduce((sum, row) => sum + row.openInterest, 0),
       primaryStrike: primary.primaryStrike || primary.strike,
-      strike: primary.primaryStrike || primary.strike,
       volume: rows.reduce((sum, row) => sum + row.volume, 0),
       dominantType,
-      type: dominantType,
     };
   });
+};
+
+const summaryFromLoadedOptionChain = (chain: RawOptionChain | null): ExpirySelectorRow | null => {
+  if (!chain?.selectedExpiry) return null;
+  const legs = [
+    ...(chain.calls || []).map((leg) => ({ ...leg, type: "C" as const })),
+    ...(chain.puts || []).map((leg) => ({ ...leg, type: "P" as const })),
+  ];
+  if (legs.length === 0) return null;
+  const total = (key: "openInterest" | "volume", type?: "C" | "P") => legs
+    .filter((leg) => !type || leg.type === type)
+    .reduce((sum, leg) => sum + optionLegNumber(leg[key]), 0);
+  const callOi = total("openInterest", "C");
+  const putOi = total("openInterest", "P");
+  const primary = legs.reduce((best, leg) => optionLegNumber(leg.openInterest) + optionLegNumber(leg.volume) > optionLegNumber(best.openInterest) + optionLegNumber(best.volume) ? leg : best);
+  return {
+    expiry: normalizeExpiryDate(chain.selectedExpiry),
+    loaded: true,
+    openInterest: total("openInterest"),
+    primaryStrike: optionLegNumber(primary.strike),
+    volume: total("volume"),
+    dominantType: callOi >= putOi ? "C" : "P",
+  };
 };
 
 const getRunColor = (status: ToolStatus) => {
@@ -798,6 +818,21 @@ const getToolInputDraft = (name: string, symbol: string, expiry?: string, strike
 
 const SkeletonBlock = ({ className = "" }: { className?: string }) => (
   <div className={`animate-pulse rounded-md bg-slate-800/70 ${className}`} />
+);
+
+const MetricTile = ({
+  label,
+  value,
+  tone = "neutral",
+}: {
+  label: string;
+  value: string;
+  tone?: "neutral" | "positive" | "negative" | "blue" | "yellow";
+}) => (
+  <div className={`siw-metric-tile siw-tone-${tone}`}>
+    <span>{label}</span>
+    <strong>{value}</strong>
+  </div>
 );
 
 const ErrorBanner = ({ message, onRetry }: { message: string; onRetry?: () => void }) => (
@@ -1442,21 +1477,6 @@ const MiniSparkline = ({
   );
 };
 
-const MetricTile = ({
-  label,
-  value,
-  tone = "neutral",
-}: {
-  label: string;
-  value: string;
-  tone?: "neutral" | "positive" | "negative" | "blue" | "yellow";
-}) => (
-  <div className={`siw-metric-tile siw-tone-${tone}`}>
-    <span>{label}</span>
-    <strong>{value}</strong>
-  </div>
-);
-
 export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligenceWatcherPageProps) {
   const [selectedSymbol, setSelectedSymbol] = useState(() =>
     typeof window === "undefined"
@@ -1467,7 +1487,6 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [query, setQuery] = useState("");
   const [searchError, setSearchError] = useState<string | null>(null);
   const [mode, setMode] = useState<StocksWatcherChartMode>("volume");
-  const [strikeWindowSize, setStrikeWindowSize] = useState(29);
   const [watchlistCollapsed, setWatchlistCollapsed] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1748,7 +1767,19 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   };
 
   const selectWatchlistSymbol = (symbol: string) => {
-    void loadSnapshot(symbol);
+    const nextSymbol = normalizeSymbol(symbol);
+    if (nextSymbol !== selectedSymbol) {
+      // Change the selected row immediately and clear the previous ticker's detail.
+      // The request below remains abortable, so an old response cannot repaint it.
+      setSelectedSymbol(nextSymbol);
+      setSnapshot(null);
+      setSelectedExpiry(null);
+      setExpiryOverviewState({ loading: false, error: null, data: null });
+      setTabPanelState({ loading: false, error: null, data: null });
+      setSubTabPanelState({ loading: false, error: null, data: null });
+      setChartTooltip(null);
+    }
+    void loadSnapshot(nextSymbol);
     if (typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches) {
       window.setTimeout(() => {
         detailPanelRef.current?.scrollIntoView({ block: "start", behavior: "auto" });
@@ -2202,41 +2233,20 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const heroArrow = directionArrow(heroDirection);
   const selectedChain = optionChainFromResult(expiryOverviewState.data?.get_options);
   const selectedExposures = optionExposuresFromResult(expiryOverviewState.data?.get_options_gex);
-  const rows = buildStrikeRowsFromOptionRaw(selectedChain, selectedExposures, snapshot?.strikes || []);
+  const rows = buildStrikeRowsFromOptionRaw(selectedChain, selectedExposures);
   const expiryRows = buildExpiryRowsForSelector(snapshot);
-  const optionsSectionMinHeightRem = Math.max(52, 3 + expiryRows.length * 2.35);
-  const chartRows = rows.length > 0 ? rows : expiryRows
-    .map((row, index) => {
-      const strike = row.primaryStrike || row.strike || snapshot?.atm || index + 1;
-      const callDominant = row.dominantType === "C" || row.type === "C";
-      const callOpenInterest = callDominant ? row.openInterest : Math.round(row.openInterest * 0.35);
-      const putOpenInterest = callDominant ? Math.round(row.openInterest * 0.35) : row.openInterest;
-      const callVolume = callDominant ? row.volume : Math.round(row.volume * 0.35);
-      const putVolume = callDominant ? Math.round(row.volume * 0.35) : row.volume;
-      const callGex = Math.round(callOpenInterest * Math.max(strike, 1) * 4);
-      const putGex = -Math.round(putOpenInterest * Math.max(strike, 1) * 4);
-      return {
-        strike,
-        callOpenInterest,
-        putOpenInterest,
-        callVolume,
-        putVolume,
-        callGex,
-        putGex,
-        netGex: callGex + putGex,
-      };
-    })
-    .sort((a, b) => a.strike - b.strike);
-  const spotRowIndex = snapshot
-    ? chartRows.reduce((bestIndex, row, index) => {
-      const bestDistance = Math.abs(chartRows[bestIndex]?.strike - snapshot.spot);
-      const currentDistance = Math.abs(row.strike - snapshot.spot);
-      return currentDistance < bestDistance ? index : bestIndex;
-    }, Math.max(0, Math.floor(chartRows.length / 2)))
-    : Math.max(0, Math.floor(chartRows.length / 2));
-  const focusedStart = Math.max(0, Math.min(chartRows.length, spotRowIndex - Math.floor(strikeWindowSize / 2)));
-  const focusedEnd = Math.min(chartRows.length, focusedStart + strikeWindowSize);
-  const focusedRows = chartRows.slice(Math.max(0, focusedEnd - strikeWindowSize), focusedEnd);
+  const loadedExpirySummary = summaryFromLoadedOptionChain(selectedChain);
+  const selectorExpiryRows = expiryRows.map((row) =>
+    loadedExpirySummary && row.expiry === loadedExpirySummary.expiry ? loadedExpirySummary : row,
+  );
+  const optionsSectionMinHeightRem = Math.max(52, 3 + selectorExpiryRows.length * 2.35);
+  const hasYahooOpenInterest = Boolean(selectedChain && [...(selectedChain.calls || []), ...(selectedChain.puts || [])]
+    .some((leg) => optionLegNumber(leg.openInterest) > 0));
+  const hasYahooGex = hasYahooOpenInterest && selectedExposures.some((row) =>
+    typeof row.netGex === "number" && Number.isFinite(row.netGex));
+  const modeAvailable = mode === "volume" || (mode === "oi" ? hasYahooOpenInterest : hasYahooGex);
+  const chartRows = rows.sort((a, b) => a.strike - b.strike);
+  const focusedRows = chartRows;
   const maxValue = mode === "gex"
     ? Math.max(1, ...(focusedRows.length > 0 ? focusedRows : chartRows).map((row) => Math.abs(row.netGex)))
     : getMaxForMode(focusedRows.length > 0 ? focusedRows : chartRows, mode);
@@ -2404,36 +2414,29 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs font-black">
         <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-blue-100">Exp {formatExpiryDate(currentExpiry, "compact")}</span>
         <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-yellow-300">Spot {snapshot ? currency(snapshot.spot) : "--"}</span>
-        <span className={`rounded border border-slate-700 bg-slate-900 px-2 py-1 ${dominantSide === "Calls" ? "text-emerald-300" : "text-red-300"}`}>
-          Dom {dominantSide}{dominantRow ? ` @ ${dominantRow.strike}` : ""}
-        </span>
-        <span className={`rounded border border-slate-700 bg-slate-900 px-2 py-1 ${netGex >= 0 ? "text-emerald-300" : "text-red-300"}`}>
-          {mode === "gex" ? "Net" : "Regime"} {mode === "gex" ? formatNumber(netGex) : snapshot?.gexRegime || "--"}
-        </span>
-        <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-300">P/C {snapshot?.putCallVolume.toFixed(2) || "--"}</span>
-        <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-cyan-300">Flip {gammaFlipLevel === null ? "--" : currency(gammaFlipLevel)}</span>
-        <span className="rounded border border-yellow-500/30 bg-yellow-500/10 px-2 py-1 text-yellow-300">C Wall {maxCallWall ? currency(maxCallWall.strike) : "--"}</span>
-        <span className="rounded border border-red-500/30 bg-red-500/10 px-2 py-1 text-red-300">P Wall {maxPutWall ? currency(maxPutWall.strike) : "--"}</span>
-        <div className="ml-auto flex min-w-[16rem] items-center gap-3">
-          <label htmlFor="strike-window-slider" className="text-xs font-black uppercase tracking-[0.12em] text-slate-400">
-            Strike Zoom
-          </label>
-          <input
-            id="strike-window-slider"
-            aria-label="Strike zoom"
-            type="range"
-            min={9}
-            max={Math.max(9, Math.min(80, chartRows.length || 29))}
-            step={2}
-            value={Math.min(strikeWindowSize, Math.max(9, Math.min(80, chartRows.length || 29)))}
-            onChange={(event) => setStrikeWindowSize(Number(event.target.value))}
-            className="h-2 min-w-24 flex-1 cursor-pointer accent-blue-400"
-          />
-          <span className="w-16 text-right text-xs font-bold text-blue-100">
-            {visibleRows.length || 0}
+        {hasYahooOpenInterest && (
+          <span className={`rounded border border-slate-700 bg-slate-900 px-2 py-1 ${dominantSide === "Calls" ? "text-emerald-300" : "text-red-300"}`}>
+            Dom {dominantSide}{dominantRow ? ` @ ${dominantRow.strike}` : ""}
           </span>
-        </div>
+        )}
+        <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-300">P/C volume {snapshot?.putCallVolume.toFixed(2) || "--"}</span>
+        {hasYahooGex && (
+          <>
+            <span className={`rounded border border-slate-700 bg-slate-900 px-2 py-1 ${netGex >= 0 ? "text-emerald-300" : "text-red-300"}`}>
+              {mode === "gex" ? "Net GEX" : "GEX regime"} {mode === "gex" ? formatNumber(netGex) : snapshot?.gexRegime || "--"}
+            </span>
+            <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-cyan-300">Flip {gammaFlipLevel === null ? "--" : currency(gammaFlipLevel)}</span>
+            <span className="rounded border border-yellow-500/30 bg-yellow-500/10 px-2 py-1 text-yellow-300">C Wall {maxCallWall ? currency(maxCallWall.strike) : "--"}</span>
+            <span className="rounded border border-red-500/30 bg-red-500/10 px-2 py-1 text-red-300">P Wall {maxPutWall ? currency(maxPutWall.strike) : "--"}</span>
+          </>
+        )}
       </div>
+
+      {!hasYahooOpenInterest && selectedChain && (
+        <p className="mb-3 rounded-md border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100" data-options-oi-unavailable>
+          Yahoo returned no positive open interest for this expiry. OI, P/C OI, GEX, walls and flip levels are unavailable; volume remains source data.
+        </p>
+      )}
 
       {error && <ErrorBanner message={error} onRetry={refreshCurrent} />}
       {snapshot?.warnings.map((warning) => (
@@ -2444,11 +2447,11 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
       {expiryOverviewState.loading && <SkeletonBlock className="mb-4 h-8 w-64" />}
       {expiryOverviewState.error && <ErrorBanner message={expiryOverviewState.error} onRetry={() => void loadExpiryOverview(currentExpiry, true)} />}
-      {!expiryOverviewState.loading && chartRows.length === 0 && (
+      {!expiryOverviewState.loading && (!modeAvailable || chartRows.length === 0) && (
         <OptionsEmptyState expiry={currentExpiry} onRetry={() => void loadExpiryOverview(currentExpiry, true)} />
       )}
 
-      {chartRows.length > 0 && (
+      {modeAvailable && chartRows.length > 0 && (
       <div
         ref={chartViewportRef}
         data-options-chart-viewport
@@ -2816,7 +2819,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="rounded-md border border-slate-800 bg-slate-950/60 p-4">
             <p className="text-xs uppercase text-slate-500">P/C Open Interest</p>
-            <p className="mt-1 text-2xl font-black text-emerald-200">{optionLegNumber(raw.putCallOpenInterest).toFixed(2)}</p>
+            <p className="mt-1 text-2xl font-black text-emerald-200">{hasYahooOpenInterest ? optionLegNumber(raw.putCallOpenInterest).toFixed(2) : "n/a"}</p>
           </div>
           <div className="rounded-md border border-slate-800 bg-slate-950/60 p-4">
             <p className="text-xs uppercase text-slate-500">P/C Volume</p>
@@ -2832,11 +2835,20 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const renderStatsReferencePanel = () => {
     const statsRaw = rawRecord(tabPanelState.data?.get_stock_stats?.raw) || {};
     const betaRaw = rawRecord(tabPanelState.data?.get_beta?.raw) || {};
+    const yahooQuote = rawRecord(statsRaw.quote) || {};
+    const yahooSummary = rawRecord(statsRaw.summary) || {};
+    const yahooProfile = rawRecord(yahooSummary.assetProfile) || {};
+    const yahooStats = rawRecord(yahooSummary.defaultKeyStatistics) || {};
+    const yahooFinancial = rawRecord(yahooSummary.financialData) || {};
+    const yahooDetail = rawRecord(yahooSummary.summaryDetail) || {};
     const fromRaw = (keys: string[]) => {
       for (const key of keys) {
-        const value = statsRaw[key] ?? betaRaw[key];
-        if (typeof value === "string" && value.trim()) return value;
-        if (typeof value === "number" && Number.isFinite(value)) return value;
+        for (const source of [statsRaw, betaRaw, yahooQuote, yahooProfile, yahooStats, yahooFinancial, yahooDetail]) {
+          const value = source[key];
+          const nestedValue = rawRecord(value)?.raw ?? value;
+          if (typeof nestedValue === "string" && nestedValue.trim()) return nestedValue;
+          if (typeof nestedValue === "number" && Number.isFinite(nestedValue)) return nestedValue;
+        }
       }
       return null;
     };
@@ -2852,14 +2864,14 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     };
     const quote = snapshot?.quote;
     const beta = display(["beta", "beta3Year", "fiveYearAvgBeta"]);
-    const targetMean = display(["targetMeanPrice", "meanTargetPrice"], "Needs checking", "money");
-    const marketCap = display(["marketCap"], "Needs checking", "money");
-    const enterpriseValue = display(["enterpriseValue"], "Needs checking", "money");
-    const sector = String(fromRaw(["sector"]) || getStocksWatcherUniverseStock(selectedSymbol)?.sector || "Needs checking");
-    const industry = String(fromRaw(["industry"]) || "Needs checking");
+    const targetMean = display(["targetMeanPrice", "meanTargetPrice"], "n/a", "money");
+    const marketCap = display(["marketCap"], "n/a", "money");
+    const enterpriseValue = display(["enterpriseValue"], "n/a", "money");
+    const sector = String(fromRaw(["sector", "sectorDisp"]) || getStocksWatcherUniverseStock(selectedSymbol)?.sector || "n/a");
+    const industry = String(fromRaw(["industry", "industryDisp"]) || "n/a");
     const rows = [
-      ["Exchange", String(fromRaw(["exchange", "fullExchangeName"]) || "Needs checking")],
-      ["Market State", quote ? "OPEN" : "Needs checking"],
+      ["Exchange", String(fromRaw(["exchange", "fullExchangeName"]) || "n/a")],
+      ["Market State", String(fromRaw(["marketState"]) || quote?.marketState || "n/a")],
       ["Sector", sector],
       ["Industry", industry],
       ["Market Cap", marketCap],
@@ -2926,12 +2938,11 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           <div className="siw-panel siw-stat-card">
             <span>Mean Target and Analysts</span>
             <strong>{targetMean}</strong>
-            <em>Needs checking before investment use</em>
-            <div className="siw-meter"><i style={{ width: "62%" }} /></div>
+            <em>Yahoo analyst target</em>
           </div>
           <div className="siw-panel siw-stat-card">
             <span>Earnings and Price Context</span>
-            <strong>{display(["earningsDate"], "Needs checking")}</strong>
+            <strong>{display(["earningsDate"], "n/a")}</strong>
             <em>Not financial advice</em>
           </div>
         </div>
@@ -3170,8 +3181,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       }, new Map()).values(),
     )
       .map((row) => ({ ...row, total: visibleWatchlistSectorTotals.get(row.sector) || row.covered, avgChangePercent: row.totalChangePercent / row.covered }))
-      .sort((a, b) => b.avgChangePercent - a.avgChangePercent)
-      .slice(0, 9);
+      .sort((a, b) => b.avgChangePercent - a.avgChangePercent);
     const advancers = liveWatchlistQuotes.filter(({ quote }) => quote.changePercent > 0).length;
     const decliners = liveWatchlistQuotes.filter(({ quote }) => quote.changePercent < 0).length;
     const unchanged = Math.max(0, watchlistCoverage - advancers - decliners);
@@ -3423,9 +3433,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             </div>
             <div className="siw-key-grid">
               <MetricTile label="Spot" value={latestPrice ? currency(latestPrice) : "--"} tone="blue" />
-              <MetricTile label="Call GEX" value={formatNumber(totalCallGex)} tone="positive" />
-              <MetricTile label="Put GEX" value={formatNumber(totalPutGex)} tone="negative" />
-              <MetricTile label="P/C OI" value={(snapshot?.putCallOpenInterest || 0).toFixed(2)} tone="neutral" />
+              <MetricTile label="Call GEX" value={hasYahooGex ? formatNumber(totalCallGex) : "n/a"} tone="positive" />
+              <MetricTile label="Put GEX" value={hasYahooGex ? formatNumber(totalPutGex) : "n/a"} tone="negative" />
+              <MetricTile label="P/C OI" value={hasYahooOpenInterest ? (snapshot?.putCallOpenInterest || 0).toFixed(2) : "n/a"} tone="neutral" />
             </div>
           </div>
         </div>
@@ -3456,7 +3466,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             <span>Type</span>
           </div>
           <div className="siw-expiry-list">
-            {expiryRows.map((row) => {
+            {selectorExpiryRows.map((row) => {
               const normalizedExpiry = normalizeExpiryDate(row.expiry);
               const active = normalizeExpiryDate(currentExpiry) === normalizedExpiry;
               return (
@@ -3476,10 +3486,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                   }}
                 >
                   <span>{formatExpiryDate(row.expiry, "compact")}</span>
-                  <span>{formatNumber(row.openInterest)}</span>
-                  <span>{row.primaryStrike || row.strike}</span>
-                  <span>{formatNumber(row.volume)}</span>
-                  <span className={row.dominantType === "C" ? "siw-up" : "siw-down"}>{row.dominantType}</span>
+                  <span>{row.loaded ? formatNumber(row.openInterest || 0) : "Load"}</span>
+                  <span>{row.loaded ? row.primaryStrike || "—" : "on select"}</span>
+                  <span>{row.loaded ? formatNumber(row.volume || 0) : "—"}</span>
+                  <span className={row.loaded && row.dominantType === "P" ? "siw-down" : "siw-up"}>{row.loaded ? row.dominantType : "—"}</span>
                 </button>
               );
             })}
@@ -3490,52 +3500,39 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         </aside>
 
         <div className="siw-options-main">
-          <div className="siw-options-kpis" data-options-summary>
-            <MetricTile label="GEX Pinning" value={maxCallWall ? maxCallWall.strike.toFixed(2) : "--"} tone="positive" />
-            <MetricTile label="P/C" value={(snapshot?.putCallOpenInterest || 0).toFixed(2)} tone={(snapshot?.putCallOpenInterest || 0) > 1 ? "negative" : "negative"} />
-            <MetricTile label="0 Sweeps" value={snapshot?.sweeps ? `${snapshot.sweeps}` : "Today"} tone="blue" />
-            <div className="siw-strike-zoom">
-              <span>Strike Zoom</span>
-              <button type="button" onClick={() => setStrikeWindowSize((value) => Math.max(9, value - 2))}>-</button>
-              <input
-                aria-label="Strike zoom"
-                type="range"
-                min={9}
-                max={Math.max(9, Math.min(80, chartRows.length || 29))}
-                step={2}
-                value={Math.min(strikeWindowSize, Math.max(9, Math.min(80, chartRows.length || 29)))}
-                onChange={(event) => setStrikeWindowSize(Number(event.target.value))}
-              />
-              <button type="button" onClick={() => setStrikeWindowSize((value) => Math.min(Math.max(9, Math.min(80, chartRows.length || 29)), value + 2))}>+</button>
-              <b>x1.0</b>
-              <button type="button" className="siw-config-button" onClick={() => setSettingsOpen((value) => !value)}>Config</button>
-            </div>
-          </div>
-
           <div className="siw-options-subtabs">
             {(["oi", "volume", "gex"] as StocksWatcherChartMode[]).map((item) => (
               <button
                 key={item}
                 type="button"
                 onClick={() => {
+                  if ((item === "oi" && !hasYahooOpenInterest) || (item === "gex" && !hasYahooGex)) return;
                   setMode(item);
                   setActiveSubTab("Overview");
                 }}
+                disabled={(item === "oi" && !hasYahooOpenInterest) || (item === "gex" && !hasYahooGex)}
+                title={(item === "oi" && !hasYahooOpenInterest) || (item === "gex" && !hasYahooGex) ? "Yahoo did not return usable open interest for this expiry" : undefined}
                 className={activeSubTab === "Overview" && mode === item ? "is-active" : ""}
               >
                 {item === "oi" ? "OI" : item === "volume" ? "Vol" : "GEX"}
               </button>
             ))}
-            {OPTIONS_SUB_TABS.filter((item) => item !== "Overview").map((item) => (
-              <button
-                key={item}
-                type="button"
-                onClick={() => setActiveSubTab(item)}
-                className={activeSubTab === item ? "is-active" : ""}
-              >
-                {item}
-              </button>
-            ))}
+            {OPTIONS_SUB_TABS.filter((item) => item !== "Overview").map((item) => {
+              const disabled = !hasYahooOpenInterest && ["Greeks", "DEX", "P/C", "0DTE"].includes(item);
+              return (
+                <button
+                  key={item}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => {
+                    if (!disabled) setActiveSubTab(item);
+                  }}
+                  className={activeSubTab === item ? "is-active" : ""}
+                >
+                  {item}
+                </button>
+              );
+            })}
           </div>
           <div className="siw-options-content">
             {renderOptionsSubTab()}
@@ -3768,7 +3765,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         </aside>
 
         <main ref={detailPanelRef} className="siw-main">
-          <header className="siw-hero">
+          <header className={`siw-hero ${loading ? "is-loading" : ""}`} data-selected-symbol={selectedSymbol}>
             <div className="siw-hero-identity">
               <div className="siw-logo-card">
                 <TickerLogo symbol={snapshot?.symbol || selectedSymbol} large />
@@ -3847,11 +3844,24 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
           <div className="siw-main-scroll">
             {error && <ErrorBanner message={error} onRetry={refreshCurrent} />}
+            {loading && loadingSymbol === selectedSymbol && (
+              <section className="siw-ticker-transition" data-ticker-loading aria-live="polite">
+                <div>
+                  <span>Loading {selectedSymbol} from Yahoo</span>
+                  <em>Previous ticker data is intentionally hidden.</em>
+                </div>
+                <div className="siw-ticker-transition-skeletons" aria-hidden="true">
+                  <SkeletonBlock className="h-5 w-40" />
+                  <SkeletonBlock className="h-20 w-full" />
+                  <SkeletonBlock className="h-44 w-full" />
+                </div>
+              </section>
+            )}
             {settingsOpen && (
               <section className="siw-settings-panel" data-settings-panel>
                 <div>
                   <strong>Watcher config</strong>
-                <span>Strike window: {strikeWindowSize} | Source: {snapshot?.source === "native_yahoo" ? "Yahoo Finance native" : "Unavailable"}</span>
+                <span>Source: {snapshot?.source === "native_yahoo" ? "Yahoo Finance native" : "Unavailable"}</span>
                 </div>
                 <button type="button" onClick={refreshCurrent}>Retry / refresh</button>
               </section>
@@ -4296,7 +4306,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                   <span>Type</span>
                 </div>
                 <div className="px-3">
-                  {expiryRows.map((row) => {
+                  {selectorExpiryRows.map((row) => {
                     const normalizedExpiry = normalizeExpiryDate(row.expiry);
                     const active = normalizeExpiryDate(currentExpiry) === normalizedExpiry;
                     return (
@@ -4316,10 +4326,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                         className={`grid w-full cursor-pointer grid-cols-[minmax(5rem,1fr)_3.8rem_3.8rem_4.6rem_2.4rem] border-b py-2 text-left text-sm font-bold transition-colors hover:bg-slate-900 focus-visible:ring-2 focus-visible:ring-blue-400/40 ${active ? "border-b-blue-400 bg-blue-500/10 text-blue-100 shadow-[inset_3px_0_0_rgba(96,165,250,0.85)]" : "border-slate-800 text-slate-200"}`}
                       >
                         <span>{formatExpiryDate(row.expiry, "compact")}</span>
-                        <span>{formatNumber(row.openInterest)}</span>
-                        <span>{row.primaryStrike || row.strike}</span>
-                        <span>{formatNumber(row.volume)}</span>
-                        <span className={row.dominantType === "C" ? "text-emerald-400" : "text-red-400"}>{row.dominantType}</span>
+                        <span>{row.loaded ? formatNumber(row.openInterest || 0) : "Load"}</span>
+                        <span>{row.loaded ? row.primaryStrike || "—" : "on select"}</span>
+                        <span>{row.loaded ? formatNumber(row.volume || 0) : "—"}</span>
+                        <span className={row.loaded && row.dominantType === "P" ? "text-red-400" : "text-emerald-400"}>{row.loaded ? row.dominantType : "—"}</span>
                       </button>
                     );
                   })}
@@ -4329,14 +4339,6 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
             <div className="flex h-full min-h-[52rem] min-w-0 flex-col overflow-hidden rounded-md border border-slate-800 bg-[#0b111a]">
               {activeTab === "Options" && (
-                <div data-options-summary className="flex flex-wrap items-center gap-2 border-b border-slate-800 px-4 py-3">
-                  <span className="rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-black text-emerald-300">GEX: {snapshot?.gexRegime || "--"}</span>
-                  <span className="rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-black text-emerald-300">P/C: {snapshot?.putCallOpenInterest.toFixed(2) || "--"}</span>
-                  <span className="rounded-full bg-slate-800 px-3 py-1 text-xs font-bold text-slate-400">{snapshot?.sweeps || 0} sweeps</span>
-                </div>
-              )}
-
-              {activeTab === "Options" && (
                 <>
                   <div className="flex flex-wrap items-center gap-1 border-b border-slate-800 px-4">
                     {(["oi", "volume", "gex"] as StocksWatcherChartMode[]).map((item) => (
@@ -4344,24 +4346,32 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                         key={item}
                         type="button"
                         onClick={() => {
+                          if ((item === "oi" && !hasYahooOpenInterest) || (item === "gex" && !hasYahooGex)) return;
                           setMode(item);
                           setActiveSubTab("Overview");
                         }}
+                        disabled={(item === "oi" && !hasYahooOpenInterest) || (item === "gex" && !hasYahooGex)}
                         className={`border-b-2 px-3 py-3 text-sm font-semibold ${activeSubTab === "Overview" && mode === item ? "border-blue-400 text-blue-300" : "border-transparent text-slate-300 hover:text-white"}`}
                       >
                         {item === "oi" ? "OI" : item === "volume" ? "Vol" : "GEX"}
                       </button>
                     ))}
-                    {OPTIONS_SUB_TABS.filter((item) => item !== "Overview").map((item) => (
-                      <button
-                        key={item}
-                        type="button"
-                        onClick={() => setActiveSubTab(item)}
-                        className={`border-b-2 px-3 py-3 text-sm font-semibold ${activeSubTab === item ? "border-blue-400 text-blue-300" : "border-transparent text-slate-300 hover:text-white"}`}
-                      >
-                        {item}
-                      </button>
-                    ))}
+                    {OPTIONS_SUB_TABS.filter((item) => item !== "Overview").map((item) => {
+                      const disabled = !hasYahooOpenInterest && ["Greeks", "DEX", "P/C", "0DTE"].includes(item);
+                      return (
+                        <button
+                          key={item}
+                          type="button"
+                          disabled={disabled}
+                          onClick={() => {
+                            if (!disabled) setActiveSubTab(item);
+                          }}
+                          className={`border-b-2 px-3 py-3 text-sm font-semibold ${activeSubTab === item ? "border-blue-400 text-blue-300" : "border-transparent text-slate-300 hover:text-white"}`}
+                        >
+                          {item}
+                        </button>
+                      );
+                    })}
                   </div>
                   {renderOptionsSubTab()}
                 </>
