@@ -23,6 +23,7 @@
     "quant:audit": "tsx scripts/quant-strategy-audit.ts",
     "test:stocks-watcher": "node --import tsx --test tests/stocks-intelligence-watcher.test.ts tests/stocks-watcher-robinhood-options.test.ts",
     "test:stocks-watcher:uat": "node tests/stocks-intelligence-watcher.uat.cjs",
+    "robinhood-options:publish": "tsx scripts/publish-robinhood-options-snapshot.ts",
     "test:mobile-scroll:uat": "node tests/mobile-scroll.uat.cjs",
     "deploy": "npm run deploy:site && npm run deploy:spx",
     "deploy:site": "node scripts/deploy-site.js",
