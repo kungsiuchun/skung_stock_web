@@ -11,6 +11,7 @@ interface WorkGalleryProps {
   onOpenSPXGexHeatmap: () => void;
   onOpenStocksWatcher: () => void;
   onOpenFixedIncome: () => void;
+  onOpenMarketBreadth: () => void;
 }
 
 type WorkItem = {
@@ -33,6 +34,7 @@ export function WorkGallery({
   onOpenSPXGexHeatmap,
   onOpenStocksWatcher,
   onOpenFixedIncome,
+  onOpenMarketBreadth,
 }: WorkGalleryProps) {
   const workItems: WorkItem[] = [
     {
@@ -99,6 +101,16 @@ export function WorkGallery({
       action: "Open rates",
       icon: <Landmark className="h-5 w-5" />,
       onClick: onOpenFixedIncome,
+    },
+    {
+      title: "S&P 500 Market Breadth",
+      category: "Market Internals",
+      description: "A daily sector-level read of participation, leadership, and long-term trend strength across the SPY universe.",
+      buildNote: "Rebuilds sector performance, constituent breadth, and SMA200 slope from licensed adjusted closes with explicit freshness and provenance.",
+      action: "Open breadth",
+      icon: <BarChart3 className="h-5 w-5" />,
+      featured: true,
+      onClick: onOpenMarketBreadth,
     },
     {
       title: "Image Caption",

@@ -19,3 +19,7 @@ database_id = "c629da02-21ce-4b1c-87f2-59ba54be922e"
 [[r2_buckets]]
 binding = "VALUATION_DATA"
 bucket_name = "valuation-watcher-data"
+
+[[r2_buckets]]
+binding = "MARKET_BREADTH_DATA"
+bucket_name = "market-breadth-data"

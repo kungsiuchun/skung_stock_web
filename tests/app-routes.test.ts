@@ -26,6 +26,7 @@ test("round trips every page-level view to a hash route", () => {
     ["spx-gex-heatmap", "#/work/spx-gex-heatmap"],
     ["stocks-intelligence-watcher", "#/work/stocks-intelligence-watcher"],
     ["fixed-income", "#/work/fixed-income"],
+    ["market-breadth", "#/work/market-breadth"],
   ];
 
   for (const [view, hash] of expected) {

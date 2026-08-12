@@ -9,6 +9,7 @@ import { SPXRecapPage } from './components/spx-recap-page'
 import { SPXGexHeatmapPage } from './components/spx-gex-heatmap-page'
 import { StocksIntelligenceWatcherPage } from './components/stocks-intelligence-watcher-page'
 import { FixedIncomePage } from './components/fixed-income-page'
+import { MarketBreadthPage } from './components/market-breadth-page'
 import { AboutPage } from './components/about-page'
 import { ContactPage } from './components/contact-page'
 import { WorkGallery } from './components/work-gallery'
@@ -27,6 +28,7 @@ function App() {
     'spx-gex-heatmap',
     'stocks-intelligence-watcher',
     'fixed-income',
+    'market-breadth',
   ].includes(currentView);
 
   useEffect(() => {
@@ -109,6 +111,7 @@ function App() {
               onOpenSPXGexHeatmap={() => navigateToView('spx-gex-heatmap')}
               onOpenStocksWatcher={() => navigateToView('stocks-intelligence-watcher')}
               onOpenFixedIncome={() => navigateToView('fixed-income')}
+              onOpenMarketBreadth={() => navigateToView('market-breadth')}
             />
           ) : currentView === 'settle-up' ? (
             <SettleUpPage onBackToWork={() => navigateToView('work-gallery')} />
@@ -127,6 +130,8 @@ function App() {
             <StocksIntelligenceWatcherPage onBackToWork={() => navigateToView('work-gallery')} />
           ) : currentView === 'fixed-income' ? (
             <FixedIncomePage onBackToWork={() => navigateToView('work-gallery')} />
+          ) : currentView === 'market-breadth' ? (
+            <MarketBreadthPage onBackToWork={() => navigateToView('work-gallery')} />
           ) : (
             <HomeLandingPage
               onOpenMarketLab={() => navigateToView('work-gallery')}
