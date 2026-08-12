@@ -314,7 +314,7 @@ const isFormingBar = (input: {
 };
 
 export class CandlestickDataError extends Error {
-  constructor(public readonly code: "NO_RESULT" | "MALFORMED_PAYLOAD" | "INSUFFICIENT_BARS", message: string) {
+  constructor(public readonly code: "NO_RESULT" | "MALFORMED_PAYLOAD" | "INSUFFICIENT_BARS" | "YAHOO_TIMEOUT", message: string) {
     super(message);
     this.name = "CandlestickDataError";
   }

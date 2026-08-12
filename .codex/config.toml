@@ -1,9 +1,5 @@
 [mcp_servers.code-review-graph]
-args = [
-    "code-review-graph",
-    "serve",
-]
-command = "uvx"
+url = "http://127.0.0.1:5555/mcp"
 
 [mcp_servers.code-review-graph.tools.list_flows_tool]
 approval_mode = "approve"

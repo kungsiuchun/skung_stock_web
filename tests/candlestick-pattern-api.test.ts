@@ -93,6 +93,18 @@ const yahooPayload = () => {
 
 const parse = async (response: Response) => response.json() as Promise<any>;
 
+const hangingReadDb = (): D1DatabaseLike => ({
+  prepare: () => {
+    const statement = {
+      bind: () => statement,
+      first: async <T>() => new Promise<T | null>(() => {}),
+      all: async <T>() => ({ results: [] as T[] }),
+      run: async () => ({}),
+    };
+    return statement;
+  },
+});
+
 test("API maps each supported interval to its fixed Yahoo range and bypasses absent D1", async () => {
   const originalFetch = globalThis.fetch;
   const requested: string[] = [];
@@ -113,6 +125,7 @@ test("API maps each supported interval to its fixed Yahoo range and bypasses abs
       assert.equal(body.data.schemaVersion, "v2");
       assert.equal(body.data.analysis.supportResistance.method, "swing_cluster");
       assert.equal(body.cache.status, "bypassed");
+      assert.equal(response.headers.get("X-Request-ID"), body.requestId);
       assert.match(requested[requested.length - 1], new RegExp(`interval=${interval}.*range=${range}`));
     }
   } finally {
@@ -208,6 +221,41 @@ test("API ignores legacy v1 cache rows and writes the v2 contract under a new sc
     assert.equal(fetchCalls, 1);
     assert.equal(body.data.schemaVersion, "v2");
     assert.ok(db.keys().some((key) => key.startsWith("candlestick-patterns-v2:AAPL:")));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("API returns 504 with a traceable request ID when D1 cache read exceeds the total deadline", async () => {
+  const startedAt = Date.now();
+  const response = await onRequestGet({
+    request: new Request("http://localhost/api/candlestick-patterns?symbol=AAPL&interval=1d"),
+    env: { MARKET_CACHE_DB: hangingReadDb() },
+    deadlineMs: 40,
+  });
+  const body = await parse(response);
+  assert.equal(response.status, 504);
+  assert.match(body.error, /cache-read exceeded/);
+  assert.equal(response.headers.get("X-Request-ID"), body.requestId);
+  assert.ok(Date.now() - startedAt < 250);
+});
+
+test("API classifies Yahoo timeout separately and always settles", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_input, init) => new Promise<Response>((_, reject) => {
+    const signal = init?.signal as AbortSignal;
+    signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+  })) as typeof fetch;
+  try {
+    const response = await onRequestGet({
+      request: new Request("http://localhost/api/candlestick-patterns?symbol=NVDA&interval=1d"),
+      env: {},
+      deadlineMs: 50,
+    });
+    const body = await parse(response);
+    assert.equal(response.status, 504);
+    assert.match(body.error, /Yahoo Finance chart request exceeded/);
+    assert.equal(response.headers.get("X-Request-ID"), body.requestId);
   } finally {
     globalThis.fetch = originalFetch;
   }

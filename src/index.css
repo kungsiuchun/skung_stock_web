@@ -27,6 +27,15 @@ body {
   overflow: hidden;
 }
 
+@media (max-width: 1023px) {
+  body {
+    height: auto;
+    min-height: 100dvh;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+}
+
 @keyframes spx-spot-live-pulse {
   0%, 100% {
     filter: drop-shadow(0 0 0 rgb(34 211 238 / 0));

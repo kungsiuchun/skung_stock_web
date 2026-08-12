@@ -49,7 +49,7 @@ function App() {
   };
 
   return (
-    <main className="w-full h-screen relative bg-[#141414] overflow-hidden">
+    <main className="relative min-h-dvh w-full overflow-visible bg-[#141414] lg:h-screen lg:overflow-hidden">
       {!isFullScreenLabView && (
         <Navbar
           onMarketLab={() => navigateToView('work-gallery')}
@@ -61,7 +61,7 @@ function App() {
         />
       )}
       
-      <div className={`w-full h-full flex ${currentView === 'home' || currentView === 'contact' || isFullScreenLabView ? '' : 'pt-20'}`}>
+      <div className={`flex min-h-dvh w-full overflow-visible lg:h-full lg:min-h-0 lg:overflow-hidden ${currentView === 'home' || currentView === 'contact' || isFullScreenLabView ? '' : 'pt-20'}`}>
         
         {/* Left App Navigation Component - ONLY active during Finance Dashboard */}
         {currentView === 'finance-dashboard' && (
@@ -87,7 +87,7 @@ function App() {
         )}
 
 
-        <div className="flex-1 h-full overflow-hidden">
+        <div className="min-w-0 flex-1 overflow-visible lg:h-full lg:overflow-hidden">
           {currentView === 'home' ? (
             <HomeLandingPage
               onOpenMarketLab={() => navigateToView('work-gallery')}

@@ -42,6 +42,8 @@ import {
   shouldRunScheduledTick,
   type SpxSchedulerState,
 } from '../src/lib/spx-market-scheduler';
+import { runSpxDecisionRun } from '../src/lib/spx-decision-run';
+import { buildSpxMarketSnapshot, normalizeSpxReplaySeries } from '../src/lib/spx-market-snapshot';
 
 // Cloudflare Worker Environment Types
 interface Env {
@@ -2783,87 +2785,6 @@ const buildCouncilResult = (agents: Record<'QM' | 'CM' | 'NT' | 'PA', AgentDecis
   };
 };
 
-const normalizeReplaySeries = (rows: any[]): Array<Record<string, unknown>> => rows.map((row) => ({
-  date: row.date instanceof Date ? row.date.toISOString() : String(row.date || ''),
-  open: toNullableFiniteNumber(row.open),
-  high: toNullableFiniteNumber(row.high),
-  low: toNullableFiniteNumber(row.low),
-  close: toNullableFiniteNumber(row.close),
-  volume: toNullableFiniteNumber(row.volume),
-}));
-
-const buildMarketSnapshot = (input: {
-  runId: string;
-  scheduledAt: Date;
-  snapshotAt: Date;
-  spxLatestAt?: Date | null;
-  spxM5LatestAt?: Date | null;
-  vixLatestAt?: Date | null;
-  gexSnapshotAt?: string | null;
-  gexProvider?: string | null;
-  gexFallbackFrom?: string | null;
-  dataQuality: MarketDataQualitySummary;
-  facts: MarketSnapshot['facts'];
-  gexSummary?: SpxGexTelegramSummary | null;
-  boardDeepLink: string | null;
-  replayEvidence: MarketSnapshot['replayEvidence'];
-}): MarketSnapshot => {
-  const ageMs = (observedAt: Date | null | undefined) => observedAt
-    ? Math.max(0, input.snapshotAt.getTime() - observedAt.getTime())
-    : null;
-  const freshnessStatus = (age: number | null, maxAgeMs: number) => age === null ? 'MISSING' : age <= maxAgeMs ? 'OK' : 'STALE';
-  const spxAge = ageMs(input.spxLatestAt);
-  const spxM5Age = ageMs(input.spxM5LatestAt);
-  const vixAge = ageMs(input.vixLatestAt);
-  const gexDate = input.gexSnapshotAt ? new Date(input.gexSnapshotAt) : null;
-  const gexAge = gexDate && Number.isFinite(gexDate.getTime()) ? ageMs(gexDate) : null;
-  return {
-    runId: input.runId,
-    scheduledAt: input.scheduledAt.toISOString(),
-    snapshotAt: input.snapshotAt.toISOString(),
-    sourceFreshness: {
-      spxYahoo: {
-        source: 'Yahoo Finance ^GSPC chart',
-        observedAt: input.spxLatestAt?.toISOString() || null,
-        ageMs: spxAge,
-        status: freshnessStatus(spxAge, 20 * 60_000),
-      },
-      spxM5Yahoo: {
-        source: 'Yahoo Finance ^GSPC 5m chart',
-        observedAt: input.spxM5LatestAt?.toISOString() || null,
-        ageMs: spxM5Age,
-        status: freshnessStatus(spxM5Age, 10 * 60_000),
-      },
-      vixYahoo: {
-        source: 'Yahoo Finance ^VIX chart',
-        observedAt: input.vixLatestAt?.toISOString() || null,
-        ageMs: vixAge,
-        status: freshnessStatus(vixAge, 20 * 60_000),
-      },
-      canonicalGex: {
-        source: `Canonical SPX GEX Board snapshot (${input.gexProvider || 'unknown provider'})`,
-        observedAt: gexDate && Number.isFinite(gexDate.getTime()) ? gexDate.toISOString() : null,
-        ageMs: gexAge,
-        status: gexAge !== null && gexAge <= 35 * 60_000 && input.gexFallbackFrom
-          ? 'FALLBACK'
-          : freshnessStatus(gexAge, 35 * 60_000),
-      },
-    },
-    dataQuality: {
-      status: input.dataQuality.overallStatus,
-      hardBlocks: [...input.dataQuality.hardBlocks],
-      warnings: [...input.dataQuality.warnings],
-    },
-    facts: input.facts,
-    gexSummary: input.gexSummary || null,
-    normalizedContext: null,
-    boardDeepLink: input.boardDeepLink,
-    replayGrade: input.replayEvidence?.replayGrade || 'UNAVAILABLE',
-    replayEvidence: input.replayEvidence,
-    rawSnapshotAvailable: false,
-  };
-};
-
 const expectedTradingRunIdsForDate = (dateKey: string) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) throw new Error('lifecycle_date must use YYYY-MM-DD');
   const anchor = Date.parse(`${dateKey}T00:00:00.000Z`);
@@ -3333,7 +3254,7 @@ export async function runSpxUatLlm(
   return { runId, message, result, probe };
 }
 
-async function runTradingAgents(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}) {
+async function executeTradingDecisionRun(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}) {
   let runLockToken: string | null = null;
   let decisionStore: D1SpxDecisionStore | null = null;
   let decisionRun: DecisionRunRecord | null = null;
@@ -3606,15 +3527,15 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
         dataQuality: canonicalGex.dataQuality,
       } : null,
       normalizedSeries: {
-        spx15m: normalizeReplaySeries(spxQuotes),
-        spx5m: normalizeReplaySeries(m5QuotesValid),
-        spxD1: normalizeReplaySeries(spxQuotesD1),
-        spxH1: normalizeReplaySeries(spxQuotesH1),
-        vix15m: normalizeReplaySeries(vixQuotes),
-        vix9d: normalizeReplaySeries(vixQuotes9d),
+        spx15m: normalizeSpxReplaySeries(spxQuotes),
+        spx5m: normalizeSpxReplaySeries(m5QuotesValid),
+        spxD1: normalizeSpxReplaySeries(spxQuotesD1),
+        spxH1: normalizeSpxReplaySeries(spxQuotesH1),
+        vix15m: normalizeSpxReplaySeries(vixQuotes),
+        vix9d: normalizeSpxReplaySeries(vixQuotes9d),
       },
     };
-    const marketSnapshot = buildMarketSnapshot({
+    const marketSnapshot = buildSpxMarketSnapshot({
       runId,
       scheduledAt: now,
       snapshotAt,
@@ -4010,6 +3931,16 @@ async function runTradingAgents(env: Env, now: Date = new Date(), options: Sched
   }
 }
 
+/** The only live adapter for cron and authenticated manual SPX decision runs. */
+export async function runLiveSpxDecisionRun(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}) {
+  const marketStatus = getMarketScheduleStatus(now);
+  return runSpxDecisionRun({
+    isTradingWindow: options.force || marketStatus.isTradingWindow,
+    skipReason: marketStatus.skipReason || null,
+    execute: () => executeTradingDecisionRun(env, now, options),
+  });
+}
+
 async function runEndOfDayAudit(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}) {
   const marketStatus = getMarketScheduleStatus(now);
   if (!options.force && !marketStatus.isMarketOpenDay) {
@@ -4292,12 +4223,17 @@ export async function runSupervisedSpxMarketTick(env: Env, now: Date = new Date(
 
     const marketStatus = getMarketScheduleStatus(now);
     if (!marketStatus.isTradingWindow) {
+      const skipped = await runSpxDecisionRun({
+        isTradingWindow: false,
+        skipReason: marketStatus.skipReason || null,
+      });
+      if (skipped.status !== 'SKIPPED') throw new Error('outside-window decision run executed unexpectedly');
       await health.finish({ tickId, job: 'MARKET_TICK', runId: null, status: 'SUCCEEDED', stage: 'GEX_ONLY' }, new Date().toISOString());
       return { status: 'SUCCEEDED' as const, failureCode: null };
     }
 
     await health.begin({ tickId, job: 'TRADING', runId: null, stage: 'STARTED' }, new Date().toISOString());
-    const trading = await runTradingAgents(env, now);
+    const trading = await runLiveSpxDecisionRun(env, now);
     await health.finish({
       tickId,
       job: 'TRADING',
@@ -4705,7 +4641,7 @@ export default {
       console.error = (...args) => logs.push(`[ERR] ${args.join(' ')}`);
 
       try {
-        await runTradingAgents(env, new Date(), {
+        await runLiveSpxDecisionRun(env, new Date(), {
           force: forceManualRun,
           debugReportPreview: true,
           deliveryMode: resolveSpxDeliveryMode({ trigger: 'MANUAL', debugPreview: true }),
@@ -4722,7 +4658,7 @@ export default {
       trigger: 'MANUAL',
       explicitDelivery: url.searchParams.has('deliver'),
     });
-    ctx.waitUntil(runTradingAgents(env, new Date(), { force: forceManualRun, deliveryMode }));
+    ctx.waitUntil(runLiveSpxDecisionRun(env, new Date(), { force: forceManualRun, deliveryMode }));
     return new Response(deliveryMode === 'SEND'
       ? 'Analysis delivery triggered.'
       : 'Analysis preview triggered; Telegram delivery suppressed. Add ?deliver to send explicitly.');

@@ -3,18 +3,17 @@ import test from "node:test";
 import {
   STOCKS_WATCHER_CACHE_TTL_MS,
   applyStocksWatcherSymbolRemoval,
-  buildDemoStocksWatcherSnapshot,
   buildStocksWatcherSnapshotFromNative,
   getFreshStocksWatcherCacheEntry,
   getGammaFlipLevel,
   getStocksWatcherMarketSession,
-  formatStocksWatcherRelativeAge,
   getStocksWatcherRowQuotesFromRawResult,
   getStocksWatcherVisibleSymbols,
   getNearestSpotStrike,
   mergeStocksWatcherRowQuoteMap,
   refreshStocksWatcherSymbolsBatch,
   resolveStocksWatcherSearchSymbol,
+  type StocksWatcherSnapshot,
   type StocksWatcherToolClient,
 } from "../src/lib/stocks-intelligence-watcher";
 import { STOCKS_WATCHER_SYMBOLS, STOCKS_WATCHER_UNIVERSE } from "../src/lib/stocks-watcher-universe";
@@ -42,13 +41,19 @@ import {
   getStocksWatcherTopTabToolPlan,
   normalizeWatcherExpiryForYahoo,
 } from "../src/lib/stocks-intelligence-watcher-session";
-import { attachPublishedWatcherData, onRequest as stocksWatcherApi } from "../functions/api/stocks-intelligence-watcher";
-import { onRequestPost as coverageAdminApi } from "../functions/api/stocks-intelligence-watcher/admin";
-import { getWatcherCoverageStatus, loadWatcherValuationBands, requestWatcherCoverage, type R2BucketLike } from "../src/lib/stocks-watcher-valuation-data";
-import { createWatcherSession, verifyWatcherSession } from "../src/lib/stocks-watcher-auth";
-import { onRequestGet as authLoginApi } from "../functions/api/stocks-intelligence-watcher/auth/login";
-import { onRequestGet as authCallbackApi } from "../functions/api/stocks-intelligence-watcher/auth/callback";
-import { onRequestGet as authSessionApi } from "../functions/api/stocks-intelligence-watcher/auth/session";
+import {
+  classifyStocksWatcherDataset,
+  onRequest as stocksWatcherApi,
+} from "../functions/api/stocks-intelligence-watcher";
+import {
+  checkMarketCacheD1Quota,
+  evaluateMarketCacheD1Quota,
+  getMarketCacheD1QuotaObservation,
+  getMarketCacheDatasetTtlMs,
+  getMarketCacheFreshnessGuard,
+  isMarketCacheWithin70PercentGuard,
+  resolveMarketCache,
+} from "../src/lib/market-data-cache";
 
 class FakeStocksNativeClient implements StocksWatcherToolClient {
   async listTools() {
@@ -202,171 +207,105 @@ class FakeStocksNativeClient implements StocksWatcherToolClient {
   }
 }
 
-const freshPublishedAt = () => new Date().toISOString();
-const fakeR2 = (objects: Record<string, unknown>): R2BucketLike => ({
-  get: async (key) => objects[key] === undefined ? null : { json: async () => objects[key] },
-});
-const writableFakeR2 = (objects: Record<string, unknown>): R2BucketLike => ({
-  get: async (key) => objects[key] === undefined ? null : { json: async () => objects[key] },
-  put: async (key, value) => { objects[key] = JSON.parse(value); },
-});
-const fakePublishedR2 = (objects: Record<string, unknown>): R2BucketLike => fakeR2({
-  "current.json": { schemaVersion: "1.0", releaseId: "release-1", generatedAt: freshPublishedAt() },
-  ...Object.fromEntries(Object.entries(objects).map(([key, value]) => [`releases/release-1/${key}`, value])),
-});
-const valuationFixture = (generatedAt = freshPublishedAt()) => ({
-  schemaVersion: "1.0",
-  source: "ValuationCalculation hybrid valuation model",
-  symbol: "TSM",
-  generatedAt,
-  dataAsOf: "2026-07-30",
-  metric: "pe",
-  window: "3Y",
-  latest: { date: "2026-07-30", price: 200, bands: { mean: 180, up1: 220, up2: 260, down1: 140, down2: 100 } },
-  points: [{ date: "2026-07-30", price: 200, bands: { mean: 180, up1: 220, up2: 260, down1: 140, down2: 100 } }],
-});
-const financialsFixture = (generatedAt = freshPublishedAt()) => ({
-  schemaVersion: "1.0", source: "FMP quarterly statements transformed by ValuationCalculation", symbol: "TSM", generatedAt, dataAsOf: "2026-06-30",
-  quarters: [{ date: "2026-06-30", filingDate: "2026-07-16", fiscalYear: "2026", period: "Q2", currency: "USD", revenue: 100, netIncome: 20, eps: 2, operatingCashFlow: 30, freeCashFlow: 15, revenue_qoq: 1, revenue_yoy: 10, netIncome_qoq: 2, netIncome_yoy: 11, eps_qoq: 2, eps_yoy: 11, operatingCashFlow_qoq: 3, operatingCashFlow_yoy: 12 }],
-});
-
-test("missing published valuation returns an observable coverage status instead of Yahoo fallback", async () => {
-  const response = await stocksWatcherApi({
-    request: new Request("https://example.test/api/stocks-intelligence-watcher", { method: "POST", body: JSON.stringify({ tool: "get_valuation_bands", params: { symbol: "IBM" } }) }),
-    env: { VALUATION_DATA: fakeR2({ "current.json": { schemaVersion: "1.0", releaseId: "release-1", generatedAt: freshPublishedAt() }, "coverage/universe.json": { schemaVersion: "1.0", updatedAt: freshPublishedAt(), symbols: [{ symbol: "IBM", requestedAt: freshPublishedAt(), state: "queued" }] } }) },
+// Deterministic test data belongs to the test suite; production code must not
+// export or serve a demo snapshot when Yahoo is unavailable.
+const buildTestSnapshot = (symbol: string, warning = "fixture"): StocksWatcherSnapshot => {
+  const upperSymbol = normalizeStocksWatcherSymbol(symbol);
+  const spot = upperSymbol === "SOFI" ? 12.34 : upperSymbol === "TSLA" ? 406.55 : 181.8;
+  const change = upperSymbol === "SOFI" ? 0.56 : upperSymbol === "TSLA" ? 12.49 : 2.14;
+  const strikes = Array.from({ length: 6 }, (_, index) => {
+    const strike = spot + (index - 3) * (spot > 200 ? 5 : 1);
+    const callOpenInterest = 2_000 + index * 300;
+    const putOpenInterest = 1_400 + (5 - index) * 260;
+    const callGex = 100_000 + index * 25_000;
+    const putGex = -80_000 + index * 12_000;
+    return {
+      strike,
+      callOpenInterest,
+      putOpenInterest,
+      callVolume: 300 + index * 40,
+      putVolume: 260 + (5 - index) * 30,
+      callGex,
+      putGex,
+      netGex: callGex + putGex,
+    };
   });
-  const body = await response.json() as { ok: boolean; coverageStatus: string; error: string };
-  assert.equal(response.status, 404);
-  assert.equal(body.ok, false);
-  assert.equal(body.coverageStatus, "queued");
-  assert.match(body.error, /VALUATION_DATA_NOT_PUBLISHED/);
-});
-
-test("admin coverage tool rejects unauthenticated calls and queues an authenticated ticker once", async () => {
-  const objects: Record<string, unknown> = {
-    "current.json": { schemaVersion: "1.0", releaseId: "release-1", generatedAt: freshPublishedAt() },
-    "releases/release-1/manifest.json": { schemaVersion: "1.0", symbols: [{ symbol: "TSM" }] },
-  };
-  const bucket = writableFakeR2(objects);
-  const request = (token?: string, scheme = "Bearer") => new Request("https://example.test/api/stocks-intelligence-watcher/admin", {
-    method: "POST",
-    headers: token ? { Authorization: `${scheme} ${token}` } : undefined,
-    body: JSON.stringify({ tool: "request_valuation_coverage", params: { symbol: "ibm" } }),
-  });
-  const env = { VALUATION_DATA: bucket, STOCKS_WATCHER_ADMIN_TOKEN: "test-admin-token" };
-  const rejected = await coverageAdminApi({ request: request(), env });
-  assert.equal(rejected.status, 401);
-  assert.deepEqual(await rejected.json(), { ok: false, error: "ADMIN_AUTH_REQUIRED" });
-
-  const invalid = await coverageAdminApi({ request: request("wrong-token"), env });
-  assert.equal(invalid.status, 401);
-  assert.deepEqual(await invalid.json(), { ok: false, error: "ADMIN_AUTH_REQUIRED" });
-
-  const first = await coverageAdminApi({ request: request("test-admin-token"), env });
-  const second = await coverageAdminApi({ request: request("test-admin-token"), env });
-  assert.equal((await first.json() as { raw: { status: string } }).raw.status, "queued");
-  assert.equal((await second.json() as { raw: { status: string } }).raw.status, "already_queued");
-  const lowercaseScheme = await coverageAdminApi({ request: request("test-admin-token", "bearer"), env });
-  assert.equal(lowercaseScheme.status, 200);
-  assert.equal(await getWatcherCoverageStatus(bucket, "IBM"), "queued");
-});
-
-test("admin coverage tool rejects malformed ticker text before touching R2", async () => {
-  const env = { VALUATION_DATA: writableFakeR2({}), STOCKS_WATCHER_ADMIN_TOKEN: "test-admin-token" };
-  for (const symbol of ["not valid", "IBM<script>"]) {
-    const response = await coverageAdminApi({
-      request: new Request("https://example.test/api/stocks-intelligence-watcher/admin", {
-        method: "POST",
-        headers: { Authorization: "Bearer test-admin-token" },
-        body: JSON.stringify({ tool: "request_valuation_coverage", params: { symbol } }),
-      }),
-      env,
-    });
-    assert.equal(response.status, 400);
-    assert.deepEqual(await response.json(), { ok: false, error: "ADMIN_TOOL_INVALID: symbol is invalid." });
-  }
-});
-
-test("admin coverage tool fails closed when its server-side credential is not configured", async () => {
-  const response = await coverageAdminApi({
-    request: new Request("https://example.test/api/stocks-intelligence-watcher/admin", {
-      method: "POST",
-      headers: { Authorization: "Bearer any-value" },
-      body: JSON.stringify({ tool: "request_valuation_coverage", params: { symbol: "IBM" } }),
-    }),
-    env: { VALUATION_DATA: writableFakeR2({}) },
-  });
-
-  assert.equal(response.status, 503);
-  assert.deepEqual(await response.json(), { ok: false, error: "ADMIN_AUTH_UNCONFIGURED" });
-
-  const unavailable = await coverageAdminApi({
-    request: new Request("https://example.test/api/stocks-intelligence-watcher/admin", {
-      method: "POST",
-      headers: { Authorization: "Bearer configured-token" },
-      body: JSON.stringify({ tool: "request_valuation_coverage", params: { symbol: "IBM" } }),
-    }),
-    env: { STOCKS_WATCHER_ADMIN_TOKEN: "configured-token" },
-  });
-  assert.equal(unavailable.status, 503);
-  assert.deepEqual(await unavailable.json(), { ok: false, error: "VALUATION_DATA_UNAVAILABLE: R2 write binding is not configured." });
-});
-
-test("owner session is signed, expires, and authorizes the admin coverage route", async () => {
-  const now = Date.now();
-  const session = await createWatcherSession("Kungsiuchun0@gmail.com", "test-session-secret", now);
-  assert.deepEqual(await verifyWatcherSession(session, "test-session-secret", now + 1_000), { email: "kungsiuchun0@gmail.com", issuedAt: now, expiresAt: now + 8 * 60 * 60 * 1000 });
-  assert.equal(await verifyWatcherSession(`${session}tampered`, "test-session-secret", now), null);
-  assert.equal(await verifyWatcherSession(session, "test-session-secret", now + 8 * 60 * 60 * 1000), null);
-
-  const objects: Record<string, unknown> = { "current.json": { schemaVersion: "1.0", releaseId: "release-1", generatedAt: freshPublishedAt() }, "releases/release-1/manifest.json": { schemaVersion: "1.0", symbols: [{ symbol: "TSM" }] } };
-  const response = await coverageAdminApi({
-    request: new Request("https://example.test/api/stocks-intelligence-watcher/admin", { method: "POST", headers: { Cookie: `stocks_watcher_session=${session}` }, body: JSON.stringify({ tool: "request_valuation_coverage", params: { symbol: "ibm" } }) }),
-    env: { VALUATION_DATA: writableFakeR2(objects), STOCKS_WATCHER_SESSION_SECRET: "test-session-secret", STOCKS_WATCHER_ALLOWED_EMAIL: "Kungsiuchun0@gmail.com" },
-  });
-  assert.equal(response.status, 200);
-});
-
-test("coverage queue retries an R2 conditional-write conflict without dropping another ticker", async () => {
-  let registry: unknown = null;
-  let putCalls = 0;
-  const bucket: R2BucketLike = {
-    get: async (key) => {
-      if (key !== "coverage/universe.json" || registry === null) return null;
-      return { httpEtag: `etag-${putCalls}`, json: async () => registry };
+  const expiryRows = [
+    { expiry: "2026-05-29", openInterest: 426_000, primaryStrike: Math.round(spot), strike: Math.round(spot), volume: 98_400, dominantType: "C" as const, type: "C" as const },
+    { expiry: "2026-06-01", openInterest: 56_000, primaryStrike: Math.round(spot) - 5, strike: Math.round(spot) - 5, volume: 17_500, dominantType: "P" as const, type: "P" as const },
+  ];
+  return {
+    generatedAt: "2026-05-28T20:00:00.000Z",
+    symbol: upperSymbol,
+    quote: {
+      symbol: upperSymbol,
+      companyName: upperSymbol === "SOFI" ? "SoFi Technologies Inc." : upperSymbol === "TSLA" ? "Tesla, Inc." : "NVIDIA Corporation",
+      price: spot,
+      open: spot - change * 0.5,
+      high: spot * 1.01,
+      low: spot * 0.99,
+      previousClose: spot - change,
+      change,
+      changePercent: Number(((change / spot) * 100).toFixed(2)),
+      marketState: "REGULAR",
+      asOf: "2026-05-28T20:00:00.000Z",
     },
-    put: async (_key, value, options) => {
-      putCalls += 1;
-      assert.ok(options?.onlyIf);
-      if (putCalls === 1) {
-        registry = { schemaVersion: "1.0", updatedAt: freshPublishedAt(), symbols: [{ symbol: "MSFT", requestedAt: freshPublishedAt(), state: "queued" }] };
-        return null;
-      }
-      registry = JSON.parse(value);
-      return {};
+    spot,
+    atm: Math.round(spot),
+    selectedTimeLabel: "live",
+    gexRegime: "Pinning",
+    putCallOpenInterest: 0.8,
+    putCallVolume: 0.7,
+    sweeps: 1,
+    availableExpiries: expiryRows.map((row) => row.expiry),
+    selectedExpiry: expiryRows[0].expiry,
+    expiryRows,
+    expiries: expiryRows,
+    strikes,
+    history: [
+      { date: "2026-05-28T13:30:00.000Z", label: "13:30", price: spot - 1 },
+      { date: "2026-05-28T14:00:00.000Z", label: "14:00", price: spot - 0.5 },
+      { date: "2026-05-28T14:30:00.000Z", label: "14:30", price: spot },
+      { date: "2026-05-28T15:00:00.000Z", label: "15:00", price: spot + 0.1 },
+    ],
+    recentNews: [],
+    earnings: {
+      source: "fixture",
+      nextEarningsDate: null,
+      nextEpsEstimate: null,
+      nextRevenueEstimate: null,
+      lastEarningsDate: null,
+      lastReportedQuarter: null,
+      epsActual: null,
+      epsEstimate: null,
+      epsDifference: null,
+      surprisePercent: null,
+      result: null,
+      priceMove: null,
     },
+    marketContext: { breadth: "fixture breadth", relativeStrength: "fixture strength" },
+    availableTools: [],
+    toolRuns: [{ name: "fixture", status: "ok", detail: warning }],
+    warnings: [warning],
+    source: "native_yahoo",
   };
-  const result = await requestWatcherCoverage(bucket, "IBM");
-  assert.equal(result.status, "queued");
-  assert.equal(putCalls, 2);
-  assert.deepEqual((registry as { symbols: { symbol: string }[] }).symbols.map((entry) => entry.symbol), ["MSFT", "IBM"]);
-});
+};
 
-test("demo snapshot is deterministic enough for the watcher shell", () => {
-  const snapshot = buildDemoStocksWatcherSnapshot("NVDA", "fallback");
+test("test-local fixture is deterministic enough for the watcher shell", () => {
+  const snapshot = buildTestSnapshot("NVDA", "fixture");
 
   assert.equal(snapshot.symbol, "NVDA");
-  assert.equal(snapshot.source, "demo_fallback");
+  assert.equal(snapshot.source, "native_yahoo");
   assert.ok(snapshot.availableExpiries.length > 0);
   assert.equal(snapshot.selectedExpiry, snapshot.availableExpiries[0]);
   assert.equal(snapshot.expiryRows.length, snapshot.availableExpiries.length);
-  assert.ok(snapshot.expiries.length >= 12);
-  assert.ok(snapshot.strikes.length >= 20);
-  assert.ok(snapshot.warnings.includes("fallback"));
+  assert.equal(snapshot.expiries.length, 2);
+  assert.equal(snapshot.strikes.length, 6);
+  assert.ok(snapshot.warnings.includes("fixture"));
 });
 
 test("nearest spot strike chooses one strike when several are close to spot", () => {
-  const snapshot = buildDemoStocksWatcherSnapshot("NVDA", "fallback");
+  const snapshot = buildTestSnapshot("NVDA", "fixture");
   const nearest = getNearestSpotStrike(
     [
       { ...snapshot.strikes[0], strike: 180 },
@@ -380,7 +319,7 @@ test("nearest spot strike chooses one strike when several are close to spot", ()
 });
 
 test("gamma flip uses nearest net-GEX sign crossing, not the smallest absolute bar", () => {
-  const base = buildDemoStocksWatcherSnapshot("GOOG", "fallback").strikes[0];
+  const base = buildTestSnapshot("GOOG", "fixture").strikes[0];
   const rows = [
     { ...base, strike: 220, netGex: 1 },
     { ...base, strike: 360, netGex: -2_000_000 },
@@ -393,7 +332,7 @@ test("gamma flip uses nearest net-GEX sign crossing, not the smallest absolute b
 });
 
 test("gamma flip is unavailable when visible net GEX never changes sign", () => {
-  const base = buildDemoStocksWatcherSnapshot("GOOG", "fallback").strikes[0];
+  const base = buildTestSnapshot("GOOG", "fixture").strikes[0];
   const rows = [
     { ...base, strike: 350, netGex: 100_000 },
     { ...base, strike: 360, netGex: 200_000 },
@@ -404,7 +343,7 @@ test("gamma flip is unavailable when visible net GEX never changes sign", () => 
 });
 
 test("AI summary payload compacts watcher data and changes cache key by expiry", () => {
-  const snapshot = buildDemoStocksWatcherSnapshot("NVDA", "fallback");
+  const snapshot = buildTestSnapshot("NVDA", "fixture");
   const payload = buildStocksWatcherAiSummaryPayload(snapshot, {
     selectedExpiry: snapshot.availableExpiries[0],
     marketBreadth: "Controlled breadth context for unit tests.",
@@ -422,7 +361,7 @@ test("AI summary payload compacts watcher data and changes cache key by expiry",
 });
 
 test("AI summary is deterministic and does not depend on model output", () => {
-  const snapshot = buildDemoStocksWatcherSnapshot("TSLA", "fallback");
+  const snapshot = buildTestSnapshot("TSLA", "fixture");
   const payload = buildStocksWatcherAiSummaryPayload(snapshot);
   const summary = buildStocksWatcherDeterministicSummary(payload);
 
@@ -431,26 +370,6 @@ test("AI summary is deterministic and does not depend on model output", () => {
   assert.ok(summary.headline.includes("TSLA"));
   assert.ok(summary.whatItTellsUs.length > 0);
   assert.ok(summary.howToAct.some((item) => item.includes("not a standalone buy or sell trigger")));
-});
-
-test("AI summary turns Markdown market-breadth tables into readable prose", () => {
-  const snapshot = buildDemoStocksWatcherSnapshot("NVDA", "fallback");
-  const payload = buildStocksWatcherAiSummaryPayload(snapshot, {
-    marketBreadth: "# Market breadth\n| Advancers | Decliners |\n| --- | --- |\n| 10 | 2 |",
-  });
-  const summary = buildStocksWatcherDeterministicSummary(payload);
-
-  assert.doesNotMatch(payload.marketBreadth, /\|/);
-  assert.match(summary.whyItMatters[2], /secondary confirmation/i);
-});
-
-test("watcher refresh age uses human-sized units", () => {
-  assert.equal(formatStocksWatcherRelativeAge(null), "--");
-  assert.equal(formatStocksWatcherRelativeAge(59), "59 sec ago");
-  assert.equal(formatStocksWatcherRelativeAge(60), "1 min ago");
-  assert.equal(formatStocksWatcherRelativeAge(3_599), "59 min ago");
-  assert.equal(formatStocksWatcherRelativeAge(3_600), "1 hour ago");
-  assert.equal(formatStocksWatcherRelativeAge(86_400), "1 day ago");
 });
 
 test("watchlist removal removes favorites, hides defaults, and chooses the next visible ticker", () => {
@@ -517,7 +436,7 @@ test("watcher session plans native tool calls and cache keys without UI state", 
 });
 
 test("watcher session resolves snapshot cache and custom stock decisions", () => {
-  const snapshot = buildDemoStocksWatcherSnapshot("SOFI", "fallback");
+  const snapshot = buildTestSnapshot("SOFI", "fixture");
   const cached = { snapshot, fetchedAt: 12345 };
 
   assert.equal(getStocksWatcherSnapshotExpiry(snapshot), snapshot.selectedExpiry);
@@ -756,10 +675,10 @@ test("all-stocks source can render a dynamic universe without stale default-symb
 });
 
 test("snapshot cache returns only fresh entries", () => {
-  const snapshot = buildDemoStocksWatcherSnapshot("NVDA", "fallback");
+  const snapshot = buildTestSnapshot("NVDA", "fixture");
   const cache = new Map([
     ["NVDA", { snapshot, fetchedAt: 1_000 }],
-    ["IREN", { snapshot: buildDemoStocksWatcherSnapshot("IREN", "fallback"), fetchedAt: 1_000 }],
+    ["IREN", { snapshot: buildTestSnapshot("IREN", "fixture"), fetchedAt: 1_000 }],
   ]);
 
   assert.equal(getFreshStocksWatcherCacheEntry(cache, "nvda", 1_000 + STOCKS_WATCHER_CACHE_TTL_MS - 1)?.snapshot.symbol, "NVDA");
@@ -983,135 +902,184 @@ test("native snapshot records a failed optional tool without blocking core ticke
   assert.ok(snapshot.toolRuns.some((run) => run.name === "basket_relative_strength" && run.status === "failed"));
 });
 
-test("POST endpoint keeps the native tool-call contract", async () => {
+test("native snapshot fails closed when the core quote has no finite positive price", async () => {
+  const client = new FakeStocksNativeClient();
+  const originalCallTool = client.callTool.bind(client);
+  client.callTool = async (name, args) => {
+    if (name === "get_quotes") {
+      return { text: "| Ticker | Last |\n| NVDA | n/a |", raw: { quotes: [{ symbol: "NVDA", price: 0 }] } };
+    }
+    return originalCallTool(name, args);
+  };
+
+  await assert.rejects(
+    buildStocksWatcherSnapshotFromNative("NVDA", client),
+    /finite positive price/,
+  );
+});
+
+test("native snapshot leaves history and expiry rows empty when optional data is unavailable", async () => {
+  const client = new FakeStocksNativeClient();
+  const originalCallToolText = client.callToolText.bind(client);
+  client.callToolText = async (name, args) => {
+    if (name === "get_options" || name === "get_intraday" || name === "get_stock_history") return "";
+    return originalCallToolText(name, args);
+  };
+  const originalCallTool = client.callTool.bind(client);
+  client.callTool = async (name, args) => {
+    if (name === "get_options" || name === "get_intraday" || name === "get_stock_history") {
+      return { text: "", raw: {} };
+    }
+    return originalCallTool(name, args);
+  };
+
+  const snapshot = await buildStocksWatcherSnapshotFromNative("NVDA", client);
+  assert.deepEqual(snapshot.availableExpiries, []);
+  assert.deepEqual(snapshot.expiryRows, []);
+  assert.deepEqual(snapshot.history, []);
+  assert.equal(snapshot.selectedExpiry, null);
+  assert.ok(snapshot.warnings.includes("Options expiry data unavailable."));
+  assert.ok(snapshot.warnings.includes("Price history unavailable."));
+  assert.ok(snapshot.strikes.length > 0); // completeRows synthetic GEX path remains independent.
+});
+
+test("POST Watchlist fails closed without the D1 curated-universe binding", async () => {
   const response = await stocksWatcherApi({
     request: new Request("https://example.com/api/stocks-intelligence-watcher", {
       method: "POST",
       body: JSON.stringify({ tool: "get_watchlist", params: {} }),
     }),
   });
-  const payload = await response.json() as {
-    ok: boolean;
-    tool: string;
-    text: string;
-    raw: { symbols: string[]; stocks?: unknown };
-    cache: { status: string };
-  };
+  const payload = await response.json() as { ok: boolean; error: string; observability: { requestId: string; dataset: string; rowsRead: number; rowsWritten: number; source: string } };
 
-  assert.equal(response.status, 200);
-  assert.equal(payload.ok, true);
-  assert.equal(payload.cache.status, "bypassed");
-  assert.equal(payload.tool, "get_watchlist");
-  assert.deepEqual(payload.raw.symbols.slice(0, 6), ["NVDA", "GOOG", "GOOGL", "AAPL", "MSFT", "AMZN"]);
-  assert.equal(payload.raw.symbols.length, 51);
-  assert.equal(payload.raw.symbols.includes("SPX"), true);
-  assert.equal(Array.isArray((payload.raw as { stocks?: unknown }).stocks), true);
-  assert.match(payload.text, /NVDA/);
+  assert.equal(response.status, 503);
+  assert.equal(payload.ok, false);
+  assert.match(payload.error, /MARKET_CACHE_DB is not bound/);
+  assert.equal(payload.observability.requestId, response.headers.get("X-Request-ID"));
+  assert.equal(payload.observability.dataset, "quote");
+  assert.equal(payload.observability.rowsRead, 0);
+  assert.equal(payload.observability.rowsWritten, 0);
+  assert.equal(payload.observability.source, "d1_tracking");
+  assert.equal(response.headers.get("X-Market-Dataset"), "quote");
+  assert.equal(response.headers.get("X-Market-Cache-TTL-Ms"), "60000");
 });
 
-test("published valuation and financial tools expose typed R2 data without Yahoo fallback", async () => {
-  const r2 = fakePublishedR2({
-    "valuation/TSM/pe/3Y.json": valuationFixture(),
-    "financials/TSM.json": financialsFixture(),
+test("market cache dataset TTLs and 70 percent guard are explicit", async () => {
+  assert.equal(getMarketCacheDatasetTtlMs("quote"), 60_000);
+  assert.equal(getMarketCacheDatasetTtlMs("options"), 15 * 60_000);
+  assert.equal(getMarketCacheDatasetTtlMs("history"), 15 * 60_000);
+  assert.equal(getMarketCacheDatasetTtlMs("intraday"), 15 * 60_000);
+  assert.equal(getMarketCacheDatasetTtlMs("news"), 15 * 60_000);
+  assert.equal(getMarketCacheDatasetTtlMs("fundamentals"), 24 * 60 * 60_000);
+  assert.equal(getMarketCacheDatasetTtlMs("earnings"), 24 * 60 * 60_000);
+  assert.equal(getMarketCacheDatasetTtlMs("snapshot"), 60_000);
+
+  const toolDatasetCases: Array<[string, string]> = [
+    ["get_quotes", "quote"],
+    ["get_options", "options"],
+    ["get_options_gex", "options"],
+    ["get_options_greeks", "options"],
+    ["get_options_iv_intraday", "options"],
+    ["get_options_pcr", "options"],
+    ["get_options_dex", "options"],
+    ["get_options_sweeps", "options"],
+    ["get_options_0dte", "options"],
+    ["pre_event_brief", "news"],
+    ["get_stock_stats", "fundamentals"],
+    ["get_beta", "fundamentals"],
+    ["get_holders", "fundamentals"],
+    ["earnings_vol_crush", "earnings"],
+    ["get_stock_history", "history"],
+    ["get_intraday", "intraday"],
+  ];
+  for (const [tool, dataset] of toolDatasetCases) assert.equal(classifyStocksWatcherDataset(tool), dataset, tool);
+
+  const cachedAt = "2026-05-28T00:00:00.000Z";
+  const expiresAt = "2026-05-28T00:10:00.000Z";
+  assert.equal(getMarketCacheFreshnessGuard(cachedAt, expiresAt, new Date("2026-05-28T00:06:00.000Z")), "fresh");
+  assert.equal(getMarketCacheFreshnessGuard(cachedAt, expiresAt, new Date("2026-05-28T00:08:00.000Z")), "near_expiry");
+  assert.equal(isMarketCacheWithin70PercentGuard(cachedAt, expiresAt, new Date("2026-05-28T00:06:00.000Z")), true);
+  assert.equal(isMarketCacheWithin70PercentGuard(cachedAt, expiresAt, new Date("2026-05-28T00:08:00.000Z")), false);
+
+  const bypassed = await resolveMarketCache({
+    scope: "ttl-test",
+    symbol: "NVDA",
+    dataset: "options",
+    load: async () => ({ ok: true }),
   });
-  const valuationResponse = await stocksWatcherApi({ request: new Request("https://example.com/api/stocks-intelligence-watcher", { method: "POST", body: JSON.stringify({ tool: "get_valuation_bands", params: { symbol: "TSM", metric: "pe", window: "3Y" } }) }), env: { VALUATION_DATA: r2 } });
-  const valuationPayload = await valuationResponse.json() as { ok: boolean; raw: { latest: { bands: { mean: number } } } };
-  assert.equal(valuationResponse.status, 200);
-  assert.equal(valuationPayload.ok, true);
-  assert.equal(valuationPayload.raw.latest.bands.mean, 180);
-
-  const financialResponse = await stocksWatcherApi({ request: new Request("https://example.com/api/stocks-intelligence-watcher", { method: "POST", body: JSON.stringify({ tool: "get_financial_statements", params: { symbol: "TSM", periods: 1 } }) }), env: { VALUATION_DATA: r2 } });
-  const financialPayload = await financialResponse.json() as { ok: boolean; raw: { quarters: { freeCashFlow: number }[] } };
-  assert.equal(financialResponse.status, 200);
-  assert.equal(financialPayload.ok, true);
-  assert.equal(financialPayload.raw.quarters[0]?.freeCashFlow, 15);
+  assert.equal(bypassed.cache.ttlMs, 15 * 60_000);
+  assert.equal(bypassed.cache.dataset, "options");
+  assert.equal(bypassed.cache.observability.rowRead, "bypassed");
 });
 
-test("published valuation rejects bad input, missing objects, and stale data", async () => {
-  await assert.rejects(() => loadWatcherValuationBands(fakePublishedR2({}), { symbol: "TSM", metric: "pe", window: "3Y" }), /NOT_PUBLISHED/);
-  await assert.rejects(() => loadWatcherValuationBands(fakePublishedR2({ "valuation/TSM/pe/3Y.json": valuationFixture("2020-01-01T00:00:00.000Z") }), { symbol: "TSM", metric: "pe", window: "3Y" }), /STALE/);
-  await assert.rejects(() => loadWatcherValuationBands(fakePublishedR2({ "valuation/TSM/pe/3Y.json": valuationFixture(new Date(Date.now() + 60 * 60 * 1000).toISOString()) }), { symbol: "TSM", metric: "pe", window: "3Y" }), /in the future/);
-  await assert.rejects(() => loadWatcherValuationBands(fakePublishedR2({}), { symbol: "TSM", metric: "bad", window: "3Y" }), /metric must be/);
-  await assert.rejects(() => loadWatcherValuationBands(fakePublishedR2({ "valuation/TSM/pe/3Y.json": { ...valuationFixture(), schemaVersion: "9.9" } }), { symbol: "TSM", metric: "pe", window: "3Y" }), /contract mismatch/);
-});
-
-test("snapshot keeps published valuation when only financial data is unavailable", async () => {
-  const snapshot = await attachPublishedWatcherData(buildDemoStocksWatcherSnapshot("TSM", "fallback"), fakePublishedR2({ "valuation/TSM/pe/3Y.json": valuationFixture() }));
-  assert.equal(snapshot.valuation?.latest.bands.mean, 180);
-  assert.equal(snapshot.financials, null);
-  assert.ok(snapshot.warnings.some((warning) => warning.includes("financials/TSM.json")));
-});
-
-test("snapshot makes unpublished valuation data observable without a Yahoo substitute", async () => {
-  const snapshot = await attachPublishedWatcherData(buildDemoStocksWatcherSnapshot("TSM", "fallback"), fakeR2({}));
-  assert.equal(snapshot.valuation, null);
-  assert.equal(snapshot.financials, null);
-  assert.ok(snapshot.warnings.some((warning) => warning.includes("VALUATION_DATA_NOT_PUBLISHED")));
-  assert.ok(snapshot.availableTools.some((tool) => tool.name === "get_valuation_bands"));
-  assert.ok(!snapshot.availableTools.some((tool) => tool.name === "request_valuation_coverage"));
-});
-
-test("owner OAuth login creates a short-lived state cookie and callback rejects CSRF or provider denial", async () => {
-  const loginResponse = await authLoginApi({
-    request: new Request("https://watcher.example/api/stocks-intelligence-watcher/auth/login"),
-    env: { GITHUB_CLIENT_ID: "client-id", STOCKS_WATCHER_AUTH_ORIGIN: "https://watcher.example" },
+test("D1 quota guard blocks at the 70 percent hard threshold and reports headroom", () => {
+  const readThreshold = 3_500_000;
+  const writeThreshold = 70_000;
+  const readBlocked = evaluateMarketCacheD1Quota({
+    currentUtcDay: "2026-08-10",
+    usage: { dayUtc: "2026-08-10", rowsRead: readThreshold - 1, rowsWritten: 0 },
+    rowsRead: 1,
+    rowsWritten: 0,
   });
-  assert.equal(loginResponse.status, 302);
-  assert.match(loginResponse.headers.get("location") || "", /github\.com\/login\/oauth\/authorize/);
-  assert.match(loginResponse.headers.get("set-cookie") || "", /stocks_watcher_oauth_state=.*Max-Age=600/);
+  assert.equal(readBlocked.allow, false);
+  assert.equal(readBlocked.reason, "read_threshold_exceeded");
+  assert.deepEqual(readBlocked.blockedDimensions, ["read"]);
+  assert.equal(readBlocked.readHeadroom, 0);
+  assert.equal(readBlocked.readRemaining, 1_500_000);
 
-  const invalidState = await authCallbackApi({
-    request: new Request("https://watcher.example/api/stocks-intelligence-watcher/auth/callback?state=bad&code=code", { headers: { Cookie: "stocks_watcher_oauth_state=other" } }),
-    env: {},
+  const writeBlocked = checkMarketCacheD1Quota({
+    currentDayUtc: "2026-08-10",
+    aggregatedUsage: { dayUtc: "2026-08-10", rowsRead: 0, rowsWritten: writeThreshold - 1 },
+    observedRowsRead: 0,
+    observedRowsWritten: 1,
   });
-  assert.equal(invalidState.status, 400);
-
-  const denied = await authCallbackApi({
-    request: new Request("https://watcher.example/api/stocks-intelligence-watcher/auth/callback?error=access_denied"),
-    env: {},
-  });
-  assert.equal(denied.status, 400);
-  assert.deepEqual(await denied.json(), { ok: false, error: "AUTH_PROVIDER_DENIED" });
+  assert.equal(writeBlocked.allow, false);
+  assert.equal(writeBlocked.reason, "write_threshold_exceeded");
+  assert.deepEqual(writeBlocked.blockedDimensions, ["write"]);
+  assert.equal(writeBlocked.writeHeadroom, 0);
 });
 
-test("owner OAuth callback exchanges GitHub identity and clears the one-time state cookie", async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (input) => {
-    const url = String(input);
-    if (url.endsWith("/login/oauth/access_token")) return new Response(JSON.stringify({ access_token: "github-token" }), { status: 200 });
-    if (url.endsWith("/user")) return new Response(JSON.stringify({ email: null }), { status: 200 });
-    if (url.endsWith("/user/emails")) return new Response(JSON.stringify([{ email: "owner@example.com", verified: true }]), { status: 200 });
-    throw new Error(`unexpected fetch ${url}`);
-  };
-  try {
-    const response = await authCallbackApi({
-      request: new Request("https://watcher.example/api/stocks-intelligence-watcher/auth/callback?state=state-123&code=oauth-code", { headers: { Cookie: "stocks_watcher_oauth_state=state-123" } }),
-      env: {
-        GITHUB_CLIENT_ID: "client-id",
-        GITHUB_CLIENT_SECRET: "client-secret",
-        STOCKS_WATCHER_SESSION_SECRET: "session-secret",
-        STOCKS_WATCHER_ALLOWED_EMAIL: "owner@example.com",
-        STOCKS_WATCHER_AUTH_ORIGIN: "https://watcher.example",
-      },
-    });
-    assert.equal(response.status, 302);
-    assert.match(response.headers.get("location") || "", /#\/work\/stocks-intelligence-watcher\?auth=success/);
-    const cookies = response.headers.get("set-cookie") || "";
-    assert.match(cookies, /stocks_watcher_session=.*Max-Age=28800/);
-    assert.match(cookies, /stocks_watcher_oauth_state=; Max-Age=0/);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+test("D1 quota guard resets aggregate usage at a new UTC day", () => {
+  const decision = evaluateMarketCacheD1Quota({
+    currentUtcDay: "2026-08-11",
+    usage: { dayUtc: "2026-08-10", rowsRead: 5_000_000, rowsWritten: 100_000 },
+    rowsRead: 1,
+    rowsWritten: 1,
+  });
+  assert.equal(decision.allow, true);
+  assert.equal(decision.reason, "utc_day_reset");
+  assert.equal(decision.dayReset, true);
+  assert.equal(decision.projectedRowsRead, 1);
+  assert.equal(decision.projectedRowsWritten, 1);
 });
 
-test("owner session endpoint exposes only the normalized allowed owner identity", async () => {
-  const session = await createWatcherSession("Owner@Example.com", "session-secret");
-  const response = await authSessionApi({
-    request: new Request("https://watcher.example/api/stocks-intelligence-watcher/auth/session", { headers: { Cookie: `stocks_watcher_session=${session}` } }),
-    env: { STOCKS_WATCHER_SESSION_SECRET: "session-secret", STOCKS_WATCHER_ALLOWED_EMAIL: "owner@example.com" },
+test("D1 quota guard fails closed when either observed dimension is exhausted", async () => {
+  const decision = evaluateMarketCacheD1Quota({
+    currentUtcDay: "2026-08-10",
+    usage: { dayUtc: "2026-08-10", rowsRead: 0, rowsWritten: 70_000 },
+    rowsRead: 0,
+    rowsWritten: 0,
   });
-  const payload = await response.json() as { authenticated: boolean; user?: { email: string } };
-  assert.equal(response.status, 200);
-  assert.equal(payload.authenticated, true);
-  assert.equal(payload.user?.email, "owner@example.com");
+  assert.equal(decision.allow, false);
+  assert.equal(decision.reason, "write_threshold_exceeded");
+  assert.equal(decision.remaining.rowsWritten, 30_000);
+
+  await assert.rejects(
+    resolveMarketCache({
+      scope: "quota-blocked",
+      symbol: "NVDA",
+      quotaGuard: () => decision,
+      load: async () => ({ ok: true }),
+    }),
+    (error) => error instanceof Error && error.name === "MarketCacheQuotaExceededError",
+  );
+});
+
+test("cache row observability can feed the quota guard without exposing payloads", async () => {
+  const resolved = await resolveMarketCache({
+    scope: "quota-observation",
+    symbol: "NVDA",
+    load: async () => ({ ok: true }),
+  });
+  assert.deepEqual(getMarketCacheD1QuotaObservation(resolved.cache), { rowsRead: 0, rowsWritten: 0 });
 });

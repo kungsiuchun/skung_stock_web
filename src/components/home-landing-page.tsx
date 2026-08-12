@@ -10,7 +10,7 @@ const HERO_IMAGE = "/image/siu-hero-particle-source-v2.png";
 
 export function HomeLandingPage({ onOpenMarketLab, onOpenPhotography }: HomeLandingPageProps) {
   return (
-    <section className="relative h-full min-h-screen overflow-hidden bg-[#f4efe6] text-[#1a1714]">
+    <section className="relative min-h-dvh overflow-x-hidden bg-[#f4efe6] text-[#1a1714] lg:h-full lg:overflow-hidden">
       <div className="pointer-events-none absolute inset-3 border border-[#c9c0b2]/80 sm:inset-5" />
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(rgba(26,23,20,0.045)_1px,transparent_1px)] [background-size:4px_4px]" />
       <div className="pointer-events-none absolute left-[4.4rem] top-28 hidden h-[calc(100%-10rem)] w-px bg-[#c9c0b2]/60 md:block" />
