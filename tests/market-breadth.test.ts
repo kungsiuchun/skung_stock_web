@@ -424,6 +424,33 @@ describe("Market Breadth refresh producer", () => {
     assert.equal(isNyseTradingDay("2026-08-11"), true);
   });
 
+  it("requests the previous NYSE trading day for Basic-plan EOD refreshes", async () => {
+    const cases = [
+      { now: "2026-08-12T17:30:00.000Z", expected: "2026-08-11" },
+      { now: "2026-08-17T17:30:00.000Z", expected: "2026-08-14" },
+      { now: "2026-09-08T17:30:00.000Z", expected: "2026-09-04" },
+    ];
+
+    for (const testCase of cases) {
+      const repository = new MemoryMarketBreadthRefreshRepository();
+      let requestedDate = "";
+      await runMarketBreadthRefresh({
+        mode: "DAILY",
+        now: new Date(testCase.now),
+        repository,
+        client: {
+          fetchUniverse: async () => repository.universe,
+          fetchDailySummary: async (date) => {
+            requestedDate = date;
+            throw new MarketBreadthSourceError("NO_MARKET_DATA", "test stop");
+          },
+          fetchCustomBars: async () => [],
+        },
+      });
+      assert.equal(requestedDate, testCase.expected);
+    }
+  });
+
   it("completes the initial backfill in resumable batches without retrying short-history constituents forever", async () => {
     const repository = new MemoryMarketBreadthRefreshRepository();
     const shortTicker = repository.universe.holdings.at(-1)!.ticker;
@@ -458,7 +485,7 @@ describe("Market Breadth refresh producer", () => {
 
     const result = await runMarketBreadthRefresh({
       mode: "DAILY",
-      now: new Date("2026-08-11T22:30:00.000Z"),
+      now: new Date("2026-08-12T17:30:00.000Z"),
       repository,
       client: {
         fetchUniverse: async () => repository.universe,
@@ -480,7 +507,7 @@ describe("Market Breadth refresh producer", () => {
     let providerCalls = 0;
     const result = await runMarketBreadthRefresh({
       mode: "DAILY",
-      now: new Date("2026-08-11T23:30:00.000Z"),
+      now: new Date("2026-08-12T18:30:00.000Z"),
       repository,
       client: {
         fetchUniverse: async () => { providerCalls += 1; return repository.universe; },
@@ -493,23 +520,31 @@ describe("Market Breadth refresh producer", () => {
     assert.equal(providerCalls, 0);
   });
 
-  it("treats an empty holiday summary as SKIPPED and a provider outage as FAILED without replacing last-good", async () => {
+  it("deduplicates a holiday run and preserves last-good after a provider outage", async () => {
     const holidayRepository = new MemoryMarketBreadthRefreshRepository();
+    holidayRepository.latestSnapshot = {
+      ...apiSnapshot(),
+      priceAsOf: "2026-12-24",
+    } as ReturnType<typeof buildMarketBreadthSnapshot>;
     const holiday = await runMarketBreadthRefresh({
       mode: "DAILY",
       now: new Date("2026-12-25T22:30:00.000Z"),
       repository: holidayRepository,
       client: {
-        fetchUniverse: async () => holidayRepository.universe,
-        fetchDailySummary: async () => { throw new MarketBreadthSourceError("NO_MARKET_DATA", "holiday"); },
+        fetchUniverse: async () => { throw new Error("holiday duplicate must not call providers"); },
+        fetchDailySummary: async () => { throw new Error("holiday duplicate must not call providers"); },
         fetchCustomBars: async () => [],
       },
     });
     assert.equal(holiday.status, "SKIPPED");
+    assert.equal(holiday.reason, "DUPLICATE_PRICE_DATE");
     assert.equal(holidayRepository.published.length, 0);
 
     const failedRepository = new MemoryMarketBreadthRefreshRepository();
-    failedRepository.latestSnapshot = apiSnapshot() as ReturnType<typeof buildMarketBreadthSnapshot>;
+    failedRepository.latestSnapshot = {
+      ...apiSnapshot(),
+      priceAsOf: "2026-08-10",
+    } as ReturnType<typeof buildMarketBreadthSnapshot>;
     const failed = await runMarketBreadthRefresh({
       mode: "DAILY",
       now: new Date("2026-08-12T22:30:00.000Z"),

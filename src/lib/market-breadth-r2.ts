@@ -29,6 +29,7 @@ export interface MarketBreadthStatus {
     publishedAt: string;
   };
   lastAttempt: MarketBreadthAttempt;
+  unresolvedFailure?: MarketBreadthAttempt | null;
 }
 
 export interface MarketBreadthObjectBody {
@@ -44,17 +45,32 @@ const isIso = (value: unknown) => typeof value === "string" && Number.isFinite(D
 const isDate = (value: unknown) => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
 const isString = (value: unknown) => typeof value === "string" && value.length > 0;
 
+const validateAttempt = (attempt: MarketBreadthAttempt, label: string) => {
+  if (!isString(attempt.runId) || !["READY", "PARTIAL", "FAILED", "SKIPPED"].includes(attempt.status || "") || !isIso(attempt.startedAt) || !isIso(attempt.finishedAt)) {
+    throw new Error(`Market breadth ${label} is invalid.`);
+  }
+  if (attempt.priceAsOf !== null && !isDate(attempt.priceAsOf)) throw new Error(`Market breadth ${label} price date is invalid.`);
+  if (attempt.errorClass !== null && !isString(attempt.errorClass)) throw new Error(`Market breadth ${label} error class is invalid.`);
+};
+
+export const resolveMarketBreadthUnresolvedFailure = (status: MarketBreadthStatus): MarketBreadthAttempt | null => {
+  if (status.unresolvedFailure !== undefined) return status.unresolvedFailure;
+  return status.lastAttempt.status === "FAILED" || status.lastAttempt.status === "PARTIAL" ? status.lastAttempt : null;
+};
+
 export const validateMarketBreadthStatus = (value: unknown): MarketBreadthStatus => {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Market breadth status is invalid.");
   const status = value as Partial<MarketBreadthStatus>;
   if (status.schemaVersion !== 1 || !status.lastAttempt || typeof status.lastAttempt !== "object") throw new Error("Market breadth status schema is invalid.");
   if (!status.state || !MARKET_BREADTH_STATE_KEYS.includes(status.state.key as typeof MARKET_BREADTH_STATE_KEYS[number]) || !isIso(status.state.updatedAt)) throw new Error("Market breadth state pointer is invalid.");
   const attempt = status.lastAttempt;
-  if (!isString(attempt.runId) || !["READY", "PARTIAL", "FAILED", "SKIPPED"].includes(attempt.status || "") || !isIso(attempt.startedAt) || !isIso(attempt.finishedAt)) {
-    throw new Error("Market breadth last attempt is invalid.");
+  validateAttempt(attempt, "last attempt");
+  if (status.unresolvedFailure !== undefined && status.unresolvedFailure !== null) {
+    validateAttempt(status.unresolvedFailure, "unresolved failure");
+    if (status.unresolvedFailure.status !== "FAILED" && status.unresolvedFailure.status !== "PARTIAL") {
+      throw new Error("Market breadth unresolved failure status is invalid.");
+    }
   }
-  if (attempt.priceAsOf !== null && !isDate(attempt.priceAsOf)) throw new Error("Market breadth attempt price date is invalid.");
-  if (attempt.errorClass !== null && !isString(attempt.errorClass)) throw new Error("Market breadth attempt error class is invalid.");
   if (status.current !== null) {
     const current = status.current;
     if (!current || !isString(current.releaseId) || !isString(current.snapshotId) || !isString(current.snapshotKey) || !isString(current.stateKey)
@@ -62,7 +78,10 @@ export const validateMarketBreadthStatus = (value: unknown): MarketBreadthStatus
       throw new Error("Market breadth current release is invalid.");
     }
   }
-  return status as MarketBreadthStatus;
+  return {
+    ...status,
+    unresolvedFailure: resolveMarketBreadthUnresolvedFailure(status as MarketBreadthStatus),
+  } as MarketBreadthStatus;
 };
 
 export const readJsonObject = async (store: Pick<MarketBreadthObjectStore, "get">, key: string): Promise<unknown | null> => {
@@ -116,6 +135,7 @@ export const publishMarketBreadthRelease = async (store: Pick<MarketBreadthObjec
       publishedAt: snapshot.generatedAt,
     },
     lastAttempt: input.attempt,
+    unresolvedFailure: null,
   };
   await store.put(stateKey, input.stateJson, metadata);
   await store.put(snapshotKey, JSON.stringify(snapshot), metadata);
@@ -140,6 +160,11 @@ export const publishMarketBreadthAttempt = async (store: Pick<MarketBreadthObjec
     state,
     current: input.previousStatus?.current || null,
     lastAttempt: input.attempt,
+    unresolvedFailure: input.attempt.status === "FAILED" || input.attempt.status === "PARTIAL"
+      ? input.attempt
+      : input.attempt.status === "SKIPPED" && input.previousStatus
+        ? resolveMarketBreadthUnresolvedFailure(input.previousStatus)
+        : null,
   };
   await store.put(MARKET_BREADTH_STATUS_KEY, JSON.stringify(status), metadata);
   return status;

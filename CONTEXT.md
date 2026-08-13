@@ -130,6 +130,8 @@ It publishes one latest daily snapshot with three panels: sector ETF performance
 
 The SPY universe, weights, and one-sector-only membership mapping come from the dated State Street SPY and Select Sector SPDR holdings workbooks. Split-adjusted EOD prices come from Massive under an account with public display rights.
 
+The production Massive credential has Basic-plan EOD recency and a five-requests-per-minute limit. GitHub Actions therefore serializes Massive calls at a 13-second minimum interval and requests the previous NYSE trading session after the next-day EOD publication window; it never treats a same-day HTTP 403 as a holiday or silently relabels previous-day data as current-day data.
+
 Missing constituent history is unavailable and excluded from the eligible breadth denominator. It is never converted to zero or treated as below a moving average.
 
 GitHub Actions owns the batch computation and writes bounded normalized objects to the dedicated Standard-class `market-breadth-data` R2 bucket. Price state and READY snapshots use independent A/B slots, refresh audit uses a 64-slot ring, and the status pointer always moves last. Pages owns a read-only R2 API. The feature uses no D1 and no scheduled Cloudflare Worker, and must not share `MARKET_CACHE_DB`, `SPX_RECAP_DB`, or the SPX trading Worker.

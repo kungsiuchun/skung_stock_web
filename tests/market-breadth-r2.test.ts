@@ -230,6 +230,74 @@ describe("Market Breadth R2 architecture", () => {
     assert.equal(payload.snapshotId, snapshot().snapshotId);
   });
 
+  it("keeps an unresolved refresh failure visible after a duplicate run is skipped", async () => {
+    const store = new MemoryObjectStore();
+    const ready = await publishMarketBreadthRelease(store, {
+      previousStatus: null,
+      releaseId: "r1",
+      snapshot: snapshot(),
+      stateJson: "{\"schemaVersion\":1}",
+      attempt: status().lastAttempt,
+    });
+    const failed = await publishMarketBreadthAttempt(store, {
+      previousStatus: ready,
+      attempt: {
+        ...ready.lastAttempt,
+        runId: "run-failed",
+        status: "FAILED",
+        finishedAt: "2026-08-11T23:45:00.000Z",
+        errorClass: "PROVIDER_REJECTED",
+      },
+    });
+    const skipped = await publishMarketBreadthAttempt(store, {
+      previousStatus: failed,
+      attempt: {
+        ...failed.lastAttempt,
+        runId: "run-skipped",
+        status: "SKIPPED",
+        finishedAt: "2026-08-12T17:17:00.000Z",
+        errorClass: null,
+      },
+    });
+
+    assert.equal(skipped.lastAttempt.status, "SKIPPED");
+    const response = await getMarketBreadthApi({
+      request: new Request("https://example.com/api/market-breadth"),
+      env: { MARKET_BREADTH_DATA: store },
+      now: new Date("2026-08-12T18:00:00.000Z"),
+    });
+    const payload = await response.json() as { freshness: { status: string; errorClass: string; failedAt: string } };
+    assert.equal(response.status, 200);
+    assert.equal(payload.freshness.status, "STALE");
+    assert.equal(payload.freshness.errorClass, "PROVIDER_REJECTED");
+    assert.equal(payload.freshness.failedAt, "2026-08-11T23:45:00.000Z");
+
+    const recoveredSnapshot = snapshot();
+    recoveredSnapshot.generatedAt = "2026-08-12T18:05:00.000Z";
+    recoveredSnapshot.snapshotId = calculateMarketBreadthSnapshotId(recoveredSnapshot);
+    const recovered = await publishMarketBreadthRelease(store, {
+      previousStatus: skipped,
+      releaseId: "r2",
+      snapshot: recoveredSnapshot,
+      stateJson: "{\"schemaVersion\":1,\"recovered\":true}",
+      attempt: {
+        ...skipped.lastAttempt,
+        runId: "run-recovered",
+        status: "READY",
+        finishedAt: "2026-08-12T18:05:00.000Z",
+        errorClass: null,
+      },
+    });
+    assert.equal(recovered.unresolvedFailure, null);
+    const recoveredResponse = await getMarketBreadthApi({
+      request: new Request("https://example.com/api/market-breadth"),
+      env: { MARKET_BREADTH_DATA: store },
+      now: new Date("2026-08-12T18:06:00.000Z"),
+    });
+    const recoveredPayload = await recoveredResponse.json() as { freshness: { status: string } };
+    assert.equal(recoveredPayload.freshness.status, "FRESH");
+  });
+
   it("rejects shallow-but-empty snapshot rows", async () => {
     const store = new MemoryObjectStore();
     store.objects.set(MARKET_BREADTH_STATUS_KEY, JSON.stringify(status()));
@@ -253,6 +321,13 @@ describe("Market Breadth R2 architecture", () => {
     const beforeSteps = workflow.slice(0, workflow.indexOf("    steps:"));
     assert.doesNotMatch(beforeSteps, /MASSIVE_API_KEY|R2_ACCESS_KEY|R2_SECRET/);
     assert.match(workflow, /Compute and atomically publish[\s\S]*MASSIVE_API_KEY:[\s\S]*MARKET_BREADTH_R2_SECRET_ACCESS_KEY:/);
+  });
+
+  it("schedules Basic-plan EOD refreshes after the next-day publication window", () => {
+    const workflow = readFileSync(new URL("../.github/workflows/refresh-market-breadth.yml", import.meta.url), "utf8");
+    assert.match(workflow, /cron: "17 17 \* \* 2-6"/);
+    assert.match(workflow, /cron: "47 18 \* \* 2-6"/);
+    assert.doesNotMatch(workflow, /cron: "(?:47 22|32 23) \* \* 1-5"/);
   });
 });
 
