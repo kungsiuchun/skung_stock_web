@@ -125,6 +125,14 @@ export const isNyseTradingDay = (date: string) => {
   return !holidays.has(date);
 };
 
+const previousNyseTradingDay = (date: string) => {
+  const cursor = new Date(`${date}T12:00:00.000Z`);
+  do {
+    cursor.setUTCDate(cursor.getUTCDate() - 1);
+  } while (!isNyseTradingDay(cursor.toISOString().slice(0, 10)));
+  return cursor.toISOString().slice(0, 10);
+};
+
 export const runMarketBreadthRefresh = async (input: {
   mode: RefreshMode;
   repository: MarketBreadthRefreshRepository;
@@ -134,7 +142,8 @@ export const runMarketBreadthRefresh = async (input: {
 }): Promise<MarketBreadthRefreshResult> => {
   const now = input.now || new Date();
   const startedAt = now.toISOString();
-  const requestedDate = marketDateInNewYork(now);
+  const marketDate = marketDateInNewYork(now);
+  const requestedDate = input.mode === "DAILY" ? previousNyseTradingDay(marketDate) : marketDate;
   const runId = `market-breadth-${input.mode.toLowerCase()}-${startedAt}-${crypto.randomUUID()}`;
   await input.repository.beginRun({ runId, mode: input.mode, startedAt });
 

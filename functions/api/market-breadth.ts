@@ -1,5 +1,5 @@
 import { determineMarketBreadthFreshness } from "../../src/lib/market-breadth";
-import { readMarketBreadthRelease, type MarketBreadthObjectStore } from "../../src/lib/market-breadth-r2";
+import { readMarketBreadthRelease, resolveMarketBreadthUnresolvedFailure, type MarketBreadthObjectStore } from "../../src/lib/market-breadth-r2";
 
 interface Context {
   request: Request;
@@ -37,12 +37,13 @@ export async function onRequest(context: Context) {
         message: "Market breadth initial backfill has not published a snapshot yet.",
       }, 404);
     }
+    const unresolvedFailure = status ? resolveMarketBreadthUnresolvedFailure(status) : null;
     const freshness = determineMarketBreadthFreshness({
       generatedAt: snapshot.generatedAt,
       priceAsOf: snapshot.priceAsOf,
       now: context.now,
-      latestFailure: status?.lastAttempt.status === "FAILED" || status?.lastAttempt.status === "PARTIAL"
-        ? { failedAt: status.lastAttempt.finishedAt, errorClass: status.lastAttempt.errorClass || status.lastAttempt.status }
+      latestFailure: unresolvedFailure
+        ? { failedAt: unresolvedFailure.finishedAt, errorClass: unresolvedFailure.errorClass || unresolvedFailure.status }
         : null,
     });
     return json({ ...snapshot, status: "READY", freshness }, 200, "public, max-age=60, stale-while-revalidate=300");

@@ -2,8 +2,8 @@ name: Refresh S&P 500 Market Breadth
 
 on:
   schedule:
-    - cron: "47 22 * * 1-5"
-    - cron: "32 23 * * 1-5"
+    - cron: "17 17 * * 2-6"
+    - cron: "47 18 * * 2-6"
   workflow_dispatch:
     inputs:
       mode:
