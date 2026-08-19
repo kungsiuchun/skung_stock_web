@@ -290,8 +290,10 @@ const buildToolResponse = (tool, params = {}) => {
       const shouldMove = refreshAllMode && ["GOOG", "AAPL", "MSFT"].includes(symbol);
       const quoteBase = symbol === "TSLA"
         ? { price: 406.55, previousClose: 394.06, change: 12.49, changePercent: 3.17 }
+        : symbol === "META"
+          ? { price: stock.fallbackPrice, previousClose: stock.fallbackPrice, change: 0, changePercent: 0 }
         : { price: stock.fallbackPrice, previousClose: null, change: stock.fallbackChange, changePercent: stock.fallbackChangePercent };
-      return {
+      const quote = {
         symbol,
         name: stock.companyName,
         price: quoteBase.price + (shouldMove ? 7.77 : 0),
@@ -300,6 +302,11 @@ const buildToolResponse = (tool, params = {}) => {
         changePercent: quoteBase.changePercent + (shouldMove ? 1.11 : 0),
         asOf: "2026-07-09T20:00:00.000Z",
       };
+      if (symbol === "QQQI") {
+        delete quote.change;
+        delete quote.changePercent;
+      }
+      return quote;
     });
     return { ok: true, tool, params, text: "quotes", raw: { quotes }, calledAt: "2026-07-09T20:00:00.000Z" };
   }
@@ -610,7 +617,12 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.match(await visibleText(page), /LEAD \+4\.20%/);
     assert.match(await visibleText(page), /LOSS -2\.70%/);
     assert.match(await visibleText(page), /Watchlist Market Breadth \(Yahoo live quotes\)/i);
-    assert.equal(await page.$eval("[data-watchlist-breadth]", (node) => node.getAttribute("data-watchlist-coverage")), "10/10", "watchlist breadth should cover every visible ticker after Yahoo refresh");
+    assert.equal(await page.$eval("[data-watchlist-breadth]", (node) => node.getAttribute("data-watchlist-coverage")), "9/10", "breadth coverage must exclude a Yahoo row whose change fields are unavailable");
+    assert.equal(await page.$eval("[data-watchlist-row='QQQI']", (node) => node.getAttribute("data-row-change")), "", "missing Yahoo change fields must remain unavailable instead of becoming a fake unchanged quote");
+    assert.equal(await page.$eval("[data-watchlist-row='QQQI']", (node) => node.getAttribute("data-row-change-available")), "false", "missing Yahoo change evidence must remain observable in the row contract");
+    assert.match(await page.$eval("[data-watchlist-row='QQQI'] .siw-row-change", (node) => node.textContent || ""), /--/, "missing Yahoo change fields must render explicitly unavailable");
+    assert.match(await visibleText(page), /Change coverage 9\/10 · 1 unavailable/i, "breadth header must disclose unavailable change evidence");
+    assert.match(await page.$eval(".siw-breadth-counts", (node) => node.textContent || ""), /Unchanged\s*1\s*·\s*META/i, "a genuine zero-change Yahoo quote must remain unchanged and identify its ticker");
     assert.equal(await page.$eval("[data-watchlist-sector='Technology']", (node) => node.getAttribute("data-watchlist-sector-coverage")), "2/2", "sector coverage should derive from visible Yahoo quote rows");
     await page.select("select[aria-label='Sector filter']", "Technology");
     await page.waitForFunction(() => document.querySelector("[data-watchlist-breadth]")?.getAttribute("data-watchlist-coverage") === "2/2", { timeout: 5000 });
@@ -619,6 +631,33 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await page.select("select[aria-label='Sector filter']", "All Sectors");
     await page.setViewport({ width: 1508, height: 1471, deviceScaleFactor: 1 });
     await wait(300);
+    const bottomPanelRects = await page.$$eval("[data-bottom-panels] > .siw-panel", (panels) => panels.map((panel) => {
+      const rect = panel.getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom, height: rect.height };
+    }));
+    assert.equal(bottomPanelRects.length, 3, "the bottom audit area must contain three columns");
+    assert.ok(Math.max(...bottomPanelRects.map((rect) => rect.top)) - Math.min(...bottomPanelRects.map((rect) => rect.top)) <= 1, `bottom column tops must align; got ${JSON.stringify(bottomPanelRects)}`);
+    assert.ok(Math.max(...bottomPanelRects.map((rect) => rect.bottom)) - Math.min(...bottomPanelRects.map((rect) => rect.bottom)) <= 1, `bottom column bottoms must align; got ${JSON.stringify(bottomPanelRects)}`);
+    const overviewAndAuditColumns = await page.evaluate(() => {
+      const uniqueColumns = (selector) => {
+        const columns = [];
+        for (const node of document.querySelectorAll(selector)) {
+          const rect = node.getBoundingClientRect();
+          if (!columns.some((column) => Math.abs(column.left - rect.left) <= 1)) columns.push({ left: rect.left, right: rect.right });
+        }
+        return columns.sort((a, b) => a.left - b.left);
+      };
+      return {
+        overview: uniqueColumns("[data-overview-tertiary] > .siw-panel"),
+        audit: uniqueColumns("[data-bottom-panels] > .siw-panel"),
+      };
+    });
+    assert.equal(overviewAndAuditColumns.overview.length, 3, `overview tertiary area must have three columns; got ${JSON.stringify(overviewAndAuditColumns)}`);
+    assert.equal(overviewAndAuditColumns.audit.length, 3, `bottom audit area must have three columns; got ${JSON.stringify(overviewAndAuditColumns)}`);
+    assert.equal(overviewAndAuditColumns.audit.every((column, index) =>
+      Math.abs(column.left - overviewAndAuditColumns.overview[index].left) <= 1 &&
+      Math.abs(column.right - overviewAndAuditColumns.overview[index].right) <= 1
+    ), true, `overview and bottom column boundaries must align; got ${JSON.stringify(overviewAndAuditColumns)}`);
     const heroTitleAndPriceRects = await page.evaluate(() => {
       const title = document.querySelector(".siw-hero-identity h1");
       const price = document.querySelector(".siw-hero-price strong");
@@ -887,6 +926,12 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.match(await visibleText(page), /NMS/);
     assert.match(await visibleText(page), /Semiconductors/);
     assert.match(await page.$eval("[data-primary-tab-panel='Stats'] [data-company-description]", (node) => node.textContent || ""), /NVIDIA designs accelerated computing/i, "Stats must show the Yahoo company description instead of an empty earnings card");
+    const statsHeaderAlignment = await page.evaluate(() => [
+      [document.querySelector(".siw-stats-left .siw-panel-title span"), document.querySelector(".siw-stats-left .siw-stat-table")],
+      [document.querySelector(".siw-financial-summary .siw-panel-title span"), document.querySelector(".siw-financial-summary .siw-stat-table")],
+      [document.querySelector(".siw-cashflow-panel .siw-panel-title span"), document.querySelector(".siw-cashflow-panel .siw-stat-table")],
+    ].map(([title, table]) => ({ titleLeft: title?.getBoundingClientRect().left, tableLeft: table?.getBoundingClientRect().left })));
+    assert.equal(statsHeaderAlignment.every(({ titleLeft, tableLeft }) => Math.abs(titleLeft - tableLeft) <= 1), true, `Stats panel titles must align with their tables; got ${JSON.stringify(statsHeaderAlignment)}`);
     assert.equal(await page.$eval(".siw-financial-summary .siw-stat-table thead th:nth-child(2)", (node) => getComputedStyle(node).textAlign), "center", "Financial Summary value header must be centered");
     assert.equal(await page.$eval(".siw-financial-summary .siw-stat-table thead th:nth-child(3)", (node) => getComputedStyle(node).textAlign), "center", "Financial Summary context header must be centered");
     assert.doesNotMatch(await page.$eval("[data-primary-tab-panel='Stats']", (node) => node.textContent || ""), /Needs checking/i, "Stats must render Yahoo values or n\/a, never a placeholder");
@@ -957,7 +1002,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(await page.$("[data-options-summary]") === null, true, "obsolete options KPI strip must be removed");
     assert.equal(await page.$("[data-options-chart-controls]") !== null, true, "Options chart header controls must remain available");
     assert.equal(await page.$("input[aria-label='Strike zoom']") !== null, true, "Strike zoom must be in the Options chart header");
-    assert.equal(await page.$("[data-options-sweeps-control]") !== null, true, "Sweeps must remain reachable from the Options chart header");
+    assert.equal(await page.$("[data-options-sweeps-control]"), null, "unsupported Sweeps control must not be exposed");
     assert.equal(await page.$(".siw-market-pill") === null, true, "the redundant hero market refresh button must be removed");
     const publishedExpiryText = await page.$eval("[data-expiry-row='2026-07-10']", (node) => node.textContent || "");
     assert.doesNotMatch(publishedExpiryText, /Load\s*on select|Retry/, "published Robinhood expiry must expose its loaded summary");
@@ -984,7 +1029,12 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await page.click("[data-close-strike-detail]");
     await wait(150);
 
-    for (const subTab of ["OI", "Vol", "Greeks", "DEX", "Flow", "IV", "Mis$", "P/C", "Chain", "Sweeps", "0DTE"]) {
+    const visibleOptionsTabs = await page.$$eval(".siw-options-subtabs button", (nodes) => [...new Set(nodes.map((node) => node.textContent?.trim()).filter(Boolean))]);
+    for (const unsupportedTab of ["Flow", "Mis$", "Sweeps", "0DTE"]) {
+      assert.equal(visibleOptionsTabs.includes(unsupportedTab), false, `${unsupportedTab} must not be exposed when the active source cannot support it`);
+    }
+
+    for (const subTab of ["OI", "Vol", "Greeks", "DEX", "IV", "P/C", "Chain"]) {
       await clickText(page, subTab, true);
       await wait(250);
       assert.match(await page.$eval(".siw-options-subtabs .is-active", (node) => node.textContent), new RegExp(subTab.replace("$", "\\$")));
@@ -996,9 +1046,6 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       }
       if (subTab === "IV") {
         assert.equal(await page.$$eval("[data-options-iv-bar]", (items) => items.length > 5), true, "IV must render the source-backed EOD smile, not an intraday time series");
-      }
-      if (subTab === "Flow" || subTab === "Mis$" || subTab === "Sweeps" || subTab === "0DTE") {
-        assert.match(await page.$eval("[data-options-unsupported]", (node) => node.textContent || ""), /Robinhood EOD snapshots do not|same-day expiry/i, `${subTab} must fail closed instead of fabricating data`);
       }
       if (subTab === "Greeks") {
         assert.equal(await page.$eval(".siw-greeks-board", (node) => node.scrollWidth <= node.clientWidth), true, "Greeks board must not overflow its options panel");

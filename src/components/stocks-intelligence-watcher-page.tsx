@@ -92,13 +92,9 @@ const OPTIONS_SUB_TABS = [
   "Overview",
   "Greeks",
   "DEX",
-  "Flow",
   "IV",
-  "Mis$",
   "P/C",
   "Chain",
-  "Sweeps",
-  "0DTE",
 ] as const;
 
 const BASE_SECTOR_OPTIONS = ["All Sectors"];
@@ -2633,18 +2629,6 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
               <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-400">
                 P/C OI <b className="ml-1 text-slate-100">{hasOptionsOpenInterest ? (snapshot?.putCallOpenInterest ?? 0).toFixed(2) : "Unavailable"}</b>
               </span>
-              <button
-                type="button"
-                data-options-sweeps-control
-                aria-label="Open sweeps"
-                onClick={() => {
-                  setActiveSubTab("Sweeps");
-                  void loadOptionsSubTab("Sweeps", true);
-                }}
-                className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-400 hover:border-blue-400 hover:text-blue-100"
-              >
-                Sweeps <b className="ml-1 text-slate-100">View</b>
-              </button>
             </div>
             <label className="flex items-center gap-2 text-xs font-black text-slate-400">
               Strike Zoom
@@ -3443,7 +3427,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     }, new Map());
     const liveWatchlistQuotes = watchlist.flatMap((stock) => {
       const quote = rowQuotesBySymbol[stock.symbol];
-      return quote?.source === "yahoo_quote" ? [{ stock, quote }] : [];
+      return quote?.source === "yahoo_quote" && quote.changeAvailable ? [{ stock, quote }] : [];
     });
     const watchlistCoverage = liveWatchlistQuotes.length;
     const sectorRows = Array.from(
@@ -3459,7 +3443,11 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       .sort((a, b) => b.avgChangePercent - a.avgChangePercent);
     const advancers = liveWatchlistQuotes.filter(({ quote }) => quote.changePercent > 0).length;
     const decliners = liveWatchlistQuotes.filter(({ quote }) => quote.changePercent < 0).length;
-    const unchanged = Math.max(0, watchlistCoverage - advancers - decliners);
+    const unchangedSymbols = liveWatchlistQuotes
+      .filter(({ quote }) => quote.changePercent === 0)
+      .map(({ stock }) => stock.symbol);
+    const unchanged = unchangedSymbols.length;
+    const unavailableChanges = Math.max(0, visibleWatchlistCount - watchlistCoverage);
     const breadthTotal = Math.max(1, watchlistCoverage);
     const latestWatchlistQuoteAt = liveWatchlistQuotes.reduce<number | null>((latest, { quote }) =>
       latest === null || quote.fetchedAt > latest ? quote.fetchedAt : latest, null);
@@ -3533,7 +3521,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           <div className="siw-market-breadth">
             <div>
               <span>Watchlist Market Breadth (Yahoo live quotes)</span>
-              <em>{watchlistCoverage > 0 ? `Coverage ${watchlistCoverage}/${visibleWatchlistCount} · ${new Date(latestWatchlistQuoteAt || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} ET` : `Coverage 0/${visibleWatchlistCount} · Refresh to load`}</em>
+              <em>{watchlistCoverage > 0 ? `Change coverage ${watchlistCoverage}/${visibleWatchlistCount}${unavailableChanges > 0 ? ` · ${unavailableChanges} unavailable` : ""} · ${new Date(latestWatchlistQuoteAt || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} ET` : `Change coverage 0/${visibleWatchlistCount} · Refresh to load`}</em>
             </div>
             <div className="siw-breadth-rail" data-watchlist-breadth data-watchlist-coverage={`${watchlistCoverage}/${visibleWatchlistCount}`}>
               <b style={{ width: `${(advancers / breadthTotal) * 100}%` }} />
@@ -3542,7 +3530,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             </div>
             <div className="siw-breadth-counts">
               <span className="siw-up">Advancers <b>{advancers}</b></span>
-              <span>Unchanged <b>{unchanged}</b></span>
+              <span title={unchangedSymbols.length > 0 ? `Unchanged: ${unchangedSymbols.join(", ")}` : undefined}>
+                Unchanged <b>{unchanged}</b>{unchangedSymbols.length > 0 ? ` · ${unchangedSymbols.join(", ")}` : ""}
+              </span>
               <span className="siw-down">Decliners <b>{decliners}</b></span>
             </div>
             {watchlistCoverage === 0 && <div className="siw-data-empty"><strong>Needs checking</strong><span>No live Yahoo quotes for the currently visible watchlist. Refresh all to try again.</span></div>}
@@ -3795,7 +3785,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
               </button>
             ))}
             {OPTIONS_SUB_TABS.filter((item) => item !== "Overview").map((item) => {
-              const disabled = !hasOptionsOpenInterest && ["Greeks", "DEX", "P/C", "0DTE"].includes(item);
+              const disabled = !hasOptionsOpenInterest && ["Greeks", "DEX", "P/C"].includes(item);
               return (
                 <button
                   key={item}
@@ -3939,12 +3929,13 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                   const selectedSnapshotQuote = selected && snapshot?.symbol === symbol ? snapshot.quote : null;
                   const rowQuote = yahooRowQuote || selectedSnapshotQuote;
                   const hasRowQuote = Boolean(rowQuote && Number.isFinite(rowQuote.price) && rowQuote.price > 0);
-                  const change = hasRowQuote ? rowQuote!.change : null;
+                  const hasChangeData = hasRowQuote && (yahooRowQuote ? yahooRowQuote.changeAvailable : true);
+                  const change = hasChangeData ? rowQuote!.change : null;
                   const rowPositive = change !== null && change >= 0;
                   const isRowLoading = loadingSymbol === symbol || refreshingSymbols.includes(symbol);
                   const isFavorite = favorites.includes(symbol);
                   const price = hasRowQuote ? rowQuote!.price : null;
-                  const pct = hasRowQuote ? rowQuote!.changePercent : null;
+                  const pct = hasChangeData ? rowQuote!.changePercent : null;
                   const rowSource = yahooRowQuote ? "yahoo_quote" : selectedSnapshotQuote ? "selected_snapshot" : "unavailable";
                   const rowAsOf = yahooRowQuote?.asOf || selectedSnapshotQuote?.asOf || "";
 
@@ -3954,6 +3945,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                       data-watchlist-row={symbol}
                       data-row-price={price === null ? "" : price.toFixed(2)}
                       data-row-change={change === null ? "" : change.toFixed(2)}
+                      data-row-change-available={hasChangeData ? "true" : "false"}
                       data-row-source={rowSource}
                       data-row-asof={rowAsOf}
                       data-stock-sector={stock.sector}
@@ -4622,7 +4614,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                       </button>
                     ))}
                     {OPTIONS_SUB_TABS.filter((item) => item !== "Overview").map((item) => {
-                      const disabled = !hasOptionsOpenInterest && ["Greeks", "DEX", "P/C", "0DTE"].includes(item);
+                      const disabled = !hasOptionsOpenInterest && ["Greeks", "DEX", "P/C"].includes(item);
                       return (
                         <button
                           key={item}

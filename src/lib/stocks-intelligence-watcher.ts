@@ -195,6 +195,7 @@ export interface StocksWatcherRowQuote {
   previousClose?: number | null;
   change: number;
   changePercent: number;
+  changeAvailable: boolean;
   marketState: string | null;
   asOf: string | null;
   fetchedAt: number;
@@ -713,12 +714,15 @@ export const getStocksWatcherRowQuotesFromRawResult = (raw: unknown, fetchedAt =
       const symbol = typeof quote.symbol === "string" ? normalizeStocksWatcherSymbol(quote.symbol) : "";
       const price = numberFromUnknown(quote.price);
       if (!symbol || typeof price !== "number") return null;
+      const change = numberFromUnknown(quote.change);
+      const changePercent = numberFromUnknown(quote.changePercent);
       const rowQuote: StocksWatcherRowQuote = {
         symbol,
         price,
         previousClose: numberFromUnknown(quote.previousClose) ?? null,
-        change: numberFromUnknown(quote.change) ?? 0,
-        changePercent: numberFromUnknown(quote.changePercent) ?? 0,
+        change: change ?? 0,
+        changePercent: changePercent ?? 0,
+        changeAvailable: change !== undefined && changePercent !== undefined,
         marketState: typeof quote.marketState === "string" ? quote.marketState : null,
         asOf: typeof quote.asOf === "string" ? quote.asOf : null,
         fetchedAt,

@@ -1491,6 +1491,11 @@
   padding: 16px;
 }
 
+.siw-stats-board > .siw-panel > .siw-panel-title {
+  margin: -16px -16px 0;
+  padding: 16px;
+}
+
 .siw-stats-left {
   min-height: 340px;
 }
@@ -1820,7 +1825,7 @@
 
 .siw-audit-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(310px, 0.95fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   margin-top: 12px;
 }
