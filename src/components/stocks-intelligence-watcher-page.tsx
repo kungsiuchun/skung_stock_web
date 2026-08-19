@@ -47,6 +47,9 @@ import {
 } from "@/lib/stocks-intelligence-watcher-summary";
 import {
   getStocksWatcherExpiryOverviewToolPlan,
+  getStocksWatcherYahooExpiryChainCacheKey,
+  getStocksWatcherYahooExpiryPreloadTargets,
+  getStocksWatcherYahooExpirySummaryToolPlan,
   getStocksWatcherCustomStockFromSnapshot,
   getStocksWatcherOptionsSubTabCacheKey,
   getStocksWatcherOptionsSubTabToolPlan,
@@ -155,6 +158,14 @@ interface AsyncPanelState {
   loading: boolean;
   error: string | null;
   data: Record<string, NativeToolResult> | null;
+}
+
+interface YahooExpiryPreloadState {
+  runId: number;
+  total: number;
+  loaded: number;
+  failed: number;
+  complete: boolean;
 }
 
 interface StrikeDrawerState {
@@ -1534,6 +1545,18 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [subTabPanelState, setSubTabPanelState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
   const [selectedExpiry, setSelectedExpiry] = useState<string | null>(null);
   const [expiryOverviewState, setExpiryOverviewState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
+  const yahooExpiryChainCacheRef = useRef<Map<string, NativeToolResult>>(new Map());
+  const yahooExpiryChainInflightRef = useRef<Map<string, Promise<NativeToolResult>>>(new Map());
+  const yahooExpiryChainFailuresRef = useRef<Map<string, string>>(new Map());
+  const yahooExpiryPreloadRunRef = useRef(0);
+  const [, setYahooExpiryCacheVersion] = useState(0);
+  const [yahooExpiryPreload, setYahooExpiryPreload] = useState<YahooExpiryPreloadState>({
+    runId: 0,
+    total: 0,
+    loaded: 0,
+    failed: 0,
+    complete: true,
+  });
   const [strikeDrawer, setStrikeDrawer] = useState<StrikeDrawerState>({ open: false, strike: null, expiry: null, data: null });
   const strikeDrawerRequestRef = useRef(0);
   const [toolRunLog, setToolRunLog] = useState<ToolRunLogEntry[]>([]);
@@ -1831,6 +1854,35 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     return Object.fromEntries(entries);
   }, [callNativeTool]);
 
+  const loadYahooExpiryChain = useCallback(async (symbol: string, expiry: string) => {
+    const cacheKey = getStocksWatcherYahooExpiryChainCacheKey(symbol, expiry);
+    const cached = yahooExpiryChainCacheRef.current.get(cacheKey);
+    if (cached) return cached;
+
+    const inflight = yahooExpiryChainInflightRef.current.get(cacheKey);
+    if (inflight) return inflight;
+
+    const plan = getStocksWatcherYahooExpirySummaryToolPlan(symbol, expiry);
+    const request = callNativeTool(plan.name, plan.params)
+      .then((result) => {
+        yahooExpiryChainCacheRef.current.set(cacheKey, result);
+        yahooExpiryChainFailuresRef.current.delete(cacheKey);
+        setYahooExpiryCacheVersion((version) => version + 1);
+        return result;
+      })
+      .catch((requestError) => {
+        const message = requestError instanceof Error ? requestError.message : String(requestError);
+        yahooExpiryChainFailuresRef.current.set(cacheKey, message);
+        setYahooExpiryCacheVersion((version) => version + 1);
+        throw requestError;
+      })
+      .finally(() => {
+        yahooExpiryChainInflightRef.current.delete(cacheKey);
+      });
+    yahooExpiryChainInflightRef.current.set(cacheKey, request);
+    return request;
+  }, [callNativeTool]);
+
   const loadTopTab = useCallback(async (tab: TopTab, force = false) => {
     if (tab === "Options" || tab === "Overview") return;
     const symbol = normalizeSymbol(selectedSymbol);
@@ -1856,6 +1908,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   }, [runToolBundle, selectedSymbol]);
 
   const currentExpiry = selectedExpiry || snapshot?.selectedExpiry || snapshot?.availableExpiries?.[0] || snapshot?.expiries[0]?.expiry;
+  const usesNativeYahooOptions = Boolean(snapshot?.source === "native_yahoo" && !snapshot.optionsSnapshot);
+  const isYahooOptionsFallback = Boolean(usesNativeYahooOptions && snapshot?.optionsUnavailable);
 
   const loadExpiryOverview = useCallback(async (expiry: string | null | undefined, force = false) => {
     if (!expiry) return;
@@ -1870,7 +1924,14 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
     setExpiryOverviewState({ loading: true, error: null, data: null });
     try {
-      const data = await runToolBundle(getStocksWatcherExpiryOverviewToolPlan(symbol, expiry));
+      const plan = getStocksWatcherExpiryOverviewToolPlan(symbol, expiry);
+      const data = usesNativeYahooOptions
+        ? Object.fromEntries(await Promise.all([
+            loadYahooExpiryChain(symbol, expiry).then((result) => ["get_options", result] as const),
+            callNativeTool(plan[1].name, plan[1].params).then((result) => ["get_options_gex", result] as const),
+            callNativeTool(plan[2].name, plan[2].params).then((result) => ["get_options_pcr", result] as const),
+          ]))
+        : await runToolBundle(plan);
       tabDataCache.current.set(cacheKey, { data, fetchedAt: Date.now() });
       setExpiryOverviewState({ loading: false, error: null, data });
     } catch (requestError) {
@@ -1880,7 +1941,39 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         data: null,
       });
     }
-  }, [runToolBundle, selectedSymbol]);
+  }, [callNativeTool, loadYahooExpiryChain, runToolBundle, selectedSymbol, usesNativeYahooOptions]);
+
+  const preloadYahooExpirySummaries = useCallback(async () => {
+    if (!snapshot || !usesNativeYahooOptions) return;
+    const symbol = normalizeSymbol(snapshot.symbol);
+    const expiries = getStocksWatcherYahooExpiryPreloadTargets(snapshot.availableExpiries);
+    if (expiries.length === 0) return;
+
+    const runId = yahooExpiryPreloadRunRef.current + 1;
+    yahooExpiryPreloadRunRef.current = runId;
+    setYahooExpiryPreload({ runId, total: expiries.length, loaded: 0, failed: 0, complete: false });
+
+    let cursor = 0;
+    const loadNext = async () => {
+      while (cursor < expiries.length) {
+        const expiry = expiries[cursor];
+        cursor += 1;
+        try {
+          await loadYahooExpiryChain(symbol, expiry);
+          setYahooExpiryPreload((current) => current.runId === runId
+            ? { ...current, loaded: current.loaded + 1 }
+            : current);
+        } catch {
+          setYahooExpiryPreload((current) => current.runId === runId
+            ? { ...current, failed: current.failed + 1 }
+            : current);
+        }
+      }
+    };
+
+    await Promise.all([loadNext(), loadNext()]);
+    setYahooExpiryPreload((current) => current.runId === runId ? { ...current, complete: true } : current);
+  }, [loadYahooExpiryChain, snapshot, usesNativeYahooOptions]);
 
   const loadOptionsSubTab = useCallback(async (subTab: OptionsSubTab, force = false) => {
     if (subTab === "Overview") return;
@@ -1917,6 +2010,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   useEffect(() => {
     if (activeTab === "Options" && activeSubTab === "Overview" && currentExpiry) void loadExpiryOverview(currentExpiry);
   }, [activeSubTab, activeTab, currentExpiry, loadExpiryOverview]);
+
+  useEffect(() => {
+    if (activeTab === "Options" && activeSubTab === "Overview") void preloadYahooExpirySummaries();
+  }, [activeSubTab, activeTab, preloadYahooExpirySummaries]);
 
   const loadMarketContext = useCallback(async () => {
     setMarketContext((current) => ({ ...current, loading: true, error: null }));
@@ -2219,14 +2316,44 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const rows = buildStrikeRowsFromOptionRaw(selectedChain, selectedExposures);
   const expiryRows = buildExpiryRowsForSelector(snapshot);
   const loadedExpirySummary = summaryFromLoadedOptionChain(selectedChain);
-  const selectorExpiryRows = expiryRows.map((row) =>
-    loadedExpirySummary && row.expiry === loadedExpirySummary.expiry ? loadedExpirySummary : row,
-  );
+  const yahooExpiryPreloadTargets = usesNativeYahooOptions
+    ? getStocksWatcherYahooExpiryPreloadTargets(snapshot?.availableExpiries)
+    : [];
+  const selectorExpiryRows = expiryRows.map((row) => {
+    const preloaded = usesNativeYahooOptions
+      ? summaryFromLoadedOptionChain(
+          optionChainFromResult(
+            yahooExpiryChainCacheRef.current.get(getStocksWatcherYahooExpiryChainCacheKey(snapshot?.symbol || selectedSymbol, row.expiry)),
+          ),
+        )
+      : null;
+    if (preloaded) return preloaded;
+    return loadedExpirySummary && row.expiry === loadedExpirySummary.expiry ? loadedExpirySummary : row;
+  });
+  const getExpirySelectorLoadState = (row: ExpirySelectorRow) => {
+    if (row.loaded || !usesNativeYahooOptions) return "unloaded";
+    const cacheKey = getStocksWatcherYahooExpiryChainCacheKey(snapshot?.symbol || selectedSymbol, row.expiry);
+    if (yahooExpiryChainInflightRef.current.has(cacheKey)) return "loading";
+    if (yahooExpiryChainFailuresRef.current.has(cacheKey)) return "retry";
+    return yahooExpiryPreloadTargets.includes(toYahooExpiry(row.expiry) || "") && !yahooExpiryPreload.complete
+      ? "loading"
+      : "unloaded";
+  };
+  const yahooExpiryPreloadLabel = usesNativeYahooOptions && yahooExpiryPreload.total > 0
+    ? `Yahoo next ${yahooExpiryPreload.total}: ${yahooExpiryPreload.loaded}/${yahooExpiryPreload.total}${yahooExpiryPreload.failed ? ` · ${yahooExpiryPreload.failed} retry` : ""}`
+    : null;
   const optionsSectionMinHeightRem = Math.max(52, 3 + selectorExpiryRows.length * 2.35);
   const hasYahooOpenInterest = Boolean(selectedChain && [...(selectedChain.calls || []), ...(selectedChain.puts || [])]
     .some((leg) => optionLegNumber(leg.openInterest) > 0));
   const hasYahooGex = hasYahooOpenInterest && selectedExposures.some((row) =>
     typeof row.netGex === "number" && Number.isFinite(row.netGex));
+  const optionsSourceLabel = snapshot?.optionsSnapshot
+    ? `Robinhood MCP EOD · ${snapshot.optionsSnapshot.capturedAt}`
+    : isYahooOptionsFallback
+      ? "Yahoo fallback · Robinhood EOD unavailable"
+      : snapshot?.source === "native_yahoo"
+        ? "Native Yahoo"
+        : "Source unavailable";
   const modeAvailable = mode === "volume" || (mode === "oi" ? hasYahooOpenInterest : hasYahooGex);
   const chartRows = rows.sort((a, b) => a.strike - b.strike);
   const focusedRows = (() => {
@@ -2388,7 +2515,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         </div>
         <div className="flex flex-wrap justify-end gap-2 text-xs font-black">
           <span className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-300">
-            {snapshot?.source === "native_yahoo" ? "Native Yahoo" : "Source unavailable"}
+            {optionsSourceLabel}
           </span>
           <span className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-300">
             Updated {snapshot ? new Date(snapshot.generatedAt).toLocaleString() : "--"}
@@ -2400,6 +2527,12 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           )}
         </div>
       </div>
+
+      {snapshot?.optionsSnapshot && (
+        <p className="mb-3 rounded-md border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100" data-options-robinhood-provenance>
+          Robinhood MCP EOD snapshot · run {snapshot.optionsSnapshot.runId} · coverage {snapshot.optionsSnapshot.completedSymbols}/{snapshot.optionsSnapshot.expectedSymbols} · GEX = OI-signed proxy, not dealer GEX.
+        </p>
+      )}
 
       <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs font-black">
         <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-blue-100">Exp {formatExpiryDate(currentExpiry, "compact")}</span>
@@ -2424,7 +2557,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
       {!hasYahooOpenInterest && selectedChain && (
         <p className="mb-3 rounded-md border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100" data-options-oi-unavailable>
-          Yahoo returned no positive open interest for this expiry. OI, P/C OI, GEX, walls and flip levels are unavailable; volume remains source data.
+          The active options source returned no positive open interest for this expiry. OI, P/C OI, GEX, walls and flip levels are unavailable; volume remains source data.
         </p>
       )}
 
@@ -3499,6 +3632,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             {selectorExpiryRows.map((row) => {
               const normalizedExpiry = normalizeExpiryDate(row.expiry);
               const active = normalizeExpiryDate(currentExpiry) === normalizedExpiry;
+              const loadState = getExpirySelectorLoadState(row);
               return (
                 <button
                   key={normalizedExpiry}
@@ -3516,14 +3650,15 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                   }}
                 >
                   <span>{formatExpiryDate(row.expiry, "compact")}</span>
-                  <span>{row.loaded ? formatNumber(row.openInterest || 0) : "Load"}</span>
-                  <span>{row.loaded ? row.primaryStrike || "—" : "on select"}</span>
+                  <span>{row.loaded ? formatNumber(row.openInterest || 0) : loadState === "loading" ? "Loading" : loadState === "retry" ? "Retry" : "Load"}</span>
+                  <span>{row.loaded ? row.primaryStrike || "—" : loadState === "loading" ? "next 8" : loadState === "retry" ? "failed" : "on select"}</span>
                   <span>{row.loaded ? formatNumber(row.volume || 0) : "—"}</span>
                   <span className={row.loaded && row.dominantType === "P" ? "siw-down" : "siw-up"}>{row.loaded ? row.dominantType : "—"}</span>
                 </button>
               );
             })}
           </div>
+          {yahooExpiryPreloadLabel && <div className="siw-yahoo-expiry-preload" data-yahoo-expiry-preload>{yahooExpiryPreloadLabel}</div>}
           <button type="button" className="siw-view-all" onClick={() => setSelectedExpiry(snapshot?.availableExpiries?.[0] || currentExpiry || null)}>
             View all expiries
           </button>
@@ -3996,7 +4131,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           <footer className="siw-status-bar">
             <span><b /> Market: Open</span>
             <span>Data: Yahoo Finance <em>(Delayed 15-20 min)</em></span>
-                <span>Source: {snapshot?.source === "native_yahoo" ? "Yahoo options chain + local Greek approximation" : "Unavailable"}</span>
+                <span>Source: {snapshot?.optionsSnapshot ? "Robinhood MCP EOD · OI-signed GEX proxy" : isYahooOptionsFallback ? "Yahoo fallback · Robinhood EOD unavailable" : snapshot?.source === "native_yahoo" ? "Yahoo options chain + local Greek approximation" : "Unavailable"}</span>
             <span>Not financial advice</span>
             <button type="button" onClick={() => setSettingsOpen((value) => !value)}>Help</button>
           </footer>
@@ -4326,6 +4461,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                   {selectorExpiryRows.map((row) => {
                     const normalizedExpiry = normalizeExpiryDate(row.expiry);
                     const active = normalizeExpiryDate(currentExpiry) === normalizedExpiry;
+                    const loadState = getExpirySelectorLoadState(row);
                     return (
                       <button
                         key={normalizedExpiry}
@@ -4343,8 +4479,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                         className={`grid w-full cursor-pointer grid-cols-[minmax(5rem,1fr)_3.8rem_3.8rem_4.6rem_2.4rem] border-b py-2 text-left text-sm font-bold transition-colors hover:bg-slate-900 focus-visible:ring-2 focus-visible:ring-blue-400/40 ${active ? "border-b-blue-400 bg-blue-500/10 text-blue-100 shadow-[inset_3px_0_0_rgba(96,165,250,0.85)]" : "border-slate-800 text-slate-200"}`}
                       >
                         <span>{formatExpiryDate(row.expiry, "compact")}</span>
-                        <span>{row.loaded ? formatNumber(row.openInterest || 0) : "Load"}</span>
-                        <span>{row.loaded ? row.primaryStrike || "—" : "on select"}</span>
+                        <span>{row.loaded ? formatNumber(row.openInterest || 0) : loadState === "loading" ? "Loading" : loadState === "retry" ? "Retry" : "Load"}</span>
+                        <span>{row.loaded ? row.primaryStrike || "—" : loadState === "loading" ? "next 8" : loadState === "retry" ? "failed" : "on select"}</span>
                         <span>{row.loaded ? formatNumber(row.volume || 0) : "—"}</span>
                         <span className={row.loaded && row.dominantType === "P" ? "text-red-400" : "text-emerald-400"}>{row.loaded ? row.dominantType : "—"}</span>
                       </button>

@@ -31,6 +31,9 @@ import {
 } from "../src/lib/stocks-intelligence-watcher-summary";
 import {
   getStocksWatcherExpiryOverviewToolPlan,
+  getStocksWatcherYahooExpiryChainCacheKey,
+  getStocksWatcherYahooExpiryPreloadTargets,
+  getStocksWatcherYahooExpirySummaryToolPlan,
   getStocksWatcherOptionsSubTabCacheKey,
   getStocksWatcherOptionsSubTabToolPlan,
   getStocksWatcherCustomStockFromSnapshot,
@@ -40,6 +43,7 @@ import {
   getStocksWatcherTopTabCacheKey,
   getStocksWatcherTopTabToolPlan,
   normalizeWatcherExpiryForYahoo,
+  STOCKS_WATCHER_YAHOO_EXPIRY_PRELOAD_LIMIT,
 } from "../src/lib/stocks-intelligence-watcher-session";
 import {
   classifyStocksWatcherDataset,
@@ -414,6 +418,15 @@ test("watcher session plans native tool calls and cache keys without UI state", 
   assert.equal(normalizeWatcherExpiryForYahoo("26-06-19"), "2026-06-19");
   assert.equal(getStocksWatcherTopTabCacheKey(" nvda ", "Stats"), "NVDA:Stats");
   assert.equal(getStocksWatcherOptionsSubTabCacheKey("nvda", "26-06-19", "Greeks"), "NVDA:2026-06-19:Greeks");
+  assert.equal(getStocksWatcherYahooExpiryChainCacheKey(" nvda ", "26-06-19"), "NVDA:2026-06-19:YahooOptionsChain");
+  assert.deepEqual(
+    getStocksWatcherYahooExpiryPreloadTargets([
+      "26-08-21", "2026-08-14", "2026-08-14", "not-an-expiry", "2026-08-28", "2026-09-04",
+      "2026-09-11", "2026-09-18", "2026-09-25", "2026-10-16", "2026-11-20", "2026-12-18",
+    ]),
+    ["2026-08-14", "2026-08-21", "2026-08-28", "2026-09-04", "2026-09-11", "2026-09-18", "2026-09-25", "2026-10-16"],
+  );
+  assert.equal(STOCKS_WATCHER_YAHOO_EXPIRY_PRELOAD_LIMIT, 8);
 
   assert.deepEqual(getStocksWatcherTopTabToolPlan("Stats", "nvda"), [
     { name: "get_stock_stats", params: { ticker: "NVDA" } },
@@ -428,6 +441,10 @@ test("watcher session plans native tool calls and cache keys without UI state", 
     { name: "get_options_gex", params: { ticker: "NVDA", expiry: "2026-06-19", topRows: 24 } },
     { name: "get_options_pcr", params: { ticker: "NVDA", expiry: "2026-06-19" } },
   ]);
+  assert.deepEqual(getStocksWatcherYahooExpirySummaryToolPlan("nvda", "26-06-19"), {
+    name: "get_options",
+    params: { ticker: "NVDA", expiry: "2026-06-19", strikesAroundAtm: 40 },
+  });
   assert.deepEqual(getStocksWatcherStrikeDetailToolPlan("nvda", "26-06-19", 180), [
     { name: "get_options_greeks", params: { ticker: "NVDA", expiry: "2026-06-19", strike: 180 } },
     { name: "get_options_iv_intraday", params: { ticker: "NVDA", expiry: "2026-06-19", strike: 180 } },
@@ -941,6 +958,19 @@ test("native snapshot leaves history and expiry rows empty when optional data is
   assert.ok(snapshot.warnings.includes("Options expiry data unavailable."));
   assert.ok(snapshot.warnings.includes("Price history unavailable."));
   assert.ok(snapshot.strikes.length > 0); // completeRows synthetic GEX path remains independent.
+});
+
+test("curated ticker falls back to Yahoo options when the Robinhood release is unavailable", async () => {
+  const snapshot = await buildStocksWatcherSnapshotFromNative("NVDA", new FakeStocksNativeClient(), {
+    unavailableReason: "ROBINHOOD_OPTIONS_NOT_PUBLISHED: current.json is unavailable.",
+  });
+
+  assert.equal(snapshot.optionsUnavailable, "ROBINHOOD_OPTIONS_NOT_PUBLISHED: current.json is unavailable.");
+  assert.ok(snapshot.availableExpiries.length > 0);
+  assert.ok(snapshot.expiryRows.length > 0);
+  assert.ok(snapshot.strikes.length > 0);
+  assert.ok(snapshot.warnings.some((warning) => warning.includes("using Yahoo fallback")));
+  assert.ok(snapshot.toolRuns.some((run) => run.name === "get_options" && run.status === "ok"));
 });
 
 test("POST Watchlist fails closed without the D1 curated-universe binding", async () => {

@@ -41,6 +41,8 @@ export interface StocksWatcherSnapshotLoadDecision {
 
 const normalizeSessionSymbol = (symbol: string) => symbol.trim().toUpperCase();
 
+export const STOCKS_WATCHER_YAHOO_EXPIRY_PRELOAD_LIMIT = 8;
+
 export const normalizeWatcherExpiryForYahoo = (expiry: string | null | undefined) => {
   if (!expiry) return undefined;
   if (/^\d{2}-\d{2}-\d{2}$/.test(expiry)) return `20${expiry}`;
@@ -55,6 +57,20 @@ export const getStocksWatcherOptionsSubTabCacheKey = (
   expiry: string | null | undefined,
   subTab: StocksWatcherOptionsSubTab,
 ) => `${normalizeSessionSymbol(symbol)}:${normalizeWatcherExpiryForYahoo(expiry) || "front"}:${subTab}`;
+
+export const getStocksWatcherYahooExpiryChainCacheKey = (
+  symbol: string,
+  expiry: string | null | undefined,
+) => `${normalizeSessionSymbol(symbol)}:${normalizeWatcherExpiryForYahoo(expiry) || "front"}:YahooOptionsChain`;
+
+export const getStocksWatcherYahooExpiryPreloadTargets = (
+  availableExpiries: readonly string[] | null | undefined,
+  limit = STOCKS_WATCHER_YAHOO_EXPIRY_PRELOAD_LIMIT,
+) => Array.from(new Set(
+  (availableExpiries || [])
+    .map(normalizeWatcherExpiryForYahoo)
+    .filter((expiry): expiry is string => Boolean(expiry && /^\d{4}-\d{2}-\d{2}$/.test(expiry))),
+)).sort().slice(0, Math.max(0, limit));
 
 export const getStocksWatcherTopTabToolPlan = (
   tab: StocksWatcherTopTab,
@@ -120,6 +136,17 @@ export const getStocksWatcherExpiryOverviewToolPlan = (
     { name: "get_options_gex", params: { ticker, expiry: expiryArg, topRows: 24 } },
     { name: "get_options_pcr", params: { ticker, expiry: expiryArg } },
   ];
+};
+
+export const getStocksWatcherYahooExpirySummaryToolPlan = (
+  symbol: string,
+  expiry: string | null | undefined,
+): StocksWatcherToolCallPlan => {
+  const ticker = normalizeSessionSymbol(symbol);
+  return {
+    name: "get_options",
+    params: { ticker, expiry: normalizeWatcherExpiryForYahoo(expiry), strikesAroundAtm: 40 },
+  };
 };
 
 export const getStocksWatcherStrikeDetailToolPlan = (

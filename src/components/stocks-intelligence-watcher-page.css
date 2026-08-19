@@ -1399,6 +1399,14 @@
   font-weight: 900;
 }
 
+.siw-yahoo-expiry-preload {
+  margin: 10px 12px 0;
+  color: var(--siw-muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
 .siw-options-main {
   min-width: 0;
   display: flex;

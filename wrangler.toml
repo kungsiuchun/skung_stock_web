@@ -20,6 +20,12 @@ database_id = "c629da02-21ce-4b1c-87f2-59ba54be922e"
 binding = "VALUATION_DATA"
 bucket_name = "valuation-watcher-data"
 
+# Private, immutable Robinhood MCP EOD option releases. The bucket is created
+# only after the local preflight/release gate; no market payload is committed.
+[[r2_buckets]]
+binding = "OPTIONS_SNAPSHOT_DATA"
+bucket_name = "watcher-options-snapshots"
+
 [[r2_buckets]]
 binding = "MARKET_BREADTH_DATA"
 bucket_name = "market-breadth-data"

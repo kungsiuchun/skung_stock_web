@@ -25,6 +25,13 @@ import {
   STOCKS_WATCHER_VALUATION_TOOLS,
   type R2BucketLike,
 } from "../../src/lib/stocks-watcher-valuation-data";
+import {
+  loadRobinhoodOptionsSnapshot,
+  robinhoodGex,
+  toRobinhoodOptionsView,
+  type RobinhoodOptionsPublishedSnapshot,
+  type RobinhoodOptionsR2BucketLike,
+} from "../../src/lib/stocks-watcher-robinhood-options";
 
 const json = (body: unknown, init: ResponseInit = {}) =>
   new Response(JSON.stringify(body), {
@@ -56,6 +63,7 @@ const normalizeParams = (value: unknown) => {
 interface Env {
   MARKET_CACHE_DB?: D1DatabaseLike;
   VALUATION_DATA?: R2BucketLike;
+  OPTIONS_SNAPSHOT_DATA?: RobinhoodOptionsR2BucketLike;
 }
 
 interface WatcherApiObservability {
@@ -66,7 +74,7 @@ interface WatcherApiObservability {
   cacheStatus: string;
   rowsRead: number;
   rowsWritten: number;
-  source: "native_yahoo" | "d1_tracking";
+  source: "native_yahoo" | "d1_tracking" | "robinhood_mcp";
   errorCode?: "UPSTREAM_UNAVAILABLE" | "INVALID_REQUEST";
 }
 
@@ -86,6 +94,71 @@ export const datasetForTool = classifyStocksWatcherDataset;
 
 const toolSymbol = (params: Record<string, unknown>) =>
   normalizeStocksWatcherSymbol(String(params.ticker || params.stock_code || params.symbol || "MARKET"));
+
+const ROBINHOOD_OPTIONS_TOOLS = new Set([
+  "get_options", "get_options_gex", "get_options_greeks", "get_options_pcr", "get_options_dex", "get_options_0dte", "get_options_iv_intraday", "get_options_sweeps", "get_options_mispricing", "get_options_flow_universe",
+]);
+
+type CuratedRobinhoodOptions =
+  | { curated: false }
+  | { curated: true; snapshot: RobinhoodOptionsPublishedSnapshot }
+  | { curated: true; unavailableReason: string };
+
+interface OptionsSnapshotCurrentRow {
+  run_id: string;
+  release_id: string;
+  manifest_key: string;
+  manifest_sha256: string;
+  captured_at: string;
+  expected_symbols: number;
+  completed_symbols: number;
+}
+
+const assertPublishedOptionsD1Current = async (db: D1DatabaseLike, snapshot: RobinhoodOptionsPublishedSnapshot) => {
+  const row = await db.prepare(`
+    SELECT run_id, release_id, manifest_key, manifest_sha256, captured_at, expected_symbols, completed_symbols
+    FROM watcher_options_snapshot_current WHERE singleton = 1
+  `).first<OptionsSnapshotCurrentRow>();
+  if (!row) throw new Error("ROBINHOOD_OPTIONS_UNAVAILABLE: D1 current manifest/status is unavailable.");
+  if (row.run_id !== snapshot.runId || row.release_id !== snapshot.releaseId || row.manifest_key !== snapshot.manifest.key || row.manifest_sha256 !== snapshot.manifest.sha256 || row.captured_at !== snapshot.capturedAt || row.expected_symbols !== snapshot.manifest.expectedSymbols || row.completed_symbols !== snapshot.manifest.completedSymbols) {
+    throw new Error("ROBINHOOD_OPTIONS_INVALID: D1 current manifest/status does not match the R2 release.");
+  }
+};
+
+const resolveCuratedRobinhoodOptions = async (env: Env, symbol: string): Promise<CuratedRobinhoodOptions> => {
+  if (!env.MARKET_CACHE_DB) return { curated: true, unavailableReason: "curated universe unavailable: MARKET_CACHE_DB is not bound" };
+  const assets = await listStocksWatcherTrackedAssets(env.MARKET_CACHE_DB, { activeOnly: true, limit: 500 });
+  if (!assets.some((asset) => asset.symbol === symbol)) return { curated: false };
+  try {
+    const snapshot = await loadRobinhoodOptionsSnapshot(env.OPTIONS_SNAPSHOT_DATA, symbol);
+    await assertPublishedOptionsD1Current(env.MARKET_CACHE_DB, snapshot);
+    return { curated: true, snapshot };
+  } catch (error) {
+    return { curated: true, unavailableReason: error instanceof Error ? error.message : String(error) };
+  }
+};
+
+const publishedOptionsToolResponse = (
+  tool: string,
+  params: Record<string, unknown>,
+  requestId: string,
+  snapshot: RobinhoodOptionsPublishedSnapshot,
+) => {
+  const view = toRobinhoodOptionsView(snapshot);
+  const selected = snapshot.contracts.filter((row) => row.expiry === (String(params.expiry || view.selectedExpiry || "")));
+  const raw = tool === "get_options"
+    ? {
+      source: "robinhood_mcp", spot: snapshot.spot, selectedExpiry: view.selectedExpiry, expiries: view.availableExpiries,
+      calls: selected.filter((row) => row.callPut === "call"), puts: selected.filter((row) => row.callPut === "put"),
+      provenance: { provider: "robinhood_mcp", runId: snapshot.runId, capturedAt: snapshot.capturedAt, methodology: "OI-signed GEX proxy" },
+    }
+    : tool === "get_options_greeks"
+      ? { source: "robinhood_mcp", rows: selected, provenance: { provider: "robinhood_mcp", runId: snapshot.runId, capturedAt: snapshot.capturedAt } }
+      : tool === "get_options_pcr"
+        ? { source: "robinhood_mcp", putCallOpenInterest: view.strikes.reduce((sum, row) => sum + row.putOpenInterest, 0) / Math.max(1, view.strikes.reduce((sum, row) => sum + row.callOpenInterest, 0)), provenance: { provider: "robinhood_mcp", runId: snapshot.runId, capturedAt: snapshot.capturedAt } }
+        : { source: "robinhood_mcp", rows: view.strikes, contracts: selected.map((row) => ({ ...row, signedGex: row.callPut === "call" ? robinhoodGex(row) : -robinhoodGex(row) })), provenance: { provider: "robinhood_mcp", runId: snapshot.runId, capturedAt: snapshot.capturedAt, methodology: "OI-signed GEX proxy" } };
+  return json({ ok: true, requestId, tool, params, text: `${snapshot.symbol} Robinhood MCP EOD options snapshot as of ${snapshot.capturedAt}. GEX is an OI-signed proxy, not dealer GEX.`, raw, calledAt: new Date().toISOString(), cache: { status: "published", sourceAsOf: snapshot.capturedAt }, observability: { requestId, scope: "stocks-watcher-options-snapshot", dataset: datasetForTool(tool), durationMs: 0, cacheStatus: "published", rowsRead: 0, rowsWritten: 0, source: "robinhood_mcp" } satisfies WatcherApiObservability });
+};
 
 export const attachPublishedWatcherData = async (snapshot: StocksWatcherSnapshot, bucket: R2BucketLike | undefined): Promise<StocksWatcherSnapshot> => {
   let release;
@@ -168,6 +241,22 @@ const callNativeTool = async (
         const message = error instanceof Error ? error.message : String(error);
         const coverageStatus = message.startsWith("VALUATION_DATA_NOT_PUBLISHED:") ? await getWatcherCoverageStatus(env.VALUATION_DATA, symbol) : "unavailable";
         return json({ ok: false, requestId, tool, params, error: message, coverageStatus }, { status: message.startsWith("VALUATION_DATA_NOT_PUBLISHED:") ? 404 : 400 });
+      }
+    }
+    if (ROBINHOOD_OPTIONS_TOOLS.has(tool)) {
+      const symbol = toolSymbol(params);
+      const published = await resolveCuratedRobinhoodOptions(env, symbol);
+      if (published.curated && "snapshot" in published) return publishedOptionsToolResponse(tool, params, requestId, published.snapshot);
+      if (published.curated) {
+        console.warn(JSON.stringify({
+          event: "stocks_watcher_options_fallback",
+          requestId,
+          symbol,
+          tool,
+          from: "robinhood_mcp",
+          to: "native_yahoo",
+          reason: published.unavailableReason,
+        }));
       }
     }
     reservation = await reserveQuotaForRequest(env.MARKET_CACHE_DB);
@@ -393,10 +482,15 @@ export async function onRequest(context: { request: Request; env?: Env }) {
         quotaGuard: reservation ? () => reservation!.decision : undefined,
         requestId,
         sourceAsOf: (snapshot) => snapshot.generatedAt,
-        load: async () => attachPublishedWatcherData(
-          await buildStocksWatcherSnapshotFromNative(symbol, new NativeStocksYahooClient()),
-          env.VALUATION_DATA,
-        ),
+        load: async () => {
+          const published = await resolveCuratedRobinhoodOptions(env, symbol);
+          return attachPublishedWatcherData(
+            await buildStocksWatcherSnapshotFromNative(symbol, new NativeStocksYahooClient(), published.curated
+              ? ("snapshot" in published ? { snapshot: published.snapshot } : { unavailableReason: published.unavailableReason })
+              : undefined),
+            env.VALUATION_DATA,
+          );
+        },
       });
       const quotaObservation = getMarketCacheD1QuotaObservation(resolved.cache);
       await finalizeQuotaForRequest(reservation, quotaObservation.rowsRead, quotaObservation.rowsWritten);
