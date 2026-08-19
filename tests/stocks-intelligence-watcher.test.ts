@@ -732,6 +732,8 @@ test("row quote parser preserves Yahoo quote fields for watcher rows", () => {
     quotes: [
       { symbol: "goog", name: "Alphabet Inc.", price: 356.24, previousClose: 357.89, change: -1.65, changePercent: -0.46, marketState: "CLOSED", asOf: "2026-07-09T20:00:00.000Z" },
       { symbol: "AAPL", name: "Apple Inc.", price: 316.22, change: 21.84, changePercent: 7.42, asOf: "2026-07-09T20:01:00.000Z" },
+      { symbol: "ZERO", name: "Confirmed unchanged", price: 50, change: 0, changePercent: 0 },
+      { symbol: "FLAT", name: "Missing change evidence", price: 100 },
       { symbol: "BAD", name: "Bad row" },
     ],
   }, 1234);
@@ -741,8 +743,11 @@ test("row quote parser preserves Yahoo quote fields for watcher rows", () => {
     [
       { symbol: "GOOG", price: 356.24, previousClose: 357.89, change: -1.65, changePercent: -0.46, source: "yahoo_quote", fetchedAt: 1234 },
       { symbol: "AAPL", price: 316.22, previousClose: null, change: 21.84, changePercent: 7.42, source: "yahoo_quote", fetchedAt: 1234 },
+      { symbol: "ZERO", price: 50, previousClose: null, change: 0, changePercent: 0, source: "yahoo_quote", fetchedAt: 1234 },
+      { symbol: "FLAT", price: 100, previousClose: null, change: 0, changePercent: 0, source: "yahoo_quote", fetchedAt: 1234 },
     ],
   );
+  assert.deepEqual(quotes.map((quote) => quote.changeAvailable), [true, true, true, false]);
   assert.equal(quotes[0]?.asOf, "2026-07-09T20:00:00.000Z");
   assert.equal(quotes[0]?.marketState, "CLOSED");
 });

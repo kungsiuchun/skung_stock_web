@@ -184,12 +184,13 @@ export const loadRobinhoodOptionsSnapshot = async (bucket: RobinhoodOptionsR2Buc
 };
 
 export const robinhoodGex = (contract: RobinhoodOptionContract) => contract.gamma * contract.openInterest * contract.multiplier * contract.spot ** 2 * 0.01;
+export const robinhoodDex = (contract: RobinhoodOptionContract) => contract.delta * contract.openInterest * contract.multiplier * contract.spot;
 
 export const assertRobinhoodSpotCompatible = (snapshotSpot: number, watcherSpot: number) => {
   if (!Number.isFinite(watcherSpot) || watcherSpot <= 0 || Math.abs(snapshotSpot - watcherSpot) / snapshotSpot > ROBINHOOD_OPTIONS_MAX_SPOT_DIVERGENCE) throw new Error("ROBINHOOD_OPTIONS_SPOT_MISMATCH: EOD snapshot spot is not compatible with the current quote.");
 };
 
-export const toRobinhoodOptionsView = (snapshot: RobinhoodOptionsPublishedSnapshot) => {
+export const toRobinhoodOptionsView = (snapshot: RobinhoodOptionsPublishedSnapshot, requestedExpiry?: string | null) => {
   const byExpiry = new Map<string, RobinhoodOptionContract[]>();
   for (const contract of snapshot.contracts) byExpiry.set(contract.expiry, [...(byExpiry.get(contract.expiry) || []), contract]);
   const expiries = [...byExpiry.keys()].sort();
@@ -202,7 +203,7 @@ export const toRobinhoodOptionsView = (snapshot: RobinhoodOptionsPublishedSnapsh
     const primary = contracts.reduce((best, row) => row.openInterest > best.openInterest ? row : best, contracts[0]);
     return { expiry, openInterest: callOi + putOi, primaryStrike: primary.strike, strike: primary.strike, volume: callVolume + putVolume, dominantType: callOi >= putOi ? "C" as const : "P" as const, type: callOi >= putOi ? "C" as const : "P" as const };
   });
-  const selectedExpiry = expiries[0] || null;
+  const selectedExpiry = requestedExpiry && byExpiry.has(requestedExpiry) ? requestedExpiry : expiries[0] || null;
   const selected = selectedExpiry ? byExpiry.get(selectedExpiry)! : [];
   const byStrike = new Map<number, RobinhoodOptionContract[]>();
   for (const contract of selected) byStrike.set(contract.strike, [...(byStrike.get(contract.strike) || []), contract]);
@@ -211,7 +212,134 @@ export const toRobinhoodOptionsView = (snapshot: RobinhoodOptionsPublishedSnapsh
     const puts = contracts.filter((row) => row.callPut === "put");
     const callGex = calls.reduce((sum, row) => sum + robinhoodGex(row), 0);
     const putGex = puts.reduce((sum, row) => sum - robinhoodGex(row), 0);
-    return { strike, callOpenInterest: calls.reduce((sum, row) => sum + row.openInterest, 0), putOpenInterest: puts.reduce((sum, row) => sum + row.openInterest, 0), callVolume: calls.reduce((sum, row) => sum + row.volume, 0), putVolume: puts.reduce((sum, row) => sum + row.volume, 0), callGex, putGex, netGex: callGex + putGex };
+    const callDex = calls.reduce((sum, row) => sum + robinhoodDex(row), 0);
+    const putDex = puts.reduce((sum, row) => sum + robinhoodDex(row), 0);
+    const callOpenInterest = calls.reduce((sum, row) => sum + row.openInterest, 0);
+    const putOpenInterest = puts.reduce((sum, row) => sum + row.openInterest, 0);
+    const weightedIv = (rows: RobinhoodOptionContract[], totalOpenInterest: number) => rows.length === 0
+      ? null
+      : totalOpenInterest > 0
+        ? rows.reduce((sum, row) => sum + row.impliedVolatility * row.openInterest, 0) / totalOpenInterest
+        : rows.reduce((sum, row) => sum + row.impliedVolatility, 0) / rows.length;
+    const callIvRaw = weightedIv(calls, callOpenInterest);
+    const putIvRaw = weightedIv(puts, putOpenInterest);
+    const ivValues = [callIvRaw, putIvRaw].filter((value): value is number => value !== null);
+    const callIv = callIvRaw === null ? null : callIvRaw * 100;
+    const putIv = putIvRaw === null ? null : putIvRaw * 100;
+    return {
+      strike,
+      callOpenInterest,
+      putOpenInterest,
+      callVolume: calls.reduce((sum, row) => sum + row.volume, 0),
+      putVolume: puts.reduce((sum, row) => sum + row.volume, 0),
+      callGex,
+      putGex,
+      netGex: callGex + putGex,
+      callDex,
+      putDex,
+      netDex: callDex + putDex,
+      callIv,
+      putIv,
+      avgIv: ivValues.length ? (ivValues.reduce((sum, value) => sum + value, 0) / ivValues.length) * 100 : null,
+      openInterestSource: "robinhood_mcp" as const,
+    };
   });
-  return { availableExpiries: expiries, selectedExpiry, expiryRows, strikes };
+  return { availableExpiries: expiries, selectedExpiry, expiryRows, strikes, selectedContracts: selected };
+};
+
+export const toRobinhoodOptionsToolPayload = (
+  snapshot: RobinhoodOptionsPublishedSnapshot,
+  tool: string,
+  params: Record<string, unknown>,
+): { text: string; raw: Record<string, unknown> } => {
+  const requestedExpiry = typeof params.expiry === "string" ? params.expiry : null;
+  const view = toRobinhoodOptionsView(snapshot, requestedExpiry);
+  const provenance = {
+    provider: ROBINHOOD_OPTIONS_PROVIDER,
+    runId: snapshot.runId,
+    capturedAt: snapshot.capturedAt,
+    methodology: "OI-signed GEX proxy",
+  };
+  const chain = {
+    source: ROBINHOOD_OPTIONS_PROVIDER,
+    spot: snapshot.spot,
+    selectedExpiry: view.selectedExpiry,
+    expiries: view.availableExpiries,
+    calls: view.selectedContracts.filter((row) => row.callPut === "call").map((row) => ({ ...row, type: "C" as const, lastPrice: row.mark })),
+    puts: view.selectedContracts.filter((row) => row.callPut === "put").map((row) => ({ ...row, type: "P" as const, lastPrice: row.mark })),
+  };
+  const baseText = `${snapshot.symbol} Robinhood MCP EOD options snapshot as of ${snapshot.capturedAt}.`;
+  const visualRaw = (extra: Record<string, unknown>, methodology = provenance.methodology) => ({
+    source: ROBINHOOD_OPTIONS_PROVIDER,
+    supported: true,
+    ...extra,
+    provenance: { ...provenance, methodology },
+  });
+  const unsupported = (reason: string) => ({
+    text: `${baseText} ${reason}`,
+    raw: visualRaw({ supported: false, unavailableReason: reason }),
+  });
+
+  if (tool === "get_options") {
+    return { text: `${baseText} Structured chain for ${view.selectedExpiry || "unavailable expiry"}.`, raw: visualRaw({ chain }) };
+  }
+  if (tool === "get_options_gex" || tool === "chart_gex") {
+    return {
+      text: `${baseText} GEX is an OI-signed proxy, not dealer GEX.`,
+      raw: visualRaw({ chain, exposures: view.strikes, chart: "net_gex_by_strike" }),
+    };
+  }
+  if (tool === "get_options_dex" || tool === "chart_dex") {
+    return {
+      text: `${baseText} DEX is an OI-weighted delta exposure proxy, not dealer positioning.`,
+      raw: visualRaw({ chain, exposures: view.strikes, chart: "net_dex_by_strike" }, "OI-weighted DEX proxy"),
+    };
+  }
+  if (tool === "get_options_greeks" || tool === "chart_greeks") {
+    return {
+      text: `${baseText} EOD Greeks and OI-derived exposures by strike.`,
+      raw: visualRaw({ chain, rows: view.strikes, contracts: view.selectedContracts, chart: "greeks_by_strike" }, "Robinhood MCP EOD Greeks"),
+    };
+  }
+  if (tool === "get_options_iv_intraday") {
+    return {
+      text: `${baseText} EOD IV smile by strike; intraday history is not present in this snapshot.`,
+      raw: visualRaw({ chain, rows: view.strikes, metric: "eod_iv_smile", timeSeries: false }, "Robinhood MCP EOD IV smile"),
+    };
+  }
+  if (tool === "get_options_pcr") {
+    const callOi = view.selectedContracts.filter((row) => row.callPut === "call").reduce((sum, row) => sum + row.openInterest, 0);
+    const putOi = view.selectedContracts.filter((row) => row.callPut === "put").reduce((sum, row) => sum + row.openInterest, 0);
+    const callVol = view.selectedContracts.filter((row) => row.callPut === "call").reduce((sum, row) => sum + row.volume, 0);
+    const putVol = view.selectedContracts.filter((row) => row.callPut === "put").reduce((sum, row) => sum + row.volume, 0);
+    return {
+      text: `${baseText} Put/call ratios for ${view.selectedExpiry || "unavailable expiry"}.`,
+      raw: visualRaw({
+        expiry: view.selectedExpiry,
+        putCallOpenInterest: putOi / Math.max(1, callOi),
+        putCallVolume: putVol / Math.max(1, callVol),
+        callOi,
+        putOi,
+        callVol,
+        putVol,
+      }, "Robinhood MCP EOD put/call ratios"),
+    };
+  }
+  if (tool === "get_options_flow_universe") return unsupported("Robinhood EOD snapshots do not contain tape-level options flow.");
+  if (tool === "get_options_sweeps") return unsupported("Robinhood EOD snapshots do not support verified sweep detection.");
+  if (tool === "get_options_mispricing") return unsupported("Robinhood EOD snapshots do not contain bid/ask fields required for a mispricing scan.");
+  if (tool === "get_options_0dte") {
+    const capturedEtDate = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/New_York",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date(snapshot.capturedAt));
+    if (view.selectedExpiry !== capturedEtDate) return unsupported(`The selected expiry ${view.selectedExpiry || "is unavailable"} is not 0DTE for the snapshot date ${capturedEtDate}.`);
+    return {
+      text: `${baseText} 0DTE OI-derived exposure snapshot.`,
+      raw: visualRaw({ chain, rows: view.strikes, metric: "0dte_exposure" }),
+    };
+  }
+  return unsupported(`Robinhood EOD snapshots do not support ${tool}.`);
 };

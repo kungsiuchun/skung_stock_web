@@ -64,6 +64,7 @@ import {
 } from "@/lib/stocks-watcher-universe";
 import type { StocksWatcherUniverseStock } from "@/lib/stocks-watcher-universe";
 import { getStocksWatcherInitialSymbolFromHash, STOCKS_WATCHER_DEFAULT_SYMBOL } from "@/lib/stocks-intelligence-watcher-route";
+import { normalizeOptionsVisualModel, optionsExpiryMatchesRequest } from "@/lib/stocks-watcher-options-visual";
 
 interface StocksIntelligenceWatcherPageProps {
   onBackToWork: () => void;
@@ -91,13 +92,9 @@ const OPTIONS_SUB_TABS = [
   "Overview",
   "Greeks",
   "DEX",
-  "Flow",
   "IV",
-  "Mis$",
   "P/C",
   "Chain",
-  "Sweeps",
-  "0DTE",
 ] as const;
 
 const BASE_SECTOR_OPTIONS = ["All Sectors"];
@@ -230,6 +227,7 @@ interface RawOptionLeg {
   bid?: number;
   ask?: number;
   lastPrice?: number;
+  mark?: number;
   volume?: number;
   openInterest?: number;
   impliedVolatility?: number;
@@ -663,7 +661,10 @@ const compactDateLabel = (value: string | undefined) => {
 const optionChainFromResult = (result: NativeToolResult | undefined): RawOptionChain | null => {
   const raw = rawRecord(result?.raw);
   const chain = rawRecord(raw?.chain);
-  return chain ? chain as unknown as RawOptionChain : null;
+  if (chain) return chain as unknown as RawOptionChain;
+  return raw && (Array.isArray(raw.calls) || Array.isArray(raw.puts))
+    ? raw as unknown as RawOptionChain
+    : null;
 };
 
 const optionExposuresFromResult = (result: NativeToolResult | undefined): RawOptionExposure[] => {
@@ -679,6 +680,21 @@ const optionLegNumber = (value: unknown) => {
     return Number.isFinite(parsed) ? parsed : 0;
   }
   return 0;
+};
+
+const optionLegDisplayNumber = (value: unknown) => {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value.replace(/[$,%]/g, "").replace(/,/g, ""));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+};
+
+const formatOptionIv = (value: unknown) => {
+  const parsed = optionLegDisplayNumber(value);
+  if (parsed === null) return "n/a";
+  return `${(parsed > 0 && parsed <= 3 ? parsed * 100 : parsed).toFixed(1)}%`;
 };
 
 const effectiveLegOpenInterest = (leg: RawOptionLeg | undefined, explicit?: unknown) => {
@@ -858,9 +874,9 @@ const ErrorBanner = ({ message, onRetry }: { message: string; onRetry?: () => vo
 
 const OptionsEmptyState = ({ expiry, onRetry }: { expiry?: string | null; onRetry?: () => void }) => (
   <div className="flex min-h-[18rem] flex-col items-center justify-center rounded-md border border-slate-800 bg-slate-950/50 p-6 text-center">
-    <p className="text-sm font-black text-blue-100">No native Yahoo data for this expiry</p>
+    <p className="text-sm font-black text-blue-100">No structured options data for this expiry</p>
     <p className="mt-2 max-w-md text-xs leading-5 text-slate-500">
-      {formatExpiryDate(expiry, "long")} has no structured option payload for this panel.
+      The active source has no supported payload for {formatExpiryDate(expiry, "long")} in this panel.
     </p>
     {onRetry && (
       <button type="button" onClick={onRetry} className="mt-4 rounded-md border border-blue-400/40 px-3 py-2 text-xs font-bold text-blue-100 hover:bg-blue-500/10">
@@ -869,6 +885,28 @@ const OptionsEmptyState = ({ expiry, onRetry }: { expiry?: string | null; onRetr
     )}
   </div>
 );
+
+const OptionsUnsupportedState = ({ title, reason, source }: { title: string; reason: string; source?: string | null }) => (
+  <div className="flex min-h-[14rem] flex-col items-center justify-center rounded-md border border-amber-500/25 bg-amber-500/5 p-6 text-center" data-options-unsupported>
+    <p className="text-sm font-black text-amber-100">{title}</p>
+    <p className="mt-2 max-w-lg text-xs leading-5 text-slate-400">{reason}</p>
+    {source && <p className="mt-3 text-[0.7rem] font-bold uppercase tracking-wide text-slate-500">Source: {source}</p>}
+  </div>
+);
+
+const OptionsResultProvenance = ({ result }: { result: NativeToolResult | undefined }) => {
+  const raw = rawRecord(result?.raw);
+  const provenance = rawRecord(raw?.provenance);
+  if (!provenance) return null;
+  const provider = provenance.provider === "robinhood_mcp" ? "Robinhood MCP EOD" : String(provenance.provider || "Unknown source");
+  const capturedAt = typeof provenance.capturedAt === "string" ? provenance.capturedAt : "capture time unavailable";
+  const methodology = typeof provenance.methodology === "string" ? provenance.methodology : "methodology unavailable";
+  return (
+    <p className="mb-3 rounded border border-cyan-500/25 bg-cyan-500/5 px-3 py-2 text-[0.7rem] leading-5 text-cyan-100" data-options-result-provenance>
+      Source: {provider} · Captured: {capturedAt} · Methodology: {methodology}
+    </p>
+  );
+};
 
 type PriceChartStyle = "line" | "mountain" | "candle" | "ohlc";
 type PriceChartRange = "1D" | "5D" | "ALL";
@@ -1932,6 +1970,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             callNativeTool(plan[2].name, plan[2].params).then((result) => ["get_options_pcr", result] as const),
           ]))
         : await runToolBundle(plan);
+      if (!optionsExpiryMatchesRequest(data.get_options?.raw, expiry)) {
+        const returnedExpiry = normalizeOptionsVisualModel({ chainRaw: data.get_options?.raw, exposureRaw: null }).expiry || "missing";
+        throw new Error(`OPTIONS_EXPIRY_MISMATCH: requested ${normalizeExpiryDate(expiry)}, received ${returnedExpiry}`);
+      }
       tabDataCache.current.set(cacheKey, { data, fetchedAt: Date.now() });
       setExpiryOverviewState({ loading: false, error: null, data });
     } catch (requestError) {
@@ -2311,8 +2353,13 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const heroDirection = snapshot ? quoteDirection(snapshot.quote.change, snapshot.quote.changePercent) : 0;
   const isPositive = heroDirection >= 0;
   const heroArrow = directionArrow(heroDirection);
-  const selectedChain = optionChainFromResult(expiryOverviewState.data?.get_options);
-  const selectedExposures = optionExposuresFromResult(expiryOverviewState.data?.get_options_gex);
+  const optionsVisualModel = normalizeOptionsVisualModel({
+    chainRaw: expiryOverviewState.data?.get_options?.raw,
+    exposureRaw: expiryOverviewState.data?.get_options_gex?.raw,
+    now,
+  });
+  const selectedChain = optionsVisualModel.chain as unknown as RawOptionChain | null;
+  const selectedExposures = optionsVisualModel.strikeRows as unknown as RawOptionExposure[];
   const rows = buildStrikeRowsFromOptionRaw(selectedChain, selectedExposures);
   const expiryRows = buildExpiryRowsForSelector(snapshot);
   const loadedExpirySummary = summaryFromLoadedOptionChain(selectedChain);
@@ -2343,10 +2390,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     ? `Yahoo next ${yahooExpiryPreload.total}: ${yahooExpiryPreload.loaded}/${yahooExpiryPreload.total}${yahooExpiryPreload.failed ? ` · ${yahooExpiryPreload.failed} retry` : ""}`
     : null;
   const optionsSectionMinHeightRem = Math.max(52, 3 + selectorExpiryRows.length * 2.35);
-  const hasYahooOpenInterest = Boolean(selectedChain && [...(selectedChain.calls || []), ...(selectedChain.puts || [])]
-    .some((leg) => optionLegNumber(leg.openInterest) > 0));
-  const hasYahooGex = hasYahooOpenInterest && selectedExposures.some((row) =>
-    typeof row.netGex === "number" && Number.isFinite(row.netGex));
+  const hasOptionsOpenInterest = optionsVisualModel.capabilities.openInterest;
+  const hasOptionsGex = hasOptionsOpenInterest && optionsVisualModel.capabilities.gex;
   const optionsSourceLabel = snapshot?.optionsSnapshot
     ? `Robinhood MCP EOD · ${snapshot.optionsSnapshot.capturedAt}`
     : isYahooOptionsFallback
@@ -2354,7 +2399,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       : snapshot?.source === "native_yahoo"
         ? "Native Yahoo"
         : "Source unavailable";
-  const modeAvailable = mode === "volume" || (mode === "oi" ? hasYahooOpenInterest : hasYahooGex);
+  const modeAvailable = mode === "volume" ? optionsVisualModel.capabilities.volume : mode === "oi" ? hasOptionsOpenInterest : hasOptionsGex;
   const chartRows = rows.sort((a, b) => a.strike - b.strike);
   const focusedRows = (() => {
     if (!snapshot || strikeZoom <= 1 || chartRows.length <= 7) return chartRows;
@@ -2537,13 +2582,13 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs font-black">
         <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-blue-100">Exp {formatExpiryDate(currentExpiry, "compact")}</span>
         <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-yellow-300">Spot {snapshot ? currency(snapshot.spot) : "--"}</span>
-        {hasYahooOpenInterest && (
+        {hasOptionsOpenInterest && (
           <span className={`rounded border border-slate-700 bg-slate-900 px-2 py-1 ${dominantSide === "Calls" ? "text-emerald-300" : "text-red-300"}`}>
             Dom {dominantSide}{dominantRow ? ` @ ${dominantRow.strike}` : ""}
           </span>
         )}
         <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-300">P/C volume {snapshot?.putCallVolume.toFixed(2) || "--"}</span>
-        {hasYahooGex && (
+        {hasOptionsGex && (
           <>
             <span className={`rounded border border-slate-700 bg-slate-900 px-2 py-1 ${netGex >= 0 ? "text-emerald-300" : "text-red-300"}`}>
               {mode === "gex" ? "Net GEX" : "GEX regime"} {mode === "gex" ? formatNumber(netGex) : snapshot?.gexRegime || "--"}
@@ -2555,7 +2600,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         )}
       </div>
 
-      {!hasYahooOpenInterest && selectedChain && (
+      {!hasOptionsOpenInterest && selectedChain && (
         <p className="mb-3 rounded-md border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100" data-options-oi-unavailable>
           The active options source returned no positive open interest for this expiry. OI, P/C OI, GEX, walls and flip levels are unavailable; volume remains source data.
         </p>
@@ -2579,23 +2624,11 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           <div data-options-chart-controls className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-800 bg-slate-950/70 px-3 py-2">
             <div className="flex flex-wrap items-center gap-2 text-xs font-black">
               <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-400">
-                GEX Pinning <b className="ml-1 text-slate-100">{hasYahooGex && gammaFlipLevel !== null ? currency(gammaFlipLevel) : "Unavailable"}</b>
+                GEX Pinning <b className="ml-1 text-slate-100">{!hasOptionsGex ? "Unavailable" : gammaFlipLevel !== null ? currency(gammaFlipLevel) : "No flip in range"}</b>
               </span>
               <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-400">
-                P/C OI <b className="ml-1 text-slate-100">{hasYahooOpenInterest ? (snapshot?.putCallOpenInterest ?? 0).toFixed(2) : "Unavailable"}</b>
+                P/C OI <b className="ml-1 text-slate-100">{hasOptionsOpenInterest ? (snapshot?.putCallOpenInterest ?? 0).toFixed(2) : "Unavailable"}</b>
               </span>
-              <button
-                type="button"
-                data-options-sweeps-control
-                aria-label="Open sweeps"
-                onClick={() => {
-                  setActiveSubTab("Sweeps");
-                  void loadOptionsSubTab("Sweeps", true);
-                }}
-                className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-400 hover:border-blue-400 hover:text-blue-100"
-              >
-                Sweeps <b className="ml-1 text-slate-100">View</b>
-              </button>
             </div>
             <label className="flex items-center gap-2 text-xs font-black text-slate-400">
               Strike Zoom
@@ -2817,8 +2850,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 <th className="px-3 py-2">Strike</th>
                 <th className="px-3 py-2 text-right">Bid</th>
                 <th className="px-3 py-2 text-right">Ask</th>
+                <th className="px-3 py-2 text-right">Mark</th>
                 <th className="px-3 py-2 text-right">Vol</th>
-                <th className="px-3 py-2 text-right">OI/Vol</th>
+                <th className="px-3 py-2 text-right">OI</th>
                 <th className="px-3 py-2 text-right">IV</th>
               </tr>
             </thead>
@@ -2826,11 +2860,12 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
               {legs.map((leg) => (
                 <tr key={`${side}-${leg.contractSymbol || leg.strike}`} className="border-t border-slate-800 text-slate-200">
                   <td className="px-3 py-2 font-black text-white">{optionLegNumber(leg.strike)}</td>
-                  <td className="px-3 py-2 text-right">{optionLegNumber(leg.bid).toFixed(2)}</td>
-                  <td className="px-3 py-2 text-right">{optionLegNumber(leg.ask).toFixed(2)}</td>
+                  <td className="px-3 py-2 text-right">{optionLegDisplayNumber(leg.bid)?.toFixed(2) ?? "n/a"}</td>
+                  <td className="px-3 py-2 text-right">{optionLegDisplayNumber(leg.ask)?.toFixed(2) ?? "n/a"}</td>
+                  <td className="px-3 py-2 text-right">{optionLegDisplayNumber(leg.mark ?? leg.lastPrice)?.toFixed(2) ?? "n/a"}</td>
                   <td className="px-3 py-2 text-right">{formatNumber(optionLegNumber(leg.volume))}</td>
                   <td className="px-3 py-2 text-right">{formatNumber(effectiveLegOpenInterest(leg))}</td>
-                  <td className="px-3 py-2 text-right">{(optionLegNumber(leg.impliedVolatility) || (optionLegNumber(leg.lastPrice) > 0 ? 20 : 0)).toFixed(1)}%</td>
+                  <td className="px-3 py-2 text-right">{formatOptionIv(leg.impliedVolatility)}</td>
                 </tr>
               ))}
             </tbody>
@@ -2841,6 +2876,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
     return (
       <div className="space-y-4">
+        <OptionsResultProvenance result={result} />
         <div className="grid gap-3 sm:grid-cols-3">
           <div className="rounded-md border border-slate-800 bg-slate-950/60 p-3">
             <p className="text-xs uppercase text-slate-500">Selected Expiry</p>
@@ -2873,6 +2909,16 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     const legs = Array.isArray(raw?.legs)
       ? raw.legs.map(rawRecord).filter((row): row is Record<string, unknown> => Boolean(row))
       : [];
+    if (raw?.supported === false) {
+      const provenance = rawRecord(raw.provenance);
+      return (
+        <OptionsUnsupportedState
+          title={`${result.tool} is not supported by this source`}
+          reason={typeof raw.unavailableReason === "string" ? raw.unavailableReason : "The active source does not provide the fields required for this panel."}
+          source={typeof provenance?.provider === "string" ? provenance.provider : null}
+        />
+      );
+    }
     if (resultLooksHtml(result)) return <ToolResultBlock result={result} />;
     if (result.tool === "get_options") return renderChainPanel(result);
     if (flowRows.length > 0) {
@@ -2930,9 +2976,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                     <td className="px-3 py-2 text-right font-black text-white">{optionLegNumber(leg.strike)}</td>
                     <td className="px-3 py-2 text-right">{formatNumber(optionLegNumber(leg.volume))}</td>
                     <td className="px-3 py-2 text-right">{formatNumber(optionLegNumber(leg.openInterest))}</td>
-                    <td className="px-3 py-2 text-right">{optionLegNumber(leg.bid).toFixed(2)}</td>
-                    <td className="px-3 py-2 text-right">{optionLegNumber(leg.ask).toFixed(2)}</td>
-                    <td className="px-3 py-2 text-right">{optionLegNumber(leg.impliedVolatility).toFixed(1)}%</td>
+                    <td className="px-3 py-2 text-right">{optionLegDisplayNumber(leg.bid)?.toFixed(2) ?? "n/a"}</td>
+                    <td className="px-3 py-2 text-right">{optionLegDisplayNumber(leg.ask)?.toFixed(2) ?? "n/a"}</td>
+                    <td className="px-3 py-2 text-right">{formatOptionIv(leg.impliedVolatility)}</td>
                   </tr>
                 );
               })}
@@ -2942,6 +2988,55 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       );
     }
     if (exposures.length > 0) {
+      if (result.tool === "get_options_dex" || result.tool === "chart_dex") {
+        const plotted = exposures.slice(0, 28).map((row) => ({
+          strike: optionLegNumber(row.strike),
+          value: optionLegNumber(row.netDex),
+        }));
+        const maxAbs = Math.max(1, ...plotted.map((row) => Math.abs(row.value)));
+        return (
+          <div className="space-y-1" data-options-dex-chart>
+            <p className="mb-3 text-xs text-slate-400">Net DEX by strike · zero-centred OI-weighted delta exposure proxy · not dealer positioning.</p>
+            {plotted.map((row) => (
+              <div key={`dex-${result.tool}-${row.strike}`} className="grid grid-cols-[3.5rem_minmax(0,1fr)_5rem] items-center gap-2 text-[0.68rem]">
+                <span className="text-right font-bold text-slate-300">{row.strike}</span>
+                <span className="relative h-4 overflow-hidden rounded bg-slate-900" data-options-dex-bar title={`Strike ${row.strike}: ${formatNumber(row.value)}`}>
+                  <i className="absolute inset-y-0 left-1/2 w-px bg-slate-500" />
+                  <i
+                    className={`absolute inset-y-1 ${row.value >= 0 ? "left-1/2 bg-emerald-400" : "right-1/2 bg-red-400"}`}
+                    style={{ width: `${Math.max(row.value === 0 ? 0 : 1.5, Math.abs(row.value) / maxAbs * 48)}%` }}
+                  />
+                </span>
+                <span className={`text-right font-mono ${row.value >= 0 ? "text-emerald-300" : "text-red-300"}`}>{formatNumber(row.value)}</span>
+              </div>
+            ))}
+          </div>
+        );
+      }
+      if (result.tool === "get_options_iv_intraday") {
+        const plotted = exposures.slice(0, 28).map((row) => ({
+          strike: optionLegNumber(row.strike),
+          iv: effectiveExposureIv(row),
+        })).filter((row) => row.iv > 0);
+        if (plotted.length === 0) {
+          return <OptionsUnsupportedState title="IV smile is unavailable" reason="The active source did not provide traceable implied-volatility values for this expiry." source={String(raw?.source || "")} />;
+        }
+        const maxIv = Math.max(...plotted.map((row) => row.iv));
+        return (
+          <div data-options-iv-chart>
+            <p className="mb-3 text-xs text-slate-400">EOD implied-volatility smile by strike · snapshot bars, not intraday history.</p>
+            <div className="flex h-64 items-end gap-1 overflow-x-auto border-b border-l border-slate-700 px-2 pt-6">
+              {plotted.map((row) => (
+                <span key={`iv-${row.strike}`} className="flex h-full min-w-8 flex-1 flex-col justify-end text-center" title={`Strike ${row.strike}: ${row.iv.toFixed(1)}%`}>
+                  <em className="mb-1 text-[0.62rem] not-italic text-blue-200">{row.iv.toFixed(1)}%</em>
+                  <i className="min-h-1 rounded-t bg-blue-400/80" data-options-iv-bar style={{ height: `${Math.max(3, row.iv / maxIv * 82)}%` }} />
+                  <b className="mt-1 text-[0.6rem] text-slate-400">{row.strike}</b>
+                </span>
+              ))}
+            </div>
+          </div>
+        );
+      }
       return (
         <div className="overflow-hidden rounded-md border border-slate-800">
           <table className="w-full text-left text-xs">
@@ -2982,7 +3077,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="rounded-md border border-slate-800 bg-slate-950/60 p-4">
             <p className="text-xs uppercase text-slate-500">P/C Open Interest</p>
-            <p className="mt-1 text-2xl font-black text-emerald-200">{hasYahooOpenInterest ? optionLegNumber(raw.putCallOpenInterest).toFixed(2) : "n/a"}</p>
+            <p className="mt-1 text-2xl font-black text-emerald-200">{hasOptionsOpenInterest ? optionLegNumber(raw.putCallOpenInterest).toFixed(2) : "n/a"}</p>
           </div>
           <div className="rounded-md border border-slate-800 bg-slate-950/60 p-4">
             <p className="text-xs uppercase text-slate-500">P/C Volume</p>
@@ -3163,19 +3258,16 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const renderGreeksReferencePanel = (data: Record<string, NativeToolResult>) => {
     const greekResult = data.get_options_greeks || Object.values(data).find((result) => optionExposuresFromResult(result).length > 0);
     const rawGreekRows = optionExposuresFromResult(greekResult);
-    const fallbackGreekRows: RawOptionExposure[] = chartRows.map((row) => ({
-        strike: row.strike,
-        callOpenInterest: row.callOpenInterest,
-        putOpenInterest: row.putOpenInterest,
-        callVolume: row.callVolume,
-        putVolume: row.putVolume,
-        netGex: row.netGex,
-        netDex: row.netGex * 0.08,
-        callGex: row.callGex,
-        putGex: row.putGex,
-        avgIv: 0,
-      }));
-    const greekRows: RawOptionExposure[] = (rawGreekRows.length > 0 ? rawGreekRows : fallbackGreekRows).slice(0, 12);
+    if (rawGreekRows.length === 0) {
+      return (
+        <OptionsUnsupportedState
+          title="Greeks are unavailable for this expiry"
+          reason="The active source did not provide traceable delta, gamma, implied-volatility and open-interest inputs. No synthetic DEX or IV values were generated."
+          source={optionsVisualModel.provider}
+        />
+      );
+    }
+    const greekRows: RawOptionExposure[] = rawGreekRows.slice(0, 12);
     const callOiTotal = greekRows.reduce((sum, row) => sum + effectiveLegOpenInterest(row.call, row.callEffectiveOpenInterest ?? row.callOpenInterest), 0);
     const putOiTotal = greekRows.reduce((sum, row) => sum + effectiveLegOpenInterest(row.put, row.putEffectiveOpenInterest ?? row.putOpenInterest), 0);
     const callVolTotal = greekRows.reduce((sum, row) => sum + optionLegNumber(row.callVolume ?? row.call?.volume), 0);
@@ -3188,6 +3280,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
     return (
       <div className="siw-greeks-board">
+        <div className="siw-greeks-provenance">
+          <OptionsResultProvenance result={greekResult} />
+        </div>
         <div className="siw-panel siw-greek-table-panel">
           <div className="siw-panel-title">
             <span>Greeks by Strike</span>
@@ -3313,6 +3408,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 {Object.values(subTabPanelState.data).map((result) => (
                   <div key={result.tool} className="min-w-0 overflow-hidden rounded-md border border-slate-800 bg-slate-950/50 p-3">
                     <div className="mb-2 text-sm font-black text-blue-100">{result.tool}</div>
+                    <OptionsResultProvenance result={result} />
                     {renderOptionResultPanel(result)}
                   </div>
                 ))}
@@ -3331,7 +3427,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     }, new Map());
     const liveWatchlistQuotes = watchlist.flatMap((stock) => {
       const quote = rowQuotesBySymbol[stock.symbol];
-      return quote?.source === "yahoo_quote" ? [{ stock, quote }] : [];
+      return quote?.source === "yahoo_quote" && quote.changeAvailable ? [{ stock, quote }] : [];
     });
     const watchlistCoverage = liveWatchlistQuotes.length;
     const sectorRows = Array.from(
@@ -3347,7 +3443,11 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       .sort((a, b) => b.avgChangePercent - a.avgChangePercent);
     const advancers = liveWatchlistQuotes.filter(({ quote }) => quote.changePercent > 0).length;
     const decliners = liveWatchlistQuotes.filter(({ quote }) => quote.changePercent < 0).length;
-    const unchanged = Math.max(0, watchlistCoverage - advancers - decliners);
+    const unchangedSymbols = liveWatchlistQuotes
+      .filter(({ quote }) => quote.changePercent === 0)
+      .map(({ stock }) => stock.symbol);
+    const unchanged = unchangedSymbols.length;
+    const unavailableChanges = Math.max(0, visibleWatchlistCount - watchlistCoverage);
     const breadthTotal = Math.max(1, watchlistCoverage);
     const latestWatchlistQuoteAt = liveWatchlistQuotes.reduce<number | null>((latest, { quote }) =>
       latest === null || quote.fetchedAt > latest ? quote.fetchedAt : latest, null);
@@ -3421,7 +3521,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           <div className="siw-market-breadth">
             <div>
               <span>Watchlist Market Breadth (Yahoo live quotes)</span>
-              <em>{watchlistCoverage > 0 ? `Coverage ${watchlistCoverage}/${visibleWatchlistCount} · ${new Date(latestWatchlistQuoteAt || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} ET` : `Coverage 0/${visibleWatchlistCount} · Refresh to load`}</em>
+              <em>{watchlistCoverage > 0 ? `Change coverage ${watchlistCoverage}/${visibleWatchlistCount}${unavailableChanges > 0 ? ` · ${unavailableChanges} unavailable` : ""} · ${new Date(latestWatchlistQuoteAt || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} ET` : `Change coverage 0/${visibleWatchlistCount} · Refresh to load`}</em>
             </div>
             <div className="siw-breadth-rail" data-watchlist-breadth data-watchlist-coverage={`${watchlistCoverage}/${visibleWatchlistCount}`}>
               <b style={{ width: `${(advancers / breadthTotal) * 100}%` }} />
@@ -3430,7 +3530,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             </div>
             <div className="siw-breadth-counts">
               <span className="siw-up">Advancers <b>{advancers}</b></span>
-              <span>Unchanged <b>{unchanged}</b></span>
+              <span title={unchangedSymbols.length > 0 ? `Unchanged: ${unchangedSymbols.join(", ")}` : undefined}>
+                Unchanged <b>{unchanged}</b>{unchangedSymbols.length > 0 ? ` · ${unchangedSymbols.join(", ")}` : ""}
+              </span>
               <span className="siw-down">Decliners <b>{decliners}</b></span>
             </div>
             {watchlistCoverage === 0 && <div className="siw-data-empty"><strong>Needs checking</strong><span>No live Yahoo quotes for the currently visible watchlist. Refresh all to try again.</span></div>}
@@ -3596,9 +3698,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             </div>
             <div className="siw-key-grid">
               <MetricTile label="Spot" value={latestPrice ? currency(latestPrice) : "--"} tone="blue" />
-              <MetricTile label="Call GEX" value={hasYahooGex ? formatNumber(totalCallGex) : "n/a"} tone="positive" />
-              <MetricTile label="Put GEX" value={hasYahooGex ? formatNumber(totalPutGex) : "n/a"} tone="negative" />
-              <MetricTile label="P/C OI" value={hasYahooOpenInterest ? (snapshot?.putCallOpenInterest || 0).toFixed(2) : "n/a"} tone="neutral" />
+              <MetricTile label="Call GEX" value={hasOptionsGex ? formatNumber(totalCallGex) : "n/a"} tone="positive" />
+              <MetricTile label="Put GEX" value={hasOptionsGex ? formatNumber(totalPutGex) : "n/a"} tone="negative" />
+              <MetricTile label="P/C OI" value={hasOptionsOpenInterest ? (snapshot?.putCallOpenInterest || 0).toFixed(2) : "n/a"} tone="neutral" />
             </div>
           </div>
         </div>
@@ -3671,19 +3773,19 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 key={item}
                 type="button"
                 onClick={() => {
-                  if ((item === "oi" && !hasYahooOpenInterest) || (item === "gex" && !hasYahooGex)) return;
+                  if ((item === "oi" && !hasOptionsOpenInterest) || (item === "gex" && !hasOptionsGex)) return;
                   setMode(item);
                   setActiveSubTab("Overview");
                 }}
-                disabled={(item === "oi" && !hasYahooOpenInterest) || (item === "gex" && !hasYahooGex)}
-                title={(item === "oi" && !hasYahooOpenInterest) || (item === "gex" && !hasYahooGex) ? "Yahoo did not return usable open interest for this expiry" : undefined}
+                disabled={(item === "oi" && !hasOptionsOpenInterest) || (item === "gex" && !hasOptionsGex)}
+                title={(item === "oi" && !hasOptionsOpenInterest) || (item === "gex" && !hasOptionsGex) ? "The active source did not return the required options fields for this expiry" : undefined}
                 className={activeSubTab === "Overview" && mode === item ? "is-active" : ""}
               >
                 {item === "oi" ? "OI" : item === "volume" ? "Vol" : "GEX"}
               </button>
             ))}
             {OPTIONS_SUB_TABS.filter((item) => item !== "Overview").map((item) => {
-              const disabled = !hasYahooOpenInterest && ["Greeks", "DEX", "P/C", "0DTE"].includes(item);
+              const disabled = !hasOptionsOpenInterest && ["Greeks", "DEX", "P/C"].includes(item);
               return (
                 <button
                   key={item}
@@ -3827,12 +3929,13 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                   const selectedSnapshotQuote = selected && snapshot?.symbol === symbol ? snapshot.quote : null;
                   const rowQuote = yahooRowQuote || selectedSnapshotQuote;
                   const hasRowQuote = Boolean(rowQuote && Number.isFinite(rowQuote.price) && rowQuote.price > 0);
-                  const change = hasRowQuote ? rowQuote!.change : null;
+                  const hasChangeData = hasRowQuote && (yahooRowQuote ? yahooRowQuote.changeAvailable : true);
+                  const change = hasChangeData ? rowQuote!.change : null;
                   const rowPositive = change !== null && change >= 0;
                   const isRowLoading = loadingSymbol === symbol || refreshingSymbols.includes(symbol);
                   const isFavorite = favorites.includes(symbol);
                   const price = hasRowQuote ? rowQuote!.price : null;
-                  const pct = hasRowQuote ? rowQuote!.changePercent : null;
+                  const pct = hasChangeData ? rowQuote!.changePercent : null;
                   const rowSource = yahooRowQuote ? "yahoo_quote" : selectedSnapshotQuote ? "selected_snapshot" : "unavailable";
                   const rowAsOf = yahooRowQuote?.asOf || selectedSnapshotQuote?.asOf || "";
 
@@ -3842,6 +3945,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                       data-watchlist-row={symbol}
                       data-row-price={price === null ? "" : price.toFixed(2)}
                       data-row-change={change === null ? "" : change.toFixed(2)}
+                      data-row-change-available={hasChangeData ? "true" : "false"}
                       data-row-source={rowSource}
                       data-row-asof={rowAsOf}
                       data-stock-sector={stock.sector}
@@ -4499,18 +4603,18 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                         key={item}
                         type="button"
                         onClick={() => {
-                          if ((item === "oi" && !hasYahooOpenInterest) || (item === "gex" && !hasYahooGex)) return;
+                          if ((item === "oi" && !hasOptionsOpenInterest) || (item === "gex" && !hasOptionsGex)) return;
                           setMode(item);
                           setActiveSubTab("Overview");
                         }}
-                        disabled={(item === "oi" && !hasYahooOpenInterest) || (item === "gex" && !hasYahooGex)}
+                        disabled={(item === "oi" && !hasOptionsOpenInterest) || (item === "gex" && !hasOptionsGex)}
                         className={`border-b-2 px-3 py-3 text-sm font-semibold ${activeSubTab === "Overview" && mode === item ? "border-blue-400 text-blue-300" : "border-transparent text-slate-300 hover:text-white"}`}
                       >
                         {item === "oi" ? "OI" : item === "volume" ? "Vol" : "GEX"}
                       </button>
                     ))}
                     {OPTIONS_SUB_TABS.filter((item) => item !== "Overview").map((item) => {
-                      const disabled = !hasYahooOpenInterest && ["Greeks", "DEX", "P/C", "0DTE"].includes(item);
+                      const disabled = !hasOptionsOpenInterest && ["Greeks", "DEX", "P/C"].includes(item);
                       return (
                         <button
                           key={item}

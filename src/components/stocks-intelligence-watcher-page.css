@@ -1317,7 +1317,7 @@
 
 .siw-options-stage {
   display: grid;
-  grid-template-columns: minmax(440px, 470px) minmax(0, 1fr);
+  grid-template-columns: minmax(370px, 400px) minmax(0, 1fr);
   gap: 12px;
   min-height: 640px;
   align-items: stretch;
@@ -1340,7 +1340,7 @@
 .siw-expiry-head,
 .siw-expiry-row {
   display: grid;
-  grid-template-columns: 92px 74px 82px 76px 36px;
+  grid-template-columns: 82px 64px 70px 64px 32px;
   gap: 8px;
   align-items: center;
 }
@@ -1491,6 +1491,11 @@
   padding: 16px;
 }
 
+.siw-stats-board > .siw-panel > .siw-panel-title {
+  margin: -16px -16px 0;
+  padding: 16px;
+}
+
 .siw-stats-left {
   min-height: 340px;
 }
@@ -1619,8 +1624,14 @@
 
 .siw-greeks-board {
   display: grid;
-  grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
   gap: 14px;
+  min-width: 0;
+}
+
+.siw-greeks-provenance {
+  grid-column: 1 / -1;
+  min-width: 0;
 }
 
 .siw-greek-table-panel,
@@ -1628,6 +1639,8 @@
 .siw-chain-preview,
 .siw-pc-metrics {
   padding: 14px;
+  min-width: 0;
+  overflow-x: auto;
 }
 
 .siw-greek-table {
@@ -1812,7 +1825,7 @@
 
 .siw-audit-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(310px, 0.95fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   margin-top: 12px;
 }
@@ -2069,7 +2082,7 @@
   text-align: center;
 }
 
-@media (max-width: 1240px) {
+@media (max-width: 1300px) {
   .siw-replica-shell {
     grid-template-columns: 340px minmax(0, 1fr);
   }

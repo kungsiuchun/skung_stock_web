@@ -27,8 +27,7 @@ import {
 } from "../../src/lib/stocks-watcher-valuation-data";
 import {
   loadRobinhoodOptionsSnapshot,
-  robinhoodGex,
-  toRobinhoodOptionsView,
+  toRobinhoodOptionsToolPayload,
   type RobinhoodOptionsPublishedSnapshot,
   type RobinhoodOptionsR2BucketLike,
 } from "../../src/lib/stocks-watcher-robinhood-options";
@@ -144,20 +143,8 @@ const publishedOptionsToolResponse = (
   requestId: string,
   snapshot: RobinhoodOptionsPublishedSnapshot,
 ) => {
-  const view = toRobinhoodOptionsView(snapshot);
-  const selected = snapshot.contracts.filter((row) => row.expiry === (String(params.expiry || view.selectedExpiry || "")));
-  const raw = tool === "get_options"
-    ? {
-      source: "robinhood_mcp", spot: snapshot.spot, selectedExpiry: view.selectedExpiry, expiries: view.availableExpiries,
-      calls: selected.filter((row) => row.callPut === "call"), puts: selected.filter((row) => row.callPut === "put"),
-      provenance: { provider: "robinhood_mcp", runId: snapshot.runId, capturedAt: snapshot.capturedAt, methodology: "OI-signed GEX proxy" },
-    }
-    : tool === "get_options_greeks"
-      ? { source: "robinhood_mcp", rows: selected, provenance: { provider: "robinhood_mcp", runId: snapshot.runId, capturedAt: snapshot.capturedAt } }
-      : tool === "get_options_pcr"
-        ? { source: "robinhood_mcp", putCallOpenInterest: view.strikes.reduce((sum, row) => sum + row.putOpenInterest, 0) / Math.max(1, view.strikes.reduce((sum, row) => sum + row.callOpenInterest, 0)), provenance: { provider: "robinhood_mcp", runId: snapshot.runId, capturedAt: snapshot.capturedAt } }
-        : { source: "robinhood_mcp", rows: view.strikes, contracts: selected.map((row) => ({ ...row, signedGex: row.callPut === "call" ? robinhoodGex(row) : -robinhoodGex(row) })), provenance: { provider: "robinhood_mcp", runId: snapshot.runId, capturedAt: snapshot.capturedAt, methodology: "OI-signed GEX proxy" } };
-  return json({ ok: true, requestId, tool, params, text: `${snapshot.symbol} Robinhood MCP EOD options snapshot as of ${snapshot.capturedAt}. GEX is an OI-signed proxy, not dealer GEX.`, raw, calledAt: new Date().toISOString(), cache: { status: "published", sourceAsOf: snapshot.capturedAt }, observability: { requestId, scope: "stocks-watcher-options-snapshot", dataset: datasetForTool(tool), durationMs: 0, cacheStatus: "published", rowsRead: 0, rowsWritten: 0, source: "robinhood_mcp" } satisfies WatcherApiObservability });
+  const payload = toRobinhoodOptionsToolPayload(snapshot, tool, params);
+  return json({ ok: true, requestId, tool, params, ...payload, calledAt: new Date().toISOString(), cache: { status: "published", sourceAsOf: snapshot.capturedAt }, observability: { requestId, scope: "stocks-watcher-options-snapshot", dataset: datasetForTool(tool), durationMs: 0, cacheStatus: "published", rowsRead: 0, rowsWritten: 0, source: "robinhood_mcp" } satisfies WatcherApiObservability });
 };
 
 export const attachPublishedWatcherData = async (snapshot: StocksWatcherSnapshot, bucket: R2BucketLike | undefined): Promise<StocksWatcherSnapshot> => {
