@@ -2522,7 +2522,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   };
 
   const renderGenericPanel = (state: AsyncPanelState, retry: () => void) => (
-    <div className="flex min-h-[22rem] flex-1 flex-col p-3 sm:min-h-[30rem] sm:p-4">
+    <div className="siw-generic-content">
       {state.loading && (
         <div className="space-y-3">
           <SkeletonBlock className="h-8 w-48" />
@@ -2532,10 +2532,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       )}
       {state.error && <ErrorBanner message={state.error} onRetry={retry} />}
       {state.data && (
-          <div className={`grid min-w-0 gap-4 ${activeTab === "Chart" ? "min-h-0 flex-1 auto-rows-fr grid-cols-1" : "xl:grid-cols-2"}`}>
+          <div className={`siw-tool-result-grid ${activeTab === "Chart" ? "is-chart" : ""}`}>
             {Object.values(state.data).map((result) => (
-            <div key={result.tool} className={`min-w-0 overflow-hidden rounded-md border border-slate-800 bg-slate-950/50 p-3 ${activeTab === "Chart" ? "flex min-h-0 flex-col" : ""}`}>
-              <div className="mb-2 flex items-center justify-between gap-2">
+            <div key={result.tool} className={`siw-tool-result-card ${activeTab === "Chart" ? "is-chart" : ""}`}>
+              <div className="siw-tool-result-head">
                 <h3 className="text-sm font-black text-blue-100">{result.tool}</h3>
                 <span className="rounded border border-slate-700 px-2 py-1 text-[0.65rem] uppercase text-slate-400">Native</span>
               </div>
@@ -3387,7 +3387,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const renderOptionsSubTab = () => {
     if (activeSubTab === "Overview") return renderOptionsOverview();
     return (
-      <div className="min-h-[22rem] overflow-hidden p-3 sm:min-h-[30rem] sm:p-4">
+      <div className="siw-options-subtab-content">
         {subTabPanelState.loading && (
           <div className="space-y-3">
             <SkeletonBlock className="h-8 w-56" />
@@ -3404,10 +3404,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             : activeSubTab === "Chain" && subTabPanelState.data.get_options
             ? renderChainPanel(subTabPanelState.data.get_options)
             : (
-              <div className="grid min-w-0 gap-4 xl:grid-cols-2">
+              <div className="siw-tool-result-grid">
                 {Object.values(subTabPanelState.data).map((result) => (
-                  <div key={result.tool} className="min-w-0 overflow-hidden rounded-md border border-slate-800 bg-slate-950/50 p-3">
-                    <div className="mb-2 text-sm font-black text-blue-100">{result.tool}</div>
+                  <div key={result.tool} className="siw-tool-result-card">
+                    <div className="siw-tool-result-head"><strong>{result.tool}</strong></div>
                     <OptionsResultProvenance result={result} />
                     {renderOptionResultPanel(result)}
                   </div>
@@ -3780,6 +3780,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 disabled={(item === "oi" && !hasOptionsOpenInterest) || (item === "gex" && !hasOptionsGex)}
                 title={(item === "oi" && !hasOptionsOpenInterest) || (item === "gex" && !hasOptionsGex) ? "The active source did not return the required options fields for this expiry" : undefined}
                 className={activeSubTab === "Overview" && mode === item ? "is-active" : ""}
+                aria-pressed={activeSubTab === "Overview" && mode === item}
               >
                 {item === "oi" ? "OI" : item === "volume" ? "Vol" : "GEX"}
               </button>
@@ -3795,6 +3796,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                     if (!disabled) setActiveSubTab(item);
                   }}
                   className={activeSubTab === item ? "is-active" : ""}
+                  aria-pressed={activeSubTab === item}
                 >
                   {item}
                 </button>
@@ -4088,7 +4090,13 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             {TOP_TABS.map((item) => {
               const TabIcon = TOP_TAB_ICONS[item];
               return (
-                <button key={item} type="button" onClick={() => setActiveTab(item)} className={item === activeTab ? "is-active" : ""}>
+                <button
+                  key={item}
+                  type="button"
+                  onClick={() => setActiveTab(item)}
+                  className={item === activeTab ? "is-active" : ""}
+                  aria-current={item === activeTab ? "page" : undefined}
+                >
                   <span className="siw-tab-icon">
                     <TabIcon className="siw-tab-svg" aria-hidden="true" />
                   </span>

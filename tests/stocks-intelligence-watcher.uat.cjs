@@ -629,6 +629,20 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(await page.$$("[data-watchlist-sector]").then((nodes) => nodes.length), 1, "sector filter should limit the watchlist sector panel to visible rows");
     assert.equal(await page.$eval("[data-watchlist-sector]", (node) => node.getAttribute("data-watchlist-sector")), "Technology");
     await page.select("select[aria-label='Sector filter']", "All Sectors");
+    const sectorEmptyLayout = await page.evaluate(() => {
+      const list = document.querySelector(".siw-sector-list");
+      const empty = document.createElement("div");
+      empty.className = "siw-data-empty";
+      empty.innerHTML = "<strong>Needs checking</strong><span>No live Yahoo quotes for this watchlist.</span>";
+      list.appendChild(empty);
+      const style = getComputedStyle(empty);
+      const span = empty.querySelector("span").getBoundingClientRect();
+      const result = { display: style.display, spanWidth: span.width, emptyWidth: empty.getBoundingClientRect().width };
+      empty.remove();
+      return result;
+    });
+    assert.equal(sectorEmptyLayout.display, "flex", `sector unavailable state must not inherit the three-column sector-row grid; got ${JSON.stringify(sectorEmptyLayout)}`);
+    assert.ok(sectorEmptyLayout.spanWidth >= sectorEmptyLayout.emptyWidth * 0.75, `sector unavailable copy must retain readable line width; got ${JSON.stringify(sectorEmptyLayout)}`);
     await page.setViewport({ width: 1508, height: 1471, deviceScaleFactor: 1 });
     await wait(300);
     const bottomPanelRects = await page.$$eval("[data-bottom-panels] > .siw-panel", (panels) => panels.map((panel) => {
@@ -638,6 +652,41 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(bottomPanelRects.length, 3, "the bottom audit area must contain three columns");
     assert.ok(Math.max(...bottomPanelRects.map((rect) => rect.top)) - Math.min(...bottomPanelRects.map((rect) => rect.top)) <= 1, `bottom column tops must align; got ${JSON.stringify(bottomPanelRects)}`);
     assert.ok(Math.max(...bottomPanelRects.map((rect) => rect.bottom)) - Math.min(...bottomPanelRects.map((rect) => rect.bottom)) <= 1, `bottom column bottoms must align; got ${JSON.stringify(bottomPanelRects)}`);
+    const auditPanelInsets = await page.evaluate(() => [
+      [".siw-tool-runs", ".siw-run-table"],
+      [".siw-market-context", ".siw-context-cards"],
+      [".siw-tool-catalog", ".siw-tool-catalog label"],
+    ].map(([panelSelector, bodySelector]) => {
+      const panel = document.querySelector(panelSelector)?.getBoundingClientRect();
+      const bodyNode = document.querySelector(bodySelector);
+      const body = bodyNode?.getBoundingClientRect();
+      const style = bodyNode ? getComputedStyle(bodyNode) : null;
+      const usesPadding = bodySelector !== ".siw-tool-catalog label";
+      return {
+        panelSelector,
+        left: usesPadding ? Number.parseFloat(style?.paddingLeft || "-1") : body && panel ? body.left - panel.left : -1,
+        right: usesPadding ? Number.parseFloat(style?.paddingRight || "-1") : body && panel ? panel.right - body.right : -1,
+      };
+    }));
+    assert.equal(
+      auditPanelInsets.every(({ left, right }) => left >= 15 && right >= 15),
+      true,
+      `bottom audit content must keep at least a 16px visual gutter from panel borders; got ${JSON.stringify(auditPanelInsets)}`,
+    );
+    const auditInnerInsets = await page.evaluate(() => {
+      const runRow = document.querySelector(".siw-run-row");
+      const runIndex = runRow?.querySelector("span");
+      const toolTitle = document.querySelector(".siw-tool-group-title");
+      const rowRect = runRow?.getBoundingClientRect();
+      const indexRect = runIndex?.getBoundingClientRect();
+      const titleStyle = toolTitle ? getComputedStyle(toolTitle) : null;
+      return {
+        runIndexLeft: rowRect && indexRect ? indexRect.left - rowRect.left : -1,
+        toolTitlePaddingLeft: Number.parseFloat(titleStyle?.paddingLeft || "-1"),
+      };
+    });
+    assert.ok(auditInnerInsets.runIndexLeft >= 9, `tool-run row content must not touch its divider edge; got ${JSON.stringify(auditInnerInsets)}`);
+    assert.ok(auditInnerInsets.toolTitlePaddingLeft >= 9, `tool-catalog section headings must not touch their divider edge; got ${JSON.stringify(auditInnerInsets)}`);
     const overviewAndAuditColumns = await page.evaluate(() => {
       const uniqueColumns = (selector) => {
         const columns = [];
@@ -674,6 +723,9 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       heroTitleAndPriceRects.title.bottom <= heroTitleAndPriceRects.price.top ||
       heroTitleAndPriceRects.price.bottom <= heroTitleAndPriceRects.title.top;
     assert.ok(noHeroOverlap, `hero title and price must not overlap at 1508px viewport; got ${JSON.stringify(heroTitleAndPriceRects)}`);
+    await page.evaluate(() => document.querySelector("[data-bottom-panels]")?.scrollIntoView({ block: "start" }));
+    await wait(200);
+    await page.screenshot({ path: path.join(screenshotsDir, "02b-audit-columns-premium-spacing-desktop.png") });
     await page.setViewport({ width: 1600, height: 1000, deviceScaleFactor: 1 });
     await wait(300);
     const logoBox = await page.$eval("[data-ticker-logo='NVDA']", (node) => {
@@ -932,6 +984,14 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       [document.querySelector(".siw-cashflow-panel .siw-panel-title span"), document.querySelector(".siw-cashflow-panel .siw-stat-table")],
     ].map(([title, table]) => ({ titleLeft: title?.getBoundingClientRect().left, tableLeft: table?.getBoundingClientRect().left })));
     assert.equal(statsHeaderAlignment.every(({ titleLeft, tableLeft }) => Math.abs(titleLeft - tableLeft) <= 1), true, `Stats panel titles must align with their tables; got ${JSON.stringify(statsHeaderAlignment)}`);
+    const statsSectionSpacing = await page.evaluate(() => {
+      const panelHeader = document.querySelector(".siw-stats-left .siw-panel-title")?.getBoundingClientRect();
+      return Array.from(document.querySelectorAll(".siw-stat-columns h3")).map((heading) => ({
+        label: heading.textContent,
+        topInset: panelHeader ? heading.getBoundingClientRect().top - panelHeader.bottom : -1,
+      }));
+    });
+    assert.equal(statsSectionSpacing.every(({ topInset }) => topInset >= 15), true, `Stats subsection headings must keep a 16px gap below the panel divider; got ${JSON.stringify(statsSectionSpacing)}`);
     assert.equal(await page.$eval(".siw-financial-summary .siw-stat-table thead th:nth-child(2)", (node) => getComputedStyle(node).textAlign), "center", "Financial Summary value header must be centered");
     assert.equal(await page.$eval(".siw-financial-summary .siw-stat-table thead th:nth-child(3)", (node) => getComputedStyle(node).textAlign), "center", "Financial Summary context header must be centered");
     assert.doesNotMatch(await page.$eval("[data-primary-tab-panel='Stats']", (node) => node.textContent || ""), /Needs checking/i, "Stats must render Yahoo values or n\/a, never a placeholder");
@@ -1118,6 +1178,42 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       assert.match(cardText, /Financials|Revenue/i, `${symbol} must render its financials card`);
     }
 
+    await page.setViewport({ width: 1600, height: 1000, deviceScaleFactor: 1 });
+    await page.goto(`${baseUrl}/#/work/stocks-intelligence-watcher?symbol=NVDA`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("[data-watcher-replica]");
+    for (const topTab of ["Overview", "Chart", "Fundamentals", "Stats", "Earnings", "Options", "Short Vol", "News", "Holders"]) {
+      await clickText(page, topTab, true);
+      await wait(topTab === "Options" ? 900 : 450);
+      const tabLayout = await page.evaluate((tab) => {
+        const panel = document.querySelector(`[data-primary-tab-panel='${tab}']`);
+        const genericBody = panel?.querySelector(".siw-generic-content");
+        const panelRect = panel?.getBoundingClientRect();
+        const bodyRect = genericBody?.getBoundingClientRect();
+        const bodyStyle = genericBody ? getComputedStyle(genericBody) : null;
+        const resultCards = panel ? Array.from(panel.querySelectorAll(".siw-tool-result-card")) : [];
+        const singleCardRect = resultCards.length === 1 ? resultCards[0].getBoundingClientRect() : null;
+        return {
+          overflow: panel ? panel.scrollWidth - panel.clientWidth : 999,
+          leftInset: panelRect && bodyRect ? Number.parseFloat(bodyStyle?.paddingLeft || "0") : null,
+          rightInset: panelRect && bodyRect ? Number.parseFloat(bodyStyle?.paddingRight || "0") : null,
+          singleCardFill: singleCardRect && bodyRect
+            ? singleCardRect.width / Math.max(1, bodyRect.width - Number.parseFloat(bodyStyle?.paddingLeft || "0") - Number.parseFloat(bodyStyle?.paddingRight || "0"))
+            : null,
+          activeLabel: document.querySelector(".siw-main-tabs [aria-current='page']")?.textContent?.trim() || "",
+        };
+      }, topTab);
+      assert.ok(tabLayout.overflow <= 1, `${topTab} must not create horizontal overflow; got ${JSON.stringify(tabLayout)}`);
+      if (tabLayout.leftInset !== null && tabLayout.rightInset !== null) {
+        assert.ok(tabLayout.leftInset >= 15 && tabLayout.rightInset >= 15, `${topTab} generic content must keep a 16px panel gutter; got ${JSON.stringify(tabLayout)}`);
+      }
+      if (tabLayout.singleCardFill !== null) {
+        assert.ok(tabLayout.singleCardFill >= 0.98, `${topTab} single-result surface must use the available content width; got ${JSON.stringify(tabLayout)}`);
+      }
+      assert.match(tabLayout.activeLabel, new RegExp(topTab.replace(" ", "\\s*"), "i"), `${topTab} must expose its active navigation state`);
+      await page.evaluate(() => document.querySelector("[data-primary-tab-panel]")?.scrollIntoView({ block: "start" }));
+      await page.screenshot({ path: path.join(screenshotsDir, `tab-${topTab.toLowerCase().replace(/\s+/g, "-")}-desktop.png`) });
+    }
+
     await page.setViewport({ width: 1180, height: 820, deviceScaleFactor: 1 });
     await wait(300);
     await page.screenshot({ path: path.join(screenshotsDir, "uat-tablet.png") });
@@ -1132,6 +1228,15 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.match(await page.$eval("[data-options-robinhood-provenance]", (node) => node.textContent || ""), /Robinhood MCP EOD/i, "mobile proof must use the Robinhood-backed NVDA snapshot");
     await page.screenshot({ path: path.join(screenshotsDir, "uat-mobile.png"), fullPage: true });
     await page.screenshot({ path: path.join(screenshotsDir, "08-responsive-mobile.png"), fullPage: true });
+    for (const topTab of ["Overview", "Chart", "Fundamentals", "Stats", "Earnings", "Options", "Short Vol", "News", "Holders"]) {
+      await clickText(page, topTab, true);
+      await wait(topTab === "Options" ? 500 : 250);
+      const mobileOverflow = await page.evaluate(() => ({
+        document: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        root: document.querySelector("[data-watcher-replica]")?.scrollWidth - document.querySelector("[data-watcher-replica]")?.clientWidth,
+      }));
+      assert.ok(mobileOverflow.document <= 1 && mobileOverflow.root <= 1, `${topTab} mobile layout must not create horizontal page overflow; got ${JSON.stringify(mobileOverflow)}`);
+    }
     await clickText(page, "Home");
     assert.match(await page.$eval(".siw-mobile-nav .is-active", (node) => node.textContent), /Home/);
     await clickText(page, "Watcher");
