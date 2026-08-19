@@ -863,10 +863,26 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       const list = rect(".siw-expiry-list");
       const head = rect(".siw-expiry-head");
       const viewAll = rect(".siw-view-all");
-      return { actions, sidebar, rail, list, head, viewAll };
+      const preloadNode = document.querySelector("[data-yahoo-expiry-preload]");
+      const preloadStyle = preloadNode ? getComputedStyle(preloadNode) : null;
+      const preload = preloadNode
+        ? {
+            ...rect("[data-yahoo-expiry-preload]"),
+            marginTop: Number.parseFloat(preloadStyle.marginTop) || 0,
+            marginBottom: Number.parseFloat(preloadStyle.marginBottom) || 0,
+          }
+        : { height: 0, marginTop: 0, marginBottom: 0 };
+      return { actions, sidebar, rail, list, head, preload, viewAll };
     });
     assert.ok(watcherLayout.actions.bottom <= watcherLayout.sidebar.bottom + 1, `add-ticker and settings actions must stay fully inside the sidebar; got ${JSON.stringify(watcherLayout)}`);
-    assert.ok(watcherLayout.list.height >= watcherLayout.rail.height - watcherLayout.head.height - watcherLayout.viewAll.height - 28, `expiry list must use the available rail height; got ${JSON.stringify(watcherLayout)}`);
+    const expiryRailFixedHeight = watcherLayout.head.height
+      + watcherLayout.preload.height
+      + watcherLayout.preload.marginTop
+      + watcherLayout.preload.marginBottom
+      + watcherLayout.viewAll.height
+      + 28;
+    assert.ok(watcherLayout.list.height >= watcherLayout.rail.height - expiryRailFixedHeight, `expiry list must use the available rail height after fixed controls; got ${JSON.stringify(watcherLayout)}`);
+    assert.match(await page.$eval("[data-yahoo-expiry-preload]", (node) => node.textContent || ""), /Yahoo next \d+: \d+\/\d+/, "Options rail must expose Yahoo expiry preload progress");
     const watchlistScroll = await page.$eval("[data-watchlist-scope]", (node) => ({
       clientWidth: node.clientWidth,
       scrollWidth: node.scrollWidth,
@@ -879,7 +895,9 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(await page.$("input[aria-label='Strike zoom']") !== null, true, "Strike zoom must be in the Options chart header");
     assert.equal(await page.$("[data-options-sweeps-control]") !== null, true, "Sweeps must remain reachable from the Options chart header");
     assert.equal(await page.$(".siw-market-pill") === null, true, "the redundant hero market refresh button must be removed");
-    assert.match(await page.$eval("[data-expiry-row='2026-07-10']", (node) => node.textContent || ""), /Load\s*on select/, "unloaded expiries must not receive fabricated OI, volume, or strike values");
+    const preloadedExpiryText = await page.$eval("[data-expiry-row='2026-07-10']", (node) => node.textContent || "");
+    assert.doesNotMatch(preloadedExpiryText, /Load\s*on select|Retry/, "preloaded Yahoo expiry must expose its loaded chain summary");
+    assert.match(preloadedExpiryText, /\d/, "preloaded Yahoo expiry must expose source-backed OI, volume, or strike values");
     const aiSummaryText = await page.$eval("[data-ai-summary-panel]", (node) => node.textContent || "");
     assert.doesNotMatch(aiSummaryText, /\|\s*[-:]+\s*\|/, "AI summary must not expose Markdown table structure");
     await clickText(page, "GEX", true);
@@ -907,9 +925,16 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
 
     await clickText(page, "GEX", true);
     await wait(300);
+    const callsBeforeExpirySelection = apiCalls.length;
     await page.click("[data-expiry-row='2026-07-10']");
     await wait(250);
-    assert.ok(apiCalls.some((call) => call.params?.expiry === "2026-07-10"), "expiry click should request selected expiry");
+    const expirySelectionCalls = apiCalls.slice(callsBeforeExpirySelection);
+    assert.ok(expirySelectionCalls.some((call) => call.params?.expiry === "2026-07-10"), "expiry click should request selected expiry detail");
+    assert.equal(
+      expirySelectionCalls.some((call) => call.tool === "get_options" && call.params?.expiry === "2026-07-10"),
+      false,
+      "expiry click must reuse the preloaded Yahoo chain instead of refetching it",
+    );
 
     delayedSnapshotSymbol = "QQQI";
     await page.click("[data-watcher-replica] [data-watchlist-row='AAPL']");
