@@ -54,7 +54,13 @@ const saveFailedDiagnostic = (input: Partial<InputRelease>, error: unknown, comp
   const message = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
   const now = isoNow();
   const statement = `INSERT OR REPLACE INTO watcher_options_snapshot_runs (run_id, provider, scheduled_for_et, started_at, captured_at, finished_at, expected_symbols, completed_symbols, eligible_contracts, failed_symbols_json, release_id, manifest_key, manifest_sha256, status, failure_code, created_at) VALUES (${sql(runId)}, 'robinhood_mcp', ${sql(input.scheduledForEt || now)}, ${sql(input.startedAt || now)}, ${sql(input.capturedAt || null)}, ${sql(now)}, 50, ${completed}, 0, ${sql(JSON.stringify(input.symbols?.map((row) => row.symbol).filter(Boolean) || []))}, NULL, NULL, NULL, 'failed', ${sql(message)}, ${sql(now)});`;
-  try { run(["d1", "execute", "market-cache-db", "--remote", "--command", statement]); } catch { /* Preserve original publish error. */ }
+  const directory = mkdtempSync(join(tmpdir(), "robinhood-options-diagnostic-"));
+  try {
+    const statementFile = join(directory, "diagnostic.sql");
+    writeFileSync(statementFile, statement, "utf8");
+    run(["d1", "execute", "market-cache-db", "--remote", "--yes", "--file", statementFile]);
+  } catch { /* Preserve original publish error. */ }
+  finally { rmSync(directory, { recursive: true, force: true }); }
 };
 
 const main = async () => {
@@ -102,7 +108,9 @@ const main = async () => {
   });
   objects.set(manifestKey, manifestText);
 
-  const memoryBucket: RobinhoodOptionsR2BucketLike = { get: async (key) => objects.has(key) ? { text: async () => objects.get(key)! } : null };
+  const validationObjects = new Map(objects);
+  validationObjects.set("current.json", currentText);
+  const memoryBucket: RobinhoodOptionsR2BucketLike = { get: async (key) => validationObjects.has(key) ? { text: async () => validationObjects.get(key)! } : null };
   for (const entry of manifest.symbols) await loadRobinhoodOptionsSnapshot(memoryBucket, entry.symbol);
   required(new Set(manifest.symbols.map((entry) => entry.symbol)).size === ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS, "symbols must be unique after normalization");
 
@@ -121,8 +129,13 @@ const main = async () => {
     }
     const now = isoNow();
     const totalContracts = manifest.symbols.reduce((total, entry) => total + entry.contracts, 0);
-    const statement = `BEGIN; INSERT OR REPLACE INTO watcher_options_snapshot_runs (run_id, provider, scheduled_for_et, started_at, captured_at, finished_at, expected_symbols, completed_symbols, eligible_contracts, failed_symbols_json, release_id, manifest_key, manifest_sha256, status, failure_code, created_at) VALUES (${sql(input.runId)}, 'robinhood_mcp', ${sql(input.scheduledForEt)}, ${sql(input.startedAt)}, ${sql(input.capturedAt)}, ${sql(now)}, 50, 50, ${totalContracts}, '[]', ${sql(releaseId)}, ${sql(manifestKey)}, ${sql(sha256(manifestText))}, 'published', NULL, ${sql(now)}); INSERT INTO watcher_options_snapshot_current (singleton, run_id, release_id, manifest_key, manifest_sha256, captured_at, expected_symbols, completed_symbols, updated_at) VALUES (1, ${sql(input.runId)}, ${sql(releaseId)}, ${sql(manifestKey)}, ${sql(sha256(manifestText))}, ${sql(input.capturedAt)}, 50, 50, ${sql(now)}) ON CONFLICT(singleton) DO UPDATE SET run_id=excluded.run_id, release_id=excluded.release_id, manifest_key=excluded.manifest_key, manifest_sha256=excluded.manifest_sha256, captured_at=excluded.captured_at, expected_symbols=excluded.expected_symbols, completed_symbols=excluded.completed_symbols, updated_at=excluded.updated_at; COMMIT;`;
-    run(["d1", "execute", "market-cache-db", "--remote", "--command", statement]);
+    const runStatement = (name: string, statement: string) => {
+      const statementFile = join(directory, name);
+      writeFileSync(statementFile, statement, "utf8");
+      run(["d1", "execute", "market-cache-db", "--remote", "--yes", "--file", statementFile]);
+    };
+    runStatement("publish-run.sql", `INSERT OR REPLACE INTO watcher_options_snapshot_runs (run_id, provider, scheduled_for_et, started_at, captured_at, finished_at, expected_symbols, completed_symbols, eligible_contracts, failed_symbols_json, release_id, manifest_key, manifest_sha256, status, failure_code, created_at) VALUES (${sql(input.runId)}, 'robinhood_mcp', ${sql(input.scheduledForEt)}, ${sql(input.startedAt)}, ${sql(input.capturedAt)}, ${sql(now)}, 50, 50, ${totalContracts}, '[]', ${sql(releaseId)}, ${sql(manifestKey)}, ${sql(sha256(manifestText))}, 'published', NULL, ${sql(now)});`);
+    runStatement("publish-current.sql", `INSERT INTO watcher_options_snapshot_current (singleton, run_id, release_id, manifest_key, manifest_sha256, captured_at, expected_symbols, completed_symbols, updated_at) VALUES (1, ${sql(input.runId)}, ${sql(releaseId)}, ${sql(manifestKey)}, ${sql(sha256(manifestText))}, ${sql(input.capturedAt)}, 50, 50, ${sql(now)}) ON CONFLICT(singleton) DO UPDATE SET run_id=excluded.run_id, release_id=excluded.release_id, manifest_key=excluded.manifest_key, manifest_sha256=excluded.manifest_sha256, captured_at=excluded.captured_at, expected_symbols=excluded.expected_symbols, completed_symbols=excluded.completed_symbols, updated_at=excluded.updated_at;`);
     const currentFile = join(directory, "current.json");
     writeFileSync(currentFile, currentText, "utf8");
     run(["r2", "object", "put", `${bucket}/current.json`, "--file", currentFile, "--remote"]);
