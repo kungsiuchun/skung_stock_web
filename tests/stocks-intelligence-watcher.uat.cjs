@@ -84,6 +84,7 @@ const buildSnapshot = (symbol, overrides = {}) => {
   const previousClose = typeof overrides.previousClose === "number" ? overrides.previousClose : quoteBase.previousClose;
   const change = (typeof overrides.change === "number" ? overrides.change : quoteBase.change) + (overrides.changeOffset || 0);
   const changePercent = (typeof overrides.changePercent === "number" ? overrides.changePercent : quoteBase.changePercent) + (overrides.changePercentOffset || 0);
+  const isRobinhoodOptions = symbol === "NVDA";
   const strikes = Array.from({ length: 29 }, (_, index) => {
     const strike = 170 + index * 2.5;
     const callVolume = Math.max(50, Math.round(2400 - Math.abs(strike - price) * 28));
@@ -124,7 +125,7 @@ const buildSnapshot = (symbol, overrides = {}) => {
     sweeps: 0,
     availableExpiries: expiries,
     selectedExpiry: expiries[0],
-    expiryRows: expiries.slice(0, 1).map((expiry, index) => ({
+    expiryRows: expiries.slice(0, isRobinhoodOptions ? expiries.length : 1).map((expiry, index) => ({
       expiry,
       openInterest: index === 0 ? 331_000 : 7_400,
       primaryStrike: index === 0 ? 200 : 235,
@@ -133,7 +134,7 @@ const buildSnapshot = (symbol, overrides = {}) => {
       dominantType: "C",
       type: "C",
     })),
-    expiries: expiries.slice(0, 1).map((expiry, index) => ({
+    expiries: expiries.slice(0, isRobinhoodOptions ? expiries.length : 1).map((expiry, index) => ({
       expiry,
       openInterest: index === 0 ? 331_000 : 7_400,
       primaryStrike: index === 0 ? 200 : 235,
@@ -212,6 +213,16 @@ const buildSnapshot = (symbol, overrides = {}) => {
       { name: "get_options", status: "ok", detail: "mocked" },
     ],
     warnings: [],
+    ...(isRobinhoodOptions ? {
+      optionsSnapshot: {
+        provider: "robinhood_mcp",
+        methodology: "OI-signed GEX proxy",
+        runId: "rh-eod-uat",
+        capturedAt: "2026-07-09T20:59:27.540Z",
+        expectedSymbols: 50,
+        completedSymbols: 50,
+      },
+    } : {}),
     source: "native_yahoo",
   };
 };
@@ -334,15 +345,31 @@ const buildToolResponse = (tool, params = {}) => {
   const rows = optionRows();
   if (tool === "get_options") {
     const zeroOi = params.ticker === "TSLA";
+    const robinhood = params.ticker === "NVDA";
+    const rhLeg = (row, side) => ({
+      strike: row.strike,
+      volume: row[side].volume,
+      openInterest: row[side].openInterest,
+      impliedVolatility: row[side].impliedVolatility / 100,
+      gamma: side === "call" ? 0.02 : 0.018,
+      delta: side === "call" ? 0.52 : -0.48,
+      mark: row[side].bid + 0.1,
+      lastPrice: row[side].bid + 0.1,
+      multiplier: 100,
+      quoteUpdatedAt: "2026-07-09T20:59:27.540Z",
+    });
     const chain = {
       symbol: params.ticker || "NVDA",
       spot: 204.12,
       expiries,
       selectedExpiry: params.expiry || expiries[0],
-      calls: rows.map((row) => ({ ...row.call, openInterest: zeroOi ? 0 : row.call.openInterest })),
-      puts: rows.map((row) => ({ ...row.put, openInterest: zeroOi ? 0 : row.put.openInterest })),
+      calls: rows.map((row) => robinhood ? rhLeg(row, "call") : ({ ...row.call, openInterest: zeroOi ? 0 : row.call.openInterest })),
+      puts: rows.map((row) => robinhood ? rhLeg(row, "put") : ({ ...row.put, openInterest: zeroOi ? 0 : row.put.openInterest })),
     };
-    return { ok: true, tool, params, text: "options chain", raw: { chain }, calledAt: "2026-07-08T21:33:04.000Z" };
+    const provenance = params.ticker === "NVDA"
+      ? { provider: "robinhood_mcp", runId: "rh-eod-uat", capturedAt: "2026-07-09T20:59:27.540Z", methodology: "OI-signed GEX proxy" }
+      : { provider: "native_yahoo", capturedAt: "2026-07-09T20:59:27.540Z", methodology: "Yahoo option chain" };
+    return { ok: true, tool, params, text: `${provenance.provider} options chain`, raw: { source: provenance.provider, chain, provenance }, calledAt: "2026-07-09T21:00:00.000Z" };
   }
 
   if (tool === "get_stock_stats") {
@@ -366,6 +393,30 @@ const buildToolResponse = (tool, params = {}) => {
       },
       calledAt: "2026-07-08T21:33:05.000Z",
     };
+  }
+
+  if (params.ticker === "NVDA" && /options|greeks|dex|iv|pcr|sweeps|mispricing/i.test(tool)) {
+    const provenance = { provider: "robinhood_mcp", runId: "rh-eod-uat", capturedAt: "2026-07-09T20:59:27.540Z", methodology: "OI-signed GEX proxy" };
+    const chain = {
+      symbol: "NVDA",
+      spot: 204.12,
+      expiries,
+      selectedExpiry: params.expiry || expiries[0],
+      calls: rows.map((row) => ({ strike: row.strike, volume: row.call.volume, openInterest: row.call.openInterest, impliedVolatility: row.call.impliedVolatility / 100, gamma: 0.02, delta: 0.52, mark: row.call.bid + 0.1, lastPrice: row.call.bid + 0.1, multiplier: 100, quoteUpdatedAt: provenance.capturedAt })),
+      puts: rows.map((row) => ({ strike: row.strike, volume: row.put.volume, openInterest: row.put.openInterest, impliedVolatility: row.put.impliedVolatility / 100, gamma: 0.018, delta: -0.48, mark: row.put.bid + 0.1, lastPrice: row.put.bid + 0.1, multiplier: 100, quoteUpdatedAt: provenance.capturedAt })),
+    };
+    if (["get_options_flow_universe", "get_options_sweeps", "get_options_mispricing", "get_options_0dte"].includes(tool)) {
+      const unavailableReason = tool === "get_options_flow_universe"
+        ? "Robinhood EOD snapshots do not contain tape-level options flow."
+        : tool === "get_options_sweeps"
+          ? "Robinhood EOD snapshots do not support verified sweep detection."
+          : tool === "get_options_0dte"
+            ? "The selected Robinhood EOD expiry is not a same-day expiry."
+            : "Robinhood EOD snapshots do not contain bid/ask fields required for a mispricing scan.";
+      return { ok: true, tool, params, text: unavailableReason, raw: { source: "robinhood_mcp", supported: false, unavailableReason, provenance }, calledAt: "2026-07-09T21:00:00.000Z" };
+    }
+    if (tool === "get_options_pcr") return { ok: true, tool, params, text: "Robinhood EOD put/call ratios", raw: { source: "robinhood_mcp", supported: true, putCallOpenInterest: 0.82, putCallVolume: 0.78, provenance }, calledAt: "2026-07-09T21:00:00.000Z" };
+    return { ok: true, tool, params, text: `${tool} Robinhood EOD rows`, raw: { source: "robinhood_mcp", supported: true, chain, rows, exposures: rows, metric: tool === "get_options_iv_intraday" ? "eod_iv_smile" : undefined, timeSeries: tool === "get_options_iv_intraday" ? false : undefined, provenance }, calledAt: "2026-07-09T21:00:00.000Z" };
   }
 
   if (/options|greeks|dex|iv|pcr|sweeps|mispricing/i.test(tool)) {
@@ -847,6 +898,18 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.match(await page.$eval("[data-primary-tab-panel='Fundamentals'] [data-company-description]", (node) => node.textContent || ""), /NVIDIA designs accelerated computing/i, "Fundamentals must include the Yahoo company description");
     assert.equal(await page.$$eval("[data-fundamentals-metrics] dd", (nodes) => nodes.every((node) => node.scrollWidth <= node.clientWidth)), true, "Fundamentals metric values must not be clipped");
 
+    for (const [topTab, expectedTool] of [["Earnings", "earnings_vol_crush"], ["Short Vol", "signal_scan"], ["News", "morning_briefing"], ["Holders", "get_sector_top_holdings"]]) {
+      await clickText(page, topTab, true);
+      await wait(350);
+      const panelText = await page.$eval(`[data-primary-tab-panel='${topTab}']`, (node) => node.textContent || "");
+      assert.match(panelText, new RegExp(expectedTool), `${topTab} must render its source-backed tool result instead of a dead placeholder`);
+      assert.ok(apiCalls.some((call) => call.tool === expectedTool), `${topTab} must execute its declared native tool plan`);
+    }
+
+    await page.type('input[name="stock-search"]', "NVDA");
+    await clickText(page, "LOAD");
+    await page.waitForFunction(() => document.querySelector(".siw-hero-identity h1")?.textContent === "NVDA", { timeout: 5000 });
+    await wait(450);
     await clickText(page, "Options");
     await wait(900);
     await page.setViewport({ width: 1248, height: 986, deviceScaleFactor: 1 });
@@ -882,7 +945,8 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       + watcherLayout.viewAll.height
       + 28;
     assert.ok(watcherLayout.list.height >= watcherLayout.rail.height - expiryRailFixedHeight, `expiry list must use the available rail height after fixed controls; got ${JSON.stringify(watcherLayout)}`);
-    assert.match(await page.$eval("[data-yahoo-expiry-preload]", (node) => node.textContent || ""), /Yahoo next \d+: \d+\/\d+/, "Options rail must expose Yahoo expiry preload progress");
+    assert.equal(await page.$("[data-yahoo-expiry-preload]"), null, "Robinhood-backed options must not show Yahoo preload status");
+    assert.match(await page.$eval("[data-options-robinhood-provenance]", (node) => node.textContent || ""), /Robinhood MCP EOD[\s\S]*OI-signed proxy, not dealer GEX/i, "Options must expose Robinhood source and methodology");
     const watchlistScroll = await page.$eval("[data-watchlist-scope]", (node) => ({
       clientWidth: node.clientWidth,
       scrollWidth: node.scrollWidth,
@@ -895,9 +959,15 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(await page.$("input[aria-label='Strike zoom']") !== null, true, "Strike zoom must be in the Options chart header");
     assert.equal(await page.$("[data-options-sweeps-control]") !== null, true, "Sweeps must remain reachable from the Options chart header");
     assert.equal(await page.$(".siw-market-pill") === null, true, "the redundant hero market refresh button must be removed");
-    const preloadedExpiryText = await page.$eval("[data-expiry-row='2026-07-10']", (node) => node.textContent || "");
-    assert.doesNotMatch(preloadedExpiryText, /Load\s*on select|Retry/, "preloaded Yahoo expiry must expose its loaded chain summary");
-    assert.match(preloadedExpiryText, /\d/, "preloaded Yahoo expiry must expose source-backed OI, volume, or strike values");
+    const publishedExpiryText = await page.$eval("[data-expiry-row='2026-07-10']", (node) => node.textContent || "");
+    assert.doesNotMatch(publishedExpiryText, /Load\s*on select|Retry/, "published Robinhood expiry must expose its loaded summary");
+    assert.match(publishedExpiryText, /\d/, "published Robinhood expiry must expose source-backed OI, volume, or strike values");
+    const primaryModeButtons = await page.$$eval(".siw-options-subtabs button", (nodes) => nodes.slice(0, 3).map((node) => ({ text: node.textContent?.trim(), disabled: node.disabled })));
+    assert.deepEqual(primaryModeButtons, [
+      { text: "OI", disabled: false },
+      { text: "Vol", disabled: false },
+      { text: "GEX", disabled: false },
+    ], "Robinhood OI, Vol and GEX modes must all be clickable");
     const aiSummaryText = await page.$eval("[data-ai-summary-panel]", (node) => node.textContent || "");
     assert.doesNotMatch(aiSummaryText, /\|\s*[-:]+\s*\|/, "AI summary must not expose Markdown table structure");
     await clickText(page, "GEX", true);
@@ -918,8 +988,29 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       await clickText(page, subTab, true);
       await wait(250);
       assert.match(await page.$eval(".siw-options-subtabs .is-active", (node) => node.textContent), new RegExp(subTab.replace("$", "\\$")));
+      if (subTab === "OI" || subTab === "Vol") {
+        assert.equal(await page.$$eval("[data-watcher-replica] [data-chart-bar]", (items) => items.length > 5), true, `${subTab} must render source-backed strike bars`);
+      }
+      if (subTab === "DEX") {
+        assert.equal(await page.$$eval("[data-options-dex-bar]", (items) => items.length > 5), true, "DEX must render a source-backed diverging strike chart");
+      }
+      if (subTab === "IV") {
+        assert.equal(await page.$$eval("[data-options-iv-bar]", (items) => items.length > 5), true, "IV must render the source-backed EOD smile, not an intraday time series");
+      }
+      if (subTab === "Flow" || subTab === "Mis$" || subTab === "Sweeps" || subTab === "0DTE") {
+        assert.match(await page.$eval("[data-options-unsupported]", (node) => node.textContent || ""), /Robinhood EOD snapshots do not|same-day expiry/i, `${subTab} must fail closed instead of fabricating data`);
+      }
       if (subTab === "Greeks") {
+        assert.equal(await page.$eval(".siw-greeks-board", (node) => node.scrollWidth <= node.clientWidth), true, "Greeks board must not overflow its options panel");
         await page.screenshot({ path: path.join(screenshotsDir, "05-options-greeks-chain-desktop.png") });
+      }
+      if (subTab === "Chain") {
+        const chainText = await page.$eval("[data-primary-tab-panel='Options']", (node) => node.textContent || "");
+        assert.match(chainText, /Mark[\s\S]*n\/a/i, "Robinhood chain must show mark and explicit n/a for absent bid/ask, never fake 0.00 quotes");
+        assert.doesNotMatch(chainText, /20\.0%/, "Robinhood chain must not synthesize a 20% IV fallback");
+      }
+      if (["Greeks", "DEX", "IV", "P/C", "Chain"].includes(subTab)) {
+        assert.match(await page.$eval("[data-options-result-provenance]", (node) => node.textContent || ""), /Robinhood MCP EOD[\s\S]*2026[\s\S]*(proxy|chain)/i, `${subTab} must expose source, capture time and methodology`);
       }
     }
 
@@ -932,9 +1023,10 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.ok(expirySelectionCalls.some((call) => call.params?.expiry === "2026-07-10"), "expiry click should request selected expiry detail");
     assert.equal(
       expirySelectionCalls.some((call) => call.tool === "get_options" && call.params?.expiry === "2026-07-10"),
-      false,
-      "expiry click must reuse the preloaded Yahoo chain instead of refetching it",
+      true,
+      "Robinhood expiry click must request the selected published chain",
     );
+    assert.doesNotMatch(await visibleText(page), /No native Yahoo data for this expiry/i, "Robinhood data must never fall into a Yahoo-only empty state");
 
     delayedSnapshotSymbol = "QQQI";
     await page.click("[data-watcher-replica] [data-watchlist-row='AAPL']");
@@ -984,8 +1076,13 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await page.screenshot({ path: path.join(screenshotsDir, "uat-tablet.png") });
     await page.screenshot({ path: path.join(screenshotsDir, "08-responsive-tablet.png") });
     await page.setViewport({ width: 390, height: 900, deviceScaleFactor: 1 });
+    await page.goto("about:blank");
+    await page.goto(`${baseUrl}/#/work/stocks-intelligence-watcher?symbol=NVDA`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("[data-watcher-replica]");
+    await page.waitForFunction(() => document.querySelector(".siw-hero-identity h1")?.textContent === "NVDA", { timeout: 5000 });
     await clickText(page, "Options");
     await wait(300);
+    assert.match(await page.$eval("[data-options-robinhood-provenance]", (node) => node.textContent || ""), /Robinhood MCP EOD/i, "mobile proof must use the Robinhood-backed NVDA snapshot");
     await page.screenshot({ path: path.join(screenshotsDir, "uat-mobile.png"), fullPage: true });
     await page.screenshot({ path: path.join(screenshotsDir, "08-responsive-mobile.png"), fullPage: true });
     await clickText(page, "Home");
