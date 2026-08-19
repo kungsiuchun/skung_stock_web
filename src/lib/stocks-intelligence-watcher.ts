@@ -912,13 +912,11 @@ export const buildStocksWatcherSnapshotFromNative = async (
     assertRobinhoodSpotCompatible(publishedOptions.snapshot.spot, price);
     robinhoodView = toRobinhoodOptionsView(publishedOptions.snapshot);
     toolRuns.push({ name: "robinhood_options_snapshot", status: "ok", detail: `validated EOD release ${publishedOptions.snapshot.releaseId}` });
-  } else if (publishedOptions?.unavailableReason) {
-    warnings.push(`Robinhood EOD options unavailable: ${publishedOptions.unavailableReason}`);
-    toolRuns.push({ name: "robinhood_options_snapshot", status: "failed", detail: publishedOptions.unavailableReason });
-    toolRuns.push({ name: "get_options", status: "skipped", detail: "curated ticker must not fall back to Yahoo options" });
-    toolRuns.push({ name: "get_options_gex", status: "skipped", detail: "curated ticker must not fall back to Yahoo GEX" });
-    toolRuns.push({ name: "get_options_0dte", status: "skipped", detail: "curated ticker must not fall back to Yahoo options" });
   } else {
+    if (publishedOptions?.unavailableReason) {
+      warnings.push(`Robinhood EOD options unavailable; using Yahoo fallback: ${publishedOptions.unavailableReason}`);
+      toolRuns.push({ name: "robinhood_options_snapshot", status: "failed", detail: publishedOptions.unavailableReason });
+    }
     const optionsResult = await callToolStructuredWithVariants(client, "get_options", [
       { ticker: upperSymbol, strikesAroundAtm: 25 },
     ], toolRuns);
@@ -957,7 +955,7 @@ export const buildStocksWatcherSnapshotFromNative = async (
   const parsedExpiries = parseOptionRows(optionsText, price);
   const expiries = robinhoodView?.availableExpiries || (rawOptions.expiries.length > 0 ? rawOptions.expiries : extractAvailableExpiries(optionsText));
   const expiryRows = robinhoodView?.expiryRows || buildExpirySummaryRows(expiries, [...rawOptions.rows, ...parsedExpiries]);
-  const strikes = robinhoodView?.strikes || (publishedOptions?.unavailableReason ? [] : completeRows(upperSymbol, price, parseGexRows(`${gexText}\n${zeroDteText}`, price)));
+  const strikes = robinhoodView?.strikes || completeRows(upperSymbol, price, parseGexRows(`${gexText}\n${zeroDteText}`, price));
   const rawIntradayHistory = historyFromRawResult(intradayResult.raw);
   const rawDailyHistory = historyFromRawResult(historyResult.raw);
   const parsedIntradayHistory = parseHistory(intradayText);

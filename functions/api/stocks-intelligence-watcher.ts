@@ -248,7 +248,15 @@ const callNativeTool = async (
       const published = await resolveCuratedRobinhoodOptions(env, symbol);
       if (published.curated && "snapshot" in published) return publishedOptionsToolResponse(tool, params, requestId, published.snapshot);
       if (published.curated) {
-        return json({ ok: false, requestId, tool, params, error: `ROBINHOOD_OPTIONS_UNAVAILABLE: ${published.unavailableReason}`, source: "robinhood_mcp" }, { status: 503 });
+        console.warn(JSON.stringify({
+          event: "stocks_watcher_options_fallback",
+          requestId,
+          symbol,
+          tool,
+          from: "robinhood_mcp",
+          to: "native_yahoo",
+          reason: published.unavailableReason,
+        }));
       }
     }
     reservation = await reserveQuotaForRequest(env.MARKET_CACHE_DB);
