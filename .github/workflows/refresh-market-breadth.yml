@@ -1,0 +1,49 @@
+name: Refresh S&P 500 Market Breadth
+
+on:
+  schedule:
+    - cron: "17 17 * * 2-6"
+    - cron: "47 18 * * 2-6"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Refresh mode
+        required: true
+        default: AUTO
+        type: choice
+        options: [AUTO, BACKFILL, DAILY]
+      backfill_batch_size:
+        description: Symbols to backfill in this run (1-50)
+        required: true
+        default: "25"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: market-breadth-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Contract tests
+        run: node --import tsx --test tests/market-breadth-r2.test.ts tests/market-breadth.test.ts
+      - name: Compute and atomically publish
+        run: npx tsx scripts/refresh-market-breadth.ts
+        env:
+          MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          MARKET_BREADTH_R2_ACCESS_KEY_ID: ${{ secrets.MARKET_BREADTH_R2_ACCESS_KEY_ID }}
+          MARKET_BREADTH_R2_SECRET_ACCESS_KEY: ${{ secrets.MARKET_BREADTH_R2_SECRET_ACCESS_KEY }}
+          MARKET_BREADTH_R2_BUCKET: market-breadth-data
+          MARKET_BREADTH_MODE: ${{ inputs.mode || 'AUTO' }}
+          MARKET_BREADTH_BACKFILL_BATCH_SIZE: ${{ inputs.backfill_batch_size || '25' }}

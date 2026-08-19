@@ -25,3 +25,7 @@ bucket_name = "valuation-watcher-data"
 [[r2_buckets]]
 binding = "OPTIONS_SNAPSHOT_DATA"
 bucket_name = "watcher-options-snapshots"
+
+[[r2_buckets]]
+binding = "MARKET_BREADTH_DATA"
+bucket_name = "market-breadth-data"

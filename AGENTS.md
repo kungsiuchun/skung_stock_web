@@ -200,6 +200,21 @@ ADANOS_API_KEY=...
 - Without the binding (for example, local development before initializing local D1), API responses explicitly report `cache.status="bypassed"`; never claim a shared-cache hit.
 - Expired entries may be shown only as visibly stale data with the refresh failure reason. Do not recreate a demo fallback for market-source failures.
 
+## S&P 500 Market Breadth
+
+- The standalone route is `#/work/market-breadth`; the browser reads only `GET /api/market-breadth`.
+- GitHub Actions `.github/workflows/refresh-market-breadth.yml` requests the previous NYSE session at 17:17 and 18:47 UTC from Tuesday through Saturday, matching the Basic plan's next-day EOD availability; `scripts/refresh-market-breadth.ts` independently selects inactive A/B state and snapshot slots, writes a 64-slot-ring run record, then moves `market-breadth/status.json` last. Secrets exist only on that final workflow step. There is no scheduled Cloudflare Worker.
+- `MARKET_BREADTH_DATA` binds only to the Standard-class `market-breadth-data` R2 bucket. The feature has no D1 schema or migration and must never use `MARKET_CACHE_DB` or `SPX_RECAP_DB`.
+- State Street SPY and 11 Select Sector SPDR daily workbooks own the dated universe, weights, and unique sector mapping. Massive adjusted daily aggregates own prices; `MASSIVE_API_KEY` is GitHub Actions-only and production requires confirmed public display rights.
+- Initial backfill is resumable through repeated `workflow_dispatch` runs. Successful symbol state is written before its attempt marker under a stable universe-membership fingerprint; provider failures remain retryable and daily workbook dates do not re-fetch legitimately short histories.
+- Every universe refresh prunes departed ticker series and obsolete membership attempt scopes. Do not weaken this: A/B object slots without content pruning are not truly bounded.
+- READY publication requires complete sector ETF history and at least 98% constituent SMA200 coverage. Missing history is unavailable, never below and never zero-filled.
+- A failed refresh keeps the last READY snapshot and an independent unresolved-failure pointer, so a later duplicate `SKIPPED` attempt cannot clear `STALE`; only a successfully published READY release clears the safe error class. There is no demo fallback.
+- Every State Street and Massive request has a bounded abort deadline shorter than the GitHub job timeout, so provider hangs become persisted `PROVIDER_TIMEOUT` failures rather than silent hard-kills.
+- The Pages API performs two R2 reads per request. Keep this invariant: at the 100,000/day Workers Free request ceiling it remains below the 10-million/month R2 Class B free allowance. Two daily publishes are far below the one-million Class A allowance.
+- Regression commands: `npm run test:market-breadth`, `npm run test:market-breadth:uat`, `npm run build`, and a local Pages Functions bundle check.
+- Remote R2 creation, scoped S3 credentials, GitHub secrets, initial production backfill, workflow enablement, and Pages deploy are separate approval gates.
+
 ## Stock Watcher Valuation Coverage
 
 - `VALUATION_DATA` is a private R2 binding. Published releases live below `releases/<releaseId>/`; `current.json` is the only active-release pointer.
