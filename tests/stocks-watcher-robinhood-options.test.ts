@@ -13,19 +13,43 @@ const hash = async (text: string) => Array.from(new Uint8Array(await crypto.subt
 const now = new Date().toISOString();
 const symbols = Array.from({ length: 50 }, (_, index) => `T${String.fromCharCode(65 + Math.floor(index / 26))}${String.fromCharCode(65 + (index % 26))}`);
 
-const makeBucket = async (overrides: { missingIv?: boolean; staleQuote?: boolean; duplicate?: boolean; manifestHash?: string; completedSymbols?: number; multiExpiry?: boolean } = {}) => {
+const fixtureExpiries = ["2026-08-21", "2026-08-24", "2026-08-28", "2026-08-31", "2026-09-02", "2026-09-04", "2026-09-11", "2026-09-18", "2026-09-25"];
+
+const makeBucket = async (overrides: { missingIv?: boolean; staleQuote?: boolean; duplicate?: boolean; manifestHash?: string; completedSymbols?: number; multiExpiry?: boolean; expiryCount?: number } = {}) => {
   const releaseId = "2026-08-12-eod";
   const runId = "run-123";
   const objects = new Map<string, string>();
   const entries: { symbol: string; key: string; sha256: string; contracts: number }[] = [];
   for (const symbol of symbols) {
-    const contract = { symbol, expiry: "2026-08-21", strike: 100, callPut: "call", multiplier: 100, openInterest: 100, gamma: 0.01, impliedVolatility: overrides.missingIv && symbol === "TAA" ? null : 0.25, delta: 0.5, volume: 12, mark: 3.2, quoteUpdatedAt: overrides.staleQuote && symbol === "TAA" ? "2026-08-01T00:00:00.000Z" : now, spot: 100, capturedAt: now };
-    const laterPut = { ...contract, expiry: "2026-08-28", strike: 105, callPut: "put" as const, openInterest: 80, gamma: 0.02, delta: -0.4, volume: 20 };
-    const contracts = overrides.duplicate && symbol === "TAA" ? [contract, contract] : overrides.multiExpiry ? [contract, laterPut] : [contract];
+    const selectedExpiries = overrides.expiryCount !== undefined
+      ? fixtureExpiries.slice(0, overrides.expiryCount)
+      : overrides.multiExpiry
+        ? [fixtureExpiries[0], fixtureExpiries[2]]
+        : [fixtureExpiries[0]];
+    const contracts = selectedExpiries.map((expiry, index) => {
+      const legacyLaterPut = overrides.expiryCount === undefined && overrides.multiExpiry && index === 1;
+      return {
+        symbol,
+        expiry,
+        strike: legacyLaterPut ? 105 : 100 + index,
+        callPut: index % 2 === 0 ? "call" as const : "put" as const,
+        multiplier: 100,
+        openInterest: legacyLaterPut ? 80 : 100 - index,
+        gamma: legacyLaterPut ? 0.02 : 0.01 + index * 0.001,
+        impliedVolatility: overrides.missingIv && symbol === "TAA" && index === 0 ? null : 0.25,
+        delta: index % 2 === 0 ? 0.5 : -0.4,
+        volume: legacyLaterPut ? 20 : 12 + index,
+        mark: 3.2,
+        quoteUpdatedAt: overrides.staleQuote && symbol === "TAA" && index === 0 ? "2026-08-01T00:00:00.000Z" : now,
+        spot: 100,
+        capturedAt: now,
+      };
+    });
+    const publishedContracts = overrides.duplicate && symbol === "TAA" ? [contracts[0], contracts[0]] : contracts;
     const key = `releases/${releaseId}/symbols/${symbol}.json`;
-    const text = JSON.stringify({ schemaVersion: "1.0", provider: "robinhood_mcp", releaseId, runId, symbol, capturedAt: now, spot: 100, contracts });
+    const text = JSON.stringify({ schemaVersion: "1.0", provider: "robinhood_mcp", releaseId, runId, symbol, capturedAt: now, spot: 100, contracts: publishedContracts });
     objects.set(key, text);
-    entries.push({ symbol, key, sha256: await hash(text), contracts: contracts.length });
+    entries.push({ symbol, key, sha256: await hash(text), contracts: publishedContracts.length });
   }
   const manifestKey = `releases/${releaseId}/manifest.json`;
   const manifest = JSON.stringify({ schemaVersion: "1.0", provider: "robinhood_mcp", releaseId, runId, capturedAt: now, expectedSymbols: 50, completedSymbols: overrides.completedSymbols ?? 50, symbols: entries });
@@ -43,6 +67,15 @@ test("valid immutable 50-symbol release produces OI-signed GEX rows", async () =
   assert.deepEqual(view.availableExpiries, ["2026-08-21"]);
   assert.equal(view.strikes[0]?.netGex, 10_000);
   assert.equal(snapshot.manifest.completedSymbols, 50);
+});
+
+test("accepts one to eight expiries and rejects a ninth expiry", async () => {
+  const snapshot = await loadRobinhoodOptionsSnapshot(await makeBucket({ expiryCount: 8 }), "TAA");
+  assert.deepEqual(toRobinhoodOptionsView(snapshot).availableExpiries, fixtureExpiries.slice(0, 8));
+  await assert.rejects(
+    () => makeBucket({ expiryCount: 9 }).then((bucket) => loadRobinhoodOptionsSnapshot(bucket, "TAA")),
+    /ROBINHOOD_OPTIONS_INVALID: symbol snapshot must contain one to 8 expiries/,
+  );
 });
 
 test("missing IV, stale quote, duplicate contracts, partial run, and manifest hash mismatch fail closed", async () => {

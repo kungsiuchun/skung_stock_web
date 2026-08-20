@@ -4,6 +4,7 @@ import { normalizeStocksWatcherSymbol } from "./stocks-native-yahoo";
 export const ROBINHOOD_OPTIONS_SCHEMA_VERSION = "1.0";
 export const ROBINHOOD_OPTIONS_PROVIDER = "robinhood_mcp" as const;
 export const ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS = 50;
+export const ROBINHOOD_OPTIONS_MAX_EXPIRIES = 8;
 export const ROBINHOOD_OPTIONS_MAX_AGE_MS = 30 * 60 * 60 * 1000;
 export const ROBINHOOD_OPTIONS_MAX_SPOT_DIVERGENCE = 0.03;
 
@@ -150,7 +151,7 @@ const parseSymbolSnapshot = (value: unknown, manifest: RobinhoodOptionsManifest,
   if (!contracts.length) fail("symbol snapshot has no contracts");
   if (new Set(contracts.map((contract) => `${contract.expiry}:${contract.strike}:${contract.callPut}`)).size !== contracts.length) fail("duplicate contracts are not allowed");
   const expiries = [...new Set(contracts.map((contract) => contract.expiry))];
-  if (expiries.length < 1 || expiries.length > 4) fail("symbol snapshot must contain one to four expiries");
+  if (expiries.length < 1 || expiries.length > ROBINHOOD_OPTIONS_MAX_EXPIRIES) fail(`symbol snapshot must contain one to ${ROBINHOOD_OPTIONS_MAX_EXPIRIES} expiries`);
   return { schemaVersion: ROBINHOOD_OPTIONS_SCHEMA_VERSION, provider: ROBINHOOD_OPTIONS_PROVIDER, releaseId: manifest.releaseId, runId: manifest.runId, symbol, capturedAt: capturedAt!, spot: spot!, contracts };
 };
 

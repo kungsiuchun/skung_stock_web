@@ -41,7 +41,7 @@ const waitForServer = async () => {
   throw new Error(`Vite did not start on ${baseUrl}`);
 };
 
-const expiries = ["2026-07-08", "2026-07-10", "2026-07-13", "2026-07-17", "2026-07-24"];
+const expiries = ["2026-07-08", "2026-07-10", "2026-07-13", "2026-07-17", "2026-07-24", "2026-07-31", "2026-08-07", "2026-08-14"];
 const uatStocks = [
   ["NVDA", "NVIDIA Corporation", "Semiconductors", "Stock", 204.12, 4.03, 2.01],
   ["GOOG", "Alphabet Inc.", "Communication Services", "Stock", 376.43, -9.69, -2.51],
@@ -1052,6 +1052,11 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.ok(watcherLayout.list.height >= watcherLayout.rail.height - expiryRailFixedHeight, `expiry list must use the available rail height after fixed controls; got ${JSON.stringify(watcherLayout)}`);
     assert.equal(await page.$("[data-yahoo-expiry-preload]"), null, "Robinhood-backed options must not show Yahoo preload status");
     assert.match(await page.$eval("[data-options-robinhood-provenance]", (node) => node.textContent || ""), /Robinhood MCP EOD[\s\S]*OI-signed proxy, not dealer GEX/i, "Options must expose Robinhood source and methodology");
+    assert.deepEqual(
+      await page.$$eval(".siw-expiry-list [data-expiry-row]", (nodes) => nodes.map((node) => node.getAttribute("data-expiry-row"))),
+      expiries,
+      "Robinhood options must render all eight published expiries",
+    );
     const watchlistScroll = await page.$eval("[data-watchlist-scope]", (node) => ({
       clientWidth: node.clientWidth,
       scrollWidth: node.scrollWidth,
@@ -1124,14 +1129,15 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await clickText(page, "GEX", true);
     await wait(300);
     const callsBeforeExpirySelection = apiCalls.length;
-    await page.click("[data-expiry-row='2026-07-10']");
+    const eighthExpiry = expiries[7];
+    await page.click(`[data-expiry-row='${eighthExpiry}']`);
     await wait(250);
     const expirySelectionCalls = apiCalls.slice(callsBeforeExpirySelection);
-    assert.ok(expirySelectionCalls.some((call) => call.params?.expiry === "2026-07-10"), "expiry click should request selected expiry detail");
+    assert.ok(expirySelectionCalls.some((call) => call.params?.expiry === eighthExpiry), "eighth expiry click should request selected expiry detail");
     assert.equal(
-      expirySelectionCalls.some((call) => call.tool === "get_options" && call.params?.expiry === "2026-07-10"),
+      expirySelectionCalls.some((call) => call.tool === "get_options" && call.params?.expiry === eighthExpiry),
       true,
-      "Robinhood expiry click must request the selected published chain",
+      "Robinhood eighth-expiry click must request the selected published chain",
     );
     assert.doesNotMatch(await visibleText(page), /No native Yahoo data for this expiry/i, "Robinhood data must never fall into a Yahoo-only empty state");
 
