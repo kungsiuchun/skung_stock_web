@@ -2288,6 +2288,7 @@
   }
 
   .siw-watchlist-tabs {
+    flex: 0 0 auto;
     margin: 0 20px;
   }
 
@@ -2297,6 +2298,7 @@
 
   .siw-watchlist {
     display: flex;
+    flex: 0 0 auto;
     height: auto;
     min-height: 0;
     gap: 8px;
