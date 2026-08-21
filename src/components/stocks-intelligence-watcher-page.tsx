@@ -2248,8 +2248,16 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     if (snapshot) void loadSnapshot(snapshot.symbol, { force: true });
   };
 
-  const refreshAllWatchers = async ({ refreshMarketContext = true }: { refreshMarketContext?: boolean } = {}) => {
-    const symbolsToRefresh = watchlist.map((stock) => stock.symbol);
+  const refreshAllWatchers = async ({
+    refreshMarketContext = true,
+    symbols,
+  }: {
+    refreshMarketContext?: boolean;
+    symbols?: string[];
+  } = {}) => {
+    const symbolsToRefresh = symbols?.length
+      ? Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)))
+      : watchlist.map((stock) => stock.symbol);
     if (symbolsToRefresh.length === 0) return;
     setWatchlistRefreshing(true);
     setRefreshingSymbols(symbolsToRefresh);
@@ -2297,7 +2305,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   useEffect(() => {
     if (didAutoRefreshWatchlistRef.current || nativeWatchlist.length === 0) return;
     didAutoRefreshWatchlistRef.current = true;
-    void refreshAllWatchers({ refreshMarketContext: false });
+    void refreshAllWatchers({
+      refreshMarketContext: false,
+      symbols: nativeWatchlist.map((stock) => stock.symbol),
+    });
   }, [nativeWatchlist]);
 
   const openStrikeDrawer = async (strike: number, expiry?: string | null) => {
