@@ -391,7 +391,7 @@ const buildToolResponse = (tool, params = {}) => {
           assetProfile: {
             sector: "Technology",
             industry: "Semiconductors",
-            longBusinessSummary: "NVIDIA designs accelerated computing platforms for data centers, professional visualization, and gaming.",
+            longBusinessSummary: "NVIDIA designs accelerated computing platforms for data centers, professional visualization, and gaming. Its products combine accelerated compute, networking, and software for enterprise AI workloads, with platforms used across research, cloud infrastructure, autonomous systems, and advanced graphics workflows worldwide.",
           },
           defaultKeyStatistics: { forwardPE: { raw: 18.5 }, enterpriseValue: { raw: 4500000000000 }, beta: { raw: 2.2 } },
           summaryDetail: { marketCap: { raw: 4400000000000 }, dividendYield: { raw: 0.001 } },
@@ -556,8 +556,15 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       refreshAllButtonBox.iconHeight >= 15,
       `left nav refresh-all button should have a normal aligned icon; got ${JSON.stringify(refreshAllButtonBox)}`,
     );
-    assert.equal(await page.$eval("[data-watchlist-breadth]", (node) => node.getAttribute("data-watchlist-coverage")), "0/10", "watchlist breadth must not fabricate fallback coverage before Yahoo rows refresh");
-    assert.equal(await page.$$("[data-watchlist-sector]").then((nodes) => nodes.length), 0, "watchlist sector panel must not render fallback/cache sectors before Yahoo rows refresh");
+    await page.waitForFunction(() => document.querySelector("[data-watchlist-breadth]")?.getAttribute("data-watchlist-coverage") === "9/10", { timeout: 5000 });
+    assert.equal(await page.$eval("[data-watchlist-breadth]", (node) => node.getAttribute("data-watchlist-coverage")), "9/10", "entering the Watcher must automatically refresh the visible Yahoo quote rows");
+    assert.ok(await page.$$("[data-watchlist-sector]").then((nodes) => nodes.length) > 0, "automatic refresh must also populate the source-backed sector panel");
+    assert.equal(await page.$eval("[data-watchlist-row='GOOG']", (node) => node.getAttribute("data-row-source")), "yahoo_quote", "automatic refresh must expose Yahoo row provenance");
+    for (const tool of ["get_macro_regime", "market_breadth", "get_sector_stats", "get_sector_top_holdings"]) {
+      assert.equal(apiCalls.filter((call) => call.tool === tool).length, 2, `React Strict Mode invokes the mount-owned ${tool} request twice; auto row refresh must not add another request`);
+    }
+    const overviewMetricValues = await page.$$eval("[data-overview-tertiary-panel='metrics'] .siw-metric-tile strong", (nodes) => nodes.map((node) => node.textContent?.trim()));
+    assert.ok(overviewMetricValues.slice(1).every((value) => value && value !== "n/a"), `validated Robinhood overview metrics must not wait for the Options tab; got ${JSON.stringify(overviewMetricValues)}`);
     const watchedRowsBeforeRefresh = await page.$$eval("[data-watchlist-row]", (rows) =>
       Object.fromEntries(rows.slice(0, 8).map((row) => [
         row.getAttribute("data-watchlist-row"),
@@ -921,6 +928,12 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await wait(150);
     await clickText(page, "All Stocks");
     await page.waitForFunction(() => document.querySelectorAll("[data-watcher-replica] [data-watchlist-row]").length > 0);
+    const watchlistTabLayout = await page.$$eval(".siw-watchlist-tabs button", (buttons) => buttons.map((button) => {
+      const rect = button.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, width: rect.width, clipped: button.scrollWidth > button.clientWidth };
+    }));
+    assert.equal(watchlistTabLayout.length, 2, "All Stocks and FAV must remain two distinct tabs");
+    assert.ok(watchlistTabLayout.every((tab) => tab.width > 0 && !tab.clipped) && watchlistTabLayout[0].right <= watchlistTabLayout[1].left + 1, `watchlist tabs must not overlap or clip: ${JSON.stringify(watchlistTabLayout)}`);
 
     await clickText(page, "⌯", true);
     assert.equal(await page.$("[data-filter-panel]") !== null, true, "filter icon should reveal filter panel");
@@ -978,6 +991,9 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.match(await visibleText(page), /NMS/);
     assert.match(await visibleText(page), /Semiconductors/);
     assert.match(await page.$eval("[data-primary-tab-panel='Stats'] [data-company-description]", (node) => node.textContent || ""), /NVIDIA designs accelerated computing/i, "Stats must show the Yahoo company description instead of an empty earnings card");
+    assert.equal(await page.$eval("[data-primary-tab-panel='Stats'] .siw-description-toggle", (node) => node.textContent), "Read more", "long company descriptions must start collapsed");
+    await page.click("[data-primary-tab-panel='Stats'] .siw-description-toggle");
+    assert.equal(await page.$eval("[data-primary-tab-panel='Stats'] .siw-description-toggle", (node) => node.textContent), "Show less", "company description toggle must expand the hidden text");
     const statsHeaderAlignment = await page.evaluate(() => [
       [document.querySelector(".siw-stats-left .siw-panel-title span"), document.querySelector(".siw-stats-left .siw-stat-table")],
       [document.querySelector(".siw-financial-summary .siw-panel-title span"), document.querySelector(".siw-financial-summary .siw-stat-table")],
@@ -1052,6 +1068,13 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.ok(watcherLayout.list.height >= watcherLayout.rail.height - expiryRailFixedHeight, `expiry list must use the available rail height after fixed controls; got ${JSON.stringify(watcherLayout)}`);
     assert.equal(await page.$("[data-yahoo-expiry-preload]"), null, "Robinhood-backed options must not show Yahoo preload status");
     assert.match(await page.$eval("[data-options-robinhood-provenance]", (node) => node.textContent || ""), /Robinhood MCP EOD[\s\S]*OI-signed proxy, not dealer GEX/i, "Options must expose Robinhood source and methodology");
+    assert.doesNotMatch(await page.$eval("[data-options-robinhood-provenance]", (node) => node.textContent || ""), /\d{1,2}:\d{2}:\d{2}/, "source timestamps must stop at hour precision");
+    const provenancePosition = await page.$eval("[data-options-robinhood-provenance]", (node) => {
+      const panel = node.closest("[data-primary-tab-panel='Options']")?.getBoundingClientRect();
+      const rect = node.getBoundingClientRect();
+      return { top: rect.top, panelBottom: panel?.bottom || 0 };
+    });
+    assert.ok(provenancePosition.top > 0 && provenancePosition.top < provenancePosition.panelBottom, `Options provenance must render inside the options panel footer; got ${JSON.stringify(provenancePosition)}`);
     assert.deepEqual(
       await page.$$eval(".siw-expiry-list [data-expiry-row]", (nodes) => nodes.map((node) => node.getAttribute("data-expiry-row"))),
       expiries,
@@ -1114,6 +1137,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       }
       if (subTab === "Greeks") {
         assert.equal(await page.$eval(".siw-greeks-board", (node) => node.scrollWidth <= node.clientWidth), true, "Greeks board must not overflow its options panel");
+        assert.equal(await page.$eval(".siw-iv-bars em", (node) => getComputedStyle(node).writingMode), "horizontal-tb", "IV strike labels must remain horizontal so they do not overlap the bars");
         await page.screenshot({ path: path.join(screenshotsDir, "05-options-greeks-chain-desktop.png") });
       }
       if (subTab === "Chain") {

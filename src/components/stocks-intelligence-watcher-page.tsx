@@ -899,12 +899,43 @@ const OptionsResultProvenance = ({ result }: { result: NativeToolResult | undefi
   const provenance = rawRecord(raw?.provenance);
   if (!provenance) return null;
   const provider = provenance.provider === "robinhood_mcp" ? "Robinhood MCP EOD" : String(provenance.provider || "Unknown source");
-  const capturedAt = typeof provenance.capturedAt === "string" ? provenance.capturedAt : "capture time unavailable";
+  const capturedAt = typeof provenance.capturedAt === "string" ? formatOptionsSourceTime(provenance.capturedAt) : "capture time unavailable";
   const methodology = typeof provenance.methodology === "string" ? provenance.methodology : "methodology unavailable";
   return (
     <p className="mb-3 rounded border border-cyan-500/25 bg-cyan-500/5 px-3 py-2 text-[0.7rem] leading-5 text-cyan-100" data-options-result-provenance>
       Source: {provider} · Captured: {capturedAt} · Methodology: {methodology}
     </p>
+  );
+};
+
+/** Source labels are audit evidence, not a millisecond-level activity log. */
+const formatOptionsSourceTime = (value: string) => {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return value;
+  return `${new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    hour12: true,
+  }).format(date)} ET`;
+};
+
+const ExpandableDescription = ({ description }: { description: string }) => {
+  const [expanded, setExpanded] = useState(false);
+  const previewLimit = 220;
+  const isLong = description.length > previewLimit;
+  const visibleDescription = expanded || !isLong ? description : `${description.slice(0, previewLimit).trimEnd()}…`;
+  return (
+    <>
+      <p>{visibleDescription || "Company description unavailable from Yahoo."}</p>
+      {isLong && (
+        <button type="button" className="siw-description-toggle" aria-expanded={expanded} onClick={() => setExpanded((current) => !current)}>
+          {expanded ? "Show less" : "Read more"}
+        </button>
+      )}
+    </>
   );
 };
 
@@ -1266,9 +1297,9 @@ const StatsPanel = ({ result }: { result: NativeToolResult }) => {
       </dl>
       <article data-company-description className="rounded-md border border-slate-800 bg-[#05080d] p-4">
         <h4 className="text-[0.65rem] font-black uppercase tracking-[0.12em] text-slate-500">Company Description</h4>
-        <p className="mt-2 text-sm leading-6 text-slate-300">
-          {companyDescription || "Company description unavailable from Yahoo."}
-        </p>
+        <div className="siw-description-copy mt-2 text-sm leading-6 text-slate-300">
+          <ExpandableDescription description={companyDescription || ""} />
+        </div>
       </article>
     </div>
   );
@@ -1571,6 +1602,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [customStocks, setCustomStocks] = useState<StocksWatcherUniverseStock[]>(() => readStoredCustomStocks());
   const [rowQuotesBySymbol, setRowQuotesBySymbol] = useState<Record<string, StocksWatcherRowQuote>>({});
   const [watchlistRefreshing, setWatchlistRefreshing] = useState(false);
+  const didAutoRefreshWatchlistRef = useRef(false);
   const [refreshingSymbols, setRefreshingSymbols] = useState<string[]>([]);
   const [cacheVersion, setCacheVersion] = useState(0);
   const [sectorFilter, setSectorFilter] = useState("All Sectors");
@@ -2216,21 +2248,20 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     if (snapshot) void loadSnapshot(snapshot.symbol, { force: true });
   };
 
-  const refreshAllWatchers = async () => {
+  const refreshAllWatchers = async ({ refreshMarketContext = true }: { refreshMarketContext?: boolean } = {}) => {
     const symbolsToRefresh = watchlist.map((stock) => stock.symbol);
     if (symbolsToRefresh.length === 0) return;
     setWatchlistRefreshing(true);
     setRefreshingSymbols(symbolsToRefresh);
     try {
-      const [quoteResults] = await Promise.all([
-        Promise.allSettled(
-          chunkSymbols(symbolsToRefresh, ROW_QUOTE_REFRESH_CHUNK_SIZE).map(async (chunk) => {
-            const result = await callNativeTool("get_quotes", { tickers: chunk.join(",") });
-            return getStocksWatcherRowQuotesFromRawResult(result.raw);
-          }),
-        ),
-        loadMarketContext(),
-      ]);
+      const contextPromise = refreshMarketContext ? loadMarketContext() : Promise.resolve();
+      const quoteResults = await Promise.allSettled(
+        chunkSymbols(symbolsToRefresh, ROW_QUOTE_REFRESH_CHUNK_SIZE).map(async (chunk) => {
+          const result = await callNativeTool("get_quotes", { tickers: chunk.join(",") });
+          return getStocksWatcherRowQuotesFromRawResult(result.raw);
+        }),
+      );
+      await contextPromise;
       const quotes = quoteResults.flatMap((result) => result.status === "fulfilled" ? result.value : []);
       if (quotes.length > 0) {
         setRowQuotesBySymbol((current) => mergeStocksWatcherRowQuoteMap(current, quotes));
@@ -2260,6 +2291,14 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       setWatchlistRefreshing(false);
     }
   };
+
+  // A blank watchlist on entry is not actionable. Refresh exactly once after
+  // the curated universe resolves; subsequent refreshes remain user-driven.
+  useEffect(() => {
+    if (didAutoRefreshWatchlistRef.current || nativeWatchlist.length === 0) return;
+    didAutoRefreshWatchlistRef.current = true;
+    void refreshAllWatchers({ refreshMarketContext: false });
+  }, [nativeWatchlist]);
 
   const openStrikeDrawer = async (strike: number, expiry?: string | null) => {
     const nextExpiry = toYahooExpiry(expiry || currentExpiry || snapshot?.expiries[0]?.expiry) || "";
@@ -2393,7 +2432,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const hasOptionsOpenInterest = optionsVisualModel.capabilities.openInterest;
   const hasOptionsGex = hasOptionsOpenInterest && optionsVisualModel.capabilities.gex;
   const optionsSourceLabel = snapshot?.optionsSnapshot
-    ? `Robinhood MCP EOD · ${snapshot.optionsSnapshot.capturedAt}`
+    ? `Robinhood MCP EOD · ${formatOptionsSourceTime(snapshot.optionsSnapshot.capturedAt)}`
     : isYahooOptionsFallback
       ? "Yahoo fallback · Robinhood EOD unavailable"
       : snapshot?.source === "native_yahoo"
@@ -2401,6 +2440,14 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         : "Source unavailable";
   const modeAvailable = mode === "volume" ? optionsVisualModel.capabilities.volume : mode === "oi" ? hasOptionsOpenInterest : hasOptionsGex;
   const chartRows = rows.sort((a, b) => a.strike - b.strike);
+  // Overview renders before the Options tab's on-demand chain request. The
+  // validated snapshot already contains the selected Robinhood expiry rows,
+  // so use them for summary metrics instead of falsely showing n/a.
+  const overviewMetricRows = chartRows.length > 0 ? chartRows : snapshot?.strikes || [];
+  const hasOverviewOptionsOpenInterest = overviewMetricRows.some((row) => row.callOpenInterest > 0 || row.putOpenInterest > 0);
+  const hasOverviewOptionsGex = hasOverviewOptionsOpenInterest && overviewMetricRows.some((row) => Number.isFinite(row.callGex) || Number.isFinite(row.putGex));
+  const overviewCallOi = overviewMetricRows.reduce((sum, row) => sum + row.callOpenInterest, 0);
+  const overviewPutOi = overviewMetricRows.reduce((sum, row) => sum + row.putOpenInterest, 0);
   const focusedRows = (() => {
     if (!snapshot || strikeZoom <= 1 || chartRows.length <= 7) return chartRows;
     const closestIndex = chartRows.reduce((bestIndex, row, index) => (
@@ -2438,8 +2485,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const sessionOpen = snapshot?.quote.open ?? null;
   const sessionHigh = snapshot?.quote.high ?? null;
   const sessionLow = snapshot?.quote.low ?? null;
-  const totalCallGex = chartRows.reduce((sum, row) => sum + Math.max(0, row.callGex), 0);
-  const totalPutGex = chartRows.reduce((sum, row) => sum + Math.min(0, row.putGex), 0);
+  const overviewTotalCallGex = overviewMetricRows.reduce((sum, row) => sum + Math.max(0, row.callGex), 0);
+  const overviewTotalPutGex = overviewMetricRows.reduce((sum, row) => sum + Math.min(0, row.putGex), 0);
   const axisTicks = mode === "gex"
     ? [
         { value: maxValue, position: 0 },
@@ -2560,10 +2607,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         </div>
         <div className="flex flex-wrap justify-end gap-2 text-xs font-black">
           <span className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-300">
-            {optionsSourceLabel}
-          </span>
-          <span className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-300">
-            Updated {snapshot ? new Date(snapshot.generatedAt).toLocaleString() : "--"}
+            Updated {snapshot ? formatOptionsSourceTime(snapshot.generatedAt) : "--"}
           </span>
           {snapshot?.cache && (
             <span className={`rounded-md border px-3 py-1.5 ${snapshot.cache.status === "stale" ? "border-amber-800 bg-amber-950/40 text-amber-200" : "border-slate-700 bg-slate-900 text-slate-300"}`}>
@@ -2572,12 +2616,6 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           )}
         </div>
       </div>
-
-      {snapshot?.optionsSnapshot && (
-        <p className="mb-3 rounded-md border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100" data-options-robinhood-provenance>
-          Robinhood MCP EOD snapshot · run {snapshot.optionsSnapshot.runId} · coverage {snapshot.optionsSnapshot.completedSymbols}/{snapshot.optionsSnapshot.expectedSymbols} · GEX = OI-signed proxy, not dealer GEX.
-        </p>
-      )}
 
       <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs font-black">
         <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-blue-100">Exp {formatExpiryDate(currentExpiry, "compact")}</span>
@@ -2828,6 +2866,15 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         </div>
       </div>
       )}
+
+      <div className="siw-options-source-footer">
+        <span>{optionsSourceLabel}</span>
+        {snapshot?.optionsSnapshot && (
+          <span data-options-robinhood-provenance>
+            Robinhood MCP EOD · {formatOptionsSourceTime(snapshot.optionsSnapshot.capturedAt)} · {snapshot.optionsSnapshot.completedSymbols}/{snapshot.optionsSnapshot.expectedSymbols} · OI-signed proxy, not dealer GEX
+          </span>
+        )}
+      </div>
       </>
       )}
     </div>
@@ -3201,7 +3248,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           </div>
           <div className="siw-panel siw-stat-card siw-description-card" data-company-description>
             <span>Company Description</span>
-            <p>{companyDescription || "Company description unavailable from Yahoo."}</p>
+            <ExpandableDescription description={companyDescription || ""} />
           </div>
         </div>
 
@@ -3280,9 +3327,6 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
     return (
       <div className="siw-greeks-board">
-        <div className="siw-greeks-provenance">
-          <OptionsResultProvenance result={greekResult} />
-        </div>
         <div className="siw-panel siw-greek-table-panel">
           <div className="siw-panel-title">
             <span>Greeks by Strike</span>
@@ -3380,6 +3424,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           <MetricTile label="Avg IV" value={`${avgIv.toFixed(1)}%`} tone="blue" />
           <MetricTile label="Rows" value={`${greekRows.length}`} tone="blue" />
         </div>
+        <div className="siw-greeks-provenance">
+          <OptionsResultProvenance result={greekResult} />
+        </div>
       </div>
     );
   };
@@ -3408,8 +3455,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 {Object.values(subTabPanelState.data).map((result) => (
                   <div key={result.tool} className="siw-tool-result-card">
                     <div className="siw-tool-result-head"><strong>{result.tool}</strong></div>
-                    <OptionsResultProvenance result={result} />
                     {renderOptionResultPanel(result)}
+                    <OptionsResultProvenance result={result} />
                   </div>
                 ))}
               </div>
@@ -3698,9 +3745,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             </div>
             <div className="siw-key-grid">
               <MetricTile label="Spot" value={latestPrice ? currency(latestPrice) : "--"} tone="blue" />
-              <MetricTile label="Call GEX" value={hasOptionsGex ? formatNumber(totalCallGex) : "n/a"} tone="positive" />
-              <MetricTile label="Put GEX" value={hasOptionsGex ? formatNumber(totalPutGex) : "n/a"} tone="negative" />
-              <MetricTile label="P/C OI" value={hasOptionsOpenInterest ? (snapshot?.putCallOpenInterest || 0).toFixed(2) : "n/a"} tone="neutral" />
+              <MetricTile label="Call GEX" value={hasOverviewOptionsGex ? formatNumber(overviewTotalCallGex) : "n/a"} tone="positive" />
+              <MetricTile label="Put GEX" value={hasOverviewOptionsGex ? formatNumber(overviewTotalPutGex) : "n/a"} tone="negative" />
+              <MetricTile label="P/C OI" value={hasOverviewOptionsOpenInterest ? (overviewPutOi / Math.max(1, overviewCallOi)).toFixed(2) : "n/a"} tone="neutral" />
             </div>
           </div>
         </div>

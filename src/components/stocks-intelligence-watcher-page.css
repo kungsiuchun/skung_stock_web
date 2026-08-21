@@ -364,6 +364,7 @@
 
 .siw-watchlist-tabs button {
   display: inline-flex;
+  min-width: 0;
   height: 44px;
   align-items: center;
   justify-content: center;
@@ -374,7 +375,9 @@
   color: var(--siw-muted);
   font-size: 13px;
   font-weight: 900;
+  overflow: hidden;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .siw-watchlist-tabs button.is-active {
@@ -895,6 +898,10 @@
   flex: 1;
   overflow: auto;
   padding: var(--siw-space-4) var(--siw-space-5) var(--siw-space-6);
+}
+
+.siw-watchlist-tabs button + button {
+  border-left: 1px solid var(--siw-line);
 }
 
 .siw-ticker-transition {
@@ -1651,6 +1658,20 @@
   min-width: 0;
 }
 
+.siw-description-toggle {
+  margin-top: 10px;
+  border: 0;
+  background: transparent;
+  color: var(--siw-blue-2);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.siw-description-toggle:hover {
+  color: var(--siw-text);
+  text-decoration: underline;
+}
+
 .siw-greeks-provenance {
   grid-column: 1 / -1;
   min-width: 0;
@@ -1694,7 +1715,7 @@
   grid-template-columns: repeat(12, minmax(16px, 1fr));
   align-items: end;
   min-height: 260px;
-  gap: 10px;
+  gap: 6px;
   padding: 18px 8px 6px;
   border: 1px solid var(--siw-line-soft);
   background:
@@ -1722,10 +1743,28 @@
 }
 
 .siw-iv-bars em {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--siw-muted);
   font-size: 10px;
   font-style: normal;
-  writing-mode: vertical-rl;
+  line-height: 1.1;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.siw-options-source-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--siw-line-soft);
+  color: var(--siw-muted);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .siw-chart-controls {
