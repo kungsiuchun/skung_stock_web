@@ -12,6 +12,12 @@ describe("Cloudflare deploy credential boundary", () => {
     assert.equal(RUNTIME_SECRET_KEYS.includes("KV_NAMESPACE_ID"), false);
   });
 
+  it("prefers the replacement CF_API_TOKEN_2 from .dev.vars", () => {
+    const env = buildCloudflareDeployEnv({ CF_API_TOKEN: "revoked-token", CF_API_TOKEN_2: "active-token", CF_ACCOUNT_ID: "account-id" }, {});
+    assert.equal(env.CLOUDFLARE_API_TOKEN, "active-token");
+    assert.equal(RUNTIME_SECRET_KEYS.includes("CF_API_TOKEN_2"), false);
+  });
+
   it("fails fast before any sync when Cloudflare auth is absent", () => {
     let calls = 0;
     assert.throws(() => syncSecrets({ vars: { OPENROUTER_API_KEY: "runtime" }, env: {}, run: () => { calls += 1; } }), /Cloudflare deploy requires/);
