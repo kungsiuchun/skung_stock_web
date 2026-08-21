@@ -36,7 +36,7 @@ export const buildCloudflareDeployEnv = (vars, inherited = process.env) => {
   return { ...inherited, CLOUDFLARE_API_TOKEN: token, CLOUDFLARE_ACCOUNT_ID: accountId };
 };
 
-export const loadDeployVars = (varsPath = path.resolve(process.cwd(), ".dev.vars")) => {
+export const loadDeployVars = (varsPath = process.env.CF_DEPLOY_VARS_FILE || path.resolve(process.cwd(), ".dev.vars")) => {
   if (!fs.existsSync(varsPath)) throw new Error(`Deploy requires ${varsPath}; it contains CF_API_TOKEN.`);
   return parseDotEnv(fs.readFileSync(varsPath, "utf8"));
 };

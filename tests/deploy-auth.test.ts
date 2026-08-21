@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildCloudflareDeployEnv, RUNTIME_SECRET_KEYS, syncSecrets } from "../scripts/sync-secrets.js";
+import { buildCloudflareDeployEnv, loadDeployVars, RUNTIME_SECRET_KEYS, syncSecrets } from "../scripts/sync-secrets.js";
 
 describe("Cloudflare deploy credential boundary", () => {
   it("maps CF_API_TOKEN to Wrangler auth without treating it as an app secret", () => {
@@ -16,6 +16,17 @@ describe("Cloudflare deploy credential boundary", () => {
     const env = buildCloudflareDeployEnv({ CF_API_TOKEN: "revoked-token", CF_API_TOKEN_2: "active-token", CF_ACCOUNT_ID: "account-id" }, {});
     assert.equal(env.CLOUDFLARE_API_TOKEN, "active-token");
     assert.equal(RUNTIME_SECRET_KEYS.includes("CF_API_TOKEN_2"), false);
+  });
+
+  it("uses CF_DEPLOY_VARS_FILE when an isolated release worktree has no local .dev.vars", () => {
+    const original = process.env.CF_DEPLOY_VARS_FILE;
+    try {
+      process.env.CF_DEPLOY_VARS_FILE = "C:\\deploy\\vars";
+      assert.throws(() => loadDeployVars(), /Deploy requires C:\\deploy\\vars/);
+    } finally {
+      if (original === undefined) delete process.env.CF_DEPLOY_VARS_FILE;
+      else process.env.CF_DEPLOY_VARS_FILE = original;
+    }
   });
 
   it("fails fast before any sync when Cloudflare auth is absent", () => {
