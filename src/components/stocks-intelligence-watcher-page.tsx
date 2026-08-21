@@ -1615,6 +1615,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [subTabPanelState, setSubTabPanelState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
   const [selectedExpiry, setSelectedExpiry] = useState<string | null>(null);
   const [expiryOverviewState, setExpiryOverviewState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
+  const expiryOverviewRequestRef = useRef(0);
   const yahooExpiryChainCacheRef = useRef<Map<string, NativeToolResult>>(new Map());
   const yahooExpiryChainInflightRef = useRef<Map<string, Promise<NativeToolResult>>>(new Map());
   const yahooExpiryChainFailuresRef = useRef<Map<string, string>>(new Map());
@@ -1983,12 +1984,16 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
   const loadExpiryOverview = useCallback(async (expiry: string | null | undefined, force = false) => {
     if (!expiry) return;
+    const requestId = expiryOverviewRequestRef.current + 1;
+    expiryOverviewRequestRef.current = requestId;
     const symbol = normalizeSymbol(selectedSymbol);
     const expiryArg = toYahooExpiry(expiry);
     const cacheKey = `${symbol}:${expiryArg || "front"}:Overview`;
     const cached = force ? null : tabDataCache.current.get(cacheKey);
     if (cached) {
-      setExpiryOverviewState({ loading: false, error: null, data: cached.data });
+      if (requestId === expiryOverviewRequestRef.current) {
+        setExpiryOverviewState({ loading: false, error: null, data: cached.data });
+      }
       return;
     }
 
@@ -2007,13 +2012,17 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         throw new Error(`OPTIONS_EXPIRY_MISMATCH: requested ${normalizeExpiryDate(expiry)}, received ${returnedExpiry}`);
       }
       tabDataCache.current.set(cacheKey, { data, fetchedAt: Date.now() });
-      setExpiryOverviewState({ loading: false, error: null, data });
+      if (requestId === expiryOverviewRequestRef.current) {
+        setExpiryOverviewState({ loading: false, error: null, data });
+      }
     } catch (requestError) {
-      setExpiryOverviewState({
-        loading: false,
-        error: requestError instanceof Error ? requestError.message : String(requestError),
-        data: null,
-      });
+      if (requestId === expiryOverviewRequestRef.current) {
+        setExpiryOverviewState({
+          loading: false,
+          error: requestError instanceof Error ? requestError.message : String(requestError),
+          data: null,
+        });
+      }
     }
   }, [callNativeTool, loadYahooExpiryChain, runToolBundle, selectedSymbol, usesNativeYahooOptions]);
 
@@ -2425,7 +2434,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         )
       : null;
     if (preloaded) return preloaded;
-    return loadedExpirySummary && row.expiry === loadedExpirySummary.expiry ? loadedExpirySummary : row;
+    return !row.loaded && loadedExpirySummary && row.expiry === loadedExpirySummary.expiry ? loadedExpirySummary : row;
   });
   const getExpirySelectorLoadState = (row: ExpirySelectorRow) => {
     if (row.loaded || !usesNativeYahooOptions) return "unloaded";
@@ -2521,6 +2530,14 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     const bestScore = best ? Math.abs(getCallValue(best, mode)) + Math.abs(getPutValue(best, mode)) : -1;
     return rowScore > bestScore ? row : best;
   }, null);
+  const selectedCallVolume = chartRows.reduce((sum, row) => sum + row.callVolume, 0);
+  const selectedPutVolume = chartRows.reduce((sum, row) => sum + row.putVolume, 0);
+  const selectedPutCallVolume = selectedCallVolume > 0 ? selectedPutVolume / selectedCallVolume : null;
+  const selectedCallOpenInterest = chartRows.reduce((sum, row) => sum + row.callOpenInterest, 0);
+  const selectedPutOpenInterest = chartRows.reduce((sum, row) => sum + row.putOpenInterest, 0);
+  const selectedPutCallOpenInterest = selectedCallOpenInterest > 0
+    ? selectedPutOpenInterest / selectedCallOpenInterest
+    : null;
   const aiSummaryPayload = useMemo(
     () => snapshot
       ? buildStocksWatcherAiSummaryPayload(snapshot, {
@@ -2636,7 +2653,13 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             Dom {dominantSide}{dominantRow ? ` @ ${dominantRow.strike}` : ""}
           </span>
         )}
-        <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-300">P/C volume {snapshot?.putCallVolume.toFixed(2) || "--"}</span>
+        <span
+          className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-300"
+          data-options-pc-volume
+          title="Selected expiry: total put volume divided by total call volume."
+        >
+          P/C volume {selectedPutCallVolume === null ? "Unavailable" : selectedPutCallVolume.toFixed(2)}
+        </span>
         {hasOptionsGex && (
           <>
             <span className={`rounded border border-slate-700 bg-slate-900 px-2 py-1 ${netGex >= 0 ? "text-emerald-300" : "text-red-300"}`}>
@@ -2676,7 +2699,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 GEX Pinning <b className="ml-1 text-slate-100">{!hasOptionsGex ? "Unavailable" : gammaFlipLevel !== null ? currency(gammaFlipLevel) : "No flip in range"}</b>
               </span>
               <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-400">
-                P/C OI <b className="ml-1 text-slate-100">{hasOptionsOpenInterest ? (snapshot?.putCallOpenInterest ?? 0).toFixed(2) : "Unavailable"}</b>
+                P/C OI <b className="ml-1 text-slate-100">{hasOptionsOpenInterest && selectedPutCallOpenInterest !== null ? selectedPutCallOpenInterest.toFixed(2) : "Unavailable"}</b>
               </span>
             </div>
             <label className="flex items-center gap-2 text-xs font-black text-slate-400">
