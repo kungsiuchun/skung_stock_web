@@ -99,6 +99,71 @@ export interface SpxPriceActionTrend {
   labels: SpxPriceActionTrendLabel[];
 }
 
+export interface SpxActionablePattern {
+  pattern: SpxPriceActionPattern;
+  score: number;
+  confluenceZone: SpxPriceActionZone | null;
+  selectedOverride: boolean;
+}
+
+export interface SelectSpxActionablePatternsInput {
+  patterns: readonly SpxPriceActionPattern[];
+  candles: readonly SpxPriceActionCandle[];
+  zones: readonly SpxPriceActionZone[];
+  selectedPatternId?: string | null;
+  lookback?: number;
+  limit?: number;
+}
+
+/**
+ * Ranks a compact trader-facing subset without mutating or changing the full
+ * detector/API pattern set. The selected pattern is kept as an explicit
+ * inspection override, even if it is old or otherwise ineligible.
+ */
+export const selectActionablePatterns = ({
+  patterns,
+  candles,
+  zones,
+  selectedPatternId = null,
+  lookback = 80,
+  limit = 3,
+}: SelectSpxActionablePatternsInput): SpxActionablePattern[] => {
+  const lastIndex = candles.length - 1;
+  const firstEligibleIndex = Math.max(0, candles.length - Math.max(1, lookback));
+  const nearbyZone = (pattern: SpxPriceActionPattern) => zones
+    .filter((zone) => pattern.price >= zone.minPrice && pattern.price <= zone.maxPrice)
+    .sort((left, right) => right.strength - left.strength || Math.abs(left.price - pattern.price) - Math.abs(right.price - pattern.price))[0] || null;
+
+  const candidates = patterns
+    .filter((pattern) =>
+      pattern.toIndex >= firstEligibleIndex
+      && pattern.toIndex <= lastIndex
+      && pattern.direction !== "neutral"
+      && pattern.confidence >= 0.8)
+    .map((pattern) => {
+      const confluenceZone = nearbyZone(pattern);
+      const recency = Math.max(0, lookback - (lastIndex - pattern.toIndex));
+      const score = pattern.confidence * 100 + recency * 0.2 + (confluenceZone ? 12 + Math.min(8, confluenceZone.strength) : 0);
+      return { pattern, score, confluenceZone, selectedOverride: false };
+    })
+    .sort((left, right) => right.score - left.score || right.pattern.toIndex - left.pattern.toIndex || left.pattern.id.localeCompare(right.pattern.id));
+
+  const kept: SpxActionablePattern[] = [];
+  for (const candidate of candidates) {
+    const duplicate = kept.some((existing) =>
+      existing.pattern.direction === candidate.pattern.direction
+      && existing.pattern.type === candidate.pattern.type
+      && Math.abs(existing.pattern.toIndex - candidate.pattern.toIndex) < 12);
+    if (!duplicate && kept.length < limit) kept.push(candidate);
+  }
+
+  const selected = selectedPatternId ? patterns.find((pattern) => pattern.id === selectedPatternId) : null;
+  if (selected && !kept.some((candidate) => candidate.pattern.id === selected.id)) {
+    kept.push({ pattern: selected, score: Number.POSITIVE_INFINITY, confluenceZone: nearbyZone(selected), selectedOverride: true });
+  }
+  return kept;
+};
+
 export interface SpxPriceActionSummary {
   latestClose: number | null;
   latestChange: number | null;
@@ -110,12 +175,14 @@ export interface SpxPriceActionSummary {
 }
 
 export interface SpxPriceActionSource {
-  provider: "yahoo" | "test";
+  provider: "0dtespx" | "yahoo" | "test";
   label: string;
   symbol: string;
   range: string;
   interval: string;
   fetchedAt: string;
+  latestSampleAt?: string | null;
+  status?: "READY" | "STALE" | "UNAVAILABLE";
   note: string;
 }
 
@@ -237,6 +304,30 @@ export const aggregateSpxPriceActionCandles = (
     });
   }
   return aggregated;
+};
+
+export const aggregateSpxOneMinutePriceActionCandles = (
+  candles: SpxPriceActionCandle[],
+  timeframe: Extract<SpxPriceActionTimeframe, "1m" | "5m" | "15m">,
+): SpxPriceActionCandle[] => {
+  const minutes = timeframe === "1m" ? 1 : Number(timeframe.slice(0, -1));
+  if (minutes === 1) return candles;
+  const buckets = new Map<number, SpxPriceActionCandle[]>();
+  for (const candle of [...candles].sort((left, right) => left.time - right.time)) {
+    const bucketTime = Math.floor(candle.time / (minutes * 60_000)) * minutes * 60_000;
+    const bucket = buckets.get(bucketTime) || [];
+    bucket.push(candle);
+    buckets.set(bucketTime, bucket);
+  }
+  return [...buckets.entries()].map(([time, bucket]) => ({
+    time,
+    date_iso: new Date(time).toISOString().slice(0, 10),
+    open: bucket[0].open,
+    high: Math.max(...bucket.map((candle) => candle.high)),
+    low: Math.min(...bucket.map((candle) => candle.low)),
+    close: bucket[bucket.length - 1].close,
+    volume: 0,
+  }));
 };
 
 const getAverageRanges = (candles: SpxPriceActionCandle[], period = 14) => {

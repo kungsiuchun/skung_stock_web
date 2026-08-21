@@ -63,7 +63,7 @@ interface PriceOverlayState {
     ticker: "SPX";
     timeframe: "1m";
     candles: Array<{ time: number; close: number }>;
-    source: { provider: "yahoo" | "test"; label: string; interval: string; fetchedAt: string };
+    source: { provider: "0dtespx" | "yahoo" | "test"; label: string; interval: string; fetchedAt: string; latestSampleAt?: string | null; status?: "READY" | "STALE" | "UNAVAILABLE" };
     warnings: string[];
   } | null;
   error: string | null;
@@ -334,15 +334,15 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
     ? (data.collectionAttempts || []).filter((attempt) => attempt.snapshotMinuteEt === 9 * 60 + 30)
     : [];
   const acceptedOpeningRetry = openingAttempts.find((attempt) => attempt.attempt > 1 && attempt.status === "ACCEPTED");
-  const latestYahooPoint = useMemo(() => pressure && priceOverlay?.data
+  const latestSpotPoint = useMemo(() => pressure && priceOverlay?.data
     ? getLatestSpxGexSpotPoint(priceOverlay.data.candles, pressure.tradingDate)
     : null, [pressure, priceOverlay?.data]);
   const displayPressure = useMemo(() => pressure ? extendSpxGexPressureForSession(pressure, etClock()) : null, [pressure, refreshKey]);
   const oneMinuteSpotSegments = useMemo(() => {
-    if (!displayPressure || priceOverlay?.selectedDate !== selectedDate || !priceOverlay.data || !latestYahooPoint) return [];
+    if (!displayPressure || priceOverlay?.selectedDate !== selectedDate || !priceOverlay.data || !latestSpotPoint) return [];
     const startMinute = displayPressure.timeline[0]?.snapshotMinuteEt ?? displayPressure.baseline.snapshotMinuteEt;
-    return buildSpxGexOneMinuteSpotSegments(priceOverlay.data.candles, displayPressure.tradingDate, startMinute, latestYahooPoint.minuteEt);
-  }, [displayPressure, latestYahooPoint, priceOverlay, selectedDate]);
+    return buildSpxGexOneMinuteSpotSegments(priceOverlay.data.candles, displayPressure.tradingDate, startMinute, latestSpotPoint.minuteEt);
+  }, [displayPressure, latestSpotPoint, priceOverlay, selectedDate]);
   const axisTicks = useMemo(() => displayPressure ? buildSpxGexPressureAxisTicks(displayPressure.timeline) : [], [displayPressure]);
   const timelineLength = displayPressure?.timeline.length || 0;
   const availableTimelineWidth = Math.max(0, matrixRailWidth - STRIKE_WIDTH - CURRENT_GEX_WIDTH);
@@ -388,7 +388,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
   }, []);
 
   const activeSlot = displayPressure?.timeline.find((slot) => slot.snapshotMinuteEt === activeCell?.cell.snapshotMinuteEt) || null;
-  const activeYahooPoint = activeCell
+  const activeSpotPoint = activeCell
     ? oneMinuteSpotSegments.flat().find((point) => point.minuteEt === activeCell.cell.snapshotMinuteEt) || null
     : null;
 
@@ -573,12 +573,12 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
 
           {activeCell && (
             <SpxGexTooltip id={TOOLTIP_ID} anchor={activeCell.anchor} width={TOOLTIP_WIDTH} estimatedHeight={TOOLTIP_HEIGHT} surface="pressure" interactive={activeCell.locked}>
-              <PressureCellDetail activeCell={activeCell} slot={activeSlot} yahooPoint={activeYahooPoint} />
+              <PressureCellDetail activeCell={activeCell} slot={activeSlot} spotPoint={activeSpotPoint} spotProvider={priceOverlay?.data?.source.provider || "source"} />
             </SpxGexTooltip>
           )}
 
           <SpxGexInlineTooltip surface="pressure">
-            {activeCell ? <PressureCellDetail activeCell={activeCell} slot={activeSlot} yahooPoint={activeYahooPoint} /> : (
+            {activeCell ? <PressureCellDetail activeCell={activeCell} slot={activeSlot} spotPoint={activeSpotPoint} spotProvider={priceOverlay?.data?.source.provider || "source"} /> : (
               <div className="flex items-center gap-2 font-mono text-[10px] text-zinc-500"><TrendingUp aria-hidden="true" className="h-3.5 w-3.5" />Tap a pressure cell for exact delayed-time evidence.</div>
             )}
           </SpxGexInlineTooltip>
@@ -598,11 +598,13 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
 const PressureCellDetail = ({
   activeCell,
   slot,
-  yahooPoint,
+  spotPoint,
+  spotProvider,
 }: {
   activeCell: ActiveCell;
   slot: SpxGexPressureMatrixModel["timeline"][number] | null;
-  yahooPoint: { price: number; timeEt: string } | null;
+  spotPoint: { price: number; timeEt: string } | null;
+  spotProvider: string;
 }) => (
   <div className="space-y-1.5 tabular-nums">
     <div className="font-black text-white">{slot?.snapshotTimeEt || "Unknown"} ET / {strikeFormatter.format(activeCell.strike)} / <span style={{ color: stateColor(activeCell.cell.state, activeCell.cell.currentGex) }}>{stateLabel[activeCell.cell.state]}</span></div>
@@ -610,7 +612,7 @@ const PressureCellDetail = ({
     <div>Baseline {compact(activeCell.cell.baselineGex, true)} → Current {compact(activeCell.cell.currentGex, true)}</div>
     <div>Δ {compact(activeCell.cell.deltaGex, true)} / Strength {formatPercent(activeCell.cell.strengthPct)} / Intensity {activeCell.cell.intensityPct}%</div>
     <div className="border-t border-white/10 pt-1.5 text-cyan-100">GEX snapshot SPX {activeCell.cell.spot === null ? "n/a" : spotFormatter.format(activeCell.cell.spot)}</div>
-    <div className="text-cyan-300">Yahoo 1m context {yahooPoint ? `${spotFormatter.format(yahooPoint.price)} at ${yahooPoint.timeEt} ET` : "unavailable at this minute"}</div>
+    <div className="text-cyan-300">{spotProvider.toUpperCase()} 1m context {spotPoint ? `${spotFormatter.format(spotPoint.price)} at ${spotPoint.timeEt} ET` : "unavailable at this minute"}</div>
     {activeCell.locked && <div className="text-zinc-500">Pinned / press Escape to dismiss</div>}
   </div>
 );

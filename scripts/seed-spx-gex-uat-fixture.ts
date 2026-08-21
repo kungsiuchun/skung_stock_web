@@ -218,7 +218,8 @@ ${lifecycleSql}
 `;
 
 const sqliteDirectory = path.join(persistTo, "v3", "d1", "miniflare-D1DatabaseObject");
-const sqliteFiles = (await readdir(sqliteDirectory)).filter((file) => file.endsWith(".sqlite"));
+// Wrangler 4 stores its own metadata.sqlite beside the actual D1 database.
+const sqliteFiles = (await readdir(sqliteDirectory)).filter((file) => file.endsWith(".sqlite") && file !== "metadata.sqlite");
 if (sqliteFiles.length !== 1) {
   throw new Error(`Expected one isolated D1 SQLite file after migrations, found ${sqliteFiles.length}.`);
 }

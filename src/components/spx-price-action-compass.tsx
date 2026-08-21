@@ -17,7 +17,9 @@ import {
 } from "lucide-react";
 import {
   projectSpxChartClientPoint,
+  selectActionablePatterns,
   sortSpxPriceActionPatternsLatestFirst,
+  type SpxActionablePattern,
   type SpxPriceActionCandle,
   type SpxPriceActionCompassResponse,
   type SpxPriceActionPattern,
@@ -34,6 +36,8 @@ interface SignalFilterState {
   direction: SignalDirectionFilter;
   type: "all" | SpxPriceActionPatternType;
 }
+
+type SignalDensity = "actionable" | "all";
 
 const defaultSignalFilter: SignalFilterState = { direction: "all", type: "all" };
 
@@ -135,6 +139,7 @@ export function SpxPriceActionCompass({ enabled = true, onInitialLoadSettled }: 
   const [modalPattern, setModalPattern] = useState<SpxPriceActionPattern | null>(null);
   const [signalFilter, setSignalFilter] = useState<SignalFilterState>(defaultSignalFilter);
   const [mode, setMode] = useState<"review" | "practice">("review");
+  const [signalDensity, setSignalDensity] = useState<SignalDensity>("actionable");
   const [showZones, setShowZones] = useState(true);
   const [showPatterns, setShowPatterns] = useState(true);
   const [showTrend, setShowTrend] = useState(true);
@@ -152,7 +157,15 @@ export function SpxPriceActionCompass({ enabled = true, onInitialLoadSettled }: 
       const requestUrl = `/api/spx-price-action-compass?timeframe=${nextTimeframe}`;
       const response = await runSpxRequest((attemptSignal) => fetch(requestUrl, { signal: attemptSignal }), { onRetry: () => setReconnecting(true) });
       const payload = await parseJsonResponse<SpxPriceActionCompassResponse & { warnings?: string[] }>(response, requestUrl);
-      if (!response.ok) throw new Error(payload.warnings?.join(" ") || "SPX Price Action Compass API failed");
+      if (!response.ok) {
+        setData(payload);
+        setSelectedPattern(null);
+        setModalPattern(null);
+        setPracticeChoice(null);
+        setPracticeRevealed(false);
+        setError(payload.warnings?.join(" ") || "SPX Price Action Compass API failed");
+        return;
+      }
       setData(payload);
       setSelectedPattern(payload.summary.latestPattern || payload.patterns[0] || null);
       setModalPattern(null);
@@ -199,6 +212,19 @@ export function SpxPriceActionCompass({ enabled = true, onInitialLoadSettled }: 
       .sort((a, b) => b.toIndex - a.toIndex || b.confidence - a.confidence)[0] || null;
   }, [data.candles.length, filteredPatterns]);
 
+  const actionablePatterns = useMemo(() => selectActionablePatterns({
+    patterns: filteredPatterns,
+    candles: data.candles,
+    zones: data.zones,
+    selectedPatternId: selectedPattern?.id,
+  }), [data.candles, data.zones, filteredPatterns, selectedPattern?.id]);
+
+  const reviewChartPatterns = signalDensity === "actionable"
+    ? actionablePatterns.map((candidate) => candidate.pattern)
+    : filteredPatterns;
+  const actionableSetupCount = actionablePatterns.filter((candidate) => !candidate.selectedOverride).length;
+  const selectedOverrideCount = actionablePatterns.length - actionableSetupCount;
+
   const practiceOutcome = useMemo(() => {
     if (!challengePattern) return null;
     const signal = data.candles[challengePattern.toIndex];
@@ -218,7 +244,7 @@ export function SpxPriceActionCompass({ enabled = true, onInitialLoadSettled }: 
     if (mode !== "practice" || !challengePattern) {
       return {
         candles: data.candles,
-        patterns: filteredPatterns,
+        patterns: reviewChartPatterns,
         trend: data.trend,
         offset: 0,
       };
@@ -248,13 +274,16 @@ export function SpxPriceActionCompass({ enabled = true, onInitialLoadSettled }: 
       trend: shiftedTrend,
       offset: start,
     };
-  }, [challengePattern, data.candles, filteredPatterns, data.trend, mode, practiceRevealed]);
+  }, [challengePattern, data.candles, data.trend, mode, practiceRevealed, reviewChartPatterns]);
 
   const patternById = useMemo(() => new Map(data.patterns.map((pattern) => [pattern.id, pattern])), [data.patterns]);
   const topPatterns = useMemo(
-    () => sortSpxPriceActionPatternsLatestFirst(filteredPatterns).slice(0, 8),
-    [filteredPatterns],
+    () => signalDensity === "actionable"
+      ? actionablePatterns.filter((candidate) => !candidate.selectedOverride).slice(0, 3).map((candidate) => candidate.pattern)
+      : sortSpxPriceActionPatternsLatestFirst(filteredPatterns).slice(0, 8),
+    [actionablePatterns, filteredPatterns, signalDensity],
   );
+  const actionableById = useMemo(() => new Map(actionablePatterns.map((candidate) => [candidate.pattern.id, candidate])), [actionablePatterns]);
   const latest = data.summary;
 
   return (
@@ -277,12 +306,13 @@ export function SpxPriceActionCompass({ enabled = true, onInitialLoadSettled }: 
               <h2 className="text-xl font-black tracking-normal text-white sm:text-2xl">SPX Price Action Compass</h2>
             </div>
             <p className="mt-1 text-xs leading-5 text-zinc-500">
-              Yahoo OHLCV + deterministic price-action structure, rendered before the GEX board.
+              Current RTH uses 0DTESPX price context; historical and higher-timeframe OHLCV stay on Yahoo.
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
             <SegmentedMode value={mode} onChange={setMode} />
+            {mode === "review" && <SignalDensityControl value={signalDensity} onChange={setSignalDensity} />}
             <div className="inline-flex h-9 items-center border border-cyan-300/20 bg-cyan-300/10 p-0.5">
               {data.availableTimeframes.map((item) => (
                 <button
@@ -343,6 +373,9 @@ export function SpxPriceActionCompass({ enabled = true, onInitialLoadSettled }: 
                 signalFilter={signalFilter}
                 availablePatternTypes={availablePatternTypes}
                 totalPatternCount={data.patterns.length}
+                actionablePatternCount={actionableSetupCount}
+                selectedOverrideCount={selectedOverrideCount}
+                signalDensity={signalDensity}
                 showZones={showZones}
                 showPatterns={showPatterns}
                 showTrend={showTrend}
@@ -386,11 +419,13 @@ export function SpxPriceActionCompass({ enabled = true, onInitialLoadSettled }: 
             <section className="border border-[#123142] bg-black/20 p-3">
               <div className="mb-3 flex items-center justify-between gap-2 font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200">
                 <span className="flex items-center gap-2"><Search aria-hidden="true" className="h-4 w-4" />Signal Monitor</span>
-                <span className="text-[9px] text-cyan-200/45">Latest first</span>
+                <span className="text-[9px] text-cyan-200/45">{signalDensity === "actionable" ? "Ranked now" : "Latest first"}</span>
               </div>
               <div className="flex max-h-[260px] flex-col gap-2 overflow-y-auto pr-1">
                 {topPatterns.length === 0 ? (
-                  <div className="py-5 text-center text-xs text-zinc-500">No signal matches the active filter.</div>
+                  <div className="py-5 text-center text-xs text-zinc-500">
+                    {signalDensity === "actionable" ? "No actionable setup meets the active threshold." : "No pattern matches the active filter."}
+                  </div>
                 ) : topPatterns.map((pattern) => (
                   <button
                     key={pattern.id}
@@ -406,6 +441,7 @@ export function SpxPriceActionCompass({ enabled = true, onInitialLoadSettled }: 
                       <span className="truncate text-xs font-black text-white">{pattern.label}</span>
                       <span className="font-mono text-[10px]">{Math.round(pattern.confidence * 100)}%</span>
                     </div>
+                    {signalDensity === "actionable" && <ActionableMeta candidate={actionableById.get(pattern.id)} rank={topPatterns.findIndex((item) => item.id === pattern.id) + 1} />}
                     <div className="mt-1 font-mono text-[10px] text-zinc-500">
                       {data.candles[pattern.toIndex] ? formatEtTime(data.candles[pattern.toIndex].time) : "time n/a"} / idx {pattern.fromIndex}-{pattern.toIndex} / ${formatPrice(pattern.price)}
                     </div>
@@ -479,6 +515,29 @@ const SegmentedMode = ({ value, onChange }: { value: "review" | "practice"; onCh
   </div>
 );
 
+const SignalDensityControl = ({ value, onChange }: { value: SignalDensity; onChange: (value: SignalDensity) => void }) => (
+  <div className="inline-flex h-9 items-center border border-emerald-300/25 bg-emerald-300/10 p-0.5" aria-label="Signal density">
+    <button
+      type="button"
+      onClick={() => onChange("actionable")}
+      className={`h-7 px-2.5 font-mono text-[10px] font-black uppercase tracking-[0.1em] ${value === "actionable" ? "bg-emerald-200 text-[#03111a]" : "text-emerald-100 hover:bg-emerald-300/15"}`}
+      aria-pressed={value === "actionable"}
+      data-pa-signal-density="actionable"
+    >
+      Actionable
+    </button>
+    <button
+      type="button"
+      onClick={() => onChange("all")}
+      className={`h-7 px-2.5 font-mono text-[10px] font-black uppercase tracking-[0.1em] ${value === "all" ? "bg-emerald-200 text-[#03111a]" : "text-emerald-100 hover:bg-emerald-300/15"}`}
+      aria-pressed={value === "all"}
+      data-pa-signal-density="all"
+    >
+      All
+    </button>
+  </div>
+);
+
 const ToolbarToggle = ({ active, onClick, title, children }: { active: boolean; onClick: () => void; title: string; children: ReactNode }) => (
   <button
     type="button"
@@ -507,6 +566,9 @@ interface ChartProps {
   signalFilter: SignalFilterState;
   availablePatternTypes: SpxPriceActionPatternType[];
   totalPatternCount: number;
+  actionablePatternCount: number;
+  selectedOverrideCount: number;
+  signalDensity: SignalDensity;
   showZones: boolean;
   showPatterns: boolean;
   showTrend: boolean;
@@ -567,6 +629,9 @@ function PriceActionChartCanvas({
   signalFilter,
   availablePatternTypes,
   totalPatternCount,
+  actionablePatternCount,
+  selectedOverrideCount,
+  signalDensity,
   showZones,
   showPatterns,
   showTrend,
@@ -776,7 +841,9 @@ function PriceActionChartCanvas({
         <div className="flex items-center gap-3 font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200/75">
           <span>{candles.length} candles</span>
           <span>{visibleCandles.length} visible</span>
-          <span>{patterns.length} / {totalPatternCount} signals</span>
+          <span>{signalDensity === "actionable" ? `${actionablePatternCount} actionable` : `${patterns.length} visible patterns`}</span>
+          {signalDensity === "actionable" && selectedOverrideCount > 0 && <span>+ {selectedOverrideCount} selected</span>}
+          <span>{totalPatternCount} detected</span>
         </div>
         <div className="relative flex items-center gap-1">
           <button type="button" className="h-7 w-7 border border-white/10 text-zinc-300 hover:bg-white/10" onClick={() => setZoom((value) => Math.min(candles.length, Math.round(value * 1.2)))} title="Zoom out">
@@ -1015,6 +1082,18 @@ function PriceActionChartCanvas({
   );
 }
 
+const ActionableMeta = ({ candidate, rank }: { candidate: SpxActionablePattern | undefined; rank: number }) => {
+  const zoneLabel = candidate?.confluenceZone
+    ? `near ${candidate.confluenceZone.type}`
+    : "recent setup";
+  return (
+    <div className="mt-1.5 flex flex-wrap gap-1.5 font-mono text-[9px] font-black uppercase tracking-[0.08em] text-cyan-100/75">
+      <span className="border border-cyan-200/20 bg-cyan-200/10 px-1.5 py-0.5">#{rank}</span>
+      <span className="border border-white/10 px-1.5 py-0.5">{zoneLabel}</span>
+    </div>
+  );
+};
+
 const zoneClass = (zone: SpxPriceActionZone | null | undefined) => {
   if (!zone) return "border-white/10 bg-white/[0.03] text-zinc-500";
   if (zone.type === "support") return "border-emerald-300/30 bg-emerald-300/10 text-emerald-100";
@@ -1080,10 +1159,14 @@ const SourcePanel = ({ data }: { data: SpxPriceActionCompassResponse }) => (
   <section className="border border-[#123142] bg-black/20 p-3 text-xs leading-5 text-zinc-400" data-pa-source-panel="true">
     <div className="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200">Source</div>
     <div className="mt-2">{data.source.label} / {data.source.interval} / {data.source.range}</div>
+    <div className="font-mono text-[10px] text-cyan-200">Status {data.source.status || "READY"}</div>
     <div className="font-mono text-[10px] text-zinc-500">Candle time: America/New_York (ET)</div>
     <div className="font-mono text-[10px] text-zinc-600">
       Fetched {formatEtTime(data.source.fetchedAt, true)} / {formatUtcTime(data.source.fetchedAt, true)}
     </div>
+    {data.source.latestSampleAt && <div className="font-mono text-[10px] text-zinc-600">
+      Latest sample {formatEtTime(data.source.latestSampleAt, true)} / {formatUtcTime(data.source.latestSampleAt, true)}
+    </div>}
   </section>
 );
 

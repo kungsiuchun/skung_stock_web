@@ -3,14 +3,22 @@ import { describe, it } from "node:test";
 
 import { onRequest as getSpxPriceActionCompassApi } from "../functions/api/spx-price-action-compass";
 import {
+  fetchZeroDteSpxCurrentSession,
+  normalizeZeroDteSpxOneMinuteCandles,
+  ZeroDteSpxError,
+} from "../functions/api/_0dtespx";
+import {
+  aggregateSpxOneMinutePriceActionCandles,
   buildSpxPriceActionCompassResponse,
   deriveSpxSupportResistanceZones,
   detectSpxPriceActionPatterns,
   findSpxPriceActionSwingPoints,
   projectSpxChartClientPoint,
+  selectActionablePatterns,
   sortSpxPriceActionPatternsLatestFirst,
   type SpxPriceActionCandle,
   type SpxPriceActionPattern,
+  type SpxPriceActionZone,
 } from "../src/lib/spx-price-action-compass";
 
 const candle = (
@@ -58,6 +66,13 @@ const buildZoneFixture = () => [
   candle(7, 100, 103, 97.9, 101),
   candle(8, 101, 102, 99, 100),
 ];
+
+const etTradingDate = () => {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(new Date()).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+};
 
 describe("SPX Price Action Compass detector", () => {
   it("sorts Signal Monitor patterns latest-first with deterministic ties without mutating input", () => {
@@ -199,5 +214,148 @@ describe("SPX Price Action Compass API", () => {
     assert.equal(payload.patterns, undefined);
     assert.equal(payload.source.provider, "test");
     assert.match(payload.source.note, /GEX pressure overlay/);
+  });
+
+  it("selects a compact ranked actionable subset without changing detector patterns", () => {
+    const candles = Array.from({ length: 100 }, (_, index) => candle(index, 100, 101, 99, 100));
+    const pattern = (id: string, toIndex: number, confidence: number, direction: SpxPriceActionPattern["direction"], type: SpxPriceActionPattern["type"], price = 100): SpxPriceActionPattern => ({
+      id, type, name: id, label: id, category: "candle", direction,
+      candleIndices: [toIndex], fromIndex: toIndex, toIndex, price, confidence, description: id,
+    });
+    const patterns = [
+      pattern("selected-old", 4, 0.4, "neutral", "DOJI"),
+      pattern("old", 18, 0.95, "bullish", "ENGULFING_BULLISH"),
+      pattern("low-confidence", 99, 0.79, "bullish", "ENGULFING_BULLISH"),
+      pattern("neutral", 99, 0.99, "neutral", "DOJI"),
+      pattern("duplicate-weaker", 90, 0.8, "bullish", "ENGULFING_BULLISH"),
+      pattern("duplicate-winner", 96, 0.82, "bullish", "ENGULFING_BULLISH"),
+      pattern("near-resistance", 94, 0.8, "bearish", "PIN_BAR_BEARISH", 105),
+      pattern("third", 93, 0.8, "bullish", "PIN_BAR_BULLISH"),
+      pattern("fourth", 92, 0.8, "bearish", "ENGULFING_BEARISH"),
+    ];
+    const zones: SpxPriceActionZone[] = [{
+      id: "resistance-105", type: "resistance", price: 105, minPrice: 104.8, maxPrice: 105.2,
+      strength: 4, touches: [], distanceToLastPercent: 0,
+    }];
+    const before = patterns.map((item) => item.id);
+
+    const selected = selectActionablePatterns({ patterns, candles, zones, selectedPatternId: "selected-old" });
+
+    assert.deepEqual(selected.map((item) => item.pattern.id), ["near-resistance", "duplicate-winner", "third", "selected-old"]);
+    assert.equal(selected[0].confluenceZone?.id, "resistance-105");
+    assert.equal(selected.some((item) => item.pattern.id === "old"), false);
+    assert.equal(selected.some((item) => item.pattern.id === "low-confidence"), false);
+    assert.equal(selected.some((item) => item.pattern.id === "neutral"), false);
+    assert.equal(selected.some((item) => item.pattern.id === "duplicate-weaker"), false);
+    assert.deepEqual(patterns.map((item) => item.id), before);
+  });
+
+  it("uses 0DTESPX for the current intraday session with a five-minute edge TTL", async () => {
+    const originalFetch = globalThis.fetch;
+    const now = Date.now();
+    const datetime = new Date(now).toISOString();
+    const sessionDate = etTradingDate();
+    const calls: Array<{ url: string; authorization: string | null }> = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      calls.push({ url, authorization: new Headers(init?.headers).get("authorization") });
+      if (url.endsWith("/market-data/sessions")) return Response.json({ [sessionDate]: { current: true } });
+      return Response.json([
+        { datetime, datetimeUnix: Math.floor(now / 1000) - 2, spx: "6000.25" },
+        { datetime: new Date(now - 1_000).toISOString(), datetimeUnix: Math.floor(now / 1000) - 1, spx: "6001.50" },
+        { datetime: new Date(now).toISOString(), datetimeUnix: Math.floor(now / 1000), spx: "5999.75" },
+      ]);
+    }) as typeof fetch;
+    try {
+      const response = await getSpxPriceActionCompassApi({
+        request: new Request("https://example.com/api/spx-price-action-compass?timeframe=1m"),
+        env: { ZERO_DTE_SPX_API_TOKEN: "secret-token" },
+      });
+      const payload = await response.json() as { source: { provider: string; interval: string; latestSampleAt: string; status: string }; candles: SpxPriceActionCandle[] };
+
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("cache-control"), "public, max-age=300");
+      assert.equal(payload.source.provider, "0dtespx");
+      assert.equal(payload.source.interval, "1s->1m");
+      assert.equal(payload.source.status, "READY");
+      assert.ok(payload.source.latestSampleAt);
+      assert.equal(payload.candles.length, 1);
+      assert.equal(payload.candles[0].open, 6000.25);
+      assert.equal(payload.candles[0].high, 6001.5);
+      assert.equal(payload.candles[0].low, 5999.75);
+      assert.deepEqual(calls.map((call) => call.authorization), ["secret-token", "secret-token"]);
+      assert.match(calls[1].url, new RegExp(`/market-data/historical/${sessionDate}`));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("fails closed with a safe 0DTESPX error when the current-session source is rate limited", async () => {
+    const originalFetch = globalThis.fetch;
+    const sessionDate = etTradingDate();
+    globalThis.fetch = (async (input) => String(input).endsWith("/market-data/sessions")
+      ? Response.json({ [sessionDate]: { current: true } })
+      : Response.json({ error: "rate_limit_exceeded" }, { status: 429 })) as typeof fetch;
+    try {
+      const response = await getSpxPriceActionCompassApi({
+        request: new Request("https://example.com/api/spx-price-action-compass?timeframe=1m"),
+        env: { ZERO_DTE_SPX_API_TOKEN: "secret-token" },
+      });
+      const payload = await response.json() as { source: { provider: string; status: string; range: string; interval: string }; warnings: string[] };
+      assert.equal(response.status, 502);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal(payload.source.provider, "0dtespx");
+      assert.equal(payload.source.status, "UNAVAILABLE");
+      assert.equal(payload.source.range, "current RTH session");
+      assert.equal(payload.source.interval, "1s->1m");
+      assert.deepEqual(payload.warnings, ["ZERO_DTE_SPX_RATE_LIMITED"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("0DTESPX intraday normalization", () => {
+  it("builds a minute OHLC candle from valid second prices, including a partial latest minute", () => {
+    const now = Date.parse("2026-08-20T14:31:03.000Z");
+    const result = normalizeZeroDteSpxOneMinuteCandles([
+      { datetimeUnix: 1_787_236_260, spx: "6000" },
+      { datetimeUnix: 1_787_236_261, spx: "6002" },
+      { datetimeUnix: 1_787_236_262, spx: "5998" },
+    ], now);
+    assert.equal(result.candles.length, 1);
+    assert.deepEqual(result.candles[0], {
+      time: 1_787_236_260_000, date_iso: "2026-08-20", open: 6000, high: 6002, low: 5998, close: 5998, volume: 0,
+    });
+  });
+
+  it("aggregates normalized 1-minute context into the requested 5-minute PA candle", () => {
+    const minute = 60_000;
+    const source = [
+      { time: 0, date_iso: "2026-08-20", open: 100, high: 102, low: 99, close: 101, volume: 0 },
+      { time: minute, date_iso: "2026-08-20", open: 101, high: 104, low: 100, close: 103, volume: 0 },
+      { time: 2 * minute, date_iso: "2026-08-20", open: 103, high: 105, low: 102, close: 104, volume: 0 },
+    ];
+    assert.deepEqual(aggregateSpxOneMinutePriceActionCandles(source, "5m"), [{
+      time: 0, date_iso: "1970-01-01", open: 100, high: 105, low: 99, close: 104, volume: 0,
+    }]);
+  });
+
+  it("rejects stale and malformed 0DTESPX samples without producing fake candles", () => {
+    assert.throws(
+      () => normalizeZeroDteSpxOneMinuteCandles([{ datetimeUnix: 1_787_236_000, spx: "6000" }], 1_787_236_700_000),
+      (error: unknown) => error instanceof ZeroDteSpxError && error.code === "ZERO_DTE_SPX_STALE",
+    );
+    assert.throws(
+      () => normalizeZeroDteSpxOneMinuteCandles([{ datetimeUnix: "bad", spx: "n/a" }], Date.now()),
+      (error: unknown) => error instanceof ZeroDteSpxError && error.code === "ZERO_DTE_SPX_RESPONSE_INVALID",
+    );
+  });
+
+  it("requires a server-side token before making a 0DTESPX request", async () => {
+    await assert.rejects(
+      () => fetchZeroDteSpxCurrentSession(undefined),
+      (error: unknown) => error instanceof ZeroDteSpxError && error.code === "ZERO_DTE_SPX_TOKEN_MISSING",
+    );
   });
 });
