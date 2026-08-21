@@ -354,6 +354,7 @@
 
 .siw-watchlist-tabs {
   display: grid;
+  flex: 0 0 auto;
   grid-template-columns: 1fr 1fr;
   margin: 0 18px;
   overflow: hidden;
@@ -2288,7 +2289,6 @@
   }
 
   .siw-watchlist-tabs {
-    flex: 0 0 auto;
     margin: 0 20px;
   }
 
