@@ -40,25 +40,11 @@ const US_EXCHANGES = new Set(["NMS", "NGM", "NYQ", "ASE", "PCX", "NCM", "NGS", "
 const YAHOO_CHART_HOSTS = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"] as const;
 const YAHOO_CHART_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 const YAHOO_RANGE_RECENCY_MS = 14 * 86_400_000;
+const INFERRED_DIVIDEND_FACTOR_EPSILON = 1e-6;
 
 type YahooChartRequest = {
   host: typeof YAHOO_CHART_HOSTS[number];
-  mode: "range" | "period";
   url: URL;
-};
-
-type YahooSession = {
-  cookie: string;
-  crumb: string;
-};
-
-type YahooSessionAttempt = {
-  session: YahooSession | null;
-  failure?: {
-    host: "fc.yahoo.com" | "query2.finance.yahoo.com";
-    status?: number;
-    reason: "COOKIE_FETCH_FAILED" | "COOKIE_MISSING" | "CRUMB_FETCH_FAILED" | "CRUMB_UNAVAILABLE" | "CRUMB_EMPTY";
-  };
 };
 
 class PortfolioBacktestApiError extends Error {
@@ -128,8 +114,7 @@ const yahooChartRequests = (input: Pick<ApiContext, "now"> & { ticker: string; s
     url.searchParams.set("range", range);
     url.searchParams.set("interval", "1d");
     url.searchParams.set("includePrePost", "false");
-    url.searchParams.set("events", "div,splits");
-    requests.push({ host: YAHOO_CHART_HOSTS[0], mode: "range", url });
+    requests.push({ host: YAHOO_CHART_HOSTS[0], url });
   }
   for (const host of YAHOO_CHART_HOSTS) {
     const url = new URL(`https://${host}/v8/finance/chart/${encodeURIComponent(input.ticker)}`);
@@ -137,42 +122,9 @@ const yahooChartRequests = (input: Pick<ApiContext, "now"> & { ticker: string; s
     url.searchParams.set("period1", String(Math.floor(Date.parse(`${input.start}T00:00:00.000Z`) / 1_000)));
     url.searchParams.set("period2", String(Math.floor(Date.parse(`${input.end}T00:00:00.000Z`) / 1_000) + 86_400));
     url.searchParams.set("includePrePost", "false");
-    url.searchParams.set("events", "div,splits");
-    requests.push({ host, mode: "period", url });
+    requests.push({ host, url });
   }
   return requests;
-};
-
-const fetchYahooSession = async (input: { fetcher: typeof fetch; signal: AbortSignal }): Promise<YahooSessionAttempt> => {
-  let cookieResponse: Response;
-  try {
-    cookieResponse = await input.fetcher("https://fc.yahoo.com", {
-      headers: { "User-Agent": YAHOO_CHART_USER_AGENT },
-      signal: input.signal,
-    });
-  } catch {
-    if (input.signal.aborted) throw new PortfolioBacktestApiError("YAHOO_TIMEOUT", "Market history provider timed out.");
-    return { session: null, failure: { host: "fc.yahoo.com", reason: "COOKIE_FETCH_FAILED" } };
-  }
-  const cookie = cookieResponse.headers.get("set-cookie") || "";
-  // Yahoo's cookie endpoint intentionally responds 404 while issuing the B cookie.
-  if (!cookie) return { session: null, failure: { host: "fc.yahoo.com", status: cookieResponse.status, reason: "COOKIE_MISSING" } };
-
-  let crumbResponse: Response;
-  try {
-    crumbResponse = await input.fetcher("https://query2.finance.yahoo.com/v1/test/getcrumb", {
-      headers: { "User-Agent": YAHOO_CHART_USER_AGENT, Cookie: cookie },
-      signal: input.signal,
-    });
-  } catch {
-    if (input.signal.aborted) throw new PortfolioBacktestApiError("YAHOO_TIMEOUT", "Market history provider timed out.");
-    return { session: null, failure: { host: "query2.finance.yahoo.com", reason: "CRUMB_FETCH_FAILED" } };
-  }
-  if (!crumbResponse.ok) return { session: null, failure: { host: "query2.finance.yahoo.com", status: crumbResponse.status, reason: "CRUMB_UNAVAILABLE" } };
-  const crumb = (await crumbResponse.text()).trim();
-  return crumb
-    ? { session: { cookie, crumb } }
-    : { session: null, failure: { host: "query2.finance.yahoo.com", status: crumbResponse.status, reason: "CRUMB_EMPTY" } };
 };
 
 const eventDate = (key: string, value: unknown, timeZone: string) => {
@@ -248,7 +200,8 @@ export const normalizeYahooPortfolioHistory = (input: { ticker: string; payload:
   }
   const now = input.now || new Date();
   const nowDate = dateKeyInTimeZone(now, timeZone);
-  const byDate = new Map<string, PortfolioHistoricalPoint>();
+  const rawPoints: Array<{ date: string; close: number; adjustedClose: number }> = [];
+  const dates = new Set<string>();
   for (let index = 0; index < timestamps.length; index += 1) {
     const timestamp = numeric(timestamps[index]);
     if (timestamp === null || timestamp <= 0) throw new PortfolioBacktestApiError("MALFORMED_PAYLOAD", `Market history for ${ticker} contains an invalid timestamp.`);
@@ -256,13 +209,32 @@ export const normalizeYahooPortfolioHistory = (input: { ticker: string; payload:
     if (date === nowDate && (!regularSessionEnd || now.getTime() < regularSessionEnd * 1_000)) continue;
     const close = numeric(closes[index]);
     const adjustedClose = numeric(adjustedCloses[index]);
-    if (close === null || close <= 0 || adjustedClose === null || adjustedClose <= 0 || byDate.has(date)) {
+    if (close === null || close <= 0 || adjustedClose === null || adjustedClose <= 0 || dates.has(date)) {
       throw new PortfolioBacktestApiError("MALFORMED_PAYLOAD", `Market history for ${ticker} contains incomplete or duplicate completed EOD data.`);
     }
-    byDate.set(date, { date, close, adjustedClose, dividend: dividends.get(date) || 0, splitFactor: splits.get(date) || 1 });
+    dates.add(date);
+    rawPoints.push({ date, close, adjustedClose });
   }
+  if (rawPoints.length < 2) throw new PortfolioBacktestApiError("MALFORMED_PAYLOAD", `Market history for ${ticker} has fewer than two completed EOD sessions.`);
+  rawPoints.sort((left, right) => left.date.localeCompare(right.date));
+  if (dividends.size === 0) {
+    for (let index = 1; index < rawPoints.length; index += 1) {
+      const previous = rawPoints[index - 1];
+      const current = rawPoints[index];
+      const previousFactor = previous.adjustedClose / previous.close;
+      const currentFactor = current.adjustedClose / current.close;
+      const inferredDividend = Math.round(previous.close * (1 - previousFactor / currentFactor) * 1e8) / 1e8;
+      if (Number.isFinite(inferredDividend) && inferredDividend > previous.close * INFERRED_DIVIDEND_FACTOR_EPSILON) {
+        dividends.set(current.date, inferredDividend);
+      }
+    }
+  }
+  const byDate = new Map(rawPoints.map((point) => [point.date, {
+    ...point,
+    dividend: dividends.get(point.date) || 0,
+    splitFactor: splits.get(point.date) || 1,
+  }]));
   const points = [...byDate.values()].sort((left, right) => left.date.localeCompare(right.date));
-  if (points.length < 2) throw new PortfolioBacktestApiError("MALFORMED_PAYLOAD", `Market history for ${ticker} has fewer than two completed EOD sessions.`);
   return {
     ticker,
     displayName: String(meta.longName || meta.shortName || ticker),
@@ -337,18 +309,15 @@ const fetchHistory = async (input: {
     let lastFailure: { host: string; status?: number } | undefined;
     let attempts = 0;
     const requests = yahooChartRequests(input);
-    const loadRequests = async (session?: YahooSession) => {
+    const loadRequests = async () => {
       for (const request of requests) {
         attempts += 1;
-        const url = new URL(request.url);
-        if (session) url.searchParams.set("crumb", session.crumb);
         let response: Response;
         try {
-          response = await input.fetcher(url.toString(), {
+          response = await input.fetcher(request.url.toString(), {
             headers: {
               "User-Agent": YAHOO_CHART_USER_AGENT,
               Accept: "application/json,text/plain,*/*",
-              ...(session ? { Cookie: session.cookie } : {}),
             },
             signal: input.signal,
           });
@@ -372,23 +341,8 @@ const fetchHistory = async (input: {
       }
       return null;
     };
-    const unauthenticated = await loadRequests();
-    if (unauthenticated) return unauthenticated;
-    const sessionAttempt = await fetchYahooSession({ fetcher: input.fetcher, signal: input.signal });
-    if (sessionAttempt.session) {
-      const authenticated = await loadRequests(sessionAttempt.session);
-      if (authenticated) return authenticated;
-    } else if (sessionAttempt.failure) {
-      console.warn(JSON.stringify({
-        event: "portfolio_backtest_yahoo_session",
-        requestId: input.requestId,
-        ticker: input.ticker,
-        status: "unavailable",
-        yahooSessionHost: sessionAttempt.failure.host,
-        ...(sessionAttempt.failure.status === undefined ? {} : { yahooSessionStatus: sessionAttempt.failure.status }),
-        yahooSessionReason: sessionAttempt.failure.reason,
-      }));
-    }
+    const result = await loadRequests();
+    if (result) return result;
     const upstream = lastFailure || { host: "unknown" };
     throw new PortfolioBacktestApiError(
       "UPSTREAM_UNAVAILABLE",
