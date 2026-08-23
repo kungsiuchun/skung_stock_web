@@ -37,9 +37,15 @@ export const PORTFOLIO_BACKTEST_API_DEADLINE_MS = 20_000;
 export const PORTFOLIO_BACKTEST_HISTORY_TTL_MS = 60_000;
 const MAX_HISTORY_FETCH_CONCURRENCY = 3;
 const US_EXCHANGES = new Set(["NMS", "NGM", "NYQ", "ASE", "PCX", "NCM", "NGS", "NAS", "BTS", "IEX", "CBOE"]);
+const YAHOO_CHART_HOSTS = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"] as const;
+const YAHOO_CHART_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
 class PortfolioBacktestApiError extends Error {
-  constructor(public readonly code: "INVALID_JSON" | "INELIGIBLE_TICKER" | "UPSTREAM_UNAVAILABLE" | "MALFORMED_PAYLOAD" | "YAHOO_TIMEOUT", message: string) {
+  constructor(
+    public readonly code: "INVALID_JSON" | "INELIGIBLE_TICKER" | "UPSTREAM_UNAVAILABLE" | "MALFORMED_PAYLOAD" | "YAHOO_TIMEOUT",
+    message: string,
+    public readonly upstream?: { host: string; status?: number; attempts?: number },
+  ) {
     super(message);
     this.name = "PortfolioBacktestApiError";
   }
@@ -185,6 +191,14 @@ const safeError = (error: unknown) => {
   return { code: "UPSTREAM_UNAVAILABLE", message: "Market history is currently unavailable. Retry later." };
 };
 
+const safeUpstreamTelemetry = (error: unknown) => error instanceof PortfolioBacktestApiError && error.upstream
+  ? {
+      upstreamHost: error.upstream.host,
+      ...(error.upstream.status === undefined ? {} : { upstreamStatus: error.upstream.status }),
+      ...(error.upstream.attempts === undefined ? {} : { upstreamAttempts: error.upstream.attempts }),
+    }
+  : {};
+
 const cacheStatus = (statuses: MarketCacheStatus[]): MarketCacheStatus => {
   if (statuses.every((status) => status === "bypassed")) return "bypassed";
   if (statuses.some((status) => status === "stale")) return "stale";
@@ -225,26 +239,40 @@ const fetchHistory = async (input: {
   requestId: input.requestId,
   sourceAsOf: (value) => value.points[value.points.length - 1]?.date,
   load: async () => {
-    const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(input.ticker)}`);
-    url.searchParams.set("interval", "1d");
-    url.searchParams.set("period1", String(Math.floor(Date.parse(`${input.start}T00:00:00.000Z`) / 1_000)));
-    url.searchParams.set("period2", String(Math.floor(Date.parse(`${input.end}T00:00:00.000Z`) / 1_000) + 86_400));
-    url.searchParams.set("events", "history,div,splits");
-    let response: Response;
-    try {
-      response = await input.fetcher(url.toString(), { headers: { "User-Agent": "Mozilla/5.0" }, signal: input.signal });
-    } catch (error) {
-      if (input.signal.aborted) throw new PortfolioBacktestApiError("YAHOO_TIMEOUT", "Market history provider timed out.");
-      throw new PortfolioBacktestApiError("UPSTREAM_UNAVAILABLE", "Market history provider could not be reached.");
+    let lastFailure: { host: string; status?: number } | undefined;
+    for (const host of YAHOO_CHART_HOSTS) {
+      const url = new URL(`https://${host}/v8/finance/chart/${encodeURIComponent(input.ticker)}`);
+      url.searchParams.set("interval", "1d");
+      url.searchParams.set("period1", String(Math.floor(Date.parse(`${input.start}T00:00:00.000Z`) / 1_000)));
+      url.searchParams.set("period2", String(Math.floor(Date.parse(`${input.end}T00:00:00.000Z`) / 1_000) + 86_400));
+      url.searchParams.set("events", "history,div,splits");
+      let response: Response;
+      try {
+        response = await input.fetcher(url.toString(), { headers: { "User-Agent": YAHOO_CHART_USER_AGENT, Accept: "application/json,text/plain,*/*" }, signal: input.signal });
+      } catch {
+        if (input.signal.aborted) throw new PortfolioBacktestApiError("YAHOO_TIMEOUT", "Market history provider timed out.");
+        lastFailure = { host };
+        continue;
+      }
+      if (!response.ok) {
+        lastFailure = { host, status: response.status };
+        continue;
+      }
+      let payload: unknown;
+      try {
+        payload = await response.json();
+      } catch {
+        lastFailure = { host, status: response.status };
+        continue;
+      }
+      return normalizeYahooPortfolioHistory({ ticker: input.ticker, payload, now: input.now });
     }
-    if (!response.ok) throw new PortfolioBacktestApiError("UPSTREAM_UNAVAILABLE", "Market history provider returned an unavailable response.");
-    let payload: unknown;
-    try {
-      payload = await response.json();
-    } catch {
-      throw new PortfolioBacktestApiError("MALFORMED_PAYLOAD", "Market history provider returned malformed JSON.");
-    }
-    return normalizeYahooPortfolioHistory({ ticker: input.ticker, payload, now: input.now });
+    const upstream = lastFailure || { host: "unknown" };
+    throw new PortfolioBacktestApiError(
+      "UPSTREAM_UNAVAILABLE",
+      upstream.status ? "Market history provider returned an unavailable response." : "Market history provider could not be reached.",
+      { ...upstream, attempts: YAHOO_CHART_HOSTS.length },
+    );
   },
 });
 
@@ -322,7 +350,7 @@ export async function onRequestPost(context: ApiContext) {
     const failure = controller.signal.aborted
       ? { code: "REQUEST_TIMEOUT", message: "The portfolio backtest exceeded its allowed market-data deadline." }
       : safeError(error);
-    console.error(JSON.stringify({ event: "portfolio_backtest", requestId, status: "failed", errorCode: failure.code, errorClass: error instanceof Error ? error.name : "unknown", durationMs: Date.now() - startedAt }));
+    console.error(JSON.stringify({ event: "portfolio_backtest", requestId, status: "failed", errorCode: failure.code, errorClass: error instanceof Error ? error.name : "unknown", ...safeUpstreamTelemetry(error), durationMs: Date.now() - startedAt }));
     return json({ error: failure, requestId }, controller.signal.aborted ? 504 : errorStatus(error), requestId);
   } finally {
     clearTimeout(deadline);

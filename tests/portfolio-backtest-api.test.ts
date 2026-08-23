@@ -165,6 +165,38 @@ test("returns normalized US ETF portfolio and SPY results without raw Yahoo payl
   assert.equal("chart" in body, false);
 });
 
+test("retries Yahoo chart history through its second origin when the first origin is unavailable", async () => {
+  const hosts: string[] = [];
+  const userAgents: string[] = [];
+  const response = await onRequestPost({
+    request: requestFor({
+      startingCapital: 10_000,
+      positions: [{ ticker: "VTI", basisPoints: 10_000 }],
+      startDate: "2025-01-02",
+      endDate: "2025-01-06",
+      rebalancePolicy: "none",
+      dividendPolicy: "reinvest",
+    }),
+    env: {},
+    fetcher: async (input, init) => {
+      const url = new URL(String(input));
+      hosts.push(url.hostname);
+      userAgents.push(new Headers(init?.headers).get("User-Agent") || "");
+      if (url.hostname === "query1.finance.yahoo.com") return new Response("temporarily unavailable", { status: 429 });
+      const ticker = url.pathname.includes("/VTI") ? "VTI" : "SPY";
+      return new Response(JSON.stringify(chartPayload(ticker)), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  const body = await response.json() as { data: { benchmark: string }; cache: { status: string } };
+
+  assert.equal(response.status, 200);
+  assert.equal(body.data.benchmark, "SPY");
+  assert.equal(body.cache.status, "bypassed");
+  assert.equal(hosts.filter((host) => host === "query1.finance.yahoo.com").length, 2);
+  assert.equal(hosts.filter((host) => host === "query2.finance.yahoo.com").length, 2);
+  assert.ok(userAgents.every((userAgent) => userAgent.includes("Chrome/120")));
+});
+
 test("verifies US ETF ticker names through the same server-side API before a backtest runs", async () => {
   const response = await onRequestPost({
     request: requestFor({ operation: "validate", tickers: ["vti", "bnd"] }),
