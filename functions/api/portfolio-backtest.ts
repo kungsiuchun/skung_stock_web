@@ -43,6 +43,7 @@ const YAHOO_CHART_HOSTS = ["query1.finance.yahoo.com", "query2.finance.yahoo.com
 const YAHOO_CHART_USER_AGENT = "Mozilla/5.0";
 const YAHOO_RANGE_RECENCY_MS = 14 * 86_400_000;
 const INFERRED_DIVIDEND_FACTOR_EPSILON = 1e-6;
+const nativeWorkerFetch: typeof fetch = (input, init) => fetch(input, init);
 
 type YahooChartRequest = {
   host: typeof YAHOO_CHART_HOSTS[number];
@@ -384,6 +385,7 @@ export async function onRequestPost(context: ApiContext) {
   const startedAt = Date.now();
   const requestId = crypto.randomUUID();
   const deadlineMs = context.deadlineMs ?? PORTFOLIO_BACKTEST_API_DEADLINE_MS;
+  const fetcher = context.fetcher || nativeWorkerFetch;
   const controller = new AbortController();
   const deadline = setTimeout(() => controller.abort(), deadlineMs);
   try {
@@ -398,7 +400,7 @@ export async function onRequestPost(context: ApiContext) {
       const tickers = validateTickerList(body.tickers);
       const now = context.now || new Date();
       const range = defaultRange(now);
-       const fetched = await boundedSeriesFetch(tickers, (ticker) => fetchHistory({ ticker, start: range.start, end: range.end, db: context.env.MARKET_CACHE_DB, deadlineMs, signal: controller.signal, fetcher: context.fetcher || fetch, now, requestId }));
+       const fetched = await boundedSeriesFetch(tickers, (ticker) => fetchHistory({ ticker, start: range.start, end: range.end, db: context.env.MARKET_CACHE_DB, deadlineMs, signal: controller.signal, fetcher, now, requestId }));
        fetched.forEach((entry) => assertNormalizedEligibleUsEtf(entry.value));
       const statuses = fetched.map((entry) => entry.cache.status);
       const status = cacheStatus(statuses);
@@ -420,7 +422,7 @@ export async function onRequestPost(context: ApiContext) {
     });
     const tickers = [...new Set([...body.positions.map((position) => position.ticker.trim().toUpperCase()), PORTFOLIO_BACKTEST_BENCHMARK])];
     const now = context.now || new Date();
-    const fetched = await boundedSeriesFetch(tickers, (ticker) => fetchHistory({ ticker, start: range.start, end: range.end, db: context.env.MARKET_CACHE_DB, deadlineMs, signal: controller.signal, fetcher: context.fetcher || fetch, now, requestId }));
+    const fetched = await boundedSeriesFetch(tickers, (ticker) => fetchHistory({ ticker, start: range.start, end: range.end, db: context.env.MARKET_CACHE_DB, deadlineMs, signal: controller.signal, fetcher, now, requestId }));
     fetched.forEach((entry) => assertNormalizedEligibleUsEtf(entry.value));
     const computed = simulatePortfolioBacktest({
       startingCapital: body.startingCapital,
