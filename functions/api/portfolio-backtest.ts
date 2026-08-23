@@ -39,6 +39,13 @@ const MAX_HISTORY_FETCH_CONCURRENCY = 3;
 const US_EXCHANGES = new Set(["NMS", "NGM", "NYQ", "ASE", "PCX", "NCM", "NGS", "NAS", "BTS", "IEX", "CBOE"]);
 const YAHOO_CHART_HOSTS = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"] as const;
 const YAHOO_CHART_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+const YAHOO_RANGE_RECENCY_MS = 14 * 86_400_000;
+
+type YahooChartRequest = {
+  host: typeof YAHOO_CHART_HOSTS[number];
+  mode: "range" | "period";
+  url: URL;
+};
 
 class PortfolioBacktestApiError extends Error {
   constructor(
@@ -78,6 +85,48 @@ const defaultRange = (now: Date) => {
 const requestedRange = (body: BacktestRequest, now: Date) => {
   const defaults = defaultRange(now);
   return { start: body.startDate || defaults.start, end: body.endDate || defaults.end };
+};
+
+const yahooRangeForRecentEnd = (start: string, end: string, now: Date) => {
+  const nowDate = dateKeyInTimeZone(now, "America/New_York");
+  const startMs = Date.parse(`${start}T00:00:00.000Z`);
+  const endMs = Date.parse(`${end}T00:00:00.000Z`);
+  const nowMs = Date.parse(`${nowDate}T00:00:00.000Z`);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || !Number.isFinite(nowMs)
+    || endMs > nowMs || nowMs - endMs > YAHOO_RANGE_RECENCY_MS) return null;
+
+  const requiredDays = Math.ceil((nowMs - startMs) / 86_400_000);
+  if (requiredDays <= 31) return "1mo";
+  if (requiredDays <= 92) return "3mo";
+  if (requiredDays <= 184) return "6mo";
+  if (requiredDays <= 367) return "1y";
+  if (requiredDays <= 2 * 366 + 7) return "2y";
+  if (requiredDays <= 5 * 366 + 14) return "5y";
+  if (requiredDays <= 10 * 366 + 21) return "10y";
+  return "max";
+};
+
+const yahooChartRequests = (input: Pick<ApiContext, "now"> & { ticker: string; start: string; end: string }): YahooChartRequest[] => {
+  const requests: YahooChartRequest[] = [];
+  const range = yahooRangeForRecentEnd(input.start, input.end, input.now || new Date());
+  if (range) {
+    const url = new URL(`https://${YAHOO_CHART_HOSTS[0]}/v8/finance/chart/${encodeURIComponent(input.ticker)}`);
+    url.searchParams.set("range", range);
+    url.searchParams.set("interval", "1d");
+    url.searchParams.set("includePrePost", "false");
+    url.searchParams.set("events", "div,splits");
+    requests.push({ host: YAHOO_CHART_HOSTS[0], mode: "range", url });
+  }
+  for (const host of YAHOO_CHART_HOSTS) {
+    const url = new URL(`https://${host}/v8/finance/chart/${encodeURIComponent(input.ticker)}`);
+    url.searchParams.set("interval", "1d");
+    url.searchParams.set("period1", String(Math.floor(Date.parse(`${input.start}T00:00:00.000Z`) / 1_000)));
+    url.searchParams.set("period2", String(Math.floor(Date.parse(`${input.end}T00:00:00.000Z`) / 1_000) + 86_400));
+    url.searchParams.set("includePrePost", "false");
+    url.searchParams.set("events", "div,splits");
+    requests.push({ host, mode: "period", url });
+  }
+  return requests;
 };
 
 const eventDate = (key: string, value: unknown, timeZone: string) => {
@@ -240,29 +289,26 @@ const fetchHistory = async (input: {
   sourceAsOf: (value) => value.points[value.points.length - 1]?.date,
   load: async () => {
     let lastFailure: { host: string; status?: number } | undefined;
-    for (const host of YAHOO_CHART_HOSTS) {
-      const url = new URL(`https://${host}/v8/finance/chart/${encodeURIComponent(input.ticker)}`);
-      url.searchParams.set("interval", "1d");
-      url.searchParams.set("period1", String(Math.floor(Date.parse(`${input.start}T00:00:00.000Z`) / 1_000)));
-      url.searchParams.set("period2", String(Math.floor(Date.parse(`${input.end}T00:00:00.000Z`) / 1_000) + 86_400));
-      url.searchParams.set("events", "history,div,splits");
+    let attempts = 0;
+    for (const request of yahooChartRequests(input)) {
+      attempts += 1;
       let response: Response;
       try {
-        response = await input.fetcher(url.toString(), { headers: { "User-Agent": YAHOO_CHART_USER_AGENT, Accept: "application/json,text/plain,*/*" }, signal: input.signal });
+        response = await input.fetcher(request.url.toString(), { headers: { "User-Agent": YAHOO_CHART_USER_AGENT, Accept: "application/json,text/plain,*/*" }, signal: input.signal });
       } catch {
         if (input.signal.aborted) throw new PortfolioBacktestApiError("YAHOO_TIMEOUT", "Market history provider timed out.");
-        lastFailure = { host };
+        lastFailure = { host: request.host };
         continue;
       }
       if (!response.ok) {
-        lastFailure = { host, status: response.status };
+        lastFailure = { host: request.host, status: response.status };
         continue;
       }
       let payload: unknown;
       try {
         payload = await response.json();
       } catch {
-        lastFailure = { host, status: response.status };
+        lastFailure = { host: request.host, status: response.status };
         continue;
       }
       return normalizeYahooPortfolioHistory({ ticker: input.ticker, payload, now: input.now });
@@ -271,7 +317,7 @@ const fetchHistory = async (input: {
     throw new PortfolioBacktestApiError(
       "UPSTREAM_UNAVAILABLE",
       upstream.status ? "Market history provider returned an unavailable response." : "Market history provider could not be reached.",
-      { ...upstream, attempts: YAHOO_CHART_HOSTS.length },
+      { ...upstream, attempts },
     );
   },
 });

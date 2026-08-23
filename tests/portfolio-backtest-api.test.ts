@@ -153,7 +153,7 @@ test("returns normalized US ETF portfolio and SPY results without raw Yahoo payl
 
   assert.equal(response.status, 200);
   assert.equal(requests.length, 2);
-  assert.ok(requests.every((url) => url.includes("interval=1d") && url.includes("events=history%2Cdiv%2Csplits")));
+  assert.ok(requests.every((url) => url.includes("interval=1d") && url.includes("events=div%2Csplits") && url.includes("includePrePost=false")));
   assert.equal(body.data.benchmark, "SPY");
   assert.equal(body.data.effectiveRange.sessionCount, 3);
   assert.equal(body.data.curve.length, 3);
@@ -195,6 +195,137 @@ test("retries Yahoo chart history through its second origin when the first origi
   assert.equal(hosts.filter((host) => host === "query1.finance.yahoo.com").length, 2);
   assert.equal(hosts.filter((host) => host === "query2.finance.yahoo.com").length, 2);
   assert.ok(userAgents.every((userAgent) => userAgent.includes("Chrome/120")));
+});
+
+test("uses Yahoo's range chart request for a range ending at the latest completed session", async () => {
+  const requests: URL[] = [];
+  const response = await onRequestPost({
+    request: requestFor({
+      startingCapital: 10_000,
+      positions: [{ ticker: "VTI", basisPoints: 10_000 }],
+      startDate: "2025-01-02",
+      endDate: "2025-01-06",
+      rebalancePolicy: "none",
+      dividendPolicy: "reinvest",
+    }),
+    env: {},
+    now: new Date("2025-01-08T15:00:00.000Z"),
+    fetcher: async (input) => {
+      const url = new URL(String(input));
+      requests.push(url);
+      const ticker = url.pathname.endsWith("/VTI") ? "VTI" : "SPY";
+      return new Response(JSON.stringify(chartPayload(ticker)), { status: 200 });
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(requests.length, 2);
+  assert.ok(requests.every((url) => url.hostname === "query1.finance.yahoo.com"));
+  assert.ok(requests.every((url) => url.searchParams.get("range") === "1mo"));
+  assert.ok(requests.every((url) => url.searchParams.get("period1") === null && url.searchParams.get("period2") === null));
+});
+
+test("fails safely after both Yahoo chart origins return non-success responses", async () => {
+  const hosts: string[] = [];
+  const logs: string[] = [];
+  const originalConsoleError = console.error;
+  console.error = (...values: unknown[]) => { logs.push(values.map((value) => String(value)).join(" ")); };
+  try {
+    const response = await onRequestPost({
+      request: requestFor({
+        startingCapital: 10_000,
+        positions: [{ ticker: "VTI", basisPoints: 10_000 }],
+        startDate: "2025-01-02",
+        endDate: "2025-01-06",
+        rebalancePolicy: "none",
+        dividendPolicy: "reinvest",
+      }),
+      env: {},
+      now: new Date("2026-08-23T15:00:00.000Z"),
+      fetcher: async (input) => {
+        const url = new URL(String(input));
+        hosts.push(url.hostname);
+        return new Response(url.hostname === "query1.finance.yahoo.com" ? "q1-private-body" : "q2-private-body", {
+          status: url.hostname === "query1.finance.yahoo.com" ? 429 : 503,
+        });
+      },
+    });
+    const body = await response.json() as { error: { code: string }; requestId: string };
+
+    assert.equal(response.status, 502);
+    assert.equal(body.error.code, "UPSTREAM_UNAVAILABLE");
+    assert.match(body.requestId, /^[\w-]+$/);
+    assert.equal(hosts.filter((host) => host === "query1.finance.yahoo.com").length, 2);
+    assert.equal(hosts.filter((host) => host === "query2.finance.yahoo.com").length, 2);
+    assert.doesNotMatch(JSON.stringify(body), /private-body/);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0], /query2\.finance\.yahoo\.com/);
+    assert.match(logs[0], /"upstreamStatus":503/);
+    assert.match(logs[0], /"upstreamAttempts":2/);
+    assert.doesNotMatch(logs[0], /private-body/);
+  } finally {
+    console.error = originalConsoleError;
+  }
+});
+
+test("uses one shared deadline when the second Yahoo chart origin hangs", async () => {
+  const hosts: string[] = [];
+  const response = await onRequestPost({
+    request: requestFor({
+      startingCapital: 10_000,
+      positions: [{ ticker: "VTI", basisPoints: 10_000 }],
+      startDate: "2025-01-02",
+      endDate: "2025-01-06",
+      rebalancePolicy: "none",
+      dividendPolicy: "reinvest",
+    }),
+    env: {},
+    now: new Date("2026-08-23T15:00:00.000Z"),
+    deadlineMs: 20,
+    fetcher: async (input, init) => {
+      const url = new URL(String(input));
+      hosts.push(url.hostname);
+      if (url.hostname === "query1.finance.yahoo.com") return new Response("retry q2", { status: 429 });
+      return new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+    },
+  });
+  const body = await response.json() as { error: { code: string } };
+
+  assert.equal(response.status, 504);
+  assert.equal(body.error.code, "REQUEST_TIMEOUT");
+  assert.equal(hosts.filter((host) => host === "query1.finance.yahoo.com").length, 2);
+  assert.equal(hosts.filter((host) => host === "query2.finance.yahoo.com").length, 2);
+});
+
+test("serves a stale cached history only after both Yahoo chart origins fail", async () => {
+  const db = new PortfolioCacheD1();
+  db.seed("VTI", normalizedHistory("VTI"), "2000-01-01T00:00:00.000Z");
+  db.seed("SPY", normalizedHistory("SPY"), "2000-01-01T00:00:00.000Z");
+  const hosts: string[] = [];
+  const response = await onRequestPost({
+    request: requestFor({
+      startingCapital: 10_000,
+      positions: [{ ticker: "VTI", basisPoints: 10_000 }],
+      startDate: "2025-01-02",
+      endDate: "2025-01-06",
+      rebalancePolicy: "none",
+      dividendPolicy: "reinvest",
+    }),
+    env: { MARKET_CACHE_DB: db },
+    now: new Date("2026-08-23T15:00:00.000Z"),
+    fetcher: async (input) => {
+      const url = new URL(String(input));
+      hosts.push(url.hostname);
+      return new Response("provider error", { status: url.hostname === "query1.finance.yahoo.com" ? 429 : 503 });
+    },
+  });
+  const body = await response.json() as { data: { warnings: string[] }; cache: { status: string } };
+
+  assert.equal(response.status, 206);
+  assert.equal(body.cache.status, "stale");
+  assert.match(body.data.warnings.join(" "), /stale because a refresh failed/i);
+  assert.equal(hosts.filter((host) => host === "query1.finance.yahoo.com").length, 2);
+  assert.equal(hosts.filter((host) => host === "query2.finance.yahoo.com").length, 2);
 });
 
 test("verifies US ETF ticker names through the same server-side API before a backtest runs", async () => {
