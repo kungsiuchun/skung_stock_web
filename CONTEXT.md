@@ -137,3 +137,15 @@ Missing constituent history is unavailable and excluded from the eligible breadt
 GitHub Actions owns the batch computation and writes bounded normalized objects to the dedicated Standard-class `market-breadth-data` R2 bucket. Price state and READY snapshots use independent A/B slots, refresh audit uses a 64-slot ring, and the status pointer always moves last. Pages owns a read-only R2 API. The feature uses no D1 and no scheduled Cloudflare Worker, and must not share `MARKET_CACHE_DB`, `SPX_RECAP_DB`, or the SPX trading Worker.
 
 A failed refresh preserves the last READY snapshot and makes the public API report `STALE` with a safe error class. No source failure may create demo data or overwrite the last-good snapshot.
+
+## US ETF Portfolio Backtester
+
+US ETF Portfolio Backtester is a standalone Market Lab Work Item at `#/work/portfolio-backtest`.
+
+It compares a visitor-defined USD allocation of one to ten US-listed ETFs with SPY through a read-only EOD historical simulation. The browser submits the configuration only; the Pages Function validates ETF eligibility, retrieves and normalizes history server-side, and returns a versioned result without raw provider payloads.
+
+Every portfolio must allocate exactly 10,000 whole basis points. SPY is the fixed benchmark. Rebalancing may be none, monthly, quarterly, or annual and always occurs on the last shared completed EOD session of that period.
+
+Dividend policy is explicit. `reinvest` uses Yahoo's split- and dividend-adjusted close for total-return compounding. `cash` uses Yahoo's split-adjusted close plus dividend events held as zero-yield cash. Do not apply split factors to Yahoo chart closes a second time: that manufactures a false split gain.
+
+The feature is EOD-only. It exposes requested and effective common date ranges, source-as-of, cache state, warnings, and unavailable states. Missing, malformed, ineligible, or insufficient common history fails closed; it never returns demo, zero-filled, partial-portfolio, or forecast output.

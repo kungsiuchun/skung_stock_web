@@ -11,7 +11,8 @@ export type ViewState =
   | "spx-gex-heatmap"
   | "stocks-intelligence-watcher"
   | "fixed-income"
-  | "market-breadth";
+  | "market-breadth"
+  | "portfolio-backtest";
 
 const VIEW_HASHES: Record<ViewState, string> = {
   home: "#/",
@@ -27,6 +28,7 @@ const VIEW_HASHES: Record<ViewState, string> = {
   "stocks-intelligence-watcher": "#/work/stocks-intelligence-watcher",
   "fixed-income": "#/work/fixed-income",
   "market-breadth": "#/work/market-breadth",
+  "portfolio-backtest": "#/work/portfolio-backtest",
 };
 
 export const getHashForView = (view: ViewState): string => VIEW_HASHES[view];
@@ -78,6 +80,10 @@ export const getViewFromHash = (hash: string): ViewState => {
 
   if (hash.startsWith("#/work/market-breadth")) {
     return "market-breadth";
+  }
+
+  if (hash.startsWith("#/work/portfolio-backtest")) {
+    return "portfolio-backtest";
   }
 
   if (

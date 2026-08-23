@@ -26,6 +26,8 @@
     "robinhood-options:publish": "tsx scripts/publish-robinhood-options-snapshot.ts",
     "test:market-breadth": "node --import tsx --test tests/market-breadth-r2.test.ts tests/market-breadth.test.ts tests/app-routes.test.ts",
     "test:market-breadth:uat": "node tests/market-breadth.uat.cjs",
+    "test:portfolio-backtest": "node --import tsx --test tests/portfolio-backtest.test.ts tests/portfolio-backtest-api.test.ts tests/app-routes.test.ts",
+    "test:portfolio-backtest:uat": "node tests/portfolio-backtest.uat.cjs",
     "market-breadth:action:check": "tsx scripts/refresh-market-breadth.ts",
     "test:mobile-scroll:uat": "node tests/mobile-scroll.uat.cjs",
     "deploy": "npm run deploy:pages",

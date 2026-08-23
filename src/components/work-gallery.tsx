@@ -12,6 +12,7 @@ interface WorkGalleryProps {
   onOpenStocksWatcher: () => void;
   onOpenFixedIncome: () => void;
   onOpenMarketBreadth: () => void;
+  onOpenPortfolioBacktest: () => void;
 }
 
 type WorkItem = {
@@ -35,6 +36,7 @@ export function WorkGallery({
   onOpenStocksWatcher,
   onOpenFixedIncome,
   onOpenMarketBreadth,
+  onOpenPortfolioBacktest,
 }: WorkGalleryProps) {
   const workItems: WorkItem[] = [
     {
@@ -111,6 +113,16 @@ export function WorkGallery({
       icon: <BarChart3 className="h-5 w-5" />,
       featured: true,
       onClick: onOpenMarketBreadth,
+    },
+    {
+      title: "Portfolio vs SPY",
+      category: "Portfolio Lab",
+      description: "Build a US ETF allocation and compare its historical path with SPY under explicit dividend and rebalancing policies.",
+      buildNote: "Uses server-side EOD simulation with visible source, effective dates, and fail-closed market-data states.",
+      action: "Run backtest",
+      icon: <BarChart3 className="h-5 w-5" />,
+      featured: true,
+      onClick: onOpenPortfolioBacktest,
     },
     {
       title: "Image Caption",

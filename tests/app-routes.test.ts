@@ -27,6 +27,7 @@ test("round trips every page-level view to a hash route", () => {
     ["stocks-intelligence-watcher", "#/work/stocks-intelligence-watcher"],
     ["fixed-income", "#/work/fixed-income"],
     ["market-breadth", "#/work/market-breadth"],
+    ["portfolio-backtest", "#/work/portfolio-backtest"],
   ];
 
   for (const [view, hash] of expected) {
