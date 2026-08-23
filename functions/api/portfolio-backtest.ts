@@ -314,13 +314,28 @@ const fetchHistory = async (input: {
         attempts += 1;
         let response: Response;
         try {
-          response = await input.fetcher(request.url.toString(), {
-            headers: {
-              "User-Agent": YAHOO_CHART_USER_AGENT,
-            },
-            signal: input.signal,
+          response = await new Promise<Response>((resolve, reject) => {
+            if (input.signal.aborted) {
+              reject(new PortfolioBacktestApiError("YAHOO_TIMEOUT", "Market history provider timed out."));
+              return;
+            }
+            const onAbort = () => reject(new PortfolioBacktestApiError("YAHOO_TIMEOUT", "Market history provider timed out."));
+            input.signal.addEventListener("abort", onAbort, { once: true });
+            Promise.resolve(input.fetcher(request.url.toString(), {
+              headers: { "User-Agent": YAHOO_CHART_USER_AGENT },
+            })).then(
+              (value) => {
+                input.signal.removeEventListener("abort", onAbort);
+                resolve(value);
+              },
+              (error) => {
+                input.signal.removeEventListener("abort", onAbort);
+                reject(error);
+              },
+            );
           });
-        } catch {
+        } catch (error) {
+          if (error instanceof PortfolioBacktestApiError) throw error;
           if (input.signal.aborted) throw new PortfolioBacktestApiError("YAHOO_TIMEOUT", "Market history provider timed out.");
           lastFailure = { host: request.host };
           continue;

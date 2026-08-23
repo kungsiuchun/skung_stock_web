@@ -169,6 +169,7 @@ test("retries Yahoo chart history through its second origin when the first origi
   const hosts: string[] = [];
   const userAgents: string[] = [];
   const accepts: Array<string | null> = [];
+  const signals: Array<AbortSignal | null | undefined> = [];
   const response = await onRequestPost({
     request: requestFor({
       startingCapital: 10_000,
@@ -185,6 +186,7 @@ test("retries Yahoo chart history through its second origin when the first origi
       const headers = new Headers(init?.headers);
       userAgents.push(headers.get("User-Agent") || "");
       accepts.push(headers.get("Accept"));
+      signals.push(init?.signal);
       if (url.hostname === "query1.finance.yahoo.com") return new Response("temporarily unavailable", { status: 429 });
       const ticker = url.pathname.includes("/VTI") ? "VTI" : "SPY";
       return new Response(JSON.stringify(chartPayload(ticker)), { status: 200, headers: { "content-type": "application/json" } });
@@ -199,6 +201,7 @@ test("retries Yahoo chart history through its second origin when the first origi
   assert.equal(hosts.filter((host) => host === "query2.finance.yahoo.com").length, 2);
   assert.ok(userAgents.every((userAgent) => userAgent === "Mozilla/5.0"));
   assert.ok(accepts.every((accept) => accept === null));
+  assert.ok(signals.every((signal) => signal === undefined));
 });
 
 test("uses Yahoo's range chart request for a range ending at the latest completed session", async () => {
