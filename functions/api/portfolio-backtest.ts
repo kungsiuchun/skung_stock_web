@@ -35,9 +35,9 @@ type ApiContext = {
 
 export const PORTFOLIO_BACKTEST_API_DEADLINE_MS = 20_000;
 export const PORTFOLIO_BACKTEST_HISTORY_TTL_MS = 60_000;
-// Yahoo's chart edge may terminate simultaneous Worker-origin requests without an HTTP response.
-// Keep one bounded request lane so every provider failure remains observable and fail-closed.
-const MAX_HISTORY_FETCH_CONCURRENCY = 1;
+// Keep provider pressure bounded while allowing a 10-ETF portfolio to complete
+// within the request budget.
+const MAX_HISTORY_FETCH_CONCURRENCY = 3;
 const US_EXCHANGES = new Set(["NMS", "NGM", "NYQ", "ASE", "PCX", "NCM", "NGS", "NAS", "BTS", "IEX", "CBOE"]);
 const YAHOO_CHART_HOSTS = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"] as const;
 const YAHOO_CHART_USER_AGENT = "Mozilla/5.0";

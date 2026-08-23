@@ -278,8 +278,8 @@ test("fails safely after both Yahoo chart origins return non-success responses",
     assert.equal(response.status, 502);
     assert.equal(body.error.code, "UPSTREAM_UNAVAILABLE");
     assert.match(body.requestId, /^[\w-]+$/);
-    assert.equal(hosts.filter((host) => host === "query1.finance.yahoo.com").length, 1);
-    assert.equal(hosts.filter((host) => host === "query2.finance.yahoo.com").length, 1);
+    assert.equal(hosts.filter((host) => host === "query1.finance.yahoo.com").length, 2);
+    assert.equal(hosts.filter((host) => host === "query2.finance.yahoo.com").length, 2);
     assert.doesNotMatch(JSON.stringify(body), /private-body/);
     assert.equal(logs.length, 1);
     assert.match(logs[0], /query2\.finance\.yahoo\.com/);
@@ -316,8 +316,8 @@ test("uses one shared deadline when the second Yahoo chart origin hangs", async 
 
   assert.equal(response.status, 504);
   assert.equal(body.error.code, "REQUEST_TIMEOUT");
-  assert.equal(hosts.filter((host) => host === "query1.finance.yahoo.com").length, 1);
-  assert.equal(hosts.filter((host) => host === "query2.finance.yahoo.com").length, 1);
+  assert.equal(hosts.filter((host) => host === "query1.finance.yahoo.com").length, 2);
+  assert.equal(hosts.filter((host) => host === "query2.finance.yahoo.com").length, 2);
 });
 
 test("serves a stale cached history only after both Yahoo chart origins fail", async () => {
