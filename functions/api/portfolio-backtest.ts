@@ -52,6 +52,15 @@ type YahooSession = {
   crumb: string;
 };
 
+type YahooSessionAttempt = {
+  session: YahooSession | null;
+  failure?: {
+    host: "fc.yahoo.com" | "query2.finance.yahoo.com";
+    status?: number;
+    reason: "COOKIE_FETCH_FAILED" | "COOKIE_MISSING" | "CRUMB_FETCH_FAILED" | "CRUMB_UNAVAILABLE" | "CRUMB_EMPTY";
+  };
+};
+
 class PortfolioBacktestApiError extends Error {
   constructor(
     public readonly code: "INVALID_JSON" | "INELIGIBLE_TICKER" | "UPSTREAM_UNAVAILABLE" | "MALFORMED_PAYLOAD" | "YAHOO_TIMEOUT",
@@ -134,7 +143,7 @@ const yahooChartRequests = (input: Pick<ApiContext, "now"> & { ticker: string; s
   return requests;
 };
 
-const fetchYahooSession = async (input: { fetcher: typeof fetch; signal: AbortSignal }): Promise<YahooSession | null> => {
+const fetchYahooSession = async (input: { fetcher: typeof fetch; signal: AbortSignal }): Promise<YahooSessionAttempt> => {
   let cookieResponse: Response;
   try {
     cookieResponse = await input.fetcher("https://fc.yahoo.com", {
@@ -143,11 +152,11 @@ const fetchYahooSession = async (input: { fetcher: typeof fetch; signal: AbortSi
     });
   } catch {
     if (input.signal.aborted) throw new PortfolioBacktestApiError("YAHOO_TIMEOUT", "Market history provider timed out.");
-    return null;
+    return { session: null, failure: { host: "fc.yahoo.com", reason: "COOKIE_FETCH_FAILED" } };
   }
   const cookie = cookieResponse.headers.get("set-cookie") || "";
   // Yahoo's cookie endpoint intentionally responds 404 while issuing the B cookie.
-  if (!cookie) return null;
+  if (!cookie) return { session: null, failure: { host: "fc.yahoo.com", status: cookieResponse.status, reason: "COOKIE_MISSING" } };
 
   let crumbResponse: Response;
   try {
@@ -157,11 +166,13 @@ const fetchYahooSession = async (input: { fetcher: typeof fetch; signal: AbortSi
     });
   } catch {
     if (input.signal.aborted) throw new PortfolioBacktestApiError("YAHOO_TIMEOUT", "Market history provider timed out.");
-    return null;
+    return { session: null, failure: { host: "query2.finance.yahoo.com", reason: "CRUMB_FETCH_FAILED" } };
   }
-  if (!crumbResponse.ok) return null;
+  if (!crumbResponse.ok) return { session: null, failure: { host: "query2.finance.yahoo.com", status: crumbResponse.status, reason: "CRUMB_UNAVAILABLE" } };
   const crumb = (await crumbResponse.text()).trim();
-  return crumb ? { cookie, crumb } : null;
+  return crumb
+    ? { session: { cookie, crumb } }
+    : { session: null, failure: { host: "query2.finance.yahoo.com", status: crumbResponse.status, reason: "CRUMB_EMPTY" } };
 };
 
 const eventDate = (key: string, value: unknown, timeZone: string) => {
@@ -363,10 +374,20 @@ const fetchHistory = async (input: {
     };
     const unauthenticated = await loadRequests();
     if (unauthenticated) return unauthenticated;
-    const session = await fetchYahooSession({ fetcher: input.fetcher, signal: input.signal });
-    if (session) {
-      const authenticated = await loadRequests(session);
+    const sessionAttempt = await fetchYahooSession({ fetcher: input.fetcher, signal: input.signal });
+    if (sessionAttempt.session) {
+      const authenticated = await loadRequests(sessionAttempt.session);
       if (authenticated) return authenticated;
+    } else if (sessionAttempt.failure) {
+      console.warn(JSON.stringify({
+        event: "portfolio_backtest_yahoo_session",
+        requestId: input.requestId,
+        ticker: input.ticker,
+        status: "unavailable",
+        yahooSessionHost: sessionAttempt.failure.host,
+        ...(sessionAttempt.failure.status === undefined ? {} : { yahooSessionStatus: sessionAttempt.failure.status }),
+        yahooSessionReason: sessionAttempt.failure.reason,
+      }));
     }
     const upstream = lastFailure || { host: "unknown" };
     throw new PortfolioBacktestApiError(
