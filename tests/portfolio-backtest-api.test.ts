@@ -168,6 +168,7 @@ test("returns normalized US ETF portfolio and SPY results without raw Yahoo payl
 test("retries Yahoo chart history through its second origin when the first origin is unavailable", async () => {
   const hosts: string[] = [];
   const userAgents: string[] = [];
+  const accepts: Array<string | null> = [];
   const response = await onRequestPost({
     request: requestFor({
       startingCapital: 10_000,
@@ -181,7 +182,9 @@ test("retries Yahoo chart history through its second origin when the first origi
     fetcher: async (input, init) => {
       const url = new URL(String(input));
       hosts.push(url.hostname);
-      userAgents.push(new Headers(init?.headers).get("User-Agent") || "");
+      const headers = new Headers(init?.headers);
+      userAgents.push(headers.get("User-Agent") || "");
+      accepts.push(headers.get("Accept"));
       if (url.hostname === "query1.finance.yahoo.com") return new Response("temporarily unavailable", { status: 429 });
       const ticker = url.pathname.includes("/VTI") ? "VTI" : "SPY";
       return new Response(JSON.stringify(chartPayload(ticker)), { status: 200, headers: { "content-type": "application/json" } });
@@ -194,7 +197,8 @@ test("retries Yahoo chart history through its second origin when the first origi
   assert.equal(body.cache.status, "bypassed");
   assert.equal(hosts.filter((host) => host === "query1.finance.yahoo.com").length, 2);
   assert.equal(hosts.filter((host) => host === "query2.finance.yahoo.com").length, 2);
-  assert.ok(userAgents.every((userAgent) => userAgent.includes("Chrome/120")));
+  assert.ok(userAgents.every((userAgent) => userAgent === "Mozilla/5.0"));
+  assert.ok(accepts.every((accept) => accept === null));
 });
 
 test("uses Yahoo's range chart request for a range ending at the latest completed session", async () => {

@@ -38,7 +38,7 @@ export const PORTFOLIO_BACKTEST_HISTORY_TTL_MS = 60_000;
 const MAX_HISTORY_FETCH_CONCURRENCY = 3;
 const US_EXCHANGES = new Set(["NMS", "NGM", "NYQ", "ASE", "PCX", "NCM", "NGS", "NAS", "BTS", "IEX", "CBOE"]);
 const YAHOO_CHART_HOSTS = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"] as const;
-const YAHOO_CHART_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+const YAHOO_CHART_USER_AGENT = "Mozilla/5.0";
 const YAHOO_RANGE_RECENCY_MS = 14 * 86_400_000;
 const INFERRED_DIVIDEND_FACTOR_EPSILON = 1e-6;
 
@@ -317,7 +317,6 @@ const fetchHistory = async (input: {
           response = await input.fetcher(request.url.toString(), {
             headers: {
               "User-Agent": YAHOO_CHART_USER_AGENT,
-              Accept: "application/json,text/plain,*/*",
             },
             signal: input.signal,
           });
