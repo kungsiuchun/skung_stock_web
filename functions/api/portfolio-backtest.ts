@@ -113,9 +113,8 @@ const yahooChartRequests = (input: Pick<ApiContext, "now"> & { ticker: string; s
   const range = yahooRangeForRecentEnd(input.start, input.end, input.now || new Date());
   if (range) {
     const url = new URL(`https://${YAHOO_CHART_HOSTS[0]}/v8/finance/chart/${encodeURIComponent(input.ticker)}`);
-    url.searchParams.set("range", range);
     url.searchParams.set("interval", "1d");
-    url.searchParams.set("includePrePost", "false");
+    url.searchParams.set("range", range);
     requests.push({ host: YAHOO_CHART_HOSTS[0], url });
   }
   for (const host of YAHOO_CHART_HOSTS) {
@@ -123,7 +122,6 @@ const yahooChartRequests = (input: Pick<ApiContext, "now"> & { ticker: string; s
     url.searchParams.set("interval", "1d");
     url.searchParams.set("period1", String(Math.floor(Date.parse(`${input.start}T00:00:00.000Z`) / 1_000)));
     url.searchParams.set("period2", String(Math.floor(Date.parse(`${input.end}T00:00:00.000Z`) / 1_000) + 86_400));
-    url.searchParams.set("includePrePost", "false");
     requests.push({ host, url });
   }
   return requests;

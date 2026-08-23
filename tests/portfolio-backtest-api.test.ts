@@ -153,7 +153,7 @@ test("returns normalized US ETF portfolio and SPY results without raw Yahoo payl
 
   assert.equal(response.status, 200);
   assert.equal(requests.length, 2);
-  assert.ok(requests.every((url) => url.includes("interval=1d") && url.includes("includePrePost=false") && !url.includes("events=")));
+  assert.ok(requests.every((url) => url.includes("interval=1d") && !url.includes("includePrePost=") && !url.includes("events=")));
   assert.equal(body.data.benchmark, "SPY");
   assert.equal(body.data.effectiveRange.sessionCount, 3);
   assert.equal(body.data.curve.length, 3);
