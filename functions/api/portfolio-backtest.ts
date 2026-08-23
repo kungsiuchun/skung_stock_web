@@ -47,6 +47,11 @@ type YahooChartRequest = {
   url: URL;
 };
 
+type YahooSession = {
+  cookie: string;
+  crumb: string;
+};
+
 class PortfolioBacktestApiError extends Error {
   constructor(
     public readonly code: "INVALID_JSON" | "INELIGIBLE_TICKER" | "UPSTREAM_UNAVAILABLE" | "MALFORMED_PAYLOAD" | "YAHOO_TIMEOUT",
@@ -127,6 +132,36 @@ const yahooChartRequests = (input: Pick<ApiContext, "now"> & { ticker: string; s
     requests.push({ host, mode: "period", url });
   }
   return requests;
+};
+
+const fetchYahooSession = async (input: { fetcher: typeof fetch; signal: AbortSignal }): Promise<YahooSession | null> => {
+  let cookieResponse: Response;
+  try {
+    cookieResponse = await input.fetcher("https://fc.yahoo.com", {
+      headers: { "User-Agent": YAHOO_CHART_USER_AGENT },
+      signal: input.signal,
+    });
+  } catch {
+    if (input.signal.aborted) throw new PortfolioBacktestApiError("YAHOO_TIMEOUT", "Market history provider timed out.");
+    return null;
+  }
+  const cookie = cookieResponse.headers.get("set-cookie") || "";
+  // Yahoo's cookie endpoint intentionally responds 404 while issuing the B cookie.
+  if (!cookie) return null;
+
+  let crumbResponse: Response;
+  try {
+    crumbResponse = await input.fetcher("https://query2.finance.yahoo.com/v1/test/getcrumb", {
+      headers: { "User-Agent": YAHOO_CHART_USER_AGENT, Cookie: cookie },
+      signal: input.signal,
+    });
+  } catch {
+    if (input.signal.aborted) throw new PortfolioBacktestApiError("YAHOO_TIMEOUT", "Market history provider timed out.");
+    return null;
+  }
+  if (!crumbResponse.ok) return null;
+  const crumb = (await crumbResponse.text()).trim();
+  return crumb ? { cookie, crumb } : null;
 };
 
 const eventDate = (key: string, value: unknown, timeZone: string) => {
@@ -290,28 +325,48 @@ const fetchHistory = async (input: {
   load: async () => {
     let lastFailure: { host: string; status?: number } | undefined;
     let attempts = 0;
-    for (const request of yahooChartRequests(input)) {
-      attempts += 1;
-      let response: Response;
-      try {
-        response = await input.fetcher(request.url.toString(), { headers: { "User-Agent": YAHOO_CHART_USER_AGENT, Accept: "application/json,text/plain,*/*" }, signal: input.signal });
-      } catch {
-        if (input.signal.aborted) throw new PortfolioBacktestApiError("YAHOO_TIMEOUT", "Market history provider timed out.");
-        lastFailure = { host: request.host };
-        continue;
+    const requests = yahooChartRequests(input);
+    const loadRequests = async (session?: YahooSession) => {
+      for (const request of requests) {
+        attempts += 1;
+        const url = new URL(request.url);
+        if (session) url.searchParams.set("crumb", session.crumb);
+        let response: Response;
+        try {
+          response = await input.fetcher(url.toString(), {
+            headers: {
+              "User-Agent": YAHOO_CHART_USER_AGENT,
+              Accept: "application/json,text/plain,*/*",
+              ...(session ? { Cookie: session.cookie } : {}),
+            },
+            signal: input.signal,
+          });
+        } catch {
+          if (input.signal.aborted) throw new PortfolioBacktestApiError("YAHOO_TIMEOUT", "Market history provider timed out.");
+          lastFailure = { host: request.host };
+          continue;
+        }
+        if (!response.ok) {
+          lastFailure = { host: request.host, status: response.status };
+          continue;
+        }
+        let payload: unknown;
+        try {
+          payload = await response.json();
+        } catch {
+          lastFailure = { host: request.host, status: response.status };
+          continue;
+        }
+        return normalizeYahooPortfolioHistory({ ticker: input.ticker, payload, now: input.now });
       }
-      if (!response.ok) {
-        lastFailure = { host: request.host, status: response.status };
-        continue;
-      }
-      let payload: unknown;
-      try {
-        payload = await response.json();
-      } catch {
-        lastFailure = { host: request.host, status: response.status };
-        continue;
-      }
-      return normalizeYahooPortfolioHistory({ ticker: input.ticker, payload, now: input.now });
+      return null;
+    };
+    const unauthenticated = await loadRequests();
+    if (unauthenticated) return unauthenticated;
+    const session = await fetchYahooSession({ fetcher: input.fetcher, signal: input.signal });
+    if (session) {
+      const authenticated = await loadRequests(session);
+      if (authenticated) return authenticated;
     }
     const upstream = lastFailure || { host: "unknown" };
     throw new PortfolioBacktestApiError(

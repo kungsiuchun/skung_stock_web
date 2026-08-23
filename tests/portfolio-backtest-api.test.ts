@@ -225,6 +225,42 @@ test("uses Yahoo's range chart request for a range ending at the latest complete
   assert.ok(requests.every((url) => url.searchParams.get("period1") === null && url.searchParams.get("period2") === null));
 });
 
+test("retries Yahoo chart history with its cookie and crumb session when unauthenticated chart requests fail", async () => {
+  const authenticatedHeaders: Headers[] = [];
+  const response = await onRequestPost({
+    request: requestFor({
+      startingCapital: 10_000,
+      positions: [{ ticker: "VTI", basisPoints: 10_000 }],
+      startDate: "2025-01-02",
+      endDate: "2025-01-06",
+      rebalancePolicy: "none",
+      dividendPolicy: "cash",
+    }),
+    env: {},
+    now: new Date("2026-08-23T15:00:00.000Z"),
+    fetcher: async (input, init) => {
+      const url = new URL(String(input));
+      if (url.hostname === "fc.yahoo.com") {
+        return new Response("", { status: 404, headers: { "set-cookie": "B=test-session; Path=/" } });
+      }
+      if (url.pathname === "/v1/test/getcrumb") return new Response("crumb-test", { status: 200 });
+      if (url.searchParams.get("crumb") === "crumb-test") {
+        authenticatedHeaders.push(new Headers(init?.headers));
+        const ticker = url.pathname.endsWith("/VTI") ? "VTI" : "SPY";
+        return new Response(JSON.stringify(chartPayload(ticker)), { status: 200 });
+      }
+      return new Response("authentication required", { status: 401 });
+    },
+  });
+  const body = await response.json() as { data: { benchmark: string }; cache: { status: string } };
+
+  assert.equal(response.status, 200);
+  assert.equal(body.data.benchmark, "SPY");
+  assert.equal(body.cache.status, "bypassed");
+  assert.equal(authenticatedHeaders.length, 2);
+  assert.ok(authenticatedHeaders.every((headers) => headers.get("Cookie") === "B=test-session; Path=/"));
+});
+
 test("fails safely after both Yahoo chart origins return non-success responses", async () => {
   const hosts: string[] = [];
   const logs: string[] = [];
