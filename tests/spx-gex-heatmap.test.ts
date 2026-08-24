@@ -2032,6 +2032,20 @@ describe("SPX GEX heatmap API", () => {
     assert.deepEqual(payload.detail?.repairNotes, target.repairNotes);
   });
 
+  it("rejects a cell request missing either required numeric selection before D1", async () => {
+    const db = { prepare: () => { throw new Error("cell validation must precede D1"); } } as any;
+    const missingSnapshot = await getSpxGexCellDetailApi({
+      request: new Request("https://example.com/api/spx-gex-cell-detail?date=2026-05-27&strike=6000&expiry=2026-05-27"),
+      env: { SPX_RECAP_DB: db },
+    });
+    const missingStrike = await getSpxGexCellDetailApi({
+      request: new Request("https://example.com/api/spx-gex-cell-detail?date=2026-05-27&snapshot=570&expiry=2026-05-27"),
+      env: { SPX_RECAP_DB: db },
+    });
+    assert.equal(missingSnapshot.status, 400);
+    assert.equal(missingStrike.status, 400);
+  });
+
   it("returns no data instead of legacy fallback when only daily legacy rows exist", async () => {
     const db = new MemoryD1();
     seedLegacyHeatmapRow(db, "2026-05-27", buildLegacyHeatmap("2026-05-27T13:15:00.000Z"));
@@ -2487,6 +2501,22 @@ describe("SPX GEX pressure API", () => {
     assert.equal(response.headers.get("x-spx-frame-count"), "2");
     assert.equal(Number(response.headers.get("x-spx-projection-bytes")) < 150_000, true);
     assert.equal(text.includes("snapshot_json"), false);
+  });
+
+  it("returns explicit EMPTY for an unavailable requested date", async () => {
+    const db = new CountingD1();
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, { 5995: -100, 6000: 100 }));
+    const response = await getSpxGexPressureApi({
+      request: new Request("https://example.com/api/spx-gex-pressure?date=2026-05-26"),
+      env: { SPX_RECAP_DB: db },
+    });
+    const payload = await response.json() as { status: string; errorCode: string; selectedDate: string; pressure: unknown };
+    assert.equal(response.status, 200);
+    assert.equal(payload.status, "EMPTY");
+    assert.equal(payload.errorCode, "SPX_GEX_PRESSURE_DATE_UNAVAILABLE");
+    assert.equal(payload.selectedDate, "2026-05-26");
+    assert.equal(payload.pressure, null);
+    assert.equal(db.pressureProjectionQueries, 0);
   });
 
   it("keeps a 27-frame pressure projection below 150 KB without returning the 16 MB source payload", async () => {

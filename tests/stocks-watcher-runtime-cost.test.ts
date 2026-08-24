@@ -274,6 +274,48 @@ test("equivalent options display bounds reuse one market-cache entry", async () 
   }
 });
 
+test("normalized ticker and ignored signal intent reuse market-cache entries", async () => {
+  const db = new MarketCacheD1();
+  const originalFetch = globalThis.fetch;
+  let chartLoads = 0;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("/v8/finance/chart/")) {
+      chartLoads += 1;
+      return new Response(JSON.stringify({ chart: { result: [{
+        meta: { regularMarketPrice: 180, regularMarketPreviousClose: 179 },
+        timestamp: [1_700_000_000],
+        indicators: { quote: [{ open: [179], high: [181], low: [178], close: [180], volume: [100] }] },
+      }], error: null } }));
+    }
+    if (url === "https://fc.yahoo.com") return new Response("", { headers: { "set-cookie": "A=1" } });
+    if (url.includes("/v1/test/getcrumb")) return new Response("crumb");
+    if (url.includes("/quoteSummary/")) return new Response(JSON.stringify({ quoteSummary: { result: [{ defaultKeyStatistics: { beta: { raw: 1.2 } } }] } }));
+    throw new Error(`Unexpected Yahoo request ${url}`);
+  };
+  try {
+    const call = (tool: string, params: Record<string, unknown>) => stocksWatcherApi({
+      request: new Request("https://example.com/api/stocks-intelligence-watcher", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool, params }),
+      }),
+      env: { MARKET_CACHE_DB: db },
+    });
+    const betaFirst = await call("get_beta", { ticker: "nvda" });
+    const betaSecond = await call("get_beta", { ticker: "NVDA" });
+    const signalFirst = await call("signal_scan", { ticker: "nvda", intent: "morning" });
+    const signalSecond = await call("signal_scan", { ticker: "NVDA", intent: "close" });
+    assert.equal(betaFirst.status, 200);
+    assert.equal((await betaSecond.json() as { cache: { status: string } }).cache.status, "hit");
+    assert.equal(signalFirst.status, 200);
+    assert.equal((await signalSecond.json() as { cache: { status: string } }).cache.status, "hit");
+    assert.equal(chartLoads, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("exhausted refresh quota fails closed before the Yahoo load", async () => {
   const db = new MarketCacheD1();
   const dayUtc = new Date().toISOString().slice(0, 10);

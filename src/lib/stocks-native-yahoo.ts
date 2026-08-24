@@ -1099,6 +1099,8 @@ export const getNativeStocksToolCacheParams = (
         : base;
   }
   if (["market_breadth", "get_sector_stats", "get_macro_regime", "basket_relative_strength", "get_options_flow_universe"].includes(canonicalName)) return { tool: canonicalName };
+  if (["get_watchlist", "list_memories", "share_html"].includes(canonicalName)) return { tool: canonicalName };
+  if (canonicalName === "save_memory") return { tool: canonicalName, params };
   if (canonicalName === "get_quotes") {
     const requested = String(params.tickers || "").trim()
       .split(",")
@@ -1106,16 +1108,24 @@ export const getNativeStocksToolCacheParams = (
       .filter(Boolean);
     return { tool: canonicalName, tickers: Array.from(new Set(requested.length > 0 ? requested : STOCKS_WATCHER_QUOTE_SYMBOLS)) };
   }
+  if (["get_intraday", "get_stock_stats", "get_beta", "earnings_vol_crush"].includes(canonicalName)) return { tool: canonicalName, ticker: context.ticker };
   if (canonicalName === "chart_indicator") return { tool: canonicalName, ticker: context.ticker };
-  const properties = definition.inputSchema?.properties || {};
-  return {
-    tool: canonicalName,
-    ...Object.fromEntries(
-      Object.keys(properties)
-        .filter((key) => Object.prototype.hasOwnProperty.call(params, key))
-        .map((key) => [key, params[key]]),
-    ),
-  };
+  if (canonicalName === "signal_scan") {
+    const tickers = Array.isArray(params.tickers)
+      ? Array.from(new Set(params.tickers.map((item) => normalizeStocksWatcherSymbol(String(item))).filter(Boolean)))
+      : [context.ticker];
+    return { tool: canonicalName, tickers };
+  }
+  if (canonicalName === "morning_briefing") {
+    const tickers = Array.isArray(params.tickers) && params.tickers.length > 0
+      ? Array.from(new Set(params.tickers.map((item) => normalizeStocksWatcherSymbol(String(item))).filter(Boolean)))
+      : STOCKS_WATCHER_QUOTE_SYMBOLS;
+    return { tool: canonicalName, tickers, focus: params.focus || "market watch" };
+  }
+  if (canonicalName === "get_sector_top_holdings") return { tool: canonicalName, sector: String(params.sector || "").trim() };
+  if (canonicalName === "historical_context") return { tool: canonicalName, ticker: context.ticker, condition: String(params.condition || params.event || "recent trend") };
+  if (canonicalName === "pre_event_brief") return { tool: canonicalName, ticker: context.ticker, intent: params.intent || "event prep" };
+  throw new Error(`Native Yahoo tool '${canonicalName}' lacks cache input normalization.`);
 };
 
 const latestEarningsHistoryRow = (summary: Record<string, any>) => {

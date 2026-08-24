@@ -64,7 +64,19 @@ async function onRequestUncached(context: Context) {
     ]);
     const dates = [...new Set([...activeDates, ...invalidDates])].sort().reverse();
     const requestedDate = url.searchParams.get("date");
-    const selectedDate = isValidDate(requestedDate) && dates.includes(requestedDate!) ? requestedDate! : dates[0] || null;
+    const unavailableRequestedDate = isValidDate(requestedDate) && !dates.includes(requestedDate!);
+    const selectedDate = unavailableRequestedDate ? requestedDate! : isValidDate(requestedDate) ? requestedDate! : dates[0] || null;
+    if (unavailableRequestedDate) {
+      return json({
+        status: "EMPTY",
+        errorCode: "SPX_GEX_PRESSURE_DATE_UNAVAILABLE",
+        selectedDate,
+        pressure: null,
+        invalidSnapshots: [],
+        collectionAttempts: [],
+        warnings: [`SPX GEX pressure is unavailable for ${selectedDate}.`],
+      });
+    }
     const [audit, quarantinedSnapshots, collectionAttempts] = selectedDate
       ? await Promise.all([
         listSpxGexPressureFrames(context.env.SPX_RECAP_DB, selectedDate),
