@@ -19,6 +19,9 @@ interface Context {
   waitUntil?: (promise: Promise<unknown>) => void;
 }
 
+/** GEX snapshots are collected every 15 minutes; a one-minute edge TTL is safely below that cadence. */
+const SPX_GEX_EDGE_CACHE_CONTROL = "public, max-age=60";
+
 const isValidDate = (date: string | null) => Boolean(date && /^\d{4}-\d{2}-\d{2}$/.test(date));
 
 const parseSnapshotMinute = (value: string | null) => {
@@ -158,8 +161,6 @@ async function onRequestUncached(context: Context) {
   const startedAt = Date.now();
   const warnings: string[] = [];
   const url = new URL(context.request.url);
-  const cached = await readSpxEdgeCache(context.request);
-  if (cached) return cached;
 
   if (!context.env.SPX_RECAP_DB) {
     return json({
@@ -179,6 +180,8 @@ async function onRequestUncached(context: Context) {
   }
 
   try {
+    // Keep this explicit preflight: the date-list helper intentionally maps a
+    // missing table to an empty list, while the public API must fail closed.
     await context.env.SPX_RECAP_DB.prepare("SELECT 1 FROM spx_gex_intraday_snapshots LIMIT 1").first();
     const availableDates = await listSpxGexHeatmapDates(context.env.SPX_RECAP_DB);
     const selectedDate = chooseSelectedDate(availableDates, url.searchParams.get("date"));
@@ -211,7 +214,7 @@ async function onRequestUncached(context: Context) {
       collectionAttempts,
       collectionHealth,
       warnings: [...new Set(warnings)],
-    }, {}, status === "READY" ? "public, max-age=15" : "no-store"), Date.now() - startedAt);
+    }, {}, status === "READY" ? SPX_GEX_EDGE_CACHE_CONTROL : "no-store"), Date.now() - startedAt);
     if (status === "READY") await writeSpxEdgeCache(context, response);
     return response;
   } catch (error) {

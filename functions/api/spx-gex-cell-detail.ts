@@ -22,10 +22,12 @@ export async function onRequest(context: Context) {
   const startedAt = Date.now();
   const url = new URL(context.request.url);
   const date = url.searchParams.get("date");
-  const snapshotMinuteEt = Number(url.searchParams.get("snapshot"));
-  const strike = Number(url.searchParams.get("strike"));
+  const snapshotValue = url.searchParams.get("snapshot");
+  const strikeValue = url.searchParams.get("strike");
+  const snapshotMinuteEt = snapshotValue === null ? null : Number(snapshotValue);
+  const strike = strikeValue === null ? null : Number(strikeValue);
   const expdate = url.searchParams.get("expiry");
-  if (!validDate(date) || !Number.isInteger(snapshotMinuteEt) || !Number.isFinite(strike) || !expdate) {
+  if (!validDate(date) || snapshotMinuteEt === null || !Number.isInteger(snapshotMinuteEt) || strike === null || !Number.isFinite(strike) || !expdate) {
     return json({ status: "ERROR", errorCode: "INVALID_CELL_SELECTION", error: "date, snapshot, strike, and expiry are required.", detail: null }, { status: 400 });
   }
   if (!context.env.SPX_RECAP_DB) {

@@ -3,12 +3,51 @@ export interface SpxCacheContext {
   waitUntil?: (promise: Promise<unknown>) => void;
 }
 
-const VOLATILE_QUERY_KEYS = new Set(["_", "refresh", "cacheBust"]);
+import { normalizeSpxPriceActionTimeframe } from "../../src/lib/spx-price-action-compass";
+
+/**
+ * These are the complete public selection inputs for the SPX read APIs.
+ *
+ * Do not cache arbitrary query strings. They create unique Cache API keys
+ * while the endpoint ignores them, which turns harmless tracking parameters
+ * and client cache-busters into repeated D1 origin reads.
+ */
 const inFlightSpxEdgeRequests = new Map<string, Promise<Response>>();
 
 export const canonicalSpxCacheRequest = (request: Request) => {
   const url = new URL(request.url);
-  for (const key of VOLATILE_QUERY_KEYS) url.searchParams.delete(key);
+  const canonical = new URLSearchParams();
+  const keys = url.pathname.endsWith("/spx-gex-cell-detail")
+    ? ["date", "expiry"]
+    : url.pathname.endsWith("/spx-gex-heatmap")
+      ? (/^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("date") || "") ? ["date"] : [])
+      : url.pathname.endsWith("/spx-gex-pressure")
+        ? (/^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("date") || "") ? ["date"] : [])
+        : url.pathname.endsWith("/spx-recap")
+          ? ["date"]
+        : [];
+  for (const key of keys) {
+    const value = url.searchParams.get(key);
+    if (value !== null) canonical.set(key, value);
+  }
+  if (url.pathname.endsWith("/spx-gex-heatmap")) {
+    const value = url.searchParams.get("snapshot");
+    const snapshot = Number(value);
+    if (value !== null && Number.isInteger(snapshot) && snapshot >= 0 && snapshot <= 24 * 60) canonical.set("snapshot", String(snapshot));
+  }
+  if (url.pathname.endsWith("/spx-gex-cell-detail")) {
+    const snapshotValue = url.searchParams.get("snapshot");
+    const strikeValue = url.searchParams.get("strike");
+    const snapshot = Number(snapshotValue);
+    const strike = Number(strikeValue);
+    if (snapshotValue !== null && Number.isInteger(snapshot)) canonical.set("snapshot", String(snapshot));
+    if (strikeValue !== null && Number.isFinite(strike)) canonical.set("strike", String(strike));
+  }
+  if (url.pathname.endsWith("/spx-price-action-compass")) {
+    if (url.searchParams.get("view") === "price-overlay") canonical.set("view", "price-overlay");
+    else canonical.set("timeframe", normalizeSpxPriceActionTimeframe(url.searchParams.get("timeframe")));
+  }
+  url.search = canonical.toString();
   return new Request(url.toString(), { method: "GET" });
 };
 

@@ -57,8 +57,40 @@ import { resetSpxRequestLaneForTests, runSpxRequest, SpxRequestTimeoutError } fr
 it("normalizes volatile refresh keys into one SPX edge-cache key", () => {
   const first = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?date=2026-07-17&_=1"));
   const second = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?date=2026-07-17&refresh=2"));
+  const tracking = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?utm_source=ad&date=2026-07-17&requestId=abc"));
   assert.equal(first.url, "https://example.com/api/spx-gex-pressure?date=2026-07-17");
   assert.equal(first.url, second.url);
+  assert.equal(first.url, tracking.url);
+});
+
+it("keeps price-action view and timeframe selections in distinct SPX edge-cache keys", () => {
+  const overlay = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay"));
+  const fourHour = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?timeframe=4h"));
+  const sameOverlay = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay&cacheBust=1"));
+  assert.notEqual(overlay.url, fourHour.url);
+  assert.equal(overlay.url, sameOverlay.url);
+});
+
+it("normalizes only effective SPX endpoint selections", () => {
+  const heatmap = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-heatmap?view=x"));
+  const plainHeatmap = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-heatmap"));
+  const invalidOne = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?timeframe=bad-a"));
+  const invalidTwo = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?timeframe=bad-b"));
+  assert.equal(heatmap.url, plainHeatmap.url);
+  assert.equal(invalidOne.url, invalidTwo.url);
+  const invalidPressure = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?date=bad-a"));
+  const plainPressure = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure"));
+  const datedPressure = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?date=2026-08-20"));
+  assert.equal(invalidPressure.url, plainPressure.url);
+  assert.notEqual(datedPressure.url, plainPressure.url);
+  assert.equal(
+    canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-heatmap?snapshot=bad-a")).url,
+    canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-heatmap?snapshot=bad-b")).url,
+  );
+  assert.equal(
+    canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-cell-detail?date=2026-08-20&snapshot=570&strike=6000&expiry=2026-08-28")).url,
+    canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-cell-detail?date=2026-08-20&snapshot=570.0&strike=6000.0&expiry=2026-08-28")).url,
+  );
 });
 
 it("rejects Cloudflare text failures without attempting JSON parsing", async () => {
@@ -182,6 +214,21 @@ it("coalesces concurrent cold-cache producers into one response", async () => {
   ]);
   assert.equal(producers, 1);
   assert.equal(await first.text(), await second.text());
+});
+
+it("coalesces equivalent numeric cell selections into one cold-cache producer", async () => {
+  resetSpxEdgeCoalescingForTests();
+  let producers = 0;
+  const producer = async () => {
+    producers += 1;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return new Response(JSON.stringify({ status: "READY" }));
+  };
+  await Promise.all([
+    coalesceSpxEdgeRequest(new Request("https://example.com/api/spx-gex-cell-detail?date=2026-08-20&snapshot=570&strike=6000&expiry=2026-08-28"), producer),
+    coalesceSpxEdgeRequest(new Request("https://example.com/api/spx-gex-cell-detail?date=2026-08-20&snapshot=570.0&strike=6000.0&expiry=2026-08-28"), producer),
+  ]);
+  assert.equal(producers, 1);
 });
 
 it("does not turn a missing snapshot hash parameter into snapshot minute zero", () => {
@@ -1918,7 +1965,7 @@ describe("SPX GEX heatmap API", () => {
 
     assert.equal(latestResponse.status, 200);
     assert.equal((latestPayload as any).status, "READY");
-    assert.equal(latestResponse.headers.get("cache-control"), "public, max-age=15");
+    assert.equal(latestResponse.headers.get("cache-control"), "public, max-age=60");
     assert.equal(latestPayload.selectedDate, "2026-05-27");
     assert.deepEqual(
       latestPayload.sessions.map((session) => session.snapshotMinuteEt),
@@ -1983,6 +2030,20 @@ describe("SPX GEX heatmap API", () => {
     assert.equal(payload.status, "READY");
     assert.equal(payload.detail?.model, target.model);
     assert.deepEqual(payload.detail?.repairNotes, target.repairNotes);
+  });
+
+  it("rejects a cell request missing either required numeric selection before D1", async () => {
+    const db = { prepare: () => { throw new Error("cell validation must precede D1"); } } as any;
+    const missingSnapshot = await getSpxGexCellDetailApi({
+      request: new Request("https://example.com/api/spx-gex-cell-detail?date=2026-05-27&strike=6000&expiry=2026-05-27"),
+      env: { SPX_RECAP_DB: db },
+    });
+    const missingStrike = await getSpxGexCellDetailApi({
+      request: new Request("https://example.com/api/spx-gex-cell-detail?date=2026-05-27&snapshot=570&expiry=2026-05-27"),
+      env: { SPX_RECAP_DB: db },
+    });
+    assert.equal(missingSnapshot.status, 400);
+    assert.equal(missingStrike.status, 400);
   });
 
   it("returns no data instead of legacy fallback when only daily legacy rows exist", async () => {
@@ -2431,7 +2492,7 @@ describe("SPX GEX pressure API", () => {
     const payload = JSON.parse(text) as { status: string; pressure: { timeline: unknown[]; movers: unknown[] } };
 
     assert.equal(response.status, 200, text);
-    assert.equal(response.headers.get("cache-control"), "public, max-age=15");
+    assert.equal(response.headers.get("cache-control"), "public, max-age=60");
     assert.equal(payload.status, "READY");
     assert.equal(payload.pressure.timeline.length, 2);
     assert.equal(payload.pressure.movers.length > 0, true);
@@ -2440,6 +2501,22 @@ describe("SPX GEX pressure API", () => {
     assert.equal(response.headers.get("x-spx-frame-count"), "2");
     assert.equal(Number(response.headers.get("x-spx-projection-bytes")) < 150_000, true);
     assert.equal(text.includes("snapshot_json"), false);
+  });
+
+  it("returns explicit EMPTY for an unavailable requested date", async () => {
+    const db = new CountingD1();
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, { 5995: -100, 6000: 100 }));
+    const response = await getSpxGexPressureApi({
+      request: new Request("https://example.com/api/spx-gex-pressure?date=2026-05-26"),
+      env: { SPX_RECAP_DB: db },
+    });
+    const payload = await response.json() as { status: string; errorCode: string; selectedDate: string; pressure: unknown };
+    assert.equal(response.status, 200);
+    assert.equal(payload.status, "EMPTY");
+    assert.equal(payload.errorCode, "SPX_GEX_PRESSURE_DATE_UNAVAILABLE");
+    assert.equal(payload.selectedDate, "2026-05-26");
+    assert.equal(payload.pressure, null);
+    assert.equal(db.pressureProjectionQueries, 0);
   });
 
   it("keeps a 27-frame pressure projection below 150 KB without returning the 16 MB source payload", async () => {

@@ -36,6 +36,8 @@ export const MAX_CACHE_PRUNE_ROWS = 50;
  * primary-key lookup for each yielded key.
  */
 export const MAX_CACHE_PRUNE_READ_ROWS = MAX_CACHE_PRUNE_ROWS * 2;
+/** Retention cleanup is bounded maintenance, not work for every cache refresh. */
+export const MARKET_CACHE_PRUNE_INTERVAL_MS = 15 * 60_000;
 /** market_cache_entries has one table write plus its PK and three secondary indexes. */
 export const MARKET_CACHE_WRITE_INDEX_AMPLIFICATION = 5;
 
@@ -264,6 +266,8 @@ export interface ResolveMarketCacheOptions<T> {
   /** Optional per-call TTL in milliseconds. It overrides the dataset default. */
   ttlMs?: number;
   quotaGuard?: () => MarketCacheD1QuotaDecision;
+  refreshQuotaGuard?: () => Promise<MarketCacheD1QuotaDecision>;
+  allowStaleOnRefreshError?: boolean;
   force?: boolean;
   sourceAsOf?: (value: T) => string | null | undefined;
   load: () => Promise<T>;
@@ -291,6 +295,12 @@ export class MarketCacheQuotaExceededError extends Error {
 }
 
 const inFlight = new Map<string, Promise<MarketCacheResolution<unknown>>>();
+let nextMarketCachePruneAtMs = 0;
+
+/** Test hook for deterministic maintenance scheduling. */
+export const resetMarketCachePruneScheduleForTests = () => {
+  nextMarketCachePruneAtMs = 0;
+};
 
 const stableJson = (value: unknown): string => {
   if (value === undefined) return '"__undefined"';
@@ -395,29 +405,33 @@ const writeSuccess = async <T>(db: D1DatabaseLike, input: {
     expiresAt,
     cachedAt,
   ).run();
-  const pruneResult = await db.prepare(`
-    DELETE FROM market_cache_entries
-    WHERE cache_key IN (
-      SELECT cache_key
-      FROM market_cache_entries
-      WHERE expires_at < ?
-      ORDER BY expires_at ASC, cache_key ASC
-      LIMIT ?
-    )
-  `).bind(
-    new Date(input.now.getTime() - MARKET_CACHE_RETENTION_MS).toISOString(),
-    MAX_CACHE_PRUNE_ROWS,
-  ).run();
+  const shouldPrune = input.now.getTime() >= nextMarketCachePruneAtMs;
+  if (shouldPrune) nextMarketCachePruneAtMs = input.now.getTime() + MARKET_CACHE_PRUNE_INTERVAL_MS;
+  const pruneResult = shouldPrune
+    ? await db.prepare(`
+      DELETE FROM market_cache_entries
+      WHERE cache_key IN (
+        SELECT cache_key
+        FROM market_cache_entries
+        WHERE expires_at < ?
+        ORDER BY expires_at ASC, cache_key ASC
+        LIMIT ?
+      )
+    `).bind(
+      new Date(input.now.getTime() - MARKET_CACHE_RETENTION_MS).toISOString(),
+      MAX_CACHE_PRUNE_ROWS,
+    ).run()
+    : null;
   const upsertRowsRead = Math.max(1, Math.floor(rowsReadFrom(upsertResult) ?? 1));
-  const pruneRowsRead = rowsReadFrom(pruneResult);
-  const pruneChanges = changesFrom(pruneResult);
-  const pruneRowsWritten = rowsWrittenFrom(pruneResult) ?? pruneChanges;
-  const prunedRows = pruneRowsWritten === null || pruneRowsWritten === undefined
+  const pruneRowsRead = pruneResult ? rowsReadFrom(pruneResult) : 0;
+  const pruneChanges = pruneResult ? changesFrom(pruneResult) : 0;
+  const pruneRowsWritten = pruneResult ? rowsWrittenFrom(pruneResult) ?? pruneChanges : 0;
+  const prunedRows = pruneResult && (pruneRowsWritten === null || pruneRowsWritten === undefined)
     ? MAX_CACHE_PRUNE_ROWS
-    : Math.min(MAX_CACHE_PRUNE_ROWS, Math.max(0, Math.floor(pruneRowsWritten)));
-  const boundedPruneRowsRead = pruneRowsRead === null
-    ? MAX_CACHE_PRUNE_READ_ROWS
-    : Math.max(0, Math.floor(pruneRowsRead));
+    : Math.min(MAX_CACHE_PRUNE_ROWS, Math.max(0, Math.floor(pruneRowsWritten || 0)));
+  const boundedPruneRowsRead = pruneResult
+    ? (pruneRowsRead === null ? MAX_CACHE_PRUNE_READ_ROWS : Math.max(0, Math.floor(pruneRowsRead)))
+    : 0;
 
   return { cachedAt, expiresAt, prunedRows, rowsRead: upsertRowsRead + boundedPruneRowsRead };
 };
@@ -563,6 +577,10 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
   const refresh = (async (): Promise<MarketCacheResolution<T>> => {
     const upstreamStartedAt = Date.now();
     try {
+      const decision = options.refreshQuotaGuard
+        ? await runPhase("quota-guard", options.refreshQuotaGuard, d1PhaseCapMs, null)
+        : options.quotaGuard?.();
+      if (decision && !decision.allow) throw new MarketCacheQuotaExceededError(decision);
       const upstreamMaxMs = deadlineAt === null
         ? undefined
         : Math.max(1, deadlineAt - Date.now() - staleReserveMs);
@@ -599,6 +617,7 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
       log({ status: cache.status, upstreamMs: Date.now() - upstreamStartedAt, totalMs: Date.now() - startedAt });
       return { value, cache };
     } catch (error) {
+      if (error instanceof MarketCacheQuotaExceededError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       const failedAt = now();
       let stale = existing;
@@ -618,7 +637,7 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
           throw fallbackError;
         }
       }
-      if (stale) {
+      if (stale && options.allowStaleOnRefreshError !== false) {
         let recordErrorClass: string | undefined;
         try {
           await runPhase("record-error", () => recordRefreshError(options.db!, cacheKey, failedAt, message), d1PhaseCapMs, null);

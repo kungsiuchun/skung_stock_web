@@ -19,6 +19,9 @@ interface Context {
   waitUntil?: (promise: Promise<unknown>) => void;
 }
 
+/** GEX snapshots are collected every 15 minutes; a one-minute edge TTL is safely below that cadence. */
+const SPX_GEX_EDGE_CACHE_CONTROL = "public, max-age=60";
+
 const isValidDate = (date: string | null) => Boolean(date && /^\d{4}-\d{2}-\d{2}$/.test(date));
 
 const json = (body: unknown, init: ResponseInit = {}, cacheControl = "no-store") => {
@@ -37,8 +40,6 @@ const json = (body: unknown, init: ResponseInit = {}, cacheControl = "no-store")
 async function onRequestUncached(context: Context) {
   const startedAt = Date.now();
   const url = new URL(context.request.url);
-  const cached = await readSpxEdgeCache(context.request);
-  if (cached) return cached;
 
   if (!context.env.SPX_RECAP_DB) {
     return json({
@@ -54,6 +55,8 @@ async function onRequestUncached(context: Context) {
   }
 
   try {
+    // Keep this explicit preflight: the date-list helper intentionally maps a
+    // missing table to an empty list, while the public API must fail closed.
     await context.env.SPX_RECAP_DB.prepare("SELECT 1 FROM spx_gex_intraday_snapshots LIMIT 1").first();
     const [activeDates, invalidDates] = await Promise.all([
       listSpxGexHeatmapDates(context.env.SPX_RECAP_DB),
@@ -61,7 +64,19 @@ async function onRequestUncached(context: Context) {
     ]);
     const dates = [...new Set([...activeDates, ...invalidDates])].sort().reverse();
     const requestedDate = url.searchParams.get("date");
-    const selectedDate = isValidDate(requestedDate) && dates.includes(requestedDate!) ? requestedDate! : dates[0] || null;
+    const unavailableRequestedDate = isValidDate(requestedDate) && !dates.includes(requestedDate!);
+    const selectedDate = unavailableRequestedDate ? requestedDate! : isValidDate(requestedDate) ? requestedDate! : dates[0] || null;
+    if (unavailableRequestedDate) {
+      return json({
+        status: "EMPTY",
+        errorCode: "SPX_GEX_PRESSURE_DATE_UNAVAILABLE",
+        selectedDate,
+        pressure: null,
+        invalidSnapshots: [],
+        collectionAttempts: [],
+        warnings: [`SPX GEX pressure is unavailable for ${selectedDate}.`],
+      });
+    }
     const [audit, quarantinedSnapshots, collectionAttempts] = selectedDate
       ? await Promise.all([
         listSpxGexPressureFrames(context.env.SPX_RECAP_DB, selectedDate),
@@ -113,7 +128,7 @@ async function onRequestUncached(context: Context) {
         "X-SPX-Frame-Count": String(audit.frames.length),
         "X-SPX-Projection-Bytes": String(audit.projectionBytes),
       },
-    }, "public, max-age=15"), Date.now() - startedAt);
+    }, SPX_GEX_EDGE_CACHE_CONTROL), Date.now() - startedAt);
     await writeSpxEdgeCache(context, response);
     return response;
   } catch (error) {

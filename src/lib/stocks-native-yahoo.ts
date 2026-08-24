@@ -796,7 +796,7 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     },
   ),
   tool(
-    { name: "chart_dex", description: "HTML chart wrapper for native DEX.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
+    { name: "chart_dex", description: "HTML chart wrapper for native DEX.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, topRows: { type: "integer" } }, required: ["ticker"] } },
     async ({ ticker, expiry, topRows }) => {
       const chain = await fetchOptions(ticker, expiry);
       const rows = optionRowsNearSpot(chain, topRows);
@@ -804,7 +804,7 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     },
   ),
   tool(
-    { name: "get_options_0dte", description: "Get nearest-expiry option exposure summary.", inputSchema: { properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+    { name: "get_options_0dte", description: "Get nearest-expiry option exposure summary.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
     async ({ ticker, expiry }) => {
       const chain = await fetchOptions(ticker, expiry);
       const rows = optionRowsNearSpot(chain, 96);
@@ -830,7 +830,7 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     },
   ),
   tool(
-    { name: "get_options_greeks", description: "Return IV and estimated delta/gamma exposure by strike.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, greek: { type: "string" } }, required: ["ticker"] } },
+    { name: "get_options_greeks", description: "Return IV and estimated delta/gamma exposure by strike.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, greek: { type: "string" }, topRows: { type: "integer" } }, required: ["ticker"] } },
     async ({ ticker, expiry, topRows }) => {
       const chain = await fetchOptions(ticker, expiry);
       const rows = optionRowsNearSpot(chain, topRows);
@@ -843,7 +843,7 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     },
   ),
   tool(
-    { name: "chart_greeks", description: "HTML chart wrapper for native Greek exposure.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
+    { name: "chart_greeks", description: "HTML chart wrapper for native Greek exposure.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, topRows: { type: "integer" } }, required: ["ticker"] } },
     async ({ ticker, expiry, topRows }) => {
       const chain = await fetchOptions(ticker, expiry);
       const rows = optionRowsNearSpot(chain, topRows);
@@ -851,7 +851,7 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     },
   ),
   tool(
-    { name: "get_options_iv_intraday", description: "Current option-chain IV snapshot.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
+    { name: "get_options_iv_intraday", description: "Current option-chain IV snapshot.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, topRows: { type: "integer" } }, required: ["ticker"] } },
     async ({ ticker, expiry, topRows }) => {
       const chain = await fetchOptions(ticker, expiry);
       const rows = optionRowsNearSpot(chain, topRows);
@@ -879,7 +879,7 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     },
   ),
   tool(
-    { name: "get_options_sweeps", description: "Native placeholder for unusual options rows ranked by volume.", inputSchema: { properties: { ticker: { type: "string" }, topN: { type: "integer" } }, required: ["ticker"] } },
+    { name: "get_options_sweeps", description: "Native placeholder for unusual options rows ranked by volume.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, topN: { type: "integer" } }, required: ["ticker"] } },
     async ({ ticker, expiry }) => {
       const chain = await fetchOptions(ticker, expiry);
       const legs = [...chain.calls.map((leg) => ({ ...leg, type: "C" })), ...chain.puts.map((leg) => ({ ...leg, type: "P" }))].sort((a, b) => numberOrZero(b.volume) - numberOrZero(a.volume)).slice(0, 12);
@@ -1073,6 +1073,66 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
 ];
 
 const NATIVE_TOOL_BY_NAME = new Map(NATIVE_TOOL_REGISTRY.map((definition) => [definition.name, definition]));
+
+export const getNativeStocksToolCacheParams = (
+  name: string,
+  params: Record<string, unknown> = {},
+) => {
+  const canonicalName = canonicalNativeToolName(name);
+  const definition = NATIVE_TOOL_BY_NAME.get(canonicalName);
+  if (!definition) throw new Error(`Native Yahoo tool '${name}' is not implemented.`);
+  const context = nativeToolContext(params);
+  const expiry = context.expiry || null;
+  const topRows = Number.isFinite(context.topRows) ? Math.trunc(context.topRows) : 12;
+  const strikesAroundAtm = Math.trunc(Math.max(5, Math.min(80, toNumber(params.strikesAroundAtm, 12) * 2 || 24)));
+  if (canonicalName === "get_stock_history") {
+    const range = typeof params.range === "string" && /^(\d+(d|mo|y)|ytd|max)$/.test(params.range.trim()) ? params.range.trim() : "5y";
+    const interval = typeof params.interval === "string" && /^(1d|1wk|1mo)$/.test(params.interval.trim()) ? params.interval.trim() : "1d";
+    return { tool: canonicalName, ticker: context.ticker, range, interval };
+  }
+  if (["get_options", "get_options_gex", "chart_gex", "get_options_dex", "chart_dex", "get_options_0dte", "get_options_greeks", "chart_greeks", "get_options_iv_intraday", "get_options_pcr", "get_options_sweeps", "get_options_mispricing"].includes(canonicalName)) {
+    const base = { tool: canonicalName, ticker: context.ticker, expiry };
+    return ["get_options_gex", "chart_gex", "get_options_dex", "chart_dex", "get_options_greeks", "chart_greeks", "get_options_iv_intraday"].includes(canonicalName)
+      ? { ...base, topRows }
+      : canonicalName === "get_options"
+        ? { ...base, strikesAroundAtm }
+        : base;
+  }
+  if (["market_breadth", "get_sector_stats", "get_macro_regime", "basket_relative_strength", "get_options_flow_universe"].includes(canonicalName)) return { tool: canonicalName };
+  if (["get_watchlist", "list_memories", "share_html"].includes(canonicalName)) return { tool: canonicalName };
+  if (canonicalName === "save_memory") return { tool: canonicalName, params };
+  if (canonicalName === "get_quotes") {
+    const requested = String(params.tickers || "").trim()
+      .split(",")
+      .map((item) => normalizeStocksWatcherSymbol(item))
+      .filter(Boolean);
+    return { tool: canonicalName, tickers: Array.from(new Set(requested.length > 0 ? requested : STOCKS_WATCHER_QUOTE_SYMBOLS)) };
+  }
+  if (["get_intraday", "get_stock_stats", "get_beta", "earnings_vol_crush"].includes(canonicalName)) return { tool: canonicalName, ticker: context.ticker };
+  if (canonicalName === "chart_indicator") return { tool: canonicalName, ticker: context.ticker };
+  if (canonicalName === "signal_scan") {
+    const tickers = Array.isArray(params.tickers)
+      ? Array.from(new Set(params.tickers.map((item) => normalizeStocksWatcherSymbol(String(item))).filter(Boolean)))
+      : [context.ticker];
+    return { tool: canonicalName, tickers };
+  }
+  if (canonicalName === "morning_briefing") {
+    const tickers = Array.isArray(params.tickers) && params.tickers.length > 0
+      ? Array.from(new Set(params.tickers.map((item) => normalizeStocksWatcherSymbol(String(item))).filter(Boolean)))
+      : STOCKS_WATCHER_QUOTE_SYMBOLS;
+    return { tool: canonicalName, tickers, focus: params.focus || "market watch" };
+  }
+  if (canonicalName === "get_sector_top_holdings") return { tool: canonicalName, sector: String(params.sector || "").trim() };
+  if (canonicalName === "historical_context") return { tool: canonicalName, ticker: context.ticker, condition: String(params.condition || params.event || "recent trend") };
+  if (canonicalName === "pre_event_brief") return { tool: canonicalName, ticker: context.ticker, intent: params.intent || "event prep" };
+  throw new Error(`Native Yahoo tool '${canonicalName}' lacks cache input normalization.`);
+};
+
+export const getNativeStocksToolCacheSymbol = (
+  params: Record<string, unknown>,
+) => typeof params.ticker === "string"
+  ? normalizeStocksWatcherSymbol(params.ticker)
+  : "MARKET";
 
 const latestEarningsHistoryRow = (summary: Record<string, any>) => {
   const history = Array.isArray(summary.earningsHistory?.history) ? summary.earningsHistory.history : [];

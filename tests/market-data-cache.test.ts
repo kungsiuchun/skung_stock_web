@@ -4,6 +4,7 @@ import {
   buildMarketCacheKey,
   MAX_CACHE_PRUNE_READ_ROWS,
   MAX_CACHE_PRUNE_ROWS,
+  resetMarketCachePruneScheduleForTests,
   resolveMarketCache,
 } from "../src/lib/market-data-cache";
 import type { D1DatabaseLike } from "../src/lib/spx-recap-d1";
@@ -123,6 +124,44 @@ test("market cache returns a fresh hit without repeating the upstream call", asy
   assert.equal(second.cache.status, "hit");
   assert.equal(second.value.price, 1);
   assert.equal(calls, 1);
+});
+
+test("refresh quota guard runs only for the cold-cache producer", async () => {
+  const db = new MemoryD1();
+  let guards = 0;
+  let loads = 0;
+  const options = {
+    db,
+    scope: "refresh-guard",
+    symbol: "NVDA",
+    refreshQuotaGuard: async () => {
+      guards += 1;
+      return {
+        allow: true,
+        blocked: false,
+        reason: "within_budget" as const,
+        currentDayUtc: "2026-08-24",
+        usageDayUtc: "2026-08-24",
+        dayReset: false,
+        observedRowsRead: 0,
+        observedRowsWritten: 0,
+        projectedRowsRead: 0,
+        projectedRowsWritten: 0,
+        readRemaining: 1,
+        writeRemaining: 1,
+        readHeadroom: 1,
+        writeHeadroom: 1,
+        remaining: { rowsRead: 1, rowsWritten: 1 },
+        headroom: { rowsRead: 1, rowsWritten: 1 },
+        blockedDimensions: [],
+      };
+    },
+    load: async () => ({ value: ++loads }),
+  };
+  await resolveMarketCache(options);
+  await resolveMarketCache(options);
+  assert.equal(guards, 1);
+  assert.equal(loads, 1);
 });
 
 test("market cache serves explicit stale data after a failed refresh", async () => {
@@ -278,6 +317,7 @@ test("aborting the refresh leader does not cancel a coalesced follower", async (
 });
 
 test("cache prune is indexed, bounded, and reports actual deleted rows", async () => {
+  resetMarketCachePruneScheduleForTests();
   const db = new MemoryD1();
   db.seedExpiredRows(MAX_CACHE_PRUNE_ROWS + 17, "2026-07-01T00:00:00.000Z");
   const resolved = await resolveMarketCache({
@@ -297,6 +337,7 @@ test("cache prune is indexed, bounded, and reports actual deleted rows", async (
 });
 
 test("cache preserves actual prune rows_read above the bounded delete count", async () => {
+  resetMarketCachePruneScheduleForTests();
   const db = new MemoryD1();
   db.pruneRowsReadOverride = MAX_CACHE_PRUNE_READ_ROWS + 17;
   const resolved = await resolveMarketCache({
@@ -311,6 +352,7 @@ test("cache preserves actual prune rows_read above the bounded delete count", as
 });
 
 test("cache prune metadata absence reports the bounded worst-case read/write", async () => {
+  resetMarketCachePruneScheduleForTests();
   const db = new MemoryD1();
   db.omitPruneMetadata = true;
   db.seedExpiredRows(MAX_CACHE_PRUNE_ROWS + 3, "2026-07-01T00:00:00.000Z");
@@ -324,6 +366,19 @@ test("cache prune metadata absence reports the bounded worst-case read/write", a
 
   assert.equal(resolved.cache.rowsRead, 1 + 1 + MAX_CACHE_PRUNE_READ_ROWS);
   assert.equal(resolved.cache.rowsWritten, 1 + MAX_CACHE_PRUNE_ROWS);
+});
+
+test("cache refreshes skip retention scans until the bounded maintenance interval elapses", async () => {
+  resetMarketCachePruneScheduleForTests();
+  const db = new MemoryD1();
+  db.seedExpiredRows(MAX_CACHE_PRUNE_ROWS, "2026-07-01T00:00:00.000Z");
+  const now = new Date("2026-07-14T12:00:00.000Z");
+  await resolveMarketCache({ db, scope: "scheduled-prune", symbol: "AAPL", now: () => now, load: async () => ({ price: 1 }) });
+  const second = await resolveMarketCache({ db, scope: "scheduled-prune", symbol: "MSFT", now: () => new Date(now.getTime() + 1), load: async () => ({ price: 2 }) });
+
+  assert.equal(db.lastPrunedRows, MAX_CACHE_PRUNE_ROWS);
+  assert.equal(second.cache.rowsRead, 2);
+  assert.equal(second.cache.rowsWritten, 1);
 });
 
 test("stale fallback failure emits terminal phase diagnostics", async () => {
