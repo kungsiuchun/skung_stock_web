@@ -5,6 +5,7 @@ import {
 import {
   NativeStocksYahooClient,
   getNativeStocksToolCacheParams,
+  getNativeStocksToolCacheSymbol,
   normalizeStocksWatcherSymbol,
 } from "../../src/lib/stocks-native-yahoo";
 import {
@@ -401,7 +402,7 @@ const callNativeTool = async (
   const resolved = await resolveMarketCache({
     db: env.MARKET_CACHE_DB,
     scope,
-    symbol: toolSymbol(params),
+    symbol: getNativeStocksToolCacheSymbol(cacheParams),
     params: cacheParams,
     dataset,
     ttlMs: getMarketCacheDatasetTtlMs(dataset),

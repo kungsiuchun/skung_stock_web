@@ -206,6 +206,45 @@ test("ignored POST parameters cannot create additional market-cache entries", as
   }
 });
 
+test("ignored ticker input reuses the default quotes market-cache entry", async () => {
+  const db = new MarketCacheD1();
+  const originalFetch = globalThis.fetch;
+  let quoteLoads = 0;
+  globalThis.fetch = async () => {
+    quoteLoads += 1;
+    return new Response(JSON.stringify({
+      chart: {
+        result: [{
+          meta: { regularMarketPrice: 180, regularMarketPreviousClose: 179 },
+          timestamp: [1_700_000_000],
+          indicators: { quote: [{ open: [179], high: [181], low: [178], close: [180], volume: [100] }] },
+        }],
+        error: null,
+      },
+    }));
+  };
+  try {
+    const call = (ticker: string) => stocksWatcherApi({
+      request: new Request("https://example.com/api/stocks-intelligence-watcher", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool: "get_quotes", params: { ticker } }),
+      }),
+      env: { MARKET_CACHE_DB: db },
+    });
+    const first = await call("NVDA");
+    const second = await call("AAPL");
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.equal((await second.json() as { cache: { status: string } }).cache.status, "hit");
+    assert.equal([...db.rows.keys()].filter((key) => !key.startsWith("__stocks_watcher_refresh_quota__")).length, 1);
+    assert.equal(db.refreshQuotaReservations, 1);
+    assert.ok(quoteLoads > 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("native cache keys keep handler expiry and topRows inputs distinct", () => {
   const expiryOne = buildMarketCacheKey("stocks-watcher-tool", "NVDA", getNativeStocksToolCacheParams("get_options_0dte", {
     ticker: "NVDA",

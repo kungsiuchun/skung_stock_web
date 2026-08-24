@@ -1128,6 +1128,12 @@ export const getNativeStocksToolCacheParams = (
   throw new Error(`Native Yahoo tool '${canonicalName}' lacks cache input normalization.`);
 };
 
+export const getNativeStocksToolCacheSymbol = (
+  params: Record<string, unknown>,
+) => typeof params.ticker === "string"
+  ? normalizeStocksWatcherSymbol(params.ticker)
+  : "MARKET";
+
 const latestEarningsHistoryRow = (summary: Record<string, any>) => {
   const history = Array.isArray(summary.earningsHistory?.history) ? summary.earningsHistory.history : [];
   return history.length > 0 ? history[history.length - 1] as Record<string, any> : null;
