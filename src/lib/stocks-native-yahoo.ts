@@ -1074,6 +1074,24 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
 
 const NATIVE_TOOL_BY_NAME = new Map(NATIVE_TOOL_REGISTRY.map((definition) => [definition.name, definition]));
 
+export const getNativeStocksToolCacheParams = (
+  name: string,
+  params: Record<string, unknown> = {},
+) => {
+  const canonicalName = canonicalNativeToolName(name);
+  const definition = NATIVE_TOOL_BY_NAME.get(canonicalName);
+  if (!definition) throw new Error(`Native Yahoo tool '${name}' is not implemented.`);
+  const properties = definition.inputSchema?.properties || {};
+  return {
+    tool: canonicalName,
+    ...Object.fromEntries(
+      Object.keys(properties)
+        .filter((key) => Object.prototype.hasOwnProperty.call(params, key))
+        .map((key) => [key, params[key]]),
+    ),
+  };
+};
+
 const latestEarningsHistoryRow = (summary: Record<string, any>) => {
   const history = Array.isArray(summary.earningsHistory?.history) ? summary.earningsHistory.history : [];
   return history.length > 0 ? history[history.length - 1] as Record<string, any> : null;

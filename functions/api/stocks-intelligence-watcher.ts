@@ -4,6 +4,7 @@ import {
 } from "../../src/lib/stocks-intelligence-watcher";
 import {
   NativeStocksYahooClient,
+  getNativeStocksToolCacheParams,
   normalizeStocksWatcherSymbol,
 } from "../../src/lib/stocks-native-yahoo";
 import {
@@ -304,6 +305,7 @@ const callNativeTool = async (
   const startedAt = Date.now();
   const dataset = datasetForTool(tool);
   const scope = "stocks-watcher-tool";
+  const cacheParams = getNativeStocksToolCacheParams(tool, params);
   if (tool === "get_valuation_bands") {
     const symbol = toolSymbol(params);
     try {
@@ -399,7 +401,7 @@ const callNativeTool = async (
     db: env.MARKET_CACHE_DB,
     scope,
     symbol: toolSymbol(params),
-    params: { tool, ...params },
+    params: cacheParams,
     dataset,
     ttlMs: getMarketCacheDatasetTtlMs(dataset),
     requestId,

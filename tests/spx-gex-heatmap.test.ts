@@ -63,6 +63,14 @@ it("normalizes volatile refresh keys into one SPX edge-cache key", () => {
   assert.equal(first.url, tracking.url);
 });
 
+it("keeps price-action view and timeframe selections in distinct SPX edge-cache keys", () => {
+  const overlay = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?view=price-overlay"));
+  const fourHour = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?timeframe=4h"));
+  const sameOverlay = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?view=price-overlay&cacheBust=1"));
+  assert.notEqual(overlay.url, fourHour.url);
+  assert.equal(overlay.url, sameOverlay.url);
+});
+
 it("rejects Cloudflare text failures without attempting JSON parsing", async () => {
   await assert.rejects(
     () => parseJsonResponse(new Response("error code: 1102", {

@@ -10,7 +10,7 @@ export interface SpxCacheContext {
  * while the endpoint ignores them, which turns harmless tracking parameters
  * and client cache-busters into repeated D1 origin reads.
  */
-const SPX_CACHE_QUERY_KEYS = ["date", "snapshot", "strike", "expiry"] as const;
+const SPX_CACHE_QUERY_KEYS = ["date", "snapshot", "strike", "expiry", "view", "timeframe"] as const;
 const inFlightSpxEdgeRequests = new Map<string, Promise<Response>>();
 
 export const canonicalSpxCacheRequest = (request: Request) => {
