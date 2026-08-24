@@ -16,6 +16,7 @@ import {
   countDirectionalVotes,
   decideWithCio,
   deriveOpenPositionContext,
+  evaluateNumericPositionExit,
   END_OF_DAY_FLATTEN_REASON,
   formatAgentTelegramBrief,
   getEndOfDayRiskDirective,
@@ -24,6 +25,8 @@ import {
   parseAgentResponseWithDataFallback,
   parseAgentResponseContent,
   parseOrchestratorResponseContent,
+  parseNumericExecutionLevels,
+  passesDirectionalEntryGate,
   runCouncilAnalyses,
   runSpxGpt5CompatibilityProbe,
   runLiveSpxDecisionRun,
@@ -313,6 +316,53 @@ test("CIO typed validator reports precise confidence contract fields", () => {
   assert.deepEqual(validateCioModelPlan({ ...valid, confidence_score: "56" }, allowed), { ok: false, invalidField: "confidence_score_not_number" });
   assert.deepEqual(validateCioModelPlan({ ...valid, confidence_score: 0 }, allowed), { ok: false, invalidField: "confidence_score_out_of_range" });
   assert.deepEqual(validateCioModelPlan({ ...valid, confidence_score: 101 }, allowed), { ok: false, invalidField: "confidence_score_out_of_range" });
+});
+
+test("directional execution requires numeric levels, an in-zone price, a confirming completed 5m bar, and no prior entry", () => {
+  const plan = {
+    buy_zone: "7520.25 - 7522.75",
+    stop_loss: "7517.50",
+    targets: ["7526.00", "7530.00"],
+  };
+  assert.deepEqual(parseNumericExecutionLevels(plan), {
+    entryZoneLow: 7520.25,
+    entryZoneHigh: 7522.75,
+    invalidation: 7517.5,
+    targets: [7526, 7530],
+  });
+  assert.equal(passesDirectionalEntryGate({
+    action: "OPEN_CALL",
+    currentPrice: 7524,
+    completedM5Bars: [{ open: 7520, close: 7523 }],
+    plan,
+    actionLog: [],
+  }).reason, "entry_zone_not_reached");
+  assert.equal(passesDirectionalEntryGate({
+    action: "OPEN_CALL",
+    currentPrice: 7521,
+    completedM5Bars: [{ open: 7522, close: 7520 }],
+    plan,
+    actionLog: [],
+  }).reason, "m5_confirmation_failed");
+  assert.equal(passesDirectionalEntryGate({
+    action: "OPEN_CALL",
+    currentPrice: 7521,
+    completedM5Bars: [{ open: 7520, close: 7522 }],
+    plan,
+    actionLog: [{ action: "買入 Call" }],
+  }).reason, "daily_directional_entry_limit");
+});
+
+test("an open directional position closes only at a numeric invalidation or target", () => {
+  const memory = {
+    currentPosition: "CALL",
+    entryPrice: 7521,
+    entryTime: "2026/08/23 10:00 ET",
+    actionLog: [{ action: "買入 Call", stopLoss: "7517.50", takeProfit: "7526.00 | 7530.00" }],
+  } as any;
+  assert.deepEqual(evaluateNumericPositionExit(memory, 7523), { shouldClose: false, reason: null });
+  assert.deepEqual(evaluateNumericPositionExit(memory, 7517.5), { shouldClose: true, reason: "numeric_invalidation_7517.5" });
+  assert.deepEqual(evaluateNumericPositionExit(memory, 7526), { shouldClose: true, reason: "numeric_target_reached" });
 });
 
 test("valid AI Council output rejects zero confidence and invalid HOLD evidence references", async () => {

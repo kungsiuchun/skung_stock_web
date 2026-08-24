@@ -90,6 +90,20 @@ interface RecapData {
     actionLogSize: number | null;
     learnedRules: string[];
   } | null;
+  retention?: { rawDays: number; recapDays: number; availableDateLimit: number };
+  performance?: {
+    label: string;
+    buckets: Array<{
+      action: "OPEN_CALL" | "OPEN_PUT";
+      regime: string;
+      sampleCount: number;
+      successCount: number;
+      hitRate: number | null;
+      averageReturn15m: number | null;
+      averageMae30m: number | null;
+      averageMfe30m: number | null;
+    }>;
+  };
 }
 
 const emptySummary: RecapSummary = {
@@ -284,6 +298,10 @@ export function SPXRecapPage() {
   const activeContentTitle = selectedItem ? `時段 ${selectedItem.time} 詳細報告` : "每日審計報告";
   const sourceLabel = data?.source === "d1" ? "D1 primary" : data?.source === "kv" ? "KV fallback" : "No data";
   const auditReportParts = useMemo(() => splitAuditReport(data?.auditReport || ""), [data?.auditReport]);
+  const performance = data?.performance?.buckets || [];
+  const performanceSamples = performance.reduce((sum, bucket) => sum + bucket.sampleCount, 0);
+  const performanceWins = performance.reduce((sum, bucket) => sum + bucket.successCount, 0);
+  const proxyHitRate = performanceSamples > 0 ? `${((performanceWins / performanceSamples) * 100).toFixed(1)}%` : "N/A";
 
   return (
     <div className="h-full w-full overflow-y-auto bg-[#08090d] px-4 pb-16 pt-8 text-zinc-100 sm:px-8 lg:px-12">
@@ -328,6 +346,13 @@ export function SPXRecapPage() {
             </label>
           </div>
         </div>
+
+        <section className="mb-8 grid gap-4 md:grid-cols-3">
+          <KpiCard label="SPX Proxy Samples" value={String(performanceSamples)} accent="border-sky-500/30" icon={<Target className="h-5 w-5" />} />
+          <KpiCard label="15m Proxy Hit Rate" value={proxyHitRate} accent="border-amber-500/30" icon={<Activity className="h-5 w-5" />} />
+          <KpiCard label="Retention" value={`${data?.retention?.recapDays || 90}d recap`} accent="border-violet-500/30" icon={<Database className="h-5 w-5" />} />
+        </section>
+        <p className="mb-8 text-xs text-zinc-500">{data?.performance?.label || "SPX direction proxy · not option P&L"}。Raw decision 保留 {data?.retention?.rawDays || 30} 日。</p>
 
         {Boolean(data?.warnings?.length) && (
           <div className="mb-6 border border-amber-500/30 bg-amber-950/20 px-4 py-3 text-xs font-semibold leading-6 text-amber-100">
