@@ -171,6 +171,55 @@ test("executable setups carry a complete 2R trade plan while pending setups expo
   assert.match(pending.tradeSetup.nextStep, /等待|先滿足/);
 });
 
+test("manual strategy input without an EOD high still produces a finite pending trigger", () => {
+  const result = runAlgorithmicStrategy("shrink_pullback", {
+    symbol: "TEST",
+    currentPrice: 102.1,
+    ma5: 103,
+    ma10: 102,
+    ma20: 102,
+    ma50: 100,
+    ma200: 90,
+    rsi14: 55,
+    maAlignment: "Strong Bullish",
+    atr14: 1,
+    volumeRatio: 0.7,
+    priorHigh20: 105,
+    priorLow20: 98,
+    priorHigh60: 110,
+    priorLow60: 90,
+    ma20Slope: 0.4,
+    ma50Slope: 0.3,
+  });
+
+  assert.ok(result);
+  assert.equal(result.tradeSetup.actionability, "PENDING_TRIGGER");
+  assert.equal(Number.isFinite(result.tradeSetup.triggerPrice), true);
+  assert.equal(result.tradeSetup.triggerPrice, 102.2);
+});
+
+test("box strategy uses a finite fallback trigger when only EOD lows are supplied", () => {
+  const result = runAlgorithmicStrategy("box_oscillation", {
+    symbol: "TEST",
+    currentPrice: 91,
+    ma5: 92,
+    ma10: 92,
+    ma20: 92,
+    rsi14: 45,
+    maAlignment: "Mixed",
+    atr14: 1,
+    volumeRatio: 1,
+    priorHigh60: 110,
+    priorLow60: 90,
+    ohlc: { open: [], high: [], low: [90, 90.3, 89.8], close: [], volume: [] },
+  });
+
+  assert.ok(result);
+  assert.equal(result.tradeSetup.actionability, "PENDING_TRIGGER");
+  assert.equal(Number.isFinite(result.tradeSetup.triggerPrice), true);
+  assert.equal(result.tradeSetup.triggerPrice, 91.1);
+});
+
 test("algorithmic strategy tool preserves the API while exposing the downgrade status", async () => {
   const bars = makeBars(260);
   const originalFetch = globalThis.fetch;

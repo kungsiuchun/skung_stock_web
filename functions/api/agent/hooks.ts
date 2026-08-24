@@ -14,7 +14,7 @@ export interface AgentHook {
  * Basic Logger Hook to output execution times.
  */
 export class LoggerHook implements AgentHook {
-  preToolUse(context: ToolExecutionContext) {
+  preToolUse(_context: ToolExecutionContext) {
     // We can inject logic here without polluting the executor loop
   }
 

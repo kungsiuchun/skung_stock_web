@@ -16,7 +16,7 @@ export enum BuySignal {
   HOLD = "持有",
   WAIT = "觀望",
   SELL = "避免新倉",
-  STRONG_SELL = "避免新倉",
+  STRONG_SELL = "強烈避免新倉",
 }
 
 export type TradeActionability = "EXECUTABLE" | "PENDING_TRIGGER" | "NO_TRADE" | "RESEARCH_ONLY";
@@ -343,7 +343,7 @@ const evaluateShrinkPullback = (context: StrategyContext): Draft => {
   const bullish = bullishRegime(m);
   const zoneLow = m.ma20 - m.atr * 0.25;
   const zoneHigh = m.ma20 + m.atr * 0.25;
-  const trigger = context.ohlc?.high.at(-1)! + m.atr * 0.1;
+  const trigger = finite(context.ohlc?.high.at(-1), m.price) + m.atr * 0.1;
   const reasons = [`現價 ${m.price.toFixed(2)}，20MA ${m.ma20.toFixed(2)}，距離 ${(Math.abs(m.price - m.ma20) / m.ma20 * 100).toFixed(2)}%。`, `相對成交量 ${m.rvol.toFixed(2)}x；規則要求不高於 0.80x。`];
   if (!bullish) return draft(BuySignal.SELL, 28, reasons, ["回踩只可發生在上升 regime；現時趨勢不合格。"], baseSetup("NO_TRADE", "等待 20/50/200MA 恢復多頭排列。"), context);
   if (!nearMa20 || !volumeShrink) return draft(BuySignal.WAIT, 58, reasons, [!nearMa20 ? `等待回到 ${zoneLow.toFixed(2)}–${zoneHigh.toFixed(2)} 的 20MA 區。` : "等待相對成交量收縮至 0.80x 或以下。"], baseSetup("PENDING_TRIGGER", `先滿足 MA20 區與 0.80x 量比，再突破當日高位 ${trigger.toFixed(2)}。`, { entryType: "LIMIT_ZONE", entryLow: roundPrice(zoneLow), entryHigh: roundPrice(zoneHigh), triggerPrice: roundPrice(trigger) }), context);
@@ -361,7 +361,7 @@ const evaluateBox = (context: StrategyContext): Draft => {
   const reasons = [`60 日箱底/箱頂（不含今日）：${m.priorLow60.toFixed(2)} / ${m.priorHigh60.toFixed(2)}。`, `現價位於箱體 ${(position * 100).toFixed(1)}%，箱底可識別觸碰 ${supports} 次。`];
   if (supports < 2 || range <= m.atr * 4) return draft(BuySignal.WAIT, 40, reasons, ["未形成至少兩次支持觸碰的可交易箱體。"], baseSetup("PENDING_TRIGGER", "等待箱體支持／阻力被確認。"), context);
   if (position > 0.45) return draft(BuySignal.SELL, 30, reasons, ["箱體中軌以上沒有良好風險回報；避免追入。"], baseSetup("NO_TRADE", `等待價格回到箱底 ${m.priorLow60.toFixed(2)} 附近並出現反轉。`), context);
-  const trigger = context.ohlc?.high.at(-1)! + m.atr * 0.1;
+  const trigger = finite(context.ohlc?.high.at(-1), m.price) + m.atr * 0.1;
   const setup = plannedTrade({ actionability: position <= 0.3 && m.price >= trigger ? "EXECUTABLE" : "PENDING_TRIGGER", nextStep: `箱底反轉後突破 ${trigger.toFixed(2)} 才入場。`, entryType: "BREAKOUT_TRIGGER", triggerPrice: trigger, stopLoss: m.priorLow60 - m.atr * 0.35, target1: m.priorHigh60 - m.atr * 0.5, target2: m.priorHigh60, invalidation: `收市跌穿箱底 ${m.priorLow60.toFixed(2)}。` });
   return draft(setup.actionability === "EXECUTABLE" ? BuySignal.BUY : BuySignal.WAIT, 76, reasons, [], setup, context);
 };

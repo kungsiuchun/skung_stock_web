@@ -638,7 +638,7 @@ const parseGexRows = (expiry: string, text: string) => {
   }
 
   return {
-    snapshot: text.match(/\*\*Snapshot:\*\*\s*([0-9T:.\-]+)/)?.[1] || null,
+    snapshot: text.match(/\*\*Snapshot:\*\*\s*([0-9T:.-]+)/)?.[1] || null,
     rows,
   };
 };

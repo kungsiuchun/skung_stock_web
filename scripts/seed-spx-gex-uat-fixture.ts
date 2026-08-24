@@ -191,7 +191,7 @@ INSERT OR IGNORE INTO spx_run_lifecycle_events
   (run_id, stage, stage_rank, attempt, occurred_at, latency_ms, payload_json, created_at)
 VALUES
   (${quote(runId)}, ${quote(stage)}, ${index}, 0, ${quote(createdAt)}, ${index === 0 ? "NULL" : index * 25}, '{}', ${quote(createdAt)});`).join("\n");
-const collectionEventsSql = ["SCHEDULED", "FETCHED", "NORMALIZED", "PERSISTED"].map((stage, index) => `
+const collectionEventsSql = ["SCHEDULED", "FETCHED", "NORMALIZED", "PERSISTED"].map((stage) => `
 INSERT OR IGNORE INTO spx_gex_collection_events
   (slot_id, stage, attempt, occurred_at, payload_json, created_at)
 VALUES

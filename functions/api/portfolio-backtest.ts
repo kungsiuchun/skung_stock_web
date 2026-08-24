@@ -4,7 +4,6 @@ import {
   simulatePortfolioBacktest,
   validatePortfolioBacktestRequest,
   type PortfolioBacktestInput,
-  type PortfolioHistoricalPoint,
   type PortfolioHistoricalSeries,
 } from "../../src/lib/portfolio-backtest";
 import { MarketCacheTimeoutError, resolveMarketCache, type MarketCacheStatus } from "../../src/lib/market-data-cache";

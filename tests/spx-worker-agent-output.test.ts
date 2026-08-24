@@ -998,7 +998,10 @@ test("four Council agents run concurrently under one absolute deadline", async (
   assert.equal(agents.length, 4);
   assert.equal(elapsedMs < 250, true);
   assert.equal(agents.every((agent) => agent.modelStatus === "council_deadline_exceeded"), true);
-  assert.equal(agents.every((agent) => agent.attempts?.[0].deadlineRemainingMs! <= 60), true);
+  assert.equal(agents.every((agent) => {
+    const remainingMs = agent.attempts?.[0].deadlineRemainingMs;
+    return typeof remainingMs === "number" && remainingMs <= 60;
+  }), true);
 });
 
 test("CIO non-JSON output retries once and then reports a traceable failure", async () => {

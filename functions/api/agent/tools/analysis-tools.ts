@@ -37,19 +37,9 @@ async function handleAnalyzeTrend(args: Record<string, any>): Promise<Record<str
       validIndices.push(idx);
     }
   });
-  const opens: number[] = validIndices.map(i => quote.open[i] || closes[validIndices.indexOf(i)]);
-  const highs: number[] = validIndices.map(i => quote.high[i] || closes[validIndices.indexOf(i)]);
-  const lows: number[] = validIndices.map(i => quote.low[i] || closes[validIndices.indexOf(i)]);
   const volumes: number[] = validIndices.map(i => quote.volume[i] || 0);
 
   if (closes.length < 30) return { error: "Insufficient data for trend analysis (need at least 30 days)" };
-
-  // --- 1. MA Alignment (5, 10, 20) ---
-  function getMA(period: number) {
-    if (closes.length < period) return null;
-    const slice = closes.slice(closes.length - period);
-    return slice.reduce((a, b) => a + b, 0) / period;
-  }
 
   // --- 1.5 Volume Analysis (Current vs 30d Avg) ---
   const currentVolume = volumes[volumes.length - 1] || 0;

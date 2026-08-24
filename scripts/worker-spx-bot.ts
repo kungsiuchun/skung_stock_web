@@ -1918,11 +1918,6 @@ function computeTrendDayContext(m5Quotes: any[], indicators: any, gexData: GexDa
   };
 }
 
-function isBeforeEtCutoff(etDate: Date, hour: number, minute: number) {
-  const minutes = etDate.getHours() * 60 + etDate.getMinutes();
-  return minutes < (hour * 60 + minute);
-}
-
 function planReason(plan: any) {
   return plan?.logic || plan?.action_reasoning || plan?.buy_zone || plan?.risk_warning || "策略未提供具體理由";
 }

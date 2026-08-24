@@ -1,4 +1,4 @@
-export async function onRequest(context: any) {
+export async function onRequest(_context: any) {
   try {
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/^VIX?interval=1d&range=30d`;
     const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });

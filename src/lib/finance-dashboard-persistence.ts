@@ -13,7 +13,7 @@ export interface DashboardHistoryItem {
   fullData?: FinanceDashboardData;
 }
 
-const LEGACY_DEEPEAR_PATTERN = /DeepEar|é«˜é »|get_financial_signals/i;
+const LEGACY_DEEPEAR_PATTERN = /DeepEar|é«˜é\u00a0»|get_financial_signals/i;
 
 export const hasLegacyDeepEarData = (data: unknown) => {
   if (!data || typeof data !== "object") return false;

@@ -1763,7 +1763,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
   const requestCoverage = useCallback(async () => {
     const symbol = normalizeSymbol(coverageRequestSymbol || selectedSymbol);
-    if (!/^[A-Z][A-Z0-9.\-]{0,9}$/.test(symbol)) {
+    if (!/^[A-Z][A-Z0-9.-]{0,9}$/.test(symbol)) {
       setCoverageRequestStatus("Enter a valid ticker symbol.");
       return;
     }

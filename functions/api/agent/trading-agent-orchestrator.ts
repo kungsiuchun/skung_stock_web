@@ -43,7 +43,7 @@ export class TradingAgentOrchestrator {
   }
 
   // Helper to create an executor for a specific role
-  private createExecutor(tools: any[], systemPrompt: string, roleName: string): AgentExecutor {
+  private createExecutor(tools: any[], systemPrompt: string): AgentExecutor {
     // We bind the env to the handlers out of band if needed, 
     // actually our handlers take `env` as second param in the execute function?
     // Wait, the `ToolRegistry` usually just runs `handler(args, env)`.
@@ -80,28 +80,28 @@ export class TradingAgentOrchestrator {
 任務：使用工具取得 ${symbol} 的公司基本面、利潤表和資產負債表。如果適合，也可以使用 get_fred_series 取得最新的宏觀經濟數據 (如 GDP, UNRATE, CPIAUCSL)。
 你必須給出一份詳細的 Markdown 報告，列出公司的財務健康狀況、估值指標（本益比、EPS等）、現金流狀況，以及內部成長潛力與宏觀環境影響。請使用繁體中文。
 ${TRADITIONAL_CHINESE_OUTPUT_RULE}`;
-    const fundamentalExecutor = this.createExecutor([...ALL_FUNDAMENTALS_TOOLS, ...macroTools], fundamentalPrompt, "Fundamentals Analyst");
+    const fundamentalExecutor = this.createExecutor([...ALL_FUNDAMENTALS_TOOLS, ...macroTools], fundamentalPrompt);
 
     // --- 2. Market Analyst ---
     const marketPrompt = `你是一位市場技術分析師與量化策略師。
 任務：使用你的工具獲取 ${symbol} 的技術指標（例如 get_realtime_quote, calculate_ma, analyze_trend）。
 給出一份 Markdown 報告，評論當前技術圖表排列（多頭/空頭）、RSI強弱、以及近期價格走勢。請使用繁體中文。
 ${TRADITIONAL_CHINESE_OUTPUT_RULE}`;
-    const marketExecutor = this.createExecutor([...ALL_STOCK_TOOLS, ...ALL_ANALYSIS_TOOLS], marketPrompt, "Market Analyst");
+    const marketExecutor = this.createExecutor([...ALL_STOCK_TOOLS, ...ALL_ANALYSIS_TOOLS], marketPrompt);
 
     // --- 3. Sentiment Analyst ---
     const sentimentPrompt = `你是一位新聞與市場情緒分析師。
 任務：使用 search_stock_news (可能的話 get_retail_sentiment) 獲取 ${symbol} 的近期新聞、催化劑與散戶情緒。
 給出一份 Markdown 報告，總結推動股價背後的消息面與情緒指標。請使用繁體中文。
 ${TRADITIONAL_CHINESE_OUTPUT_RULE}`;
-    const sentimentExecutor = this.createExecutor([...ALL_SEARCH_TOOLS, ...ALL_RETAIL_TOOLS], sentimentPrompt, "Sentiment Analyst");
+    const sentimentExecutor = this.createExecutor([...ALL_SEARCH_TOOLS, ...ALL_RETAIL_TOOLS], sentimentPrompt);
 
     // --- 4. Quant Analyst ---
     const quantPrompt = `你是一位量化策略分析師 (Quant Analyst)。
 任務：使用 run_algorithmic_strategy 執行 ${symbol} 的「所有」策略 (將 strategy_name 設為 "all")。
 找出當中得分最高或者最強烈暗示方向的策略，給出一份 Markdown 報告。列舉最適合當前市況的策略名稱、精確的進出場點位和止損位建議。請使用繁體中文。
 ${TRADITIONAL_CHINESE_OUTPUT_RULE}`;
-    const quantExecutor = this.createExecutor(ALL_ANALYSIS_TOOLS, quantPrompt, "Quant Analyst");
+    const quantExecutor = this.createExecutor(ALL_ANALYSIS_TOOLS, quantPrompt);
 
     // Execute in parallel
     console.log(`[Orchestrator] Dispatching Analyst Agents for ${symbol} ...`);
@@ -152,7 +152,7 @@ ${qRes.content}
 `;
 
     // Manager agent doesn't necessarily need tools here, just synthesizing.
-    const managerExecutor = this.createExecutor([], managerPrompt, "Portfolio Manager");
+    const managerExecutor = this.createExecutor([], managerPrompt);
     console.log(`[Orchestrator] Dispatching Portfolio Manager for ${symbol} ...`);
     const managerRes = await managerExecutor.run(summaryInput);
 

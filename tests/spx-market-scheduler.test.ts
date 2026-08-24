@@ -68,7 +68,7 @@ test("worker uses the DO alarm as the market clock and preserves fail-closed mis
   assert.match(workerSource, /createCboeOnlySpxGexDataClient/);
   assert.match(workerSource, /cachePolicy: 'force_refresh'/);
   assert.match(workerSource, /allowStaleCache: false/);
-  const retryMethod = workerSource.match(/private async executeOpeningRetry[\s\S]*?\n  private async execute\(/)?.[0] || "";
+  const retryMethod = workerSource.match(/private async executeOpeningRetry[\s\S]*?\n {2}private async execute\(/)?.[0] || "";
   assert.match(retryMethod, /runSpxGexHeatmapGeneration/);
   assert.doesNotMatch(retryMethod, /runTradingAgents|dispatchSpxDecisionDelivery/);
   const ensureMethod = workerSource.match(/private async ensure\(\)[\s\S]*?async fetch\(/)?.[0] || "";

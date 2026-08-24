@@ -133,7 +133,7 @@ class FakeStocksNativeClient implements StocksWatcherToolClient {
     throw new Error(`Unexpected tool ${name}`);
   }
 
-  async callTool(name: string, args: Record<string, unknown> = {}) {
+  async callTool(name: string, _args: Record<string, unknown> = {}) {
     const text = await this.callToolText(name);
     if (name === "get_quotes") {
       return {
