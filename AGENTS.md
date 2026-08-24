@@ -206,6 +206,7 @@ ADANOS_API_KEY=...
 - Production Pages binds `MARKET_CACHE_DB` to the isolated `market-cache-db` D1 database (`c629da02-21ce-4b1c-87f2-59ba54be922e`). Apply only `migrations/0009_market_data_cache.sql` to this database with `wrangler d1 execute market-cache-db --remote --file=./migrations/0009_market_data_cache.sql`; never run the shared SPX migration sequence against it.
 - Without the binding (for example, local development before initializing local D1), API responses explicitly report `cache.status="bypassed"`; never claim a shared-cache hit.
 - Expired entries may be shown only as visibly stale data with the refresh failure reason. Do not recreate a demo fallback for market-source failures.
+- Stock Watcher reserves its shared D1 safety budget atomically only before a `MARKET_CACHE_DB` refresh/write; cache hits and other read-only paths do not consume that reservation. Reserve the guard’s own D1 work plus bounded cache maintenance, fail closed when its 70% per-day threshold is reached or the reservation cannot be verified, and do not claim an account-wide D1 guarantee.
 
 ## S&P 500 Market Breadth
 

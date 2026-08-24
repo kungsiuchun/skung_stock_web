@@ -13,7 +13,7 @@ class TrackingOnlyD1 implements D1DatabaseLike {
     this.queries.push(query);
     const statement = {
       bind: () => statement,
-      first: async <T>() => {
+      first: async <_T>() => {
         throw new Error(`Unexpected D1 first query: ${query}`);
       },
       all: async <T>() => {
