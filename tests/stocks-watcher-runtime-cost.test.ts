@@ -178,6 +178,43 @@ test("native cache keys keep handler expiry and topRows inputs distinct", () => 
   assert.notEqual(rowsTwelve, rowsTwentyFour);
 });
 
+test("options sweeps refreshes separately for distinct expiry requests", async () => {
+  const db = new MarketCacheD1();
+  const originalFetch = globalThis.fetch;
+  let optionLoads = 0;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url === "https://fc.yahoo.com") return new Response("", { headers: { "set-cookie": "A=1" } });
+    if (url.includes("/v1/test/getcrumb")) return new Response("crumb");
+    const expiry = new URL(url).searchParams.get("date") || "0";
+    optionLoads += 1;
+    return new Response(JSON.stringify({ optionChain: { result: [{
+      expirationDates: [Number(expiry)],
+      quote: { regularMarketPrice: 180 },
+      options: [{ expirationDate: Number(expiry), calls: [{ strike: 180, volume: 20, openInterest: 10 }], puts: [] }],
+    }] } }));
+  };
+  try {
+    const call = (expiry: string) => stocksWatcherApi({
+      request: new Request("https://example.com/api/stocks-intelligence-watcher", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool: "get_options_sweeps", params: { ticker: "NVDA", expiry } }),
+      }),
+      env: { MARKET_CACHE_DB: db },
+    });
+    const first = await call("2026-08-28");
+    const second = await call("2026-09-04");
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.equal((await first.json() as { raw: { chain: { selectedExpiry: string } } }).raw.chain.selectedExpiry, "2026-08-28");
+    assert.equal((await second.json() as { raw: { chain: { selectedExpiry: string } } }).raw.chain.selectedExpiry, "2026-09-04");
+    assert.equal(optionLoads, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("exhausted refresh quota fails closed before the Yahoo load", async () => {
   const db = new MarketCacheD1();
   const dayUtc = new Date().toISOString().slice(0, 10);

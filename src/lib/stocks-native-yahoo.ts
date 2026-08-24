@@ -879,7 +879,7 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     },
   ),
   tool(
-    { name: "get_options_sweeps", description: "Native placeholder for unusual options rows ranked by volume.", inputSchema: { properties: { ticker: { type: "string" }, topN: { type: "integer" } }, required: ["ticker"] } },
+    { name: "get_options_sweeps", description: "Native placeholder for unusual options rows ranked by volume.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, topN: { type: "integer" } }, required: ["ticker"] } },
     async ({ ticker, expiry }) => {
       const chain = await fetchOptions(ticker, expiry);
       const legs = [...chain.calls.map((leg) => ({ ...leg, type: "C" })), ...chain.puts.map((leg) => ({ ...leg, type: "P" }))].sort((a, b) => numberOrZero(b.volume) - numberOrZero(a.volume)).slice(0, 12);
