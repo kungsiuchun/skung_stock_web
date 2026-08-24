@@ -12,6 +12,8 @@ import type { D1DatabaseLike } from "./spx-recap-d1";
 
 export const STOCKS_WATCHER_CACHE_REFRESH_READ_RESERVE = 3 + MAX_CACHE_PRUNE_READ_ROWS;
 export const STOCKS_WATCHER_CACHE_REFRESH_WRITE_RESERVE = (2 + MAX_CACHE_PRUNE_ROWS) * MARKET_CACHE_WRITE_INDEX_AMPLIFICATION;
+export const STOCKS_WATCHER_TRACKED_ASSET_READ_RESERVE = 500;
+export const STOCKS_WATCHER_SNAPSHOT_LOADER_READ_RESERVE = STOCKS_WATCHER_TRACKED_ASSET_READ_RESERVE + 1;
 
 const utcDay = (now: Date) => now.toISOString().slice(0, 10);
 
@@ -27,9 +29,13 @@ const unavailableDecision = (dayUtc: string): MarketCacheD1QuotaDecision =>
 
 export const reserveStocksWatcherCacheRefreshQuota = async (
   db: D1DatabaseLike,
+  options: { loaderRowsRead?: number } = {},
   now = new Date(),
 ): Promise<MarketCacheD1QuotaDecision> => {
   const dayUtc = utcDay(now);
+  const loaderRowsRead = options.loaderRowsRead ?? 0;
+  if (!Number.isInteger(loaderRowsRead) || loaderRowsRead < 0) return unavailableDecision(dayUtc);
+  const rowsReadReserve = STOCKS_WATCHER_CACHE_REFRESH_READ_RESERVE + loaderRowsRead;
   const readThreshold = Math.floor(MARKET_CACHE_D1_DAILY_READ_LIMIT * MARKET_CACHE_D1_QUOTA_HARD_THRESHOLD);
   const writeThreshold = Math.floor(MARKET_CACHE_D1_DAILY_WRITE_LIMIT * MARKET_CACHE_D1_QUOTA_HARD_THRESHOLD);
   const cachedAt = now.toISOString();
@@ -37,7 +43,7 @@ export const reserveStocksWatcherCacheRefreshQuota = async (
   const cacheKey = `__stocks_watcher_refresh_quota__:${dayUtc}`;
   const initialPayload = JSON.stringify({
     dayUtc,
-    rowsRead: STOCKS_WATCHER_CACHE_REFRESH_READ_RESERVE,
+    rowsRead: rowsReadReserve,
     rowsWritten: STOCKS_WATCHER_CACHE_REFRESH_WRITE_RESERVE,
   });
   let row: { payload_json: string } | null;
@@ -72,13 +78,13 @@ export const reserveStocksWatcherCacheRefreshQuota = async (
       expiresAt,
       cachedAt,
       dayUtc,
-      STOCKS_WATCHER_CACHE_REFRESH_READ_RESERVE,
+      rowsReadReserve,
       STOCKS_WATCHER_CACHE_REFRESH_WRITE_RESERVE,
       cachedAt,
       expiresAt,
       cachedAt,
       dayUtc,
-      STOCKS_WATCHER_CACHE_REFRESH_READ_RESERVE,
+      rowsReadReserve,
       readThreshold,
       STOCKS_WATCHER_CACHE_REFRESH_WRITE_RESERVE,
       writeThreshold,
@@ -96,10 +102,10 @@ export const reserveStocksWatcherCacheRefreshQuota = async (
       currentUtcDay: dayUtc,
       usage: {
         dayUtc,
-        rowsRead: usage.rowsRead - STOCKS_WATCHER_CACHE_REFRESH_READ_RESERVE,
+        rowsRead: usage.rowsRead - rowsReadReserve,
         rowsWritten: usage.rowsWritten - STOCKS_WATCHER_CACHE_REFRESH_WRITE_RESERVE,
       },
-      rowsRead: STOCKS_WATCHER_CACHE_REFRESH_READ_RESERVE,
+      rowsRead: rowsReadReserve,
       rowsWritten: STOCKS_WATCHER_CACHE_REFRESH_WRITE_RESERVE,
     });
   } catch {

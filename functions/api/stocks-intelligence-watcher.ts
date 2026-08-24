@@ -15,7 +15,11 @@ import {
   type MarketCacheDataset,
 } from "../../src/lib/market-data-cache";
 import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
-import { reserveStocksWatcherCacheRefreshQuota } from "../../src/lib/stocks-watcher-refresh-quota";
+import {
+  reserveStocksWatcherCacheRefreshQuota,
+  STOCKS_WATCHER_SNAPSHOT_LOADER_READ_RESERVE,
+  STOCKS_WATCHER_TRACKED_ASSET_READ_RESERVE,
+} from "../../src/lib/stocks-watcher-refresh-quota";
 import {
   buildStocksWatcherTrackedWatchlist,
   listStocksWatcherTrackedAssets,
@@ -493,7 +497,10 @@ const callTrackedWatchlist = async (env: Env, requestId: string) => {
     params: { tool },
     dataset,
     ttlMs: getMarketCacheDatasetTtlMs(dataset),
-    refreshQuotaGuard: () => reserveStocksWatcherCacheRefreshQuota(env.MARKET_CACHE_DB!),
+    refreshQuotaGuard: () => reserveStocksWatcherCacheRefreshQuota(
+      env.MARKET_CACHE_DB!,
+      { loaderRowsRead: STOCKS_WATCHER_TRACKED_ASSET_READ_RESERVE },
+    ),
     allowStaleOnRefreshError: false,
     requestId,
     load: async () => {
@@ -624,7 +631,10 @@ export async function onRequest(context: { request: Request; env?: Env }) {
       dataset,
       ttlMs: getMarketCacheDatasetTtlMs(dataset),
       refreshQuotaGuard: env.MARKET_CACHE_DB
-        ? () => reserveStocksWatcherCacheRefreshQuota(env.MARKET_CACHE_DB!)
+        ? () => reserveStocksWatcherCacheRefreshQuota(
+          env.MARKET_CACHE_DB!,
+          { loaderRowsRead: STOCKS_WATCHER_SNAPSHOT_LOADER_READ_RESERVE },
+        )
         : undefined,
       requestId,
       sourceAsOf: (snapshot) => snapshot.generatedAt,

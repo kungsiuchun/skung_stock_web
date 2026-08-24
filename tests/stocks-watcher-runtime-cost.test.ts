@@ -75,7 +75,7 @@ class MarketCacheD1 implements D1DatabaseLike {
           const next = current
             ? { dayUtc: current.dayUtc, rowsRead: current.rowsRead + Number(values[6]), rowsWritten: current.rowsWritten + Number(values[7]) }
             : initial;
-          if (next.rowsWritten >= 70_000) return null;
+          if (next.rowsRead >= 3_500_000 || next.rowsWritten >= 70_000) return null;
           this.refreshQuota.set(key, next);
           return { payload_json: JSON.stringify(next) } as T;
         }
@@ -171,6 +171,28 @@ test("watchlist fails closed when a stale cache cannot refresh authoritative tra
   assert.match(payload.error, /no active tracked assets/i);
   assert.equal(db.trackedAssetScans, 2);
   assert.equal(db.refreshQuotaReservations, 2);
+});
+
+test("watchlist quota reserves its bounded authoritative tracking scan", async () => {
+  const db = new MarketCacheD1();
+  const dayUtc = new Date().toISOString().slice(0, 10);
+  db.refreshQuota.set(`__stocks_watcher_refresh_quota__:${dayUtc}`, {
+    dayUtc,
+    rowsRead: 3_499_500,
+    rowsWritten: 0,
+  });
+  const response = await stocksWatcherApi({
+    request: new Request("https://example.com/api/stocks-intelligence-watcher", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tool: "get_watchlist", params: {} }),
+    }),
+    env: { MARKET_CACHE_DB: db },
+  });
+
+  assert.equal(response.status, 502);
+  assert.equal(db.refreshQuotaReservations, 1);
+  assert.equal(db.trackedAssetScans, 0);
 });
 
 test("ignored POST parameters cannot create additional market-cache entries", async () => {
