@@ -69,6 +69,13 @@ Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 - Keep `documents`, `spreadsheets`, `presentations`, and `pdf` enabled for artifact work, but do not route normal repo coding tasks through them.
 - Do not install or invoke Figma, Notion, Gmail, Slack, Stripe, Vercel, Netlify, or Sentry plugins unless the task explicitly depends on those external systems; extra connectors increase noise and auth surface.
 
+## Git Worktree Lifecycle
+
+- Normal fixes must not create a Git worktree. Create one only when the main checkout has uncommitted changes, genuinely independent work must run in parallel, or a high-risk release needs isolation; state the reason before creating it.
+- In the same task that creates a worktree, complete its lifecycle: commit, verify, merge/push/deploy when authorized, `git worktree remove`, delete the merged branch, and run `git worktree prune --expire now`.
+- Do not use detached deployment worktrees as long-lived checkouts. Do not silently leave a stash, untracked output, or unmerged feature worktree behind.
+- Never force-remove a worktree with uncommitted files or unclear ownership. Report the exact blocker and wait for the user to choose whether to preserve, commit, or discard it.
+
 ---
 
 ## Architecture
