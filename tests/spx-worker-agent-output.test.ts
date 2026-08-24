@@ -1397,6 +1397,16 @@ test("market data quality blocks only required missing feeds and warns on option
   assert.equal(usable.overallStatus, "WARN");
   assert.deepEqual(usable.hardBlocks, []);
   assert.ok(usable.warnings.includes("cboe_gex_missing"));
+
+  const yahooWithVolume = assessMarketDataQuality({
+    spxQuotes: [{ close: 7400, volume: 1000 }],
+    spxM5Quotes: [{ close: 7401, volume: 1000 }],
+    spxPriceSource: "yahoo",
+    intradayVolumeAvailable: true,
+  });
+  assert.equal(yahooWithVolume.items.spx15m.detail, "SPX 15m core chart");
+  assert.equal(yahooWithVolume.items.intradayVolume.status, "OK");
+  assert.equal(yahooWithVolume.warnings.includes("intraday_volume_missing"), false);
 });
 
 test("stale required SPX data blocks LIVE but UAT replay is explicitly non-normal", () => {

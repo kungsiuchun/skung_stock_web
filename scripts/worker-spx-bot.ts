@@ -45,8 +45,6 @@ import {
 import { runSpxDecisionRun } from '../src/lib/spx-decision-run';
 import { buildSpxMarketSnapshot, normalizeSpxReplaySeries } from '../src/lib/spx-market-snapshot';
 import { runSpxRetention, SPX_KV_RETENTION_SECONDS } from '../src/lib/spx-retention';
-import { fetchZeroDteSpxCurrentSession, fetchZeroDteSpxIntradayCandles, isZeroDteSpxCurrentSession } from '../functions/api/_0dtespx';
-import { aggregateSpxOneMinutePriceActionCandles } from '../src/lib/spx-price-action-compass';
 
 // Cloudflare Worker Environment Types
 interface Env {
@@ -59,7 +57,6 @@ interface Env {
   SPX_BOARD_URL?: string;
   SPX_ENABLE_LLM_COUNCIL?: string;
   SPX_ENABLE_LLM_CIO?: string;
-  ZERO_DTE_SPX_TOKEN?: string;
   WEBHOOK_SECRET?: string; // 🔒 防護互聯網隨機觸發的安全金鑰
   SPX_MEMORY: any;
   SPX_SCHEDULER: SpxSchedulerNamespace;
@@ -1209,28 +1206,6 @@ async function fetchYahooChart(symbol: string, interval: string, range: string) 
   }
 
   throw new Error(`Yahoo chart failed for ${symbol} ${interval}/${range}: ${errors.join(' | ')}`);
-}
-
-export async function fetchCurrentRthSpxQuotes(env: Env, tradingDate: string) {
-  const sessions = await fetchZeroDteSpxCurrentSession(env.ZERO_DTE_SPX_TOKEN);
-  if (!isZeroDteSpxCurrentSession(sessions, tradingDate)) {
-    throw new Error('ZERO_DTE_SPX_CURRENT_SESSION_UNAVAILABLE');
-  }
-  const result = await fetchZeroDteSpxIntradayCandles(tradingDate, env.ZERO_DTE_SPX_TOKEN);
-  const toQuotes = (candles: Array<{ time: number; open: number; high: number; low: number; close: number }>) => candles.map((candle) => ({
-    date: new Date(candle.time),
-    open: candle.open,
-    high: candle.high,
-    low: candle.low,
-    close: candle.close,
-    // The provider has no trade volume. Null is intentional; zero would lie.
-    volume: null,
-  }));
-  return {
-    oneMinute: toQuotes(result.candles),
-    fiveMinute: toQuotes(aggregateSpxOneMinutePriceActionCandles(result.candles, '5m')),
-    fifteenMinute: toQuotes(aggregateSpxOneMinutePriceActionCandles(result.candles, '15m')),
-  };
 }
 
 async function fetchOptionalMarketData<T>(label: string, task: Promise<T>, fallback: T): Promise<T> {
@@ -3411,12 +3386,9 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
     if (!dailyMemory.icPosition) { dailyMemory.icPosition = 'NONE'; dailyMemory.icDeployTime = null; dailyMemory.icAction = null; }
     const openPositionContext = deriveOpenPositionContext(dailyMemory);
 
-    console.log('[DEBUG] Step 1: Fetching current-RTH SPX, optional market context, canonical SPX GEX...');
-    const currentRthSpx = await timedStep('0DTESPX current-RTH SPX price', () => fetchCurrentRthSpxQuotes(env, etDateStr));
-    // 0DTESPX is the only current-RTH price source. A failure aborts this run and
-    // the outer pipeline completes it as a fail-closed HOLD; it never falls back to Yahoo.
-    const spxQuotes = currentRthSpx.oneMinute;
-    const spxQuotesM5 = currentRthSpx.fiveMinute;
+    console.log('[DEBUG] Step 1: Fetching Yahoo SPX intraday, optional market context, canonical SPX GEX...');
+    const spxQuotes = await timedStep('Yahoo SPX 15m core chart', () => fetchYahooChart('^GSPC', '15m', '7d'));
+    const spxQuotesM5 = await fetchOptionalMarketData('Yahoo SPX 5m trigger chart', fetchYahooChart('^GSPC', '5m', '2d'), spxQuotes);
     const [spxQuotesD1, spxQuotesH1, vixQuotes, vixQuotes9d, canonicalGexSnapshot, sentimentData] = await Promise.all([
       fetchOptionalMarketData('SPX D1 price-action chart', fetchYahooChart('^GSPC', '1d', '3mo'), []),
       fetchOptionalMarketData('SPX H1 price-action chart', fetchYahooChart('^GSPC', '1h', '10d'), []),
@@ -3481,8 +3453,8 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
     let marketDataQuality = assessMarketDataQuality({
       spxQuotes,
       spxM5Quotes: m5QuotesValid,
-      spxPriceSource: '0dtespx',
-      intradayVolumeAvailable: false,
+      spxPriceSource: 'yahoo',
+      intradayVolumeAvailable: spxInd.currentVWAP !== null,
       spxD1Quotes: spxQuotesD1,
       spxH1Quotes: spxQuotesH1,
       currentVix,
