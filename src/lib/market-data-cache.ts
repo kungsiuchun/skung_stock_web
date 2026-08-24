@@ -267,6 +267,7 @@ export interface ResolveMarketCacheOptions<T> {
   ttlMs?: number;
   quotaGuard?: () => MarketCacheD1QuotaDecision;
   refreshQuotaGuard?: () => Promise<MarketCacheD1QuotaDecision>;
+  allowStaleOnRefreshError?: boolean;
   force?: boolean;
   sourceAsOf?: (value: T) => string | null | undefined;
   load: () => Promise<T>;
@@ -636,7 +637,7 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
           throw fallbackError;
         }
       }
-      if (stale) {
+      if (stale && options.allowStaleOnRefreshError !== false) {
         let recordErrorClass: string | undefined;
         try {
           await runPhase("record-error", () => recordRefreshError(options.db!, cacheKey, failedAt, message), d1PhaseCapMs, null);

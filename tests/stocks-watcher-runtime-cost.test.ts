@@ -45,6 +45,9 @@ class TrackingOnlyD1 implements D1DatabaseLike {
 
 class MarketCacheD1 implements D1DatabaseLike {
   readonly queries: string[] = [];
+  trackedAssetScans = 0;
+  refreshQuotaReservations = 0;
+  trackedAssetsAvailable = true;
   readonly rows = new Map<string, {
     cache_key: string;
     payload_json: string;
@@ -65,6 +68,7 @@ class MarketCacheD1 implements D1DatabaseLike {
       },
       first: async <T>() => {
         if (query.includes("'stocks-watcher-quota'")) {
+          this.refreshQuotaReservations += 1;
           const key = String(values[0]);
           const initial = JSON.parse(String(values[1])) as { dayUtc: string; rowsRead: number; rowsWritten: number };
           const current = this.refreshQuota.get(key);
@@ -77,16 +81,20 @@ class MarketCacheD1 implements D1DatabaseLike {
         }
         return (this.rows.get(String(values[0])) || null) as T | null;
       },
-      all: async <T>() => query.includes("FROM tracked_assets")
-        ? {
-          results: [{
-            symbol: "NVDA", provider_symbol: "NVDA", priority: 100,
-            display_name: "NVIDIA", asset_type: "equity", is_active: 1,
-            metadata_json: '{"gicsSector":"Information Technology"}',
-            created_at: "2026-08-24T00:00:00.000Z", updated_at: "2026-08-24T00:00:00.000Z",
-          }] as T[],
-        }
-        : { results: [] as T[] },
+      all: async <T>() => {
+        if (!query.includes("FROM tracked_assets")) return { results: [] as T[] };
+        this.trackedAssetScans += 1;
+        return {
+          results: this.trackedAssetsAvailable
+            ? [{
+              symbol: "NVDA", provider_symbol: "NVDA", priority: 100,
+              display_name: "NVIDIA", asset_type: "equity", is_active: 1,
+              metadata_json: '{"gicsSector":"Information Technology"}',
+              created_at: "2026-08-24T00:00:00.000Z", updated_at: "2026-08-24T00:00:00.000Z",
+            }] as T[]
+            : [],
+        };
+      },
       run: async () => {
         if (query.includes("INSERT INTO market_cache_entries")) {
           const [cacheKey, , , payloadJson, sourceAsOf, cachedAt, expiresAt] = values;
@@ -132,6 +140,37 @@ test("watchlist caches the authoritative tracking scan after its first refresh",
   assert.equal(payload.observability.rowsRead, 1);
   assert.equal(payload.observability.rowsWritten, 0);
   assert.equal((payload as { cache: { status: string } }).cache.status, "hit");
+  assert.equal(db.trackedAssetScans, 1);
+  assert.equal(db.refreshQuotaReservations, 1);
+});
+
+test("watchlist fails closed when a stale cache cannot refresh authoritative tracking", async () => {
+  const db = new MarketCacheD1();
+  const call = () => stocksWatcherApi({
+    request: new Request(
+      "https://example.com/api/stocks-intelligence-watcher",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool: "get_watchlist", params: {} }),
+      },
+    ),
+    env: { MARKET_CACHE_DB: db },
+  });
+
+  assert.equal((await call()).status, 200);
+  const cachedWatchlist = [...db.rows.entries()].find(([key]) => !key.startsWith("__stocks_watcher_refresh_quota__"));
+  assert.ok(cachedWatchlist);
+  cachedWatchlist[1].expires_at = "2000-01-01T00:00:00.000Z";
+  db.trackedAssetsAvailable = false;
+
+  const response = await call();
+  const payload = (await response.json()) as { ok: boolean; error: string };
+  assert.equal(response.status, 502);
+  assert.equal(payload.ok, false);
+  assert.match(payload.error, /no active tracked assets/i);
+  assert.equal(db.trackedAssetScans, 2);
+  assert.equal(db.refreshQuotaReservations, 2);
 });
 
 test("ignored POST parameters cannot create additional market-cache entries", async () => {

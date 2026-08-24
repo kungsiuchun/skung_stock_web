@@ -493,6 +493,7 @@ const callTrackedWatchlist = async (env: Env, requestId: string) => {
     dataset,
     ttlMs: getMarketCacheDatasetTtlMs(dataset),
     refreshQuotaGuard: () => reserveStocksWatcherCacheRefreshQuota(env.MARKET_CACHE_DB!),
+    allowStaleOnRefreshError: false,
     requestId,
     load: async () => {
       const assets = await listStocksWatcherTrackedAssets(env.MARKET_CACHE_DB!, {
