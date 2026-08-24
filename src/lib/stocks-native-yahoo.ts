@@ -1081,6 +1081,23 @@ export const getNativeStocksToolCacheParams = (
   const canonicalName = canonicalNativeToolName(name);
   const definition = NATIVE_TOOL_BY_NAME.get(canonicalName);
   if (!definition) throw new Error(`Native Yahoo tool '${name}' is not implemented.`);
+  const context = nativeToolContext(params);
+  const expiry = context.expiry || null;
+  const topRows = context.topRows;
+  if (canonicalName === "get_stock_history") {
+    const range = typeof params.range === "string" && /^(\d+(d|mo|y)|ytd|max)$/.test(params.range.trim()) ? params.range.trim() : "5y";
+    const interval = typeof params.interval === "string" && /^(1d|1wk|1mo)$/.test(params.interval.trim()) ? params.interval.trim() : "1d";
+    return { tool: canonicalName, ticker: context.ticker, range, interval };
+  }
+  if (["get_options", "get_options_gex", "chart_gex", "get_options_dex", "chart_dex", "get_options_0dte", "get_options_greeks", "chart_greeks", "get_options_iv_intraday", "get_options_pcr", "get_options_sweeps", "get_options_mispricing"].includes(canonicalName)) {
+    const base = { tool: canonicalName, ticker: context.ticker, expiry };
+    return ["get_options_gex", "chart_gex", "get_options_dex", "chart_dex", "get_options_greeks", "chart_greeks", "get_options_iv_intraday"].includes(canonicalName)
+      ? { ...base, topRows }
+      : canonicalName === "get_options"
+        ? { ...base, strikesAroundAtm: toNumber(params.strikesAroundAtm, 12) }
+        : base;
+  }
+  if (["market_breadth", "get_sector_stats", "get_macro_regime", "basket_relative_strength", "get_options_flow_universe"].includes(canonicalName)) return { tool: canonicalName };
   const properties = definition.inputSchema?.properties || {};
   return {
     tool: canonicalName,

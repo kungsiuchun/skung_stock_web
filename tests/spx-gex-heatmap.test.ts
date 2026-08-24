@@ -64,11 +64,20 @@ it("normalizes volatile refresh keys into one SPX edge-cache key", () => {
 });
 
 it("keeps price-action view and timeframe selections in distinct SPX edge-cache keys", () => {
-  const overlay = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?view=price-overlay"));
-  const fourHour = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?timeframe=4h"));
-  const sameOverlay = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?view=price-overlay&cacheBust=1"));
+  const overlay = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay"));
+  const fourHour = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?timeframe=4h"));
+  const sameOverlay = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay&cacheBust=1"));
   assert.notEqual(overlay.url, fourHour.url);
   assert.equal(overlay.url, sameOverlay.url);
+});
+
+it("normalizes only effective SPX endpoint selections", () => {
+  const heatmap = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-heatmap?view=x"));
+  const plainHeatmap = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-heatmap"));
+  const invalidOne = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?timeframe=bad-a"));
+  const invalidTwo = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?timeframe=bad-b"));
+  assert.equal(heatmap.url, plainHeatmap.url);
+  assert.equal(invalidOne.url, invalidTwo.url);
 });
 
 it("rejects Cloudflare text failures without attempting JSON parsing", async () => {

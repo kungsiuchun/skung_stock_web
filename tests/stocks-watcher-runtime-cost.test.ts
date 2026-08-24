@@ -176,6 +176,14 @@ test("native cache keys keep handler expiry and topRows inputs distinct", () => 
   }));
   assert.notEqual(expiryOne, expiryTwo);
   assert.notEqual(rowsTwelve, rowsTwentyFour);
+  assert.equal(
+    buildMarketCacheKey("stocks-watcher-tool", "NVDA", getNativeStocksToolCacheParams("get_stock_history", { ticker: "NVDA" })),
+    buildMarketCacheKey("stocks-watcher-tool", "NVDA", getNativeStocksToolCacheParams("get_stock_history", { ticker: "NVDA", range: "5y", interval: "1d" })),
+  );
+  assert.equal(
+    buildMarketCacheKey("stocks-watcher-tool", "MARKET", getNativeStocksToolCacheParams("market_breadth", { market: "us" })),
+    buildMarketCacheKey("stocks-watcher-tool", "MARKET", getNativeStocksToolCacheParams("market_breadth", { market: "eu" })),
+  );
 });
 
 test("options sweeps refreshes separately for distinct expiry requests", async () => {

@@ -3,6 +3,8 @@ export interface SpxCacheContext {
   waitUntil?: (promise: Promise<unknown>) => void;
 }
 
+import { normalizeSpxPriceActionTimeframe } from "../../src/lib/spx-price-action-compass";
+
 /**
  * These are the complete public selection inputs for the SPX read APIs.
  *
@@ -10,15 +12,25 @@ export interface SpxCacheContext {
  * while the endpoint ignores them, which turns harmless tracking parameters
  * and client cache-busters into repeated D1 origin reads.
  */
-const SPX_CACHE_QUERY_KEYS = ["date", "snapshot", "strike", "expiry", "view", "timeframe"] as const;
 const inFlightSpxEdgeRequests = new Map<string, Promise<Response>>();
 
 export const canonicalSpxCacheRequest = (request: Request) => {
   const url = new URL(request.url);
   const canonical = new URLSearchParams();
-  for (const key of SPX_CACHE_QUERY_KEYS) {
+  const keys = url.pathname.endsWith("/spx-gex-cell-detail")
+    ? ["date", "snapshot", "strike", "expiry"]
+    : url.pathname.endsWith("/spx-gex-heatmap")
+      ? ["date", "snapshot"]
+      : url.pathname.endsWith("/spx-gex-pressure") || url.pathname.endsWith("/spx-recap")
+        ? ["date"]
+        : [];
+  for (const key of keys) {
     const value = url.searchParams.get(key);
     if (value !== null) canonical.set(key, value);
+  }
+  if (url.pathname.endsWith("/spx-price-action-compass")) {
+    if (url.searchParams.get("view") === "price-overlay") canonical.set("view", "price-overlay");
+    else canonical.set("timeframe", normalizeSpxPriceActionTimeframe(url.searchParams.get("timeframe")));
   }
   url.search = canonical.toString();
   return new Request(url.toString(), { method: "GET" });
