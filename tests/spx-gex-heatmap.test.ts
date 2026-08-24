@@ -57,8 +57,10 @@ import { resetSpxRequestLaneForTests, runSpxRequest, SpxRequestTimeoutError } fr
 it("normalizes volatile refresh keys into one SPX edge-cache key", () => {
   const first = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?date=2026-07-17&_=1"));
   const second = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?date=2026-07-17&refresh=2"));
+  const tracking = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?utm_source=ad&date=2026-07-17&requestId=abc"));
   assert.equal(first.url, "https://example.com/api/spx-gex-pressure?date=2026-07-17");
   assert.equal(first.url, second.url);
+  assert.equal(first.url, tracking.url);
 });
 
 it("rejects Cloudflare text failures without attempting JSON parsing", async () => {
@@ -1918,7 +1920,7 @@ describe("SPX GEX heatmap API", () => {
 
     assert.equal(latestResponse.status, 200);
     assert.equal((latestPayload as any).status, "READY");
-    assert.equal(latestResponse.headers.get("cache-control"), "public, max-age=15");
+    assert.equal(latestResponse.headers.get("cache-control"), "public, max-age=60");
     assert.equal(latestPayload.selectedDate, "2026-05-27");
     assert.deepEqual(
       latestPayload.sessions.map((session) => session.snapshotMinuteEt),
@@ -2431,7 +2433,7 @@ describe("SPX GEX pressure API", () => {
     const payload = JSON.parse(text) as { status: string; pressure: { timeline: unknown[]; movers: unknown[] } };
 
     assert.equal(response.status, 200, text);
-    assert.equal(response.headers.get("cache-control"), "public, max-age=15");
+    assert.equal(response.headers.get("cache-control"), "public, max-age=60");
     assert.equal(payload.status, "READY");
     assert.equal(payload.pressure.timeline.length, 2);
     assert.equal(payload.pressure.movers.length > 0, true);

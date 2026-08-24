@@ -3,12 +3,24 @@ export interface SpxCacheContext {
   waitUntil?: (promise: Promise<unknown>) => void;
 }
 
-const VOLATILE_QUERY_KEYS = new Set(["_", "refresh", "cacheBust"]);
+/**
+ * These are the complete public selection inputs for the SPX read APIs.
+ *
+ * Do not cache arbitrary query strings. They create unique Cache API keys
+ * while the endpoint ignores them, which turns harmless tracking parameters
+ * and client cache-busters into repeated D1 origin reads.
+ */
+const SPX_CACHE_QUERY_KEYS = ["date", "snapshot", "strike", "expiry"] as const;
 const inFlightSpxEdgeRequests = new Map<string, Promise<Response>>();
 
 export const canonicalSpxCacheRequest = (request: Request) => {
   const url = new URL(request.url);
-  for (const key of VOLATILE_QUERY_KEYS) url.searchParams.delete(key);
+  const canonical = new URLSearchParams();
+  for (const key of SPX_CACHE_QUERY_KEYS) {
+    const value = url.searchParams.get(key);
+    if (value !== null) canonical.set(key, value);
+  }
+  url.search = canonical.toString();
   return new Request(url.toString(), { method: "GET" });
 };
 

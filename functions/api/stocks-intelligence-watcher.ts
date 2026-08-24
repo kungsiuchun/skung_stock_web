@@ -1,18 +1,18 @@
-import { buildStocksWatcherSnapshotFromNative, type StocksWatcherSnapshot } from "../../src/lib/stocks-intelligence-watcher";
-import { NativeStocksYahooClient, normalizeStocksWatcherSymbol } from "../../src/lib/stocks-native-yahoo";
+import {
+  buildStocksWatcherSnapshotFromNative,
+  type StocksWatcherSnapshot,
+} from "../../src/lib/stocks-intelligence-watcher";
+import {
+  NativeStocksYahooClient,
+  normalizeStocksWatcherSymbol,
+} from "../../src/lib/stocks-native-yahoo";
 import {
   classifyMarketCacheDataset,
-  getMarketCacheD1QuotaObservation,
   getMarketCacheDatasetTtlMs,
   resolveMarketCache,
   type MarketCacheDataset,
 } from "../../src/lib/market-data-cache";
 import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
-import {
-  reserveStocksWatcherD1Quota,
-  STOCKS_WATCHER_QUOTA_WORST_CASE_OBSERVATION,
-  type StocksWatcherQuotaReservation,
-} from "../../src/lib/stocks-watcher-quota";
 import {
   buildStocksWatcherTrackedWatchlist,
   listStocksWatcherTrackedAssets,
@@ -87,15 +87,28 @@ const requestIdFor = (request: Request) => {
   }
 };
 
-export const classifyStocksWatcherDataset = (tool: string): MarketCacheDataset => classifyMarketCacheDataset(tool);
+export const classifyStocksWatcherDataset = (
+  tool: string,
+): MarketCacheDataset => classifyMarketCacheDataset(tool);
 
 export const datasetForTool = classifyStocksWatcherDataset;
 
 const toolSymbol = (params: Record<string, unknown>) =>
-  normalizeStocksWatcherSymbol(String(params.ticker || params.stock_code || params.symbol || "MARKET"));
+  normalizeStocksWatcherSymbol(
+    String(params.ticker || params.stock_code || params.symbol || "MARKET"),
+  );
 
 const ROBINHOOD_OPTIONS_TOOLS = new Set([
-  "get_options", "get_options_gex", "get_options_greeks", "get_options_pcr", "get_options_dex", "get_options_0dte", "get_options_iv_intraday", "get_options_sweeps", "get_options_mispricing", "get_options_flow_universe",
+  "get_options",
+  "get_options_gex",
+  "get_options_greeks",
+  "get_options_pcr",
+  "get_options_dex",
+  "get_options_0dte",
+  "get_options_iv_intraday",
+  "get_options_sweeps",
+  "get_options_mispricing",
+  "get_options_flow_universe",
 ]);
 
 type CuratedRobinhoodOptions =
@@ -113,27 +126,65 @@ interface OptionsSnapshotCurrentRow {
   completed_symbols: number;
 }
 
-const assertPublishedOptionsD1Current = async (db: D1DatabaseLike, snapshot: RobinhoodOptionsPublishedSnapshot) => {
-  const row = await db.prepare(`
+const assertPublishedOptionsD1Current = async (
+  db: D1DatabaseLike,
+  snapshot: RobinhoodOptionsPublishedSnapshot,
+) => {
+  const row = await db
+    .prepare(
+      `
     SELECT run_id, release_id, manifest_key, manifest_sha256, captured_at, expected_symbols, completed_symbols
     FROM watcher_options_snapshot_current WHERE singleton = 1
-  `).first<OptionsSnapshotCurrentRow>();
-  if (!row) throw new Error("ROBINHOOD_OPTIONS_UNAVAILABLE: D1 current manifest/status is unavailable.");
-  if (row.run_id !== snapshot.runId || row.release_id !== snapshot.releaseId || row.manifest_key !== snapshot.manifest.key || row.manifest_sha256 !== snapshot.manifest.sha256 || row.captured_at !== snapshot.capturedAt || row.expected_symbols !== snapshot.manifest.expectedSymbols || row.completed_symbols !== snapshot.manifest.completedSymbols) {
-    throw new Error("ROBINHOOD_OPTIONS_INVALID: D1 current manifest/status does not match the R2 release.");
+  `,
+    )
+    .first<OptionsSnapshotCurrentRow>();
+  if (!row)
+    throw new Error(
+      "ROBINHOOD_OPTIONS_UNAVAILABLE: D1 current manifest/status is unavailable.",
+    );
+  if (
+    row.run_id !== snapshot.runId ||
+    row.release_id !== snapshot.releaseId ||
+    row.manifest_key !== snapshot.manifest.key ||
+    row.manifest_sha256 !== snapshot.manifest.sha256 ||
+    row.captured_at !== snapshot.capturedAt ||
+    row.expected_symbols !== snapshot.manifest.expectedSymbols ||
+    row.completed_symbols !== snapshot.manifest.completedSymbols
+  ) {
+    throw new Error(
+      "ROBINHOOD_OPTIONS_INVALID: D1 current manifest/status does not match the R2 release.",
+    );
   }
 };
 
-const resolveCuratedRobinhoodOptions = async (env: Env, symbol: string): Promise<CuratedRobinhoodOptions> => {
-  if (!env.MARKET_CACHE_DB) return { curated: true, unavailableReason: "curated universe unavailable: MARKET_CACHE_DB is not bound" };
-  const assets = await listStocksWatcherTrackedAssets(env.MARKET_CACHE_DB, { activeOnly: true, limit: 500 });
-  if (!assets.some((asset) => asset.symbol === symbol)) return { curated: false };
+const resolveCuratedRobinhoodOptions = async (
+  env: Env,
+  symbol: string,
+): Promise<CuratedRobinhoodOptions> => {
+  if (!env.MARKET_CACHE_DB)
+    return {
+      curated: true,
+      unavailableReason:
+        "curated universe unavailable: MARKET_CACHE_DB is not bound",
+    };
+  const assets = await listStocksWatcherTrackedAssets(env.MARKET_CACHE_DB, {
+    activeOnly: true,
+    limit: 500,
+  });
+  if (!assets.some((asset) => asset.symbol === symbol))
+    return { curated: false };
   try {
-    const snapshot = await loadRobinhoodOptionsSnapshot(env.OPTIONS_SNAPSHOT_DATA, symbol);
+    const snapshot = await loadRobinhoodOptionsSnapshot(
+      env.OPTIONS_SNAPSHOT_DATA,
+      symbol,
+    );
     await assertPublishedOptionsD1Current(env.MARKET_CACHE_DB, snapshot);
     return { curated: true, snapshot };
   } catch (error) {
-    return { curated: true, unavailableReason: error instanceof Error ? error.message : String(error) };
+    return {
+      curated: true,
+      unavailableReason: error instanceof Error ? error.message : String(error),
+    };
   }
 };
 
@@ -144,10 +195,31 @@ const publishedOptionsToolResponse = (
   snapshot: RobinhoodOptionsPublishedSnapshot,
 ) => {
   const payload = toRobinhoodOptionsToolPayload(snapshot, tool, params);
-  return json({ ok: true, requestId, tool, params, ...payload, calledAt: new Date().toISOString(), cache: { status: "published", sourceAsOf: snapshot.capturedAt }, observability: { requestId, scope: "stocks-watcher-options-snapshot", dataset: datasetForTool(tool), durationMs: 0, cacheStatus: "published", rowsRead: 0, rowsWritten: 0, source: "robinhood_mcp" } satisfies WatcherApiObservability });
+  return json({
+    ok: true,
+    requestId,
+    tool,
+    params,
+    ...payload,
+    calledAt: new Date().toISOString(),
+    cache: { status: "published", sourceAsOf: snapshot.capturedAt },
+    observability: {
+      requestId,
+      scope: "stocks-watcher-options-snapshot",
+      dataset: datasetForTool(tool),
+      durationMs: 0,
+      cacheStatus: "published",
+      rowsRead: 0,
+      rowsWritten: 0,
+      source: "robinhood_mcp",
+    } satisfies WatcherApiObservability,
+  });
 };
 
-export const attachPublishedWatcherData = async (snapshot: StocksWatcherSnapshot, bucket: R2BucketLike | undefined): Promise<StocksWatcherSnapshot> => {
+export const attachPublishedWatcherData = async (
+  snapshot: StocksWatcherSnapshot,
+  bucket: R2BucketLike | undefined,
+): Promise<StocksWatcherSnapshot> => {
   let release;
   try {
     release = await loadWatcherValuationRelease(bucket);
@@ -156,45 +228,71 @@ export const attachPublishedWatcherData = async (snapshot: StocksWatcherSnapshot
     return {
       ...snapshot,
       valuationCoverage: "unavailable",
-      warnings: [...snapshot.warnings, `valuation data unavailable: ${message}`],
-      availableTools: [...snapshot.availableTools, ...STOCKS_WATCHER_VALUATION_TOOLS],
+      warnings: [
+        ...snapshot.warnings,
+        `valuation data unavailable: ${message}`,
+      ],
+      availableTools: [
+        ...snapshot.availableTools,
+        ...STOCKS_WATCHER_VALUATION_TOOLS,
+      ],
     };
   }
   const [valuationResult, financialsResult] = await Promise.allSettled([
-    loadWatcherValuationBands(bucket, { symbol: snapshot.symbol, metric: "pe", window: "3Y", release }),
-    loadWatcherFinancialStatements(bucket, { symbol: snapshot.symbol, periods: 1, release }),
+    loadWatcherValuationBands(bucket, {
+      symbol: snapshot.symbol,
+      metric: "pe",
+      window: "3Y",
+      release,
+    }),
+    loadWatcherFinancialStatements(bucket, {
+      symbol: snapshot.symbol,
+      periods: 1,
+      release,
+    }),
   ]);
   const warnings = [...snapshot.warnings];
-  if (valuationResult.status === "rejected") warnings.push(`valuation data unavailable: ${valuationResult.reason instanceof Error ? valuationResult.reason.message : String(valuationResult.reason)}`);
-  if (financialsResult.status === "rejected") warnings.push(`financial data unavailable: ${financialsResult.reason instanceof Error ? financialsResult.reason.message : String(financialsResult.reason)}`);
-  let valuationCoverage: "published" | "queued" | "unavailable" = valuationResult.status === "fulfilled" ? "published" : "unavailable";
+  if (valuationResult.status === "rejected")
+    warnings.push(
+      `valuation data unavailable: ${valuationResult.reason instanceof Error ? valuationResult.reason.message : String(valuationResult.reason)}`,
+    );
+  if (financialsResult.status === "rejected")
+    warnings.push(
+      `financial data unavailable: ${financialsResult.reason instanceof Error ? financialsResult.reason.message : String(financialsResult.reason)}`,
+    );
+  let valuationCoverage: "published" | "queued" | "unavailable" =
+    valuationResult.status === "fulfilled" ? "published" : "unavailable";
   if (valuationResult.status === "rejected") {
     try {
-      valuationCoverage = await getWatcherCoverageStatus(bucket, snapshot.symbol);
-      if (valuationCoverage === "queued") warnings.push("valuation coverage queued: this ticker will be calculated in the next daily batch.");
+      valuationCoverage = await getWatcherCoverageStatus(
+        bucket,
+        snapshot.symbol,
+      );
+      if (valuationCoverage === "queued")
+        warnings.push(
+          "valuation coverage queued: this ticker will be calculated in the next daily batch.",
+        );
     } catch (error) {
-      warnings.push(`valuation coverage status unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      warnings.push(
+        `valuation coverage status unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
   return {
     ...snapshot,
-    valuation: valuationResult.status === "fulfilled" ? valuationResult.value : null,
-    financials: financialsResult.status === "fulfilled" ? financialsResult.value.quarters[0] || null : null,
+    valuation:
+      valuationResult.status === "fulfilled" ? valuationResult.value : null,
+    financials:
+      financialsResult.status === "fulfilled"
+        ? financialsResult.value.quarters[0] || null
+        : null,
     valuationCoverage,
     warnings,
-    availableTools: [...snapshot.availableTools, ...STOCKS_WATCHER_VALUATION_TOOLS],
+    availableTools: [
+      ...snapshot.availableTools,
+      ...STOCKS_WATCHER_VALUATION_TOOLS,
+    ],
   };
-};
-
-const reserveQuotaForRequest = (db?: D1DatabaseLike) =>
-  db ? reserveStocksWatcherD1Quota(db) : Promise.resolve<StocksWatcherQuotaReservation | null>(null);
-
-const finalizeQuotaForRequest = async (
-  reservation: StocksWatcherQuotaReservation | null,
-  rowsRead: number,
-  rowsWritten: number,
-) => {
-  if (reservation) await reservation.finalize({ rowsRead, rowsWritten });
 };
 
 const callNativeTool = async (
@@ -206,36 +304,86 @@ const callNativeTool = async (
   const startedAt = Date.now();
   const dataset = datasetForTool(tool);
   const scope = "stocks-watcher-tool";
-  let reservation: StocksWatcherQuotaReservation | null = null;
-  try {
-    if (tool === "get_valuation_bands") {
-      const symbol = toolSymbol(params);
-      try {
-        const raw = await loadWatcherValuationBands(env.VALUATION_DATA, { symbol, metric: params.metric, window: params.window });
-        return json({ ok: true, requestId, tool, params, text: `${raw.symbol} ${raw.metric.toUpperCase()} ${raw.window} valuation bands as of ${raw.dataAsOf}.`, raw, calledAt: new Date().toISOString(), cache: { status: "published", sourceAsOf: raw.generatedAt }, coverageStatus: "published" });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const coverageStatus = message.startsWith("VALUATION_DATA_NOT_PUBLISHED:") ? await getWatcherCoverageStatus(env.VALUATION_DATA, symbol) : "unavailable";
-        return json({ ok: false, requestId, tool, params, error: message, coverageStatus }, { status: message.startsWith("VALUATION_DATA_NOT_PUBLISHED:") ? 404 : 400 });
-      }
+  if (tool === "get_valuation_bands") {
+    const symbol = toolSymbol(params);
+    try {
+      const raw = await loadWatcherValuationBands(env.VALUATION_DATA, {
+        symbol,
+        metric: params.metric,
+        window: params.window,
+      });
+      return json({
+        ok: true,
+        requestId,
+        tool,
+        params,
+        text: `${raw.symbol} ${raw.metric.toUpperCase()} ${raw.window} valuation bands as of ${raw.dataAsOf}.`,
+        raw,
+        calledAt: new Date().toISOString(),
+        cache: { status: "published", sourceAsOf: raw.generatedAt },
+        coverageStatus: "published",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const coverageStatus = message.startsWith("VALUATION_DATA_NOT_PUBLISHED:")
+        ? await getWatcherCoverageStatus(env.VALUATION_DATA, symbol)
+        : "unavailable";
+      return json(
+        { ok: false, requestId, tool, params, error: message, coverageStatus },
+        {
+          status: message.startsWith("VALUATION_DATA_NOT_PUBLISHED:")
+            ? 404
+            : 400,
+        },
+      );
     }
-    if (tool === "get_financial_statements") {
-      const symbol = toolSymbol(params);
-      try {
-        const raw = await loadWatcherFinancialStatements(env.VALUATION_DATA, { symbol, periods: params.periods });
-        return json({ ok: true, requestId, tool, params, text: `${raw.symbol} financial statements through ${raw.dataAsOf}.`, raw, calledAt: new Date().toISOString(), cache: { status: "published", sourceAsOf: raw.generatedAt }, coverageStatus: "published" });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const coverageStatus = message.startsWith("VALUATION_DATA_NOT_PUBLISHED:") ? await getWatcherCoverageStatus(env.VALUATION_DATA, symbol) : "unavailable";
-        return json({ ok: false, requestId, tool, params, error: message, coverageStatus }, { status: message.startsWith("VALUATION_DATA_NOT_PUBLISHED:") ? 404 : 400 });
-      }
+  }
+  if (tool === "get_financial_statements") {
+    const symbol = toolSymbol(params);
+    try {
+      const raw = await loadWatcherFinancialStatements(env.VALUATION_DATA, {
+        symbol,
+        periods: params.periods,
+      });
+      return json({
+        ok: true,
+        requestId,
+        tool,
+        params,
+        text: `${raw.symbol} financial statements through ${raw.dataAsOf}.`,
+        raw,
+        calledAt: new Date().toISOString(),
+        cache: { status: "published", sourceAsOf: raw.generatedAt },
+        coverageStatus: "published",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const coverageStatus = message.startsWith("VALUATION_DATA_NOT_PUBLISHED:")
+        ? await getWatcherCoverageStatus(env.VALUATION_DATA, symbol)
+        : "unavailable";
+      return json(
+        { ok: false, requestId, tool, params, error: message, coverageStatus },
+        {
+          status: message.startsWith("VALUATION_DATA_NOT_PUBLISHED:")
+            ? 404
+            : 400,
+        },
+      );
     }
-    if (ROBINHOOD_OPTIONS_TOOLS.has(tool)) {
-      const symbol = toolSymbol(params);
-      const published = await resolveCuratedRobinhoodOptions(env, symbol);
-      if (published.curated && "snapshot" in published) return publishedOptionsToolResponse(tool, params, requestId, published.snapshot);
-      if (published.curated) {
-        console.warn(JSON.stringify({
+  }
+  if (ROBINHOOD_OPTIONS_TOOLS.has(tool)) {
+    const symbol = toolSymbol(params);
+    const published = await resolveCuratedRobinhoodOptions(env, symbol);
+    if (published.curated && "snapshot" in published)
+      return publishedOptionsToolResponse(
+        tool,
+        params,
+        requestId,
+        published.snapshot,
+      );
+    if (published.curated) {
+      console.warn(
+        JSON.stringify({
           event: "stocks_watcher_options_fallback",
           requestId,
           symbol,
@@ -243,28 +391,26 @@ const callNativeTool = async (
           from: "robinhood_mcp",
           to: "native_yahoo",
           reason: published.unavailableReason,
-        }));
-      }
+        }),
+      );
     }
-    reservation = await reserveQuotaForRequest(env.MARKET_CACHE_DB);
-    const resolved = await resolveMarketCache({
-      db: env.MARKET_CACHE_DB,
-      scope,
-      symbol: toolSymbol(params),
-      params: { tool, ...params },
-      dataset,
-      ttlMs: getMarketCacheDatasetTtlMs(dataset),
-      quotaGuard: reservation ? () => reservation!.decision : undefined,
-      requestId,
-      load: async () => {
-        const client = new NativeStocksYahooClient();
-        const result = await client.callTool(tool, params);
-        return { text: result.text, raw: result.raw };
-      },
-    });
-    const quotaObservation = getMarketCacheD1QuotaObservation(resolved.cache);
-    await finalizeQuotaForRequest(reservation, quotaObservation.rowsRead, quotaObservation.rowsWritten);
-    return json({
+  }
+  const resolved = await resolveMarketCache({
+    db: env.MARKET_CACHE_DB,
+    scope,
+    symbol: toolSymbol(params),
+    params: { tool, ...params },
+    dataset,
+    ttlMs: getMarketCacheDatasetTtlMs(dataset),
+    requestId,
+    load: async () => {
+      const client = new NativeStocksYahooClient();
+      const result = await client.callTool(tool, params);
+      return { text: result.text, raw: result.raw };
+    },
+  });
+  return json(
+    {
       ok: true,
       requestId,
       tool,
@@ -283,23 +429,15 @@ const callNativeTool = async (
         rowsWritten: resolved.cache.rowsWritten,
         source: "native_yahoo",
       } satisfies WatcherApiObservability,
-    }, {
+    },
+    {
       headers: {
         "X-Request-ID": requestId,
         "X-Market-Dataset": dataset,
         "X-Market-Cache-TTL-Ms": String(resolved.cache.ttlMs),
       },
-    });
-  } catch (error) {
-    if (reservation) {
-      await finalizeQuotaForRequest(
-        reservation,
-        STOCKS_WATCHER_QUOTA_WORST_CASE_OBSERVATION.rowsRead,
-        STOCKS_WATCHER_QUOTA_WORST_CASE_OBSERVATION.rowsWritten,
-      );
-    }
-    throw error;
-  }
+    },
+  );
 };
 
 /**
@@ -313,40 +451,43 @@ const callTrackedWatchlist = async (env: Env, requestId: string) => {
   const dataset = datasetForTool(tool);
   const scope = "stocks-watcher-tracking";
   if (!env.MARKET_CACHE_DB) {
-    return json({
-      ok: false,
-      requestId,
-      error: "Curated Watchlist unavailable: MARKET_CACHE_DB is not bound.",
-      observability: {
+    return json(
+      {
+        ok: false,
         requestId,
-        scope,
-        dataset,
-        durationMs: Date.now() - startedAt,
-        cacheStatus: "unavailable",
-        rowsRead: 0,
-        rowsWritten: 0,
-        source: "d1_tracking",
-        errorCode: "UPSTREAM_UNAVAILABLE",
-      } satisfies WatcherApiObservability,
-    }, {
-      status: 503,
-      headers: {
-        "X-Request-ID": requestId,
-        "X-Market-Dataset": dataset,
-        "X-Market-Cache-TTL-Ms": String(getMarketCacheDatasetTtlMs(dataset)),
+        error: "Curated Watchlist unavailable: MARKET_CACHE_DB is not bound.",
+        observability: {
+          requestId,
+          scope,
+          dataset,
+          durationMs: Date.now() - startedAt,
+          cacheStatus: "unavailable",
+          rowsRead: 0,
+          rowsWritten: 0,
+          source: "d1_tracking",
+          errorCode: "UPSTREAM_UNAVAILABLE",
+        } satisfies WatcherApiObservability,
       },
-    });
+      {
+        status: 503,
+        headers: {
+          "X-Request-ID": requestId,
+          "X-Market-Dataset": dataset,
+          "X-Market-Cache-TTL-Ms": String(getMarketCacheDatasetTtlMs(dataset)),
+        },
+      },
+    );
   }
 
-  let reservation: StocksWatcherQuotaReservation | null = null;
-  try {
-    reservation = await reserveQuotaForRequest(env.MARKET_CACHE_DB);
-    if (!reservation?.decision.allow) throw new Error("Curated Watchlist blocked by the D1 quota guard.");
-    const assets = await listStocksWatcherTrackedAssets(env.MARKET_CACHE_DB, { activeOnly: true, limit: 500 });
-    if (assets.length === 0) throw new Error("Curated Watchlist has no active tracked assets.");
-    const watchlist = buildStocksWatcherTrackedWatchlist(assets);
-    await finalizeQuotaForRequest(reservation, 1, 0);
-    return json({
+  const assets = await listStocksWatcherTrackedAssets(env.MARKET_CACHE_DB, {
+    activeOnly: true,
+    limit: 500,
+  });
+  if (assets.length === 0)
+    throw new Error("Curated Watchlist has no active tracked assets.");
+  const watchlist = buildStocksWatcherTrackedWatchlist(assets);
+  return json(
+    {
       ok: true,
       requestId,
       tool,
@@ -380,23 +521,15 @@ const callTrackedWatchlist = async (env: Env, requestId: string) => {
         rowsWritten: 0,
         source: "d1_tracking",
       } satisfies WatcherApiObservability,
-    }, {
+    },
+    {
       headers: {
         "X-Request-ID": requestId,
         "X-Market-Dataset": dataset,
         "X-Market-Cache-TTL-Ms": String(getMarketCacheDatasetTtlMs(dataset)),
       },
-    });
-  } catch (error) {
-    if (reservation) {
-      await finalizeQuotaForRequest(
-        reservation,
-        STOCKS_WATCHER_QUOTA_WORST_CASE_OBSERVATION.rowsRead,
-        STOCKS_WATCHER_QUOTA_WORST_CASE_OBSERVATION.rowsWritten,
-      );
-    }
-    throw error;
-  }
+    },
+  );
 };
 
 export async function onRequest(context: { request: Request; env?: Env }) {
@@ -405,7 +538,10 @@ export async function onRequest(context: { request: Request; env?: Env }) {
   const env = context.env || {};
   const requestId = requestIdFor(context.request);
   const startedAt = Date.now();
-  const withRequestId = (init: ResponseInit = {}, extraHeaders: Record<string, string> = {}): ResponseInit => ({
+  const withRequestId = (
+    init: ResponseInit = {},
+    extraHeaders: Record<string, string> = {},
+  ): ResponseInit => ({
     ...init,
     headers: {
       "X-Request-ID": requestId,
@@ -418,14 +554,25 @@ export async function onRequest(context: { request: Request; env?: Env }) {
     let requestedTool = "";
     let validatedTool = false;
     try {
-      const body = await context.request.json() as { tool?: unknown; params?: unknown };
+      const body = (await context.request.json()) as {
+        tool?: unknown;
+        params?: unknown;
+      };
       const tool = normalizeToolName(body.tool);
       requestedTool = tool;
       validatedTool = true;
-      if (tool === "get_watchlist") return await callTrackedWatchlist(env, requestId);
-      return await callNativeTool(tool, normalizeParams(body.params), env, requestId);
+      if (tool === "get_watchlist")
+        return await callTrackedWatchlist(env, requestId);
+      return await callNativeTool(
+        tool,
+        normalizeParams(body.params),
+        env,
+        requestId,
+      );
     } catch (error) {
-      const errorCode = validatedTool ? "UPSTREAM_UNAVAILABLE" : "INVALID_REQUEST";
+      const errorCode = validatedTool
+        ? "UPSTREAM_UNAVAILABLE"
+        : "INVALID_REQUEST";
       return json(
         {
           ok: false,
@@ -443,10 +590,15 @@ export async function onRequest(context: { request: Request; env?: Env }) {
             errorCode,
           } satisfies WatcherApiObservability,
         },
-        withRequestId({ status: validatedTool ? 502 : 400 }, {
-          "X-Market-Dataset": datasetForTool(requestedTool),
-          "X-Market-Cache-TTL-Ms": String(getMarketCacheDatasetTtlMs(datasetForTool(requestedTool))),
-        }),
+        withRequestId(
+          { status: validatedTool ? 502 : 400 },
+          {
+            "X-Market-Dataset": datasetForTool(requestedTool),
+            "X-Market-Cache-TTL-Ms": String(
+              getMarketCacheDatasetTtlMs(datasetForTool(requestedTool)),
+            ),
+          },
+        ),
       );
     }
   }
@@ -456,32 +608,33 @@ export async function onRequest(context: { request: Request; env?: Env }) {
     // The bundle contains quote/options/history/news/earnings data; keep one
     // conservative snapshot TTL and do not claim per-dataset freshness.
     const dataset: MarketCacheDataset = "snapshot";
-    let reservation: StocksWatcherQuotaReservation | null = null;
-    try {
-      reservation = await reserveQuotaForRequest(env.MARKET_CACHE_DB);
-      const resolved = await resolveMarketCache({
-        db: env.MARKET_CACHE_DB,
-        scope,
-        symbol,
-        params: { symbol },
-        dataset,
-        ttlMs: getMarketCacheDatasetTtlMs(dataset),
-        quotaGuard: reservation ? () => reservation!.decision : undefined,
-        requestId,
-        sourceAsOf: (snapshot) => snapshot.generatedAt,
-        load: async () => {
-          const published = await resolveCuratedRobinhoodOptions(env, symbol);
-          return attachPublishedWatcherData(
-            await buildStocksWatcherSnapshotFromNative(symbol, new NativeStocksYahooClient(), published.curated
-              ? ("snapshot" in published ? { snapshot: published.snapshot } : { unavailableReason: published.unavailableReason })
-              : undefined),
-            env.VALUATION_DATA,
-          );
-        },
-      });
-      const quotaObservation = getMarketCacheD1QuotaObservation(resolved.cache);
-      await finalizeQuotaForRequest(reservation, quotaObservation.rowsRead, quotaObservation.rowsWritten);
-      return json({
+    const resolved = await resolveMarketCache({
+      db: env.MARKET_CACHE_DB,
+      scope,
+      symbol,
+      params: { symbol },
+      dataset,
+      ttlMs: getMarketCacheDatasetTtlMs(dataset),
+      requestId,
+      sourceAsOf: (snapshot) => snapshot.generatedAt,
+      load: async () => {
+        const published = await resolveCuratedRobinhoodOptions(env, symbol);
+        return attachPublishedWatcherData(
+          await buildStocksWatcherSnapshotFromNative(
+            symbol,
+            new NativeStocksYahooClient(),
+            published.curated
+              ? "snapshot" in published
+                ? { snapshot: published.snapshot }
+                : { unavailableReason: published.unavailableReason }
+              : undefined,
+          ),
+          env.VALUATION_DATA,
+        );
+      },
+    });
+    return json(
+      {
         ...resolved.value,
         requestId,
         cache: resolved.cache,
@@ -495,20 +648,15 @@ export async function onRequest(context: { request: Request; env?: Env }) {
           rowsWritten: resolved.cache.rowsWritten,
           source: resolved.value.source,
         } satisfies WatcherApiObservability,
-      }, withRequestId({ status: resolved.cache.status === "stale" ? 206 : 200 }, {
-        "X-Market-Dataset": dataset,
-        "X-Market-Cache-TTL-Ms": String(resolved.cache.ttlMs),
-      }));
-    } catch (error) {
-      if (reservation) {
-        await finalizeQuotaForRequest(
-          reservation,
-          STOCKS_WATCHER_QUOTA_WORST_CASE_OBSERVATION.rowsRead,
-          STOCKS_WATCHER_QUOTA_WORST_CASE_OBSERVATION.rowsWritten,
-        );
-      }
-      throw error;
-    }
+      },
+      withRequestId(
+        { status: resolved.cache.status === "stale" ? 206 : 200 },
+        {
+          "X-Market-Dataset": dataset,
+          "X-Market-Cache-TTL-Ms": String(resolved.cache.ttlMs),
+        },
+      ),
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return json(
@@ -528,10 +676,15 @@ export async function onRequest(context: { request: Request; env?: Env }) {
           errorCode: "UPSTREAM_UNAVAILABLE",
         } satisfies WatcherApiObservability,
       },
-      withRequestId({ status: 502 }, {
-        "X-Market-Dataset": "snapshot",
-        "X-Market-Cache-TTL-Ms": String(getMarketCacheDatasetTtlMs("snapshot")),
-      }),
+      withRequestId(
+        { status: 502 },
+        {
+          "X-Market-Dataset": "snapshot",
+          "X-Market-Cache-TTL-Ms": String(
+            getMarketCacheDatasetTtlMs("snapshot"),
+          ),
+        },
+      ),
     );
   }
 }

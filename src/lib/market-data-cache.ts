@@ -36,6 +36,8 @@ export const MAX_CACHE_PRUNE_ROWS = 50;
  * primary-key lookup for each yielded key.
  */
 export const MAX_CACHE_PRUNE_READ_ROWS = MAX_CACHE_PRUNE_ROWS * 2;
+/** Retention cleanup is bounded maintenance, not work for every cache refresh. */
+export const MARKET_CACHE_PRUNE_INTERVAL_MS = 15 * 60_000;
 /** market_cache_entries has one table write plus its PK and three secondary indexes. */
 export const MARKET_CACHE_WRITE_INDEX_AMPLIFICATION = 5;
 
@@ -291,6 +293,12 @@ export class MarketCacheQuotaExceededError extends Error {
 }
 
 const inFlight = new Map<string, Promise<MarketCacheResolution<unknown>>>();
+let nextMarketCachePruneAtMs = 0;
+
+/** Test hook for deterministic maintenance scheduling. */
+export const resetMarketCachePruneScheduleForTests = () => {
+  nextMarketCachePruneAtMs = 0;
+};
 
 const stableJson = (value: unknown): string => {
   if (value === undefined) return '"__undefined"';
@@ -395,29 +403,33 @@ const writeSuccess = async <T>(db: D1DatabaseLike, input: {
     expiresAt,
     cachedAt,
   ).run();
-  const pruneResult = await db.prepare(`
-    DELETE FROM market_cache_entries
-    WHERE cache_key IN (
-      SELECT cache_key
-      FROM market_cache_entries
-      WHERE expires_at < ?
-      ORDER BY expires_at ASC, cache_key ASC
-      LIMIT ?
-    )
-  `).bind(
-    new Date(input.now.getTime() - MARKET_CACHE_RETENTION_MS).toISOString(),
-    MAX_CACHE_PRUNE_ROWS,
-  ).run();
+  const shouldPrune = input.now.getTime() >= nextMarketCachePruneAtMs;
+  if (shouldPrune) nextMarketCachePruneAtMs = input.now.getTime() + MARKET_CACHE_PRUNE_INTERVAL_MS;
+  const pruneResult = shouldPrune
+    ? await db.prepare(`
+      DELETE FROM market_cache_entries
+      WHERE cache_key IN (
+        SELECT cache_key
+        FROM market_cache_entries
+        WHERE expires_at < ?
+        ORDER BY expires_at ASC, cache_key ASC
+        LIMIT ?
+      )
+    `).bind(
+      new Date(input.now.getTime() - MARKET_CACHE_RETENTION_MS).toISOString(),
+      MAX_CACHE_PRUNE_ROWS,
+    ).run()
+    : null;
   const upsertRowsRead = Math.max(1, Math.floor(rowsReadFrom(upsertResult) ?? 1));
-  const pruneRowsRead = rowsReadFrom(pruneResult);
-  const pruneChanges = changesFrom(pruneResult);
-  const pruneRowsWritten = rowsWrittenFrom(pruneResult) ?? pruneChanges;
-  const prunedRows = pruneRowsWritten === null || pruneRowsWritten === undefined
+  const pruneRowsRead = pruneResult ? rowsReadFrom(pruneResult) : 0;
+  const pruneChanges = pruneResult ? changesFrom(pruneResult) : 0;
+  const pruneRowsWritten = pruneResult ? rowsWrittenFrom(pruneResult) ?? pruneChanges : 0;
+  const prunedRows = pruneResult && (pruneRowsWritten === null || pruneRowsWritten === undefined)
     ? MAX_CACHE_PRUNE_ROWS
-    : Math.min(MAX_CACHE_PRUNE_ROWS, Math.max(0, Math.floor(pruneRowsWritten)));
-  const boundedPruneRowsRead = pruneRowsRead === null
-    ? MAX_CACHE_PRUNE_READ_ROWS
-    : Math.max(0, Math.floor(pruneRowsRead));
+    : Math.min(MAX_CACHE_PRUNE_ROWS, Math.max(0, Math.floor(pruneRowsWritten || 0)));
+  const boundedPruneRowsRead = pruneResult
+    ? (pruneRowsRead === null ? MAX_CACHE_PRUNE_READ_ROWS : Math.max(0, Math.floor(pruneRowsRead)))
+    : 0;
 
   return { cachedAt, expiresAt, prunedRows, rowsRead: upsertRowsRead + boundedPruneRowsRead };
 };
