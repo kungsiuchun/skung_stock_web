@@ -28,6 +28,7 @@ import {
   parseOrchestratorResponseContent,
   parseNumericExecutionLevels,
   passesDirectionalEntryGate,
+  putSpxKvWithRetry,
   runCouncilAnalyses,
   runSpxGpt5CompatibilityProbe,
   runLiveSpxDecisionRun,
@@ -865,6 +866,21 @@ test("trading run lock treats unexpired lock as active and expired lock as inact
   assert.equal(hasActiveTradingRunLock(JSON.stringify({ expiresAtMs: now + 1000 }), now), true);
   assert.equal(hasActiveTradingRunLock(JSON.stringify({ expiresAtMs: now - 1000 }), now), false);
   assert.equal(hasActiveTradingRunLock("not json", now), false);
+});
+
+test("audit KV mirror retries a transient failure and records the successful write", async () => {
+  let attempts = 0;
+  const writes: Array<{ key: string; value: string; ttl?: number }> = [];
+  const result = await putSpxKvWithRetry({
+    put: async (key, value, options) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("KV PUT failed: 500 Internal Server Error");
+      writes.push({ key, value, ttl: options?.expirationTtl });
+    },
+  }, "spx_audit_2026-08-24", "audit", { expirationTtl: 91 * 24 * 60 * 60 }, 0);
+
+  assert.deepEqual(result, { attempts: 2, valueBytes: 5 });
+  assert.deepEqual(writes, [{ key: "spx_audit_2026-08-24", value: "audit", ttl: 91 * 24 * 60 * 60 }]);
 });
 
 test("AI council and CIO are enabled by default and only falsey flags disable them", () => {

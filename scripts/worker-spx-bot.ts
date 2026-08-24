@@ -3018,8 +3018,8 @@ async function persistRecapDayToD1(env: Env, date: string, memory: DailyMemory, 
   report: string;
   learnedRules: string[];
   generatedAt?: string | null;
-}) {
-  if (!env.SPX_RECAP_DB) return;
+}): Promise<boolean> {
+  if (!env.SPX_RECAP_DB) return false;
 
   try {
     await upsertRecapDay(env.SPX_RECAP_DB, date, memory, audit ? {
@@ -3030,9 +3030,41 @@ async function persistRecapDayToD1(env: Env, date: string, memory: DailyMemory, 
       actionLogSize: memory.actionLog.length
     } : null);
     console.log('[D1] SPX recap persisted', date);
+    return true;
   } catch (err: any) {
     console.error('[D1] SPX recap persist failed', err?.message || err);
+    return false;
   }
+}
+
+type SpxKvPutOptions = { expirationTtl?: number };
+type SpxKvPutLike = { put(key: string, value: string, options?: SpxKvPutOptions): Promise<void> };
+
+export async function putSpxKvWithRetry(
+  kv: SpxKvPutLike,
+  key: string,
+  value: string,
+  options?: SpxKvPutOptions,
+  retryDelayMs = 250,
+) {
+  const maxAttempts = 2;
+  const valueBytes = new TextEncoder().encode(value).byteLength;
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await kv.put(key, value, options);
+      console.log('[SPX_KV_PUT]', { key, valueBytes, expirationTtl: options?.expirationTtl ?? null, attempt });
+      return { attempts: attempt, valueBytes };
+    } catch (error) {
+      lastError = error;
+      const status = /\b[45]\d\d\b/.exec(String(error instanceof Error ? error.message : error))?.[0] || 'UNKNOWN';
+      console.error('[SPX_KV_PUT_RETRY]', { key, valueBytes, expirationTtl: options?.expirationTtl ?? null, attempt, maxAttempts, status });
+      if (attempt < maxAttempts && retryDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('SPX_KV_PUT_FAILED');
 }
 
 const finalSignalReturn = (action: 'OPEN_CALL' | 'OPEN_PUT', entry: number, price: number) => (
@@ -4092,34 +4124,45 @@ async function runEndOfDayAudit(env: Env, now: Date = new Date(), options: Sched
       report = report.replace(/```json\s*[\s\S]*?\s*```/i, '').trim();
     }
 
-    if (extractedRules.length > 0) {
-      const existingBook = await env.SPX_MEMORY.get('SPX_WISDOM_BOOK');
-      let wisdomBook: string[] = existingBook ? JSON.parse(existingBook) : [];
-      // Prepend new rules and keep only the latest 10
-      wisdomBook = [...extractedRules, ...wisdomBook].slice(0, 10);
-      await env.SPX_MEMORY.put('SPX_WISDOM_BOOK', JSON.stringify(wisdomBook));
-      console.log('[AUDIT] Saved new rules to SPX_WISDOM_BOOK', extractedRules);
-    }
-
-    await env.SPX_MEMORY.put(`spx_audit_${etDateStr}`, JSON.stringify({
+    const generatedAt = new Date().toISOString();
+    const auditPayload = JSON.stringify({
       date: etDateStr,
-      generatedAt: new Date().toISOString(),
+      generatedAt,
       report,
       learnedRules: extractedRules,
       actionLogSize: memory.actionLog.length
-    }), { expirationTtl: SPX_KV_RETENTION_SECONDS });
-    console.log('[AUDIT] Saved daily recap report to SPX_MEMORY', `spx_audit_${etDateStr}`);
-    await persistRecapDayToD1(env, etDateStr, memory, {
+    });
+    const recapPersisted = await persistRecapDayToD1(env, etDateStr, memory, {
       report,
       learnedRules: extractedRules,
-      generatedAt: new Date().toISOString()
+      generatedAt
     });
+    if (!recapPersisted) throw new Error('D1_RECAP_PERSIST_FAILED');
     if (env.SPX_RECAP_DB) {
       const retention = await runSpxRetention(env.SPX_RECAP_DB, now);
       console.log('[D1] SPX retention completed', retention);
     }
 
-    const finalMsg = `📅 <b>【每日審計清單】 (${etDateStr})</b>\n\n<pre>${tgEscape(report)}</pre>`;
+    const kvMirrorFailures: string[] = [];
+    if (extractedRules.length > 0) {
+      try {
+        const existingBook = await env.SPX_MEMORY.get('SPX_WISDOM_BOOK');
+        const wisdomBook: string[] = [...extractedRules, ...(existingBook ? JSON.parse(existingBook) : [])].slice(0, 10);
+        await putSpxKvWithRetry(env.SPX_MEMORY, 'SPX_WISDOM_BOOK', JSON.stringify(wisdomBook));
+      } catch (error) {
+        kvMirrorFailures.push('wisdom');
+        console.error('[AUDIT] KV wisdom mirror failed after retry', error instanceof Error ? error.message : String(error));
+      }
+    }
+    try {
+      await putSpxKvWithRetry(env.SPX_MEMORY, `spx_audit_${etDateStr}`, auditPayload, { expirationTtl: SPX_KV_RETENTION_SECONDS });
+    } catch (error) {
+      kvMirrorFailures.push('audit');
+      console.error('[AUDIT] KV audit mirror failed after retry', error instanceof Error ? error.message : String(error));
+    }
+
+    const storageNotice = kvMirrorFailures.length ? '\n\n⚠️ 儲存｜D1 已保存；KV 鏡像重試後仍失敗。' : '';
+    const finalMsg = `📅 <b>【每日審計清單】 (${etDateStr})</b>\n\n<pre>${tgEscape(report)}</pre>${storageNotice}`;
 
     await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, finalMsg);
   } catch (e: any) {
