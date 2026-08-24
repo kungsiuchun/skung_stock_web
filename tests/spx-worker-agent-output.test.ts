@@ -30,6 +30,7 @@ import {
   passesDirectionalEntryGate,
   putSpxKvWithRetry,
   runCouncilAnalyses,
+  runEndOfDayAudit,
   runSpxGpt5CompatibilityProbe,
   runLiveSpxDecisionRun,
   runStructuredOpenRouterRequest,
@@ -881,6 +882,11 @@ test("audit KV mirror retries a transient failure and records the successful wri
 
   assert.deepEqual(result, { attempts: 2, valueBytes: 5 });
   assert.deepEqual(writes, [{ key: "spx_audit_2026-08-24", value: "audit", ttl: 91 * 24 * 60 * 60 }]);
+});
+
+test("audit reports an explicit skipped result before any closed-day side effect", async () => {
+  const result = await runEndOfDayAudit({} as any, new Date("2026-07-12T16:15:00.000Z"));
+  assert.deepEqual(result, { status: "SKIPPED", date: "2026-07-12" });
 });
 
 test("AI council and CIO are enabled by default and only falsey flags disable them", () => {

@@ -4069,11 +4069,17 @@ export async function runLiveSpxDecisionRun(env: Env, now: Date = new Date(), op
   });
 }
 
-async function runEndOfDayAudit(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}) {
+type EndOfDayAuditResult =
+  | { status: 'COMPLETED'; date: string; kvMirrorFailures: string[] }
+  | { status: 'SKIPPED'; date: string }
+  | { status: 'NO_MEMORY'; date: string }
+  | { status: 'FAILED'; date: string; failureCode: string };
+
+export async function runEndOfDayAudit(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}): Promise<EndOfDayAuditResult> {
   const marketStatus = getMarketScheduleStatus(now);
   if (!options.force && !marketStatus.isMarketOpenDay) {
     console.log(`[SCHEDULE] Skip audit run: ${marketStatus.skipReason || 'market_closed'} ${marketStatus.etDateKey}`);
-    return;
+    return { status: 'SKIPPED', date: marketStatus.etDateKey };
   }
 
   const etNow = marketStatus.etNow;
@@ -4084,7 +4090,7 @@ async function runEndOfDayAudit(env: Env, now: Date = new Date(), options: Sched
   if (!rawMemory) {
     console.log("[AUDIT] No memory found for today.");
     await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, `⚠️ <b>[盤後審計]</b> 查無今日 (${etDateStr}) 的交易記憶，無需生成審計報告。`);
-    return;
+    return { status: 'NO_MEMORY', date: etDateStr };
   }
   const memory: DailyMemory = JSON.parse(rawMemory);
 
@@ -4165,9 +4171,11 @@ async function runEndOfDayAudit(env: Env, now: Date = new Date(), options: Sched
     const finalMsg = `📅 <b>【每日審計清單】 (${etDateStr})</b>\n\n<pre>${tgEscape(report)}</pre>${storageNotice}`;
 
     await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, finalMsg);
+    return { status: 'COMPLETED', date: etDateStr, kvMirrorFailures };
   } catch (e: any) {
     console.error('[AUDIT] Failed to generate audit', e);
     await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, `❌ <b>[審計失敗]</b> ${tgEscape(e.message || String(e))}`);
+    return { status: 'FAILED', date: etDateStr, failureCode: classifySpxOperationalFailure(e, 'AUDIT_FAILED') };
   }
 }
 
@@ -4698,8 +4706,8 @@ export default {
 
     // ?audit — 手動觸發盤後審計報告
     if (url.searchParams.has('audit')) {
-      ctx.waitUntil(runEndOfDayAudit(env, new Date(), { force: forceManualRun }));
-      return new Response('Audit triggered — check Telegram in ~30s.');
+      const result = await runEndOfDayAudit(env, new Date(), { force: forceManualRun });
+      return Response.json(result, { status: result.status === 'FAILED' ? 502 : 200 });
     }
 
     if (url.searchParams.has('gex')) {
