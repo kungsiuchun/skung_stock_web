@@ -19,6 +19,7 @@ import {
   evaluateNumericPositionExit,
   END_OF_DAY_FLATTEN_REASON,
   formatAgentTelegramBrief,
+  formatM5AnalysisForContext,
   getEndOfDayRiskDirective,
   getMarketScheduleStatus,
   hasActiveTradingRunLock,
@@ -316,6 +317,14 @@ test("CIO typed validator reports precise confidence contract fields", () => {
   assert.deepEqual(validateCioModelPlan({ ...valid, confidence_score: "56" }, allowed), { ok: false, invalidField: "confidence_score_not_number" });
   assert.deepEqual(validateCioModelPlan({ ...valid, confidence_score: 0 }, allowed), { ok: false, invalidField: "confidence_score_out_of_range" });
   assert.deepEqual(validateCioModelPlan({ ...valid, confidence_score: 101 }, allowed), { ok: false, invalidField: "confidence_score_out_of_range" });
+});
+
+test("M5 context marks missing 0DTESPX volume as unavailable instead of throwing", () => {
+  assert.deepEqual(formatM5AnalysisForContext({ boxHigh: 7525.5, boxLow: 7518.25, volumeSurge: null }), {
+    boxHigh: "7525.50",
+    boxLow: "7518.25",
+    volumeSurge: "UNAVAILABLE",
+  });
 });
 
 test("directional execution requires numeric levels, an in-zone price, a confirming completed 5m bar, and no prior entry", () => {

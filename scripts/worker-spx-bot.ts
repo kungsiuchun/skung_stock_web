@@ -1742,6 +1742,16 @@ export function analyzeCompletedM5Bars(quotes: any[], snapshotAt: Date) {
   };
 }
 
+export const formatM5AnalysisForContext = (analysis: {
+  boxHigh: number | null;
+  boxLow: number | null;
+  volumeSurge: number | null;
+}) => ({
+  boxHigh: Number.isFinite(analysis.boxHigh) ? Number(analysis.boxHigh).toFixed(2) : "UNAVAILABLE",
+  boxLow: Number.isFinite(analysis.boxLow) ? Number(analysis.boxLow).toFixed(2) : "UNAVAILABLE",
+  volumeSurge: Number.isFinite(analysis.volumeSurge) ? `${Number(analysis.volumeSurge).toFixed(2)}x` : "UNAVAILABLE",
+});
+
 export const buildCioContextProjection = (contextData: any, agents: any[]) => ({
   snapshotFacts: { ...(contextData?.snapshotFacts || {}) },
   marketDataQuality: {
@@ -3655,11 +3665,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
       macd: spxInd.macd,
       fundFlow,
       learned_rules: learnedRules,
-      m5Analysis: {
-        boxHigh: m5Analysis.boxHigh.toFixed(2),
-        boxLow: m5Analysis.boxLow.toFixed(2),
-        volumeSurge: m5Analysis.volumeSurge.toFixed(2) + 'x',
-      },
+      m5Analysis: formatM5AnalysisForContext(m5Analysis),
       newsSentiment: {
         score: sentimentData.score,
         label: sentimentData.label,
