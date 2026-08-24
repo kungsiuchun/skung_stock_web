@@ -18,9 +18,9 @@ export const canonicalSpxCacheRequest = (request: Request) => {
   const url = new URL(request.url);
   const canonical = new URLSearchParams();
   const keys = url.pathname.endsWith("/spx-gex-cell-detail")
-    ? ["date", "snapshot", "strike", "expiry"]
+    ? ["date", "expiry"]
     : url.pathname.endsWith("/spx-gex-heatmap")
-      ? ["date", "snapshot"]
+      ? (/^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("date") || "") ? ["date"] : [])
       : url.pathname.endsWith("/spx-gex-pressure")
         ? (/^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("date") || "") ? ["date"] : [])
         : url.pathname.endsWith("/spx-recap")
@@ -29,6 +29,19 @@ export const canonicalSpxCacheRequest = (request: Request) => {
   for (const key of keys) {
     const value = url.searchParams.get(key);
     if (value !== null) canonical.set(key, value);
+  }
+  if (url.pathname.endsWith("/spx-gex-heatmap")) {
+    const value = url.searchParams.get("snapshot");
+    const snapshot = Number(value);
+    if (value !== null && Number.isInteger(snapshot) && snapshot >= 0 && snapshot <= 24 * 60) canonical.set("snapshot", String(snapshot));
+  }
+  if (url.pathname.endsWith("/spx-gex-cell-detail")) {
+    const snapshotValue = url.searchParams.get("snapshot");
+    const strikeValue = url.searchParams.get("strike");
+    const snapshot = Number(snapshotValue);
+    const strike = Number(strikeValue);
+    if (snapshotValue !== null && Number.isInteger(snapshot)) canonical.set("snapshot", String(snapshot));
+    if (strikeValue !== null && Number.isFinite(strike)) canonical.set("strike", String(strike));
   }
   if (url.pathname.endsWith("/spx-price-action-compass")) {
     if (url.searchParams.get("view") === "price-overlay") canonical.set("view", "price-overlay");

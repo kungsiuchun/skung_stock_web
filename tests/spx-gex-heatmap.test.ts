@@ -83,6 +83,14 @@ it("normalizes only effective SPX endpoint selections", () => {
   const datedPressure = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?date=2026-08-20"));
   assert.equal(invalidPressure.url, plainPressure.url);
   assert.notEqual(datedPressure.url, plainPressure.url);
+  assert.equal(
+    canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-heatmap?snapshot=bad-a")).url,
+    canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-heatmap?snapshot=bad-b")).url,
+  );
+  assert.equal(
+    canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-cell-detail?date=2026-08-20&snapshot=570&strike=6000&expiry=2026-08-28")).url,
+    canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-cell-detail?date=2026-08-20&snapshot=570.0&strike=6000.0&expiry=2026-08-28")).url,
+  );
 });
 
 it("rejects Cloudflare text failures without attempting JSON parsing", async () => {
@@ -206,6 +214,21 @@ it("coalesces concurrent cold-cache producers into one response", async () => {
   ]);
   assert.equal(producers, 1);
   assert.equal(await first.text(), await second.text());
+});
+
+it("coalesces equivalent numeric cell selections into one cold-cache producer", async () => {
+  resetSpxEdgeCoalescingForTests();
+  let producers = 0;
+  const producer = async () => {
+    producers += 1;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return new Response(JSON.stringify({ status: "READY" }));
+  };
+  await Promise.all([
+    coalesceSpxEdgeRequest(new Request("https://example.com/api/spx-gex-cell-detail?date=2026-08-20&snapshot=570&strike=6000&expiry=2026-08-28"), producer),
+    coalesceSpxEdgeRequest(new Request("https://example.com/api/spx-gex-cell-detail?date=2026-08-20&snapshot=570.0&strike=6000.0&expiry=2026-08-28"), producer),
+  ]);
+  assert.equal(producers, 1);
 });
 
 it("does not turn a missing snapshot hash parameter into snapshot minute zero", () => {

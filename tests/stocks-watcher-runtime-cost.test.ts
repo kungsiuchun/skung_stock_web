@@ -192,6 +192,14 @@ test("native cache keys keep handler expiry and topRows inputs distinct", () => 
     buildMarketCacheKey("stocks-watcher-tool", "NVDA", getNativeStocksToolCacheParams("chart_dex", { ticker: "NVDA", topRows: 12.1 })),
     buildMarketCacheKey("stocks-watcher-tool", "NVDA", getNativeStocksToolCacheParams("chart_dex", { ticker: "NVDA", topRows: 12.9 })),
   );
+  assert.equal(
+    buildMarketCacheKey("stocks-watcher-tool", "NVDA", getNativeStocksToolCacheParams("get_options", { ticker: "NVDA", strikesAroundAtm: 1 })),
+    buildMarketCacheKey("stocks-watcher-tool", "NVDA", getNativeStocksToolCacheParams("get_options", { ticker: "NVDA", strikesAroundAtm: 2 })),
+  );
+  assert.equal(
+    buildMarketCacheKey("stocks-watcher-tool", "NVDA", getNativeStocksToolCacheParams("chart_indicator", { ticker: "NVDA", indicator: "rsi" })),
+    buildMarketCacheKey("stocks-watcher-tool", "NVDA", getNativeStocksToolCacheParams("chart_indicator", { ticker: "NVDA", indicator: "macd" })),
+  );
 });
 
 test("options sweeps refreshes separately for distinct expiry requests", async () => {
@@ -226,6 +234,41 @@ test("options sweeps refreshes separately for distinct expiry requests", async (
     assert.equal((await first.json() as { raw: { chain: { selectedExpiry: string } } }).raw.chain.selectedExpiry, "2026-08-28");
     assert.equal((await second.json() as { raw: { chain: { selectedExpiry: string } } }).raw.chain.selectedExpiry, "2026-09-04");
     assert.equal(optionLoads, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("equivalent options display bounds reuse one market-cache entry", async () => {
+  const db = new MarketCacheD1();
+  const originalFetch = globalThis.fetch;
+  let optionLoads = 0;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url === "https://fc.yahoo.com") return new Response("", { headers: { "set-cookie": "A=1" } });
+    if (url.includes("/v1/test/getcrumb")) return new Response("crumb");
+    optionLoads += 1;
+    return new Response(JSON.stringify({ optionChain: { result: [{
+      expirationDates: [1_788_000_000],
+      quote: { regularMarketPrice: 180 },
+      options: [{ expirationDate: 1_788_000_000, calls: [{ strike: 180, volume: 20, openInterest: 10 }], puts: [] }],
+    }] } }));
+  };
+  try {
+    const call = (strikesAroundAtm: number) => stocksWatcherApi({
+      request: new Request("https://example.com/api/stocks-intelligence-watcher", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool: "get_options", params: { ticker: "NVDA", expiry: "2026-08-28", strikesAroundAtm } }),
+      }),
+      env: { MARKET_CACHE_DB: db },
+    });
+    const first = await call(1);
+    const second = await call(2);
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.equal((await second.json() as { cache: { status: string } }).cache.status, "hit");
+    assert.equal(optionLoads, 1);
   } finally {
     globalThis.fetch = originalFetch;
   }
