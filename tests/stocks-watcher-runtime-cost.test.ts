@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { onRequest as stocksWatcherApi } from "../functions/api/stocks-intelligence-watcher";
+import { buildMarketCacheKey } from "../src/lib/market-data-cache";
+import { getNativeStocksToolCacheParams } from "../src/lib/stocks-native-yahoo";
 import type { D1DatabaseLike } from "../src/lib/spx-recap-d1";
 
 class TrackingOnlyD1 implements D1DatabaseLike {
@@ -51,6 +53,7 @@ class MarketCacheD1 implements D1DatabaseLike {
     expires_at: string;
     last_refresh_error: string | null;
   }>();
+  readonly refreshQuota = new Map<string, { dayUtc: string; rowsRead: number; rowsWritten: number }>();
 
   prepare(query: string) {
     this.queries.push(query);
@@ -60,7 +63,20 @@ class MarketCacheD1 implements D1DatabaseLike {
         values = next;
         return statement;
       },
-      first: async <T>() => (this.rows.get(String(values[0])) || null) as T | null,
+      first: async <T>() => {
+        if (query.includes("'stocks-watcher-quota'")) {
+          const key = String(values[0]);
+          const initial = JSON.parse(String(values[1])) as { dayUtc: string; rowsRead: number; rowsWritten: number };
+          const current = this.refreshQuota.get(key);
+          const next = current
+            ? { dayUtc: current.dayUtc, rowsRead: current.rowsRead + Number(values[6]), rowsWritten: current.rowsWritten + Number(values[7]) }
+            : initial;
+          if (next.rowsWritten >= 70_000) return null;
+          this.refreshQuota.set(key, next);
+          return { payload_json: JSON.stringify(next) } as T;
+        }
+        return (this.rows.get(String(values[0])) || null) as T | null;
+      },
       all: async <T>() => ({ results: [] as T[] }),
       run: async () => {
         if (query.includes("INSERT INTO market_cache_entries")) {
@@ -132,8 +148,61 @@ test("ignored POST parameters cannot create additional market-cache entries", as
     const second = await call("second");
     assert.equal(first.status, 200);
     assert.equal(second.status, 200);
-    assert.equal(db.rows.size, 1);
+    assert.equal([...db.rows.keys()].filter((key) => !key.startsWith("__stocks_watcher_refresh_quota__")).length, 1);
     assert.equal((await second.json() as { cache: { status: string } }).cache.status, "hit");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("native cache keys keep handler expiry and topRows inputs distinct", () => {
+  const expiryOne = buildMarketCacheKey("stocks-watcher-tool", "NVDA", getNativeStocksToolCacheParams("get_options_0dte", {
+    ticker: "NVDA",
+    expiry: "2026-08-28",
+  }));
+  const expiryTwo = buildMarketCacheKey("stocks-watcher-tool", "NVDA", getNativeStocksToolCacheParams("get_options_0dte", {
+    ticker: "NVDA",
+    expiry: "2026-09-04",
+  }));
+  const rowsTwelve = buildMarketCacheKey("stocks-watcher-tool", "NVDA", getNativeStocksToolCacheParams("chart_dex", {
+    ticker: "NVDA",
+    expiry: "2026-08-28",
+    topRows: 12,
+  }));
+  const rowsTwentyFour = buildMarketCacheKey("stocks-watcher-tool", "NVDA", getNativeStocksToolCacheParams("chart_dex", {
+    ticker: "NVDA",
+    expiry: "2026-08-28",
+    topRows: 24,
+  }));
+  assert.notEqual(expiryOne, expiryTwo);
+  assert.notEqual(rowsTwelve, rowsTwentyFour);
+});
+
+test("exhausted refresh quota fails closed before the Yahoo load", async () => {
+  const db = new MarketCacheD1();
+  const dayUtc = new Date().toISOString().slice(0, 10);
+  db.refreshQuota.set(`__stocks_watcher_refresh_quota__:${dayUtc}`, {
+    dayUtc,
+    rowsRead: 0,
+    rowsWritten: 70_000 - 260,
+  });
+  const originalFetch = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = async () => {
+    fetches += 1;
+    throw new Error("Yahoo must not run after quota rejection");
+  };
+  try {
+    const response = await stocksWatcherApi({
+      request: new Request("https://example.com/api/stocks-intelligence-watcher", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool: "get_stock_history", params: { ticker: "NVDA" } }),
+      }),
+      env: { MARKET_CACHE_DB: db },
+    });
+    assert.equal(response.status, 502);
+    assert.equal(fetches, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -126,6 +126,44 @@ test("market cache returns a fresh hit without repeating the upstream call", asy
   assert.equal(calls, 1);
 });
 
+test("refresh quota guard runs only for the cold-cache producer", async () => {
+  const db = new MemoryD1();
+  let guards = 0;
+  let loads = 0;
+  const options = {
+    db,
+    scope: "refresh-guard",
+    symbol: "NVDA",
+    refreshQuotaGuard: async () => {
+      guards += 1;
+      return {
+        allow: true,
+        blocked: false,
+        reason: "within_budget" as const,
+        currentDayUtc: "2026-08-24",
+        usageDayUtc: "2026-08-24",
+        dayReset: false,
+        observedRowsRead: 0,
+        observedRowsWritten: 0,
+        projectedRowsRead: 0,
+        projectedRowsWritten: 0,
+        readRemaining: 1,
+        writeRemaining: 1,
+        readHeadroom: 1,
+        writeHeadroom: 1,
+        remaining: { rowsRead: 1, rowsWritten: 1 },
+        headroom: { rowsRead: 1, rowsWritten: 1 },
+        blockedDimensions: [],
+      };
+    },
+    load: async () => ({ value: ++loads }),
+  };
+  await resolveMarketCache(options);
+  await resolveMarketCache(options);
+  assert.equal(guards, 1);
+  assert.equal(loads, 1);
+});
+
 test("market cache serves explicit stale data after a failed refresh", async () => {
   const db = new MemoryD1();
   let now = new Date("2026-07-14T12:00:00.000Z");

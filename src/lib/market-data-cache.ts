@@ -266,6 +266,7 @@ export interface ResolveMarketCacheOptions<T> {
   /** Optional per-call TTL in milliseconds. It overrides the dataset default. */
   ttlMs?: number;
   quotaGuard?: () => MarketCacheD1QuotaDecision;
+  refreshQuotaGuard?: () => Promise<MarketCacheD1QuotaDecision>;
   force?: boolean;
   sourceAsOf?: (value: T) => string | null | undefined;
   load: () => Promise<T>;
@@ -575,6 +576,10 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
   const refresh = (async (): Promise<MarketCacheResolution<T>> => {
     const upstreamStartedAt = Date.now();
     try {
+      const decision = options.refreshQuotaGuard
+        ? await runPhase("quota-guard", options.refreshQuotaGuard, d1PhaseCapMs, null)
+        : options.quotaGuard?.();
+      if (decision && !decision.allow) throw new MarketCacheQuotaExceededError(decision);
       const upstreamMaxMs = deadlineAt === null
         ? undefined
         : Math.max(1, deadlineAt - Date.now() - staleReserveMs);
@@ -611,6 +616,7 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
       log({ status: cache.status, upstreamMs: Date.now() - upstreamStartedAt, totalMs: Date.now() - startedAt });
       return { value, cache };
     } catch (error) {
+      if (error instanceof MarketCacheQuotaExceededError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       const failedAt = now();
       let stale = existing;

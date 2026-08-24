@@ -796,7 +796,7 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     },
   ),
   tool(
-    { name: "chart_dex", description: "HTML chart wrapper for native DEX.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
+    { name: "chart_dex", description: "HTML chart wrapper for native DEX.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, topRows: { type: "integer" } }, required: ["ticker"] } },
     async ({ ticker, expiry, topRows }) => {
       const chain = await fetchOptions(ticker, expiry);
       const rows = optionRowsNearSpot(chain, topRows);
@@ -804,7 +804,7 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     },
   ),
   tool(
-    { name: "get_options_0dte", description: "Get nearest-expiry option exposure summary.", inputSchema: { properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+    { name: "get_options_0dte", description: "Get nearest-expiry option exposure summary.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
     async ({ ticker, expiry }) => {
       const chain = await fetchOptions(ticker, expiry);
       const rows = optionRowsNearSpot(chain, 96);
@@ -830,7 +830,7 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     },
   ),
   tool(
-    { name: "get_options_greeks", description: "Return IV and estimated delta/gamma exposure by strike.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, greek: { type: "string" } }, required: ["ticker"] } },
+    { name: "get_options_greeks", description: "Return IV and estimated delta/gamma exposure by strike.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, greek: { type: "string" }, topRows: { type: "integer" } }, required: ["ticker"] } },
     async ({ ticker, expiry, topRows }) => {
       const chain = await fetchOptions(ticker, expiry);
       const rows = optionRowsNearSpot(chain, topRows);
@@ -843,7 +843,7 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     },
   ),
   tool(
-    { name: "chart_greeks", description: "HTML chart wrapper for native Greek exposure.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
+    { name: "chart_greeks", description: "HTML chart wrapper for native Greek exposure.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, topRows: { type: "integer" } }, required: ["ticker"] } },
     async ({ ticker, expiry, topRows }) => {
       const chain = await fetchOptions(ticker, expiry);
       const rows = optionRowsNearSpot(chain, topRows);
@@ -851,7 +851,7 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     },
   ),
   tool(
-    { name: "get_options_iv_intraday", description: "Current option-chain IV snapshot.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
+    { name: "get_options_iv_intraday", description: "Current option-chain IV snapshot.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, topRows: { type: "integer" } }, required: ["ticker"] } },
     async ({ ticker, expiry, topRows }) => {
       const chain = await fetchOptions(ticker, expiry);
       const rows = optionRowsNearSpot(chain, topRows);

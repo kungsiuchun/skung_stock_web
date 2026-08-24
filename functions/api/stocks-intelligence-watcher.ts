@@ -14,6 +14,7 @@ import {
   type MarketCacheDataset,
 } from "../../src/lib/market-data-cache";
 import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
+import { reserveStocksWatcherCacheRefreshQuota } from "../../src/lib/stocks-watcher-refresh-quota";
 import {
   buildStocksWatcherTrackedWatchlist,
   listStocksWatcherTrackedAssets,
@@ -305,7 +306,6 @@ const callNativeTool = async (
   const startedAt = Date.now();
   const dataset = datasetForTool(tool);
   const scope = "stocks-watcher-tool";
-  const cacheParams = getNativeStocksToolCacheParams(tool, params);
   if (tool === "get_valuation_bands") {
     const symbol = toolSymbol(params);
     try {
@@ -373,6 +373,7 @@ const callNativeTool = async (
       );
     }
   }
+  const cacheParams = getNativeStocksToolCacheParams(tool, params);
   if (ROBINHOOD_OPTIONS_TOOLS.has(tool)) {
     const symbol = toolSymbol(params);
     const published = await resolveCuratedRobinhoodOptions(env, symbol);
@@ -404,6 +405,9 @@ const callNativeTool = async (
     params: cacheParams,
     dataset,
     ttlMs: getMarketCacheDatasetTtlMs(dataset),
+    refreshQuotaGuard: env.MARKET_CACHE_DB
+      ? () => reserveStocksWatcherCacheRefreshQuota(env.MARKET_CACHE_DB!)
+      : undefined,
     requestId,
     load: async () => {
       const client = new NativeStocksYahooClient();
@@ -617,6 +621,9 @@ export async function onRequest(context: { request: Request; env?: Env }) {
       params: { symbol },
       dataset,
       ttlMs: getMarketCacheDatasetTtlMs(dataset),
+      refreshQuotaGuard: env.MARKET_CACHE_DB
+        ? () => reserveStocksWatcherCacheRefreshQuota(env.MARKET_CACHE_DB!)
+        : undefined,
       requestId,
       sourceAsOf: (snapshot) => snapshot.generatedAt,
       load: async () => {
