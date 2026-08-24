@@ -78,6 +78,11 @@ it("normalizes only effective SPX endpoint selections", () => {
   const invalidTwo = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?timeframe=bad-b"));
   assert.equal(heatmap.url, plainHeatmap.url);
   assert.equal(invalidOne.url, invalidTwo.url);
+  const invalidPressure = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?date=bad-a"));
+  const plainPressure = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure"));
+  const datedPressure = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-pressure?date=2026-08-20"));
+  assert.equal(invalidPressure.url, plainPressure.url);
+  assert.notEqual(datedPressure.url, plainPressure.url);
 });
 
 it("rejects Cloudflare text failures without attempting JSON parsing", async () => {

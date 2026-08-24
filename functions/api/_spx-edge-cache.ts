@@ -21,8 +21,10 @@ export const canonicalSpxCacheRequest = (request: Request) => {
     ? ["date", "snapshot", "strike", "expiry"]
     : url.pathname.endsWith("/spx-gex-heatmap")
       ? ["date", "snapshot"]
-      : url.pathname.endsWith("/spx-gex-pressure") || url.pathname.endsWith("/spx-recap")
-        ? ["date"]
+      : url.pathname.endsWith("/spx-gex-pressure")
+        ? (/^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("date") || "") ? ["date"] : [])
+        : url.pathname.endsWith("/spx-recap")
+          ? ["date"]
         : [];
   for (const key of keys) {
     const value = url.searchParams.get(key);

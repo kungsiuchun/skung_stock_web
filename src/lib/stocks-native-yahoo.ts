@@ -1083,7 +1083,7 @@ export const getNativeStocksToolCacheParams = (
   if (!definition) throw new Error(`Native Yahoo tool '${name}' is not implemented.`);
   const context = nativeToolContext(params);
   const expiry = context.expiry || null;
-  const topRows = context.topRows;
+  const topRows = Number.isFinite(context.topRows) ? Math.trunc(context.topRows) : 12;
   if (canonicalName === "get_stock_history") {
     const range = typeof params.range === "string" && /^(\d+(d|mo|y)|ytd|max)$/.test(params.range.trim()) ? params.range.trim() : "5y";
     const interval = typeof params.interval === "string" && /^(1d|1wk|1mo)$/.test(params.interval.trim()) ? params.interval.trim() : "1d";
@@ -1098,6 +1098,13 @@ export const getNativeStocksToolCacheParams = (
         : base;
   }
   if (["market_breadth", "get_sector_stats", "get_macro_regime", "basket_relative_strength", "get_options_flow_universe"].includes(canonicalName)) return { tool: canonicalName };
+  if (canonicalName === "get_quotes") {
+    const requested = String(params.tickers || "").trim()
+      .split(",")
+      .map((item) => normalizeStocksWatcherSymbol(item))
+      .filter(Boolean);
+    return { tool: canonicalName, tickers: Array.from(new Set(requested.length > 0 ? requested : STOCKS_WATCHER_QUOTE_SYMBOLS)) };
+  }
   const properties = definition.inputSchema?.properties || {};
   return {
     tool: canonicalName,
