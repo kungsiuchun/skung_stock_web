@@ -55,8 +55,8 @@ export const reserveStocksWatcherCacheRefreshQuota = async (
       ON CONFLICT(cache_key) DO UPDATE SET
         payload_json = json_object(
           'dayUtc', ?,
-          'rowsRead', CAST(json_extract(market_cache_entries.payload_json, '$.rowsRead') AS INTEGER) + ?,
-          'rowsWritten', CAST(json_extract(market_cache_entries.payload_json, '$.rowsWritten') AS INTEGER) + ?
+          'rowsRead', MIN(CAST(json_extract(market_cache_entries.payload_json, '$.rowsRead') AS INTEGER) + ?, ?),
+          'rowsWritten', MIN(CAST(json_extract(market_cache_entries.payload_json, '$.rowsWritten') AS INTEGER) + ?, ?)
         ),
         cached_at = ?,
         expires_at = ?,
@@ -68,8 +68,8 @@ export const reserveStocksWatcherCacheRefreshQuota = async (
         AND json_type(market_cache_entries.payload_json, '$.rowsWritten') = 'integer'
         AND CAST(json_extract(market_cache_entries.payload_json, '$.rowsRead') AS INTEGER) >= 0
         AND CAST(json_extract(market_cache_entries.payload_json, '$.rowsWritten') AS INTEGER) >= 0
-        AND CAST(json_extract(market_cache_entries.payload_json, '$.rowsRead') AS INTEGER) + ? < ?
-        AND CAST(json_extract(market_cache_entries.payload_json, '$.rowsWritten') AS INTEGER) + ? < ?
+        AND CAST(json_extract(market_cache_entries.payload_json, '$.rowsRead') AS INTEGER) < ?
+        AND CAST(json_extract(market_cache_entries.payload_json, '$.rowsWritten') AS INTEGER) < ?
       RETURNING payload_json
     `).bind(
       cacheKey,
@@ -79,14 +79,14 @@ export const reserveStocksWatcherCacheRefreshQuota = async (
       cachedAt,
       dayUtc,
       rowsReadReserve,
+      readThreshold,
       STOCKS_WATCHER_CACHE_REFRESH_WRITE_RESERVE,
+      writeThreshold,
       cachedAt,
       expiresAt,
       cachedAt,
       dayUtc,
-      rowsReadReserve,
       readThreshold,
-      STOCKS_WATCHER_CACHE_REFRESH_WRITE_RESERVE,
       writeThreshold,
     ).first<{ payload_json: string }>();
   } catch {
