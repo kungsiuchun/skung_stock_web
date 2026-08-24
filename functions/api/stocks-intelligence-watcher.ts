@@ -485,13 +485,26 @@ const callTrackedWatchlist = async (env: Env, requestId: string) => {
     );
   }
 
-  const assets = await listStocksWatcherTrackedAssets(env.MARKET_CACHE_DB, {
-    activeOnly: true,
-    limit: 500,
+  const resolved = await resolveMarketCache({
+    db: env.MARKET_CACHE_DB,
+    scope,
+    symbol: "CURATED_WATCHLIST",
+    params: { tool },
+    dataset,
+    ttlMs: getMarketCacheDatasetTtlMs(dataset),
+    refreshQuotaGuard: () => reserveStocksWatcherCacheRefreshQuota(env.MARKET_CACHE_DB!),
+    requestId,
+    load: async () => {
+      const assets = await listStocksWatcherTrackedAssets(env.MARKET_CACHE_DB!, {
+        activeOnly: true,
+        limit: 500,
+      });
+      if (assets.length === 0)
+        throw new Error("Curated Watchlist has no active tracked assets.");
+      return buildStocksWatcherTrackedWatchlist(assets);
+    },
   });
-  if (assets.length === 0)
-    throw new Error("Curated Watchlist has no active tracked assets.");
-  const watchlist = buildStocksWatcherTrackedWatchlist(assets);
+  const watchlist = resolved.value;
   return json(
     {
       ok: true,
@@ -502,29 +515,16 @@ const callTrackedWatchlist = async (env: Env, requestId: string) => {
       raw: { source: "d1_tracking", ...watchlist },
       calledAt: new Date().toISOString(),
       cache: {
-        status: "bypassed",
-        dataset,
-        cachedAt: null,
-        expiresAt: null,
-        ageSeconds: null,
-        ttlMs: getMarketCacheDatasetTtlMs(dataset),
-        ageRatio: null,
-        guard: "bypassed",
-        rowRead: false,
-        rowWritten: false,
-        observability: { rowRead: "bypassed", rowWritten: "bypassed" },
-        rowsRead: 0,
-        rowsWritten: 0,
-        sourceAsOf: null,
+        ...resolved.cache,
       },
       observability: {
         requestId,
         scope,
         dataset,
         durationMs: Date.now() - startedAt,
-        cacheStatus: "bypassed",
-        rowsRead: 1,
-        rowsWritten: 0,
+        cacheStatus: resolved.cache.status,
+        rowsRead: resolved.cache.rowsRead,
+        rowsWritten: resolved.cache.rowsWritten,
         source: "d1_tracking",
       } satisfies WatcherApiObservability,
     },

@@ -77,7 +77,16 @@ class MarketCacheD1 implements D1DatabaseLike {
         }
         return (this.rows.get(String(values[0])) || null) as T | null;
       },
-      all: async <T>() => ({ results: [] as T[] }),
+      all: async <T>() => query.includes("FROM tracked_assets")
+        ? {
+          results: [{
+            symbol: "NVDA", provider_symbol: "NVDA", priority: 100,
+            display_name: "NVIDIA", asset_type: "equity", is_active: 1,
+            metadata_json: '{"gicsSector":"Information Technology"}',
+            created_at: "2026-08-24T00:00:00.000Z", updated_at: "2026-08-24T00:00:00.000Z",
+          }] as T[],
+        }
+        : { results: [] as T[] },
       run: async () => {
         if (query.includes("INSERT INTO market_cache_entries")) {
           const [cacheKey, , , payloadJson, sourceAsOf, cachedAt, expiresAt] = values;
@@ -97,9 +106,9 @@ class MarketCacheD1 implements D1DatabaseLike {
   }
 }
 
-test("watchlist performs one authoritative tracking read and no quota-ledger operation", async () => {
-  const db = new TrackingOnlyD1();
-  const response = await stocksWatcherApi({
+test("watchlist caches the authoritative tracking scan after its first refresh", async () => {
+  const db = new MarketCacheD1();
+  const call = () => stocksWatcherApi({
     request: new Request(
       "https://example.com/api/stocks-intelligence-watcher",
       {
@@ -111,15 +120,18 @@ test("watchlist performs one authoritative tracking read and no quota-ledger ope
     env: { MARKET_CACHE_DB: db },
   });
 
-  const payload = (await response.json()) as {
+  const first = await call();
+  const second = await call();
+  const payload = (await second.json()) as {
     ok: boolean;
     observability: { rowsRead: number; rowsWritten: number };
   };
-  assert.equal(response.status, 200);
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
   assert.equal(payload.ok, true);
   assert.equal(payload.observability.rowsRead, 1);
   assert.equal(payload.observability.rowsWritten, 0);
-  assert.equal(db.queries.length, 1);
+  assert.equal((payload as { cache: { status: string } }).cache.status, "hit");
 });
 
 test("ignored POST parameters cannot create additional market-cache entries", async () => {
