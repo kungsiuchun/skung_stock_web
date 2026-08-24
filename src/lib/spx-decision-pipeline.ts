@@ -594,6 +594,7 @@ const councilAgentIsValid = (agent: CouncilAgentAnalysis) => agent.valid
 
 const humanizeModelFailure = (value: string | null | undefined) => {
   const reason = String(value || "").toLowerCase();
+  if (reason.includes("pipeline_error")) return "決策管線中斷，模型未執行";
   if (reason.includes("invalid_token_budget")) return "GPT-5 輸出／推理 token 預算無效";
   if (reason.includes("unsupported_parameter")) return "GPT-5 請求參數不受 provider 支援";
   if (reason.includes("invalid_schema")) return "GPT-5 JSON schema 不被接受";
@@ -619,6 +620,9 @@ const humanizeModelFailure = (value: string | null | undefined) => {
   if (reason.includes("market_data") || reason.includes("snapshot")) return "必要市場資料不足";
   return "模型分析失敗";
 };
+
+const modelAnalysisDidNotStart = (agent: CouncilAgentAnalysis) => agent.modelStatus === "SKIPPED"
+  || ((agent.attempts?.length ?? 0) === 0 && String(agent.fallbackStatus || "").toLowerCase().includes("pipeline_error"));
 
 const councilFailureSummary = (council: CouncilResult, cioDecision: CioDecision) => {
   const invalidAgents = expectedCouncilAgents
@@ -663,9 +667,12 @@ const formatCouncilAgentLines = (council: CouncilResult) => {
       return `${agentEmoji[agentName]} ${agentName}｜⚫ 無效 — Council agent 結果缺失。`;
     }
     const valid = councilAgentIsValid(agent);
+    const failure = humanizeModelFailure(agent.fallbackStatus || agent.modelStatus || agent.reasoning);
     const reasoning = valid
       ? compactReason(String(agent.reasoning || "未提供可審計 reasoning。"))
-      : `${humanizeModelFailure(agent.fallbackStatus || agent.modelStatus || agent.reasoning)}；重試後仍無法驗證。`;
+      : modelAnalysisDidNotStart(agent)
+        ? `${failure}。`
+        : `${failure}；重試後仍無法驗證。`;
     return valid
       ? `${agentEmoji[agent.agent]} ${agent.agent}｜${decisionEmoji[agent.decision]} ${decisionLabel[agent.decision]} · ${safeConfidence(agent.confidence)}% — ${reasoning}`
       : `${agentEmoji[agent.agent]} ${agent.agent}｜⚫ 無效 — ${compactReason(reasoning)}`;
