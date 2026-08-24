@@ -4,43 +4,6 @@ import test from "node:test";
 import { onRequest as stocksWatcherApi } from "../functions/api/stocks-intelligence-watcher";
 import type { D1DatabaseLike } from "../src/lib/spx-recap-d1";
 
-class TrackingOnlyD1 implements D1DatabaseLike {
-  readonly queries: string[] = [];
-
-  prepare(query: string) {
-    this.queries.push(query);
-    const statement = {
-      bind: () => statement,
-      first: async <_T>() => {
-        throw new Error(`Unexpected D1 first query: ${query}`);
-      },
-      all: async <T>() => {
-        if (!query.includes("FROM tracked_assets"))
-          throw new Error(`Unexpected D1 scan: ${query}`);
-        return {
-          results: [
-            {
-              symbol: "NVDA",
-              provider_symbol: "NVDA",
-              priority: 100,
-              display_name: "NVIDIA",
-              asset_type: "equity",
-              is_active: 1,
-              metadata_json: '{"gicsSector":"Information Technology"}',
-              created_at: "2026-08-24T00:00:00.000Z",
-              updated_at: "2026-08-24T00:00:00.000Z",
-            },
-          ] as T[],
-        };
-      },
-      run: async () => {
-        throw new Error(`Unexpected D1 write: ${query}`);
-      },
-    };
-    return statement;
-  }
-}
-
 class MarketCacheD1 implements D1DatabaseLike {
   readonly queries: string[] = [];
   trackedAssetScans = 0;
