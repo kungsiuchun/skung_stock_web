@@ -3,7 +3,7 @@ import { normalizeStocksWatcherSymbol } from "./stocks-native-yahoo";
 /** Immutable, EOD-only contract. It is deliberately separate from Yahoo's live options shape. */
 export const ROBINHOOD_OPTIONS_SCHEMA_VERSION = "1.0";
 export const ROBINHOOD_OPTIONS_PROVIDER = "robinhood_mcp" as const;
-export const ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS = 50;
+export const ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS = 20;
 export const ROBINHOOD_OPTIONS_MAX_EXPIRIES = 8;
 export const ROBINHOOD_OPTIONS_MAX_AGE_MS = 30 * 60 * 60 * 1000;
 export const ROBINHOOD_OPTIONS_MAX_SPOT_DIVERGENCE = 0.03;
@@ -116,7 +116,7 @@ const parseManifest = (value: unknown, current: RobinhoodOptionsCurrentPointer):
     if (!symbol || !key || contracts === null || !Number.isInteger(contracts) || contracts < 1) fail("manifest symbol is malformed");
     return { symbol: normalizeStocksWatcherSymbol(symbol!), key: key!, sha256: assertHash(string(item?.sha256) || ""), contracts: contracts! };
   });
-  if (symbols.length !== ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS || new Set(symbols.map((entry) => entry.symbol)).size !== ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS) fail("manifest must contain exactly 50 unique symbols");
+  if (symbols.length !== ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS || new Set(symbols.map((entry) => entry.symbol)).size !== ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS) fail(`manifest must contain exactly ${ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS} unique symbols`);
   return { schemaVersion: ROBINHOOD_OPTIONS_SCHEMA_VERSION, provider: ROBINHOOD_OPTIONS_PROVIDER, releaseId: current.releaseId, runId: current.runId, capturedAt: current.capturedAt, expectedSymbols: current.expectedSymbols, completedSymbols: current.completedSymbols, symbols };
 };
 
