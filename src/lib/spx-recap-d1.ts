@@ -99,6 +99,39 @@ export interface AgentCalibrationWeight {
   weight: number;
 }
 
+export type SpxFinalSignalAction = "OPEN_CALL" | "OPEN_PUT";
+
+export interface FinalSignalOutcome {
+  runId: string;
+  tradingDate: string;
+  action: SpxFinalSignalAction;
+  regime: string;
+  entryAt: string;
+  entrySpx: number;
+  entryZoneLow: number;
+  entryZoneHigh: number;
+  outcome5m?: number | null;
+  outcome15m?: number | null;
+  outcome30m?: number | null;
+  mae30m?: number | null;
+  mfe30m?: number | null;
+  success15m?: boolean | null;
+  outcomeStatus?: "PENDING" | "READY" | "UNAVAILABLE";
+}
+
+export interface PendingFinalSignalOutcome extends Pick<FinalSignalOutcome, "runId" | "tradingDate" | "action" | "regime" | "entryAt" | "entrySpx" | "entryZoneLow" | "entryZoneHigh"> {}
+
+export interface FinalSignalPerformanceBucket {
+  action: SpxFinalSignalAction;
+  regime: string;
+  sampleCount: number;
+  successCount: number;
+  hitRate: number | null;
+  averageReturn15m: number | null;
+  averageMae30m: number | null;
+  averageMfe30m: number | null;
+}
+
 const nowIso = () => new Date().toISOString();
 
 const asNumber = (value: unknown) => Number(value || 0);
@@ -391,6 +424,122 @@ export const updateAgentSignalOutcomeResults = async (
   ).run();
 };
 
+export const upsertFinalSignalOutcome = async (db: D1DatabaseLike, outcome: FinalSignalOutcome) => {
+  const updatedAt = nowIso();
+  await db.prepare(`
+    INSERT INTO spx_final_signal_outcomes (
+      run_id, trading_date, action, regime, entry_at, entry_spx, entry_zone_low, entry_zone_high,
+      outcome_5m, outcome_15m, outcome_30m, mae_30m, mfe_30m, success_15m, source, outcome_status,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0dtespx', ?, ?, ?)
+    ON CONFLICT(run_id) DO UPDATE SET
+      action = excluded.action,
+      regime = excluded.regime,
+      entry_at = excluded.entry_at,
+      entry_spx = excluded.entry_spx,
+      entry_zone_low = excluded.entry_zone_low,
+      entry_zone_high = excluded.entry_zone_high,
+      outcome_5m = COALESCE(excluded.outcome_5m, outcome_5m),
+      outcome_15m = COALESCE(excluded.outcome_15m, outcome_15m),
+      outcome_30m = COALESCE(excluded.outcome_30m, outcome_30m),
+      mae_30m = COALESCE(excluded.mae_30m, mae_30m),
+      mfe_30m = COALESCE(excluded.mfe_30m, mfe_30m),
+      success_15m = COALESCE(excluded.success_15m, success_15m),
+      outcome_status = excluded.outcome_status,
+      updated_at = excluded.updated_at
+  `).bind(
+    outcome.runId,
+    outcome.tradingDate,
+    outcome.action,
+    outcome.regime,
+    outcome.entryAt,
+    outcome.entrySpx,
+    outcome.entryZoneLow,
+    outcome.entryZoneHigh,
+    outcome.outcome5m ?? null,
+    outcome.outcome15m ?? null,
+    outcome.outcome30m ?? null,
+    outcome.mae30m ?? null,
+    outcome.mfe30m ?? null,
+    outcome.success15m == null ? null : outcome.success15m ? 1 : 0,
+    outcome.outcomeStatus || "PENDING",
+    updatedAt,
+    updatedAt,
+  ).run();
+};
+
+export const readPendingFinalSignalOutcomes = async (db: D1DatabaseLike) => {
+  const result = await db.prepare(`
+    SELECT run_id, trading_date, action, regime, entry_at, entry_spx, entry_zone_low, entry_zone_high
+    FROM spx_final_signal_outcomes
+    WHERE outcome_status = 'PENDING'
+    ORDER BY entry_at ASC
+    LIMIT 100
+  `).all<{
+    run_id: string; trading_date: string; action: SpxFinalSignalAction; regime: string; entry_at: string;
+    entry_spx: number; entry_zone_low: number; entry_zone_high: number;
+  }>();
+  return (result.results || []).map((row): PendingFinalSignalOutcome => ({
+    runId: row.run_id,
+    tradingDate: row.trading_date,
+    action: row.action,
+    regime: row.regime,
+    entryAt: row.entry_at,
+    entrySpx: Number(row.entry_spx),
+    entryZoneLow: Number(row.entry_zone_low),
+    entryZoneHigh: Number(row.entry_zone_high),
+  }));
+};
+
+export const updateFinalSignalOutcome = async (db: D1DatabaseLike, runId: string, outcome: Pick<FinalSignalOutcome,
+  "outcome5m" | "outcome15m" | "outcome30m" | "mae30m" | "mfe30m" | "success15m" | "outcomeStatus"
+>) => {
+  await db.prepare(`
+    UPDATE spx_final_signal_outcomes
+    SET outcome_5m = ?, outcome_15m = ?, outcome_30m = ?, mae_30m = ?, mfe_30m = ?, success_15m = ?,
+        outcome_status = ?, updated_at = ?
+    WHERE run_id = ?
+  `).bind(
+    outcome.outcome5m ?? null,
+    outcome.outcome15m ?? null,
+    outcome.outcome30m ?? null,
+    outcome.mae30m ?? null,
+    outcome.mfe30m ?? null,
+    outcome.success15m == null ? null : outcome.success15m ? 1 : 0,
+    outcome.outcomeStatus || "READY",
+    nowIso(),
+    runId,
+  ).run();
+};
+
+export const readFinalSignalPerformance = async (db: D1DatabaseLike, fromDate: string, toDate: string) => {
+  const result = await db.prepare(`
+    SELECT action, regime, COUNT(*) AS sample_count, SUM(success_15m) AS success_count,
+           AVG(outcome_15m) AS average_return_15m, AVG(mae_30m) AS average_mae_30m, AVG(mfe_30m) AS average_mfe_30m
+    FROM spx_final_signal_outcomes
+    WHERE trading_date BETWEEN ? AND ? AND outcome_status = 'READY' AND success_15m IS NOT NULL
+    GROUP BY action, regime
+    ORDER BY action, regime
+  `).bind(fromDate, toDate).all<{
+    action: SpxFinalSignalAction; regime: string; sample_count: number; success_count: number | null;
+    average_return_15m: number | null; average_mae_30m: number | null; average_mfe_30m: number | null;
+  }>();
+  return (result.results || []).map((row): FinalSignalPerformanceBucket => {
+    const sampleCount = Number(row.sample_count || 0);
+    const successCount = Number(row.success_count || 0);
+    return {
+      action: row.action,
+      regime: row.regime,
+      sampleCount,
+      successCount,
+      hitRate: sampleCount > 0 ? Number((successCount / sampleCount * 100).toFixed(1)) : null,
+      averageReturn15m: row.average_return_15m === null ? null : Number(Number(row.average_return_15m).toFixed(2)),
+      averageMae30m: row.average_mae_30m === null ? null : Number(Number(row.average_mae_30m).toFixed(2)),
+      averageMfe30m: row.average_mfe_30m === null ? null : Number(Number(row.average_mfe_30m).toFixed(2)),
+    };
+  });
+};
+
 const defaultAgentWeight = (): AgentCalibrationWeight => ({
   sampleCount: 0,
   successCount: 0,
@@ -435,7 +584,7 @@ export const readAgentCalibrationWeights = async (db: D1DatabaseLike) => {
 };
 
 export const listD1AvailableDates = async (db: D1DatabaseLike) => {
-  const result = await db.prepare("SELECT date FROM spx_days ORDER BY date DESC").all<{ date: string }>();
+  const result = await db.prepare("SELECT date FROM spx_days ORDER BY date DESC LIMIT 90").all<{ date: string }>();
   return (result.results || []).map((row) => row.date);
 };
 

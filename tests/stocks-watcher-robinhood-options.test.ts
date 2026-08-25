@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS,
   loadRobinhoodOptionsSnapshot,
   robinhoodGex,
   toRobinhoodOptionsToolPayload,
@@ -11,7 +12,7 @@ import { normalizeOptionsVisualModel, optionsExpiryMatchesRequest } from "../src
 
 const hash = async (text: string) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))).map((item) => item.toString(16).padStart(2, "0")).join("");
 const now = new Date().toISOString();
-const symbols = Array.from({ length: 50 }, (_, index) => `T${String.fromCharCode(65 + Math.floor(index / 26))}${String.fromCharCode(65 + (index % 26))}`);
+const symbols = Array.from({ length: ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS }, (_, index) => `T${String.fromCharCode(65 + Math.floor(index / 26))}${String.fromCharCode(65 + (index % 26))}`);
 
 const fixtureExpiries = ["2026-08-21", "2026-08-24", "2026-08-28", "2026-08-31", "2026-09-02", "2026-09-04", "2026-09-11", "2026-09-18", "2026-09-25"];
 
@@ -52,21 +53,21 @@ const makeBucket = async (overrides: { missingIv?: boolean; staleQuote?: boolean
     entries.push({ symbol, key, sha256: await hash(text), contracts: publishedContracts.length });
   }
   const manifestKey = `releases/${releaseId}/manifest.json`;
-  const manifest = JSON.stringify({ schemaVersion: "1.0", provider: "robinhood_mcp", releaseId, runId, capturedAt: now, expectedSymbols: 50, completedSymbols: overrides.completedSymbols ?? 50, symbols: entries });
+  const manifest = JSON.stringify({ schemaVersion: "1.0", provider: "robinhood_mcp", releaseId, runId, capturedAt: now, expectedSymbols: ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS, completedSymbols: overrides.completedSymbols ?? ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS, symbols: entries });
   objects.set(manifestKey, manifest);
-  objects.set("current.json", JSON.stringify({ schemaVersion: "1.0", provider: "robinhood_mcp", releaseId, runId, manifestKey, manifestSha256: overrides.manifestHash ?? await hash(manifest), capturedAt: now, expectedSymbols: 50, completedSymbols: overrides.completedSymbols ?? 50 }));
+  objects.set("current.json", JSON.stringify({ schemaVersion: "1.0", provider: "robinhood_mcp", releaseId, runId, manifestKey, manifestSha256: overrides.manifestHash ?? await hash(manifest), capturedAt: now, expectedSymbols: ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS, completedSymbols: overrides.completedSymbols ?? ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS }));
   const bucket: RobinhoodOptionsR2BucketLike = { get: async (key) => objects.has(key) ? { text: async () => objects.get(key)! } : null };
   return bucket;
 };
 
-test("valid immutable 50-symbol release produces OI-signed GEX rows", async () => {
+test("valid immutable 20-symbol release produces OI-signed GEX rows", async () => {
   const snapshot = await loadRobinhoodOptionsSnapshot(await makeBucket(), "TAA");
   const contract = snapshot.contracts[0];
   assert.equal(robinhoodGex(contract), 10_000);
   const view = toRobinhoodOptionsView(snapshot);
   assert.deepEqual(view.availableExpiries, ["2026-08-21"]);
   assert.equal(view.strikes[0]?.netGex, 10_000);
-  assert.equal(snapshot.manifest.completedSymbols, 50);
+  assert.equal(snapshot.manifest.completedSymbols, ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS);
 });
 
 test("accepts one to eight expiries and rejects a ninth expiry", async () => {
@@ -79,7 +80,7 @@ test("accepts one to eight expiries and rejects a ninth expiry", async () => {
 });
 
 test("missing IV, stale quote, duplicate contracts, partial run, and manifest hash mismatch fail closed", async () => {
-  for (const input of [{ missingIv: true }, { staleQuote: true }, { duplicate: true }, { completedSymbols: 49 }, { manifestHash: "0".repeat(64) }]) {
+  for (const input of [{ missingIv: true }, { staleQuote: true }, { duplicate: true }, { completedSymbols: ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS - 1 }, { manifestHash: "0".repeat(64) }]) {
     await assert.rejects(() => makeBucket(input).then((bucket) => loadRobinhoodOptionsSnapshot(bucket, "TAA")), /ROBINHOOD_OPTIONS_(INVALID|STALE)/);
   }
 });

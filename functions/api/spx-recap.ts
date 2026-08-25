@@ -1,5 +1,6 @@
 import {
   listD1AvailableDates,
+  readFinalSignalPerformance,
   readD1Analytics,
   readD1RecapDay,
   type D1DatabaseLike,
@@ -14,6 +15,7 @@ import {
   parseAuditPayload,
   toDateKey,
 } from "../../src/lib/spx-recap-normalizer";
+import { SPX_RAW_RETENTION_DAYS, SPX_RECAP_RETENTION_DAYS } from "../../src/lib/spx-retention";
 
 interface KVNamespaceLike {
   get: (key: string) => Promise<string | null>;
@@ -142,8 +144,11 @@ const resolveRange = (url: URL, availableDates: string[], selectedDate: string |
     ? sortedAsc.slice(Math.max(0, defaultEndIndex - 9), defaultEndIndex + 1)
     : sortedAsc.slice(-10);
 
-  const fromDate = isValidDate(requestedFrom) ? requestedFrom! : defaultWindow[0];
-  const toDate = isValidDate(requestedTo) ? requestedTo! : defaultWindow[defaultWindow.length - 1];
+  const firstAvailable = sortedAsc[0];
+  const lastAvailable = sortedAsc[sortedAsc.length - 1];
+  const clampToRetention = (date: string) => date < firstAvailable ? firstAvailable : date > lastAvailable ? lastAvailable : date;
+  const fromDate = clampToRetention(isValidDate(requestedFrom) ? requestedFrom! : defaultWindow[0]);
+  const toDate = clampToRetention(isValidDate(requestedTo) ? requestedTo! : defaultWindow[defaultWindow.length - 1]);
 
   return fromDate <= toDate ? { fromDate, toDate } : { fromDate: toDate, toDate: fromDate };
 };
@@ -190,6 +195,8 @@ export async function onRequest(context: { request: Request; env: Env }) {
       warnings,
       analytics: { days: [], summary: emptySummary, learnedRules: [] },
       auditMeta: null,
+      retention: { rawDays: SPX_RAW_RETENTION_DAYS, recapDays: SPX_RECAP_RETENTION_DAYS, availableDateLimit: SPX_RECAP_RETENTION_DAYS },
+      performance: { label: "SPX direction proxy · not option P&L", buckets: [] },
     });
   }
 
@@ -220,6 +227,8 @@ export async function onRequest(context: { request: Request; env: Env }) {
       warnings,
       analytics: { days: [], summary: emptySummary, learnedRules: [] },
       auditMeta: null,
+      retention: { rawDays: SPX_RAW_RETENTION_DAYS, recapDays: SPX_RECAP_RETENTION_DAYS, availableDateLimit: SPX_RECAP_RETENTION_DAYS },
+      performance: { label: "SPX direction proxy · not option P&L", buckets: [] },
     });
   }
 
@@ -229,6 +238,7 @@ export async function onRequest(context: { request: Request; env: Env }) {
   }
 
   let analytics = { days: [], summary: emptySummary, learnedRules: [] as { sourceDate: string | null; text: string }[] };
+  let performance: Awaited<ReturnType<typeof readFinalSignalPerformance>> = [];
   if (fromDate && toDate) {
     if (context.env.SPX_RECAP_DB && d1Dates.length > 0) {
       try {
@@ -246,6 +256,13 @@ export async function onRequest(context: { request: Request; env: Env }) {
         ...analytics,
         learnedRules: await readKVRules(context.env),
       };
+    }
+    if (context.env.SPX_RECAP_DB) {
+      try {
+        performance = await readFinalSignalPerformance(context.env.SPX_RECAP_DB, fromDate, toDate);
+      } catch (error) {
+        warnings.push(`D1 performance read failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   }
 
@@ -267,5 +284,14 @@ export async function onRequest(context: { request: Request; env: Env }) {
           learnedRules: audit.learnedRules,
         }
       : null,
+    retention: {
+      rawDays: SPX_RAW_RETENTION_DAYS,
+      recapDays: SPX_RECAP_RETENTION_DAYS,
+      availableDateLimit: SPX_RECAP_RETENTION_DAYS,
+    },
+    performance: {
+      label: "SPX direction proxy · not option P&L",
+      buckets: performance,
+    },
   });
 }

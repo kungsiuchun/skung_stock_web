@@ -369,6 +369,37 @@ test("degraded HOLD Telegram is concise, human-readable, and never leaks interna
   assert.doesNotMatch(message, /council_qm_council_disabled|Evidence none|Entry N\/A|Invalidation N\/A|Targets N\/A/);
 });
 
+test("Telegram reports a pre-model pipeline error without inventing failed retries", async () => {
+  const pipelineFailureCouncil: CouncilResult = {
+    status: "DEGRADED",
+    degradedReason: "pipeline_error:LOCK_ACQUIRED:Cannot read properties of null",
+    latencyMs: 0,
+    agents: allHoldCouncil.agents.map((agent) => ({
+      ...agent,
+      valid: false,
+      confidence: 0,
+      modelStatus: "SKIPPED",
+      fallbackStatus: "pipeline_error:LOCK_ACQUIRED:Cannot read properties of null",
+      reasoning: "pipeline_error",
+      attempts: [],
+    })),
+  };
+  const { dependencies, sent } = buildDependencies({
+    council: { analyze: async () => pipelineFailureCouncil },
+  });
+
+  await runSpxDecisionPipeline({
+    runId: "pre-model-pipeline-error-message",
+    scheduledAt,
+    currentPosition: "NONE",
+  }, dependencies);
+
+  const message = sent[0] || "";
+  assert.match(message, /⚠️ 降級｜Council 未完整：QM 決策管線中斷，模型未執行、CM 決策管線中斷，模型未執行、NT 決策管線中斷，模型未執行、PA 決策管線中斷，模型未執行；CIO 按契約未執行。/);
+  assert.match(message, /📈 QM｜⚫ 無效 — 決策管線中斷，模型未執行。/);
+  assert.doesNotMatch(message, /重試後仍無法驗證|模型分析失敗|pipeline_error|Cannot read properties of null/);
+});
+
 test("Telegram restores the compact GEX section from the canonical Board summary", async () => {
   const gexSnapshot: MarketSnapshot = {
     ...snapshot,

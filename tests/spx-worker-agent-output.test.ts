@@ -16,15 +16,21 @@ import {
   countDirectionalVotes,
   decideWithCio,
   deriveOpenPositionContext,
+  evaluateNumericPositionExit,
   END_OF_DAY_FLATTEN_REASON,
   formatAgentTelegramBrief,
+  formatM5AnalysisForContext,
   getEndOfDayRiskDirective,
   getMarketScheduleStatus,
   hasActiveTradingRunLock,
   parseAgentResponseWithDataFallback,
   parseAgentResponseContent,
   parseOrchestratorResponseContent,
+  parseNumericExecutionLevels,
+  passesDirectionalEntryGate,
+  putSpxKvWithRetry,
   runCouncilAnalyses,
+  runEndOfDayAudit,
   runSpxGpt5CompatibilityProbe,
   runLiveSpxDecisionRun,
   runStructuredOpenRouterRequest,
@@ -313,6 +319,61 @@ test("CIO typed validator reports precise confidence contract fields", () => {
   assert.deepEqual(validateCioModelPlan({ ...valid, confidence_score: "56" }, allowed), { ok: false, invalidField: "confidence_score_not_number" });
   assert.deepEqual(validateCioModelPlan({ ...valid, confidence_score: 0 }, allowed), { ok: false, invalidField: "confidence_score_out_of_range" });
   assert.deepEqual(validateCioModelPlan({ ...valid, confidence_score: 101 }, allowed), { ok: false, invalidField: "confidence_score_out_of_range" });
+});
+
+test("M5 context marks missing 0DTESPX volume as unavailable instead of throwing", () => {
+  assert.deepEqual(formatM5AnalysisForContext({ boxHigh: 7525.5, boxLow: 7518.25, volumeSurge: null }), {
+    boxHigh: "7525.50",
+    boxLow: "7518.25",
+    volumeSurge: "UNAVAILABLE",
+  });
+});
+
+test("directional execution requires numeric levels, an in-zone price, a confirming completed 5m bar, and no prior entry", () => {
+  const plan = {
+    buy_zone: "7520.25 - 7522.75",
+    stop_loss: "7517.50",
+    targets: ["7526.00", "7530.00"],
+  };
+  assert.deepEqual(parseNumericExecutionLevels(plan), {
+    entryZoneLow: 7520.25,
+    entryZoneHigh: 7522.75,
+    invalidation: 7517.5,
+    targets: [7526, 7530],
+  });
+  assert.equal(passesDirectionalEntryGate({
+    action: "OPEN_CALL",
+    currentPrice: 7524,
+    completedM5Bars: [{ open: 7520, close: 7523 }],
+    plan,
+    actionLog: [],
+  }).reason, "entry_zone_not_reached");
+  assert.equal(passesDirectionalEntryGate({
+    action: "OPEN_CALL",
+    currentPrice: 7521,
+    completedM5Bars: [{ open: 7522, close: 7520 }],
+    plan,
+    actionLog: [],
+  }).reason, "m5_confirmation_failed");
+  assert.equal(passesDirectionalEntryGate({
+    action: "OPEN_CALL",
+    currentPrice: 7521,
+    completedM5Bars: [{ open: 7520, close: 7522 }],
+    plan,
+    actionLog: [{ action: "買入 Call" }],
+  }).reason, "daily_directional_entry_limit");
+});
+
+test("an open directional position closes only at a numeric invalidation or target", () => {
+  const memory = {
+    currentPosition: "CALL",
+    entryPrice: 7521,
+    entryTime: "2026/08/23 10:00 ET",
+    actionLog: [{ action: "買入 Call", stopLoss: "7517.50", takeProfit: "7526.00 | 7530.00" }],
+  } as any;
+  assert.deepEqual(evaluateNumericPositionExit(memory, 7523), { shouldClose: false, reason: null });
+  assert.deepEqual(evaluateNumericPositionExit(memory, 7517.5), { shouldClose: true, reason: "numeric_invalidation_7517.5" });
+  assert.deepEqual(evaluateNumericPositionExit(memory, 7526), { shouldClose: true, reason: "numeric_target_reached" });
 });
 
 test("valid AI Council output rejects zero confidence and invalid HOLD evidence references", async () => {
@@ -806,6 +867,26 @@ test("trading run lock treats unexpired lock as active and expired lock as inact
   assert.equal(hasActiveTradingRunLock(JSON.stringify({ expiresAtMs: now + 1000 }), now), true);
   assert.equal(hasActiveTradingRunLock(JSON.stringify({ expiresAtMs: now - 1000 }), now), false);
   assert.equal(hasActiveTradingRunLock("not json", now), false);
+});
+
+test("audit KV mirror retries a transient failure and records the successful write", async () => {
+  let attempts = 0;
+  const writes: Array<{ key: string; value: string; ttl?: number }> = [];
+  const result = await putSpxKvWithRetry({
+    put: async (key, value, options) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("KV PUT failed: 500 Internal Server Error");
+      writes.push({ key, value, ttl: options?.expirationTtl });
+    },
+  }, "spx_audit_2026-08-24", "audit", { expirationTtl: 91 * 24 * 60 * 60 }, 0);
+
+  assert.deepEqual(result, { attempts: 2, valueBytes: 5 });
+  assert.deepEqual(writes, [{ key: "spx_audit_2026-08-24", value: "audit", ttl: 91 * 24 * 60 * 60 }]);
+});
+
+test("audit reports an explicit skipped result before any closed-day side effect", async () => {
+  const result = await runEndOfDayAudit({} as any, new Date("2026-07-12T16:15:00.000Z"));
+  assert.deepEqual(result, { status: "SKIPPED", date: "2026-07-12" });
 });
 
 test("AI council and CIO are enabled by default and only falsey flags disable them", () => {
@@ -1338,6 +1419,16 @@ test("market data quality blocks only required missing feeds and warns on option
   assert.equal(usable.overallStatus, "WARN");
   assert.deepEqual(usable.hardBlocks, []);
   assert.ok(usable.warnings.includes("cboe_gex_missing"));
+
+  const yahooWithVolume = assessMarketDataQuality({
+    spxQuotes: [{ close: 7400, volume: 1000 }],
+    spxM5Quotes: [{ close: 7401, volume: 1000 }],
+    spxPriceSource: "yahoo",
+    intradayVolumeAvailable: true,
+  });
+  assert.equal(yahooWithVolume.items.spx15m.detail, "SPX 15m core chart");
+  assert.equal(yahooWithVolume.items.intradayVolume.status, "OK");
+  assert.equal(yahooWithVolume.warnings.includes("intraday_volume_missing"), false);
 });
 
 test("stale required SPX data blocks LIVE but UAT replay is explicitly non-normal", () => {

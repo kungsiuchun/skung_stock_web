@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { deployPages } from "../scripts/deploy-site.js";
+import { buildCloudflareDeployEnv } from "../scripts/sync-secrets.js";
 
 const deployVars = {
   CF_ACCOUNT_ID: "test-account",
@@ -38,4 +39,13 @@ test("Pages secret synchronization requires the explicit flag", () => {
   assert.equal(syncCalls, 1);
   assert.equal(calls.length, 1);
   assert.equal(calls[0][2].env.TEST_DEPLOY, "1");
+});
+
+test("configured replacement Cloudflare token wins over a stale inherited shell token", () => {
+  const env = buildCloudflareDeployEnv(deployVars, {
+    CLOUDFLARE_API_TOKEN: "stale-token",
+    CLOUDFLARE_ACCOUNT_ID: "inherited-account",
+  });
+  assert.equal(env.CLOUDFLARE_API_TOKEN, "test-token");
+  assert.equal(env.CLOUDFLARE_ACCOUNT_ID, "inherited-account");
 });

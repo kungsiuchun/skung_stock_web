@@ -42,7 +42,7 @@ const parseInput = (): InputRelease => {
   required(value && typeof value === "object", "input must be an object");
   for (const field of ["runId", "scheduledForEt", "startedAt", "capturedAt"] as const) required(typeof value[field] === "string" && value[field]!.trim(), `${field} is required`);
   required(Array.isArray(value.symbols), "symbols must be an array");
-  required(value.symbols.length === ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS, "a production release must contain exactly 50 symbols");
+  required(value.symbols.length === ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS, `a production release must contain exactly ${ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS} symbols`);
   return value as InputRelease;
 };
 
@@ -53,7 +53,7 @@ const saveFailedDiagnostic = (input: Partial<InputRelease>, error: unknown, comp
   const runId = typeof input.runId === "string" && input.runId ? input.runId : `failed-${randomUUID()}`;
   const message = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
   const now = isoNow();
-  const statement = `INSERT OR REPLACE INTO watcher_options_snapshot_runs (run_id, provider, scheduled_for_et, started_at, captured_at, finished_at, expected_symbols, completed_symbols, eligible_contracts, failed_symbols_json, release_id, manifest_key, manifest_sha256, status, failure_code, created_at) VALUES (${sql(runId)}, 'robinhood_mcp', ${sql(input.scheduledForEt || now)}, ${sql(input.startedAt || now)}, ${sql(input.capturedAt || null)}, ${sql(now)}, 50, ${completed}, 0, ${sql(JSON.stringify(input.symbols?.map((row) => row.symbol).filter(Boolean) || []))}, NULL, NULL, NULL, 'failed', ${sql(message)}, ${sql(now)});`;
+  const statement = `INSERT OR REPLACE INTO watcher_options_snapshot_runs (run_id, provider, scheduled_for_et, started_at, captured_at, finished_at, expected_symbols, completed_symbols, eligible_contracts, failed_symbols_json, release_id, manifest_key, manifest_sha256, status, failure_code, created_at) VALUES (${sql(runId)}, 'robinhood_mcp', ${sql(input.scheduledForEt || now)}, ${sql(input.startedAt || now)}, ${sql(input.capturedAt || null)}, ${sql(now)}, ${ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS}, ${completed}, 0, ${sql(JSON.stringify(input.symbols?.map((row) => row.symbol).filter(Boolean) || []))}, NULL, NULL, NULL, 'failed', ${sql(message)}, ${sql(now)});`;
   const directory = mkdtempSync(join(tmpdir(), "robinhood-options-diagnostic-"));
   try {
     const statementFile = join(directory, "diagnostic.sql");
@@ -115,7 +115,7 @@ const main = async () => {
   required(new Set(manifest.symbols.map((entry) => entry.symbol)).size === ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS, "symbols must be unique after normalization");
 
   if (dryRun) {
-    console.log(`Validated ${manifest.symbols.length}/50 symbols and ${manifest.symbols.reduce((total, entry) => total + entry.contracts, 0)} contracts. Dry run did not write R2 or D1.`);
+    console.log(`Validated ${manifest.symbols.length}/${ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS} symbols and ${manifest.symbols.reduce((total, entry) => total + entry.contracts, 0)} contracts. Dry run did not write R2 or D1.`);
     return;
   }
   required(process.env.CLOUDFLARE_API_TOKEN, "CLOUDFLARE_API_TOKEN is required for publishing");
@@ -134,12 +134,12 @@ const main = async () => {
       writeFileSync(statementFile, statement, "utf8");
       run(["d1", "execute", "market-cache-db", "--remote", "--yes", "--file", statementFile]);
     };
-    runStatement("publish-run.sql", `INSERT OR REPLACE INTO watcher_options_snapshot_runs (run_id, provider, scheduled_for_et, started_at, captured_at, finished_at, expected_symbols, completed_symbols, eligible_contracts, failed_symbols_json, release_id, manifest_key, manifest_sha256, status, failure_code, created_at) VALUES (${sql(input.runId)}, 'robinhood_mcp', ${sql(input.scheduledForEt)}, ${sql(input.startedAt)}, ${sql(input.capturedAt)}, ${sql(now)}, 50, 50, ${totalContracts}, '[]', ${sql(releaseId)}, ${sql(manifestKey)}, ${sql(sha256(manifestText))}, 'published', NULL, ${sql(now)});`);
-    runStatement("publish-current.sql", `INSERT INTO watcher_options_snapshot_current (singleton, run_id, release_id, manifest_key, manifest_sha256, captured_at, expected_symbols, completed_symbols, updated_at) VALUES (1, ${sql(input.runId)}, ${sql(releaseId)}, ${sql(manifestKey)}, ${sql(sha256(manifestText))}, ${sql(input.capturedAt)}, 50, 50, ${sql(now)}) ON CONFLICT(singleton) DO UPDATE SET run_id=excluded.run_id, release_id=excluded.release_id, manifest_key=excluded.manifest_key, manifest_sha256=excluded.manifest_sha256, captured_at=excluded.captured_at, expected_symbols=excluded.expected_symbols, completed_symbols=excluded.completed_symbols, updated_at=excluded.updated_at;`);
+    runStatement("publish-run.sql", `INSERT OR REPLACE INTO watcher_options_snapshot_runs (run_id, provider, scheduled_for_et, started_at, captured_at, finished_at, expected_symbols, completed_symbols, eligible_contracts, failed_symbols_json, release_id, manifest_key, manifest_sha256, status, failure_code, created_at) VALUES (${sql(input.runId)}, 'robinhood_mcp', ${sql(input.scheduledForEt)}, ${sql(input.startedAt)}, ${sql(input.capturedAt)}, ${sql(now)}, ${ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS}, ${ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS}, ${totalContracts}, '[]', ${sql(releaseId)}, ${sql(manifestKey)}, ${sql(sha256(manifestText))}, 'published', NULL, ${sql(now)});`);
+    runStatement("publish-current.sql", `INSERT INTO watcher_options_snapshot_current (singleton, run_id, release_id, manifest_key, manifest_sha256, captured_at, expected_symbols, completed_symbols, updated_at) VALUES (1, ${sql(input.runId)}, ${sql(releaseId)}, ${sql(manifestKey)}, ${sql(sha256(manifestText))}, ${sql(input.capturedAt)}, ${ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS}, ${ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS}, ${sql(now)}) ON CONFLICT(singleton) DO UPDATE SET run_id=excluded.run_id, release_id=excluded.release_id, manifest_key=excluded.manifest_key, manifest_sha256=excluded.manifest_sha256, captured_at=excluded.captured_at, expected_symbols=excluded.expected_symbols, completed_symbols=excluded.completed_symbols, updated_at=excluded.updated_at;`);
     const currentFile = join(directory, "current.json");
     writeFileSync(currentFile, currentText, "utf8");
     run(["r2", "object", "put", `${bucket}/current.json`, "--file", currentFile, "--remote"]);
-    console.log(`Published Robinhood EOD release ${releaseId}: 50/50 symbols, ${totalContracts} contracts.`);
+    console.log(`Published Robinhood EOD release ${releaseId}: ${ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS}/${ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS} symbols, ${totalContracts} contracts.`);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

@@ -1,6 +1,6 @@
 import { RSI, BollingerBands, SMA, MACD, EMA } from 'technicalindicators';
 import { PERSONAS, ORCHESTRATOR_PROMPT, AUDIT_AGENT_PROMPT } from './prompts';
-import { readAgentCalibrationWeights, readPendingAgentSignalOutcomes, updateAgentSignalOutcomeResults, upsertAgentSignalOutcome, upsertRecapDay, type D1DatabaseLike } from '../src/lib/spx-recap-d1';
+import { readFinalSignalPerformance, readPendingFinalSignalOutcomes, updateFinalSignalOutcome, upsertFinalSignalOutcome, upsertRecapDay, type D1DatabaseLike } from '../src/lib/spx-recap-d1';
 import { generateAndStoreSpxGexHeatmap, getSpxGexGenerationStatus, readSpxGexHeatmap, SpxGexSnapshotValidationError, toTelegramGexSummary, type SpxGexDataClient, type SpxGexHeatmapModel, type SpxGexTelegramSummary } from '../src/lib/spx-gex-heatmap';
 import { createCboeOnlySpxGexDataClient, createSpxGexIntradayDataClient } from '../src/lib/spx-gex-cboe';
 import {
@@ -44,6 +44,7 @@ import {
 } from '../src/lib/spx-market-scheduler';
 import { runSpxDecisionRun } from '../src/lib/spx-decision-run';
 import { buildSpxMarketSnapshot, normalizeSpxReplaySeries } from '../src/lib/spx-market-snapshot';
+import { runSpxRetention, SPX_KV_RETENTION_SECONDS } from '../src/lib/spx-retention';
 
 // Cloudflare Worker Environment Types
 interface Env {
@@ -114,7 +115,7 @@ interface TrendDayContext {
   rangePositionPct: number | null;
   priorBoxHigh: number | null;
   priorBoxLow: number | null;
-  aboveVWAP: boolean;
+  aboveVWAP: boolean | null;
   aboveEMA9: boolean;
   aboveGammaFlip: boolean | null;
   nearestExpiryGammaStatus: string | null;
@@ -283,6 +284,53 @@ export interface CioModelPlan {
   claims: Array<{ text: string; evidence_refs: string[] }>;
 }
 
+export interface NumericExecutionLevels {
+  entryZoneLow: number;
+  entryZoneHigh: number;
+  invalidation: number;
+  targets: number[];
+}
+
+const numericLevels = (value: string) => (value.match(/\d+(?:\.\d+)?/g) || [])
+  .map(Number)
+  .filter((item) => Number.isFinite(item));
+
+export const parseNumericExecutionLevels = (plan: Pick<CioModelPlan, "buy_zone" | "stop_loss" | "targets">): NumericExecutionLevels | null => {
+  if (!plan.buy_zone || !plan.stop_loss || plan.targets.length === 0) return null;
+  const zone = numericLevels(plan.buy_zone);
+  const invalidation = numericLevels(plan.stop_loss)[0];
+  const targets = plan.targets.flatMap(numericLevels);
+  if (zone.length !== 2 || !Number.isFinite(invalidation) || targets.length === 0) return null;
+  const [entryZoneLow, entryZoneHigh] = [...zone].sort((left, right) => left - right);
+  if (entryZoneLow === entryZoneHigh) return null;
+  return { entryZoneLow, entryZoneHigh, invalidation, targets };
+};
+
+export const passesDirectionalEntryGate = (input: {
+  action: "OPEN_CALL" | "OPEN_PUT";
+  currentPrice: number;
+  completedM5Bars: Array<{ open?: number; close?: number }>;
+  plan: Pick<CioModelPlan, "buy_zone" | "stop_loss" | "targets">;
+  actionLog: Array<{ action?: string }>;
+}) => {
+  const levels = parseNumericExecutionLevels(input.plan);
+  if (!levels) return { ok: false as const, reason: "numeric_execution_levels_required", levels: null };
+  if (input.currentPrice < levels.entryZoneLow || input.currentPrice > levels.entryZoneHigh) {
+    return { ok: false as const, reason: "entry_zone_not_reached", levels };
+  }
+  if (input.actionLog.some((item) => /買入\s+(Call|Put)/i.test(String(item.action || "")))) {
+    return { ok: false as const, reason: "daily_directional_entry_limit", levels };
+  }
+  const bar = input.completedM5Bars.at(-1);
+  const open = Number(bar?.open);
+  const close = Number(bar?.close);
+  if (!Number.isFinite(open) || !Number.isFinite(close)) return { ok: false as const, reason: "m5_confirmation_missing", levels };
+  const confirmed = input.action === "OPEN_CALL" ? close >= open : close <= open;
+  return confirmed
+    ? { ok: true as const, reason: null, levels }
+    : { ok: false as const, reason: "m5_confirmation_failed", levels };
+};
+
 export const deriveOpenPositionContext = (dailyMemory: DailyMemory): SpxOpenPositionContext | null => {
   if (dailyMemory.currentPosition === "NONE") return null;
   const openingAction = dailyMemory.currentPosition === "PUT" ? "買入 Put" : "買入 Call";
@@ -295,6 +343,24 @@ export const deriveOpenPositionContext = (dailyMemory: DailyMemory): SpxOpenPosi
     targets: openingSnapshot?.takeProfit ? [openingSnapshot.takeProfit] : [],
     openingRunId: openingSnapshot?.runId || null,
   };
+};
+
+export const evaluateNumericPositionExit = (dailyMemory: DailyMemory, currentPrice: number) => {
+  const context = deriveOpenPositionContext(dailyMemory);
+  if (!context || !Number.isFinite(currentPrice)) return null;
+  const invalidation = context.invalidation ? numericLevels(context.invalidation)[0] : null;
+  const targets = context.targets.flatMap(numericLevels);
+  if (!Number.isFinite(invalidation) || targets.length === 0) {
+    return { shouldClose: true, reason: "position_missing_numeric_exit_levels" };
+  }
+  if (context.side === "CALL") {
+    if (currentPrice <= invalidation!) return { shouldClose: true, reason: `numeric_invalidation_${invalidation}` };
+    if (targets.some((target) => currentPrice >= target)) return { shouldClose: true, reason: "numeric_target_reached" };
+  } else {
+    if (currentPrice >= invalidation!) return { shouldClose: true, reason: `numeric_invalidation_${invalidation}` };
+    if (targets.some((target) => currentPrice <= target)) return { shouldClose: true, reason: "numeric_target_reached" };
+  }
+  return { shouldClose: false, reason: null };
 };
 
 export const validateCioModelPlan = (
@@ -331,6 +397,14 @@ export const validateCioModelPlan = (
   if (["OPEN_CALL", "OPEN_PUT"].includes(action)
     && (!candidate.buy_zone || !candidate.stop_loss || candidate.targets.length === 0)) {
     return { ok: false, invalidField: "directional_trade_levels" };
+  }
+  if (["OPEN_CALL", "OPEN_PUT"].includes(action)
+    && !parseNumericExecutionLevels({
+      buy_zone: candidate.buy_zone as string | null,
+      stop_loss: candidate.stop_loss as string | null,
+      targets: candidate.targets as string[],
+    })) {
+    return { ok: false, invalidField: "numeric_execution_levels_required" };
   }
   if (action === "HOLD" && (candidate.buy_zone !== null || candidate.stop_loss !== null || candidate.targets.length > 0)) {
     return { ok: false, invalidField: "hold_trade_levels" };
@@ -988,6 +1062,8 @@ const qualityItem = (status: MarketDataQualityStatus, required: boolean, detail:
 export function assessMarketDataQuality(input: {
   spxQuotes?: unknown[];
   spxM5Quotes?: unknown[];
+  spxPriceSource?: string;
+  intradayVolumeAvailable?: boolean;
   spxD1Quotes?: unknown[];
   spxH1Quotes?: unknown[];
   currentVix?: unknown;
@@ -996,8 +1072,9 @@ export function assessMarketDataQuality(input: {
   calculatedGex?: unknown;
 }): MarketDataQualitySummary {
   const items: Record<string, MarketDataQualityItem> = {
-    spx15m: qualityItem(Array.isArray(input.spxQuotes) && input.spxQuotes.length > 0 ? "OK" : "MISSING", true, "SPX 15m core chart"),
-    spx5m: qualityItem(Array.isArray(input.spxM5Quotes) && input.spxM5Quotes.length > 0 ? "OK" : "MISSING", true, "SPX 5m trigger chart"),
+    spx15m: qualityItem(Array.isArray(input.spxQuotes) && input.spxQuotes.length > 0 ? "OK" : "MISSING", true, input.spxPriceSource === "0dtespx" ? "0DTESPX current-RTH 1m core chart" : "SPX 15m core chart"),
+    spx5m: qualityItem(Array.isArray(input.spxM5Quotes) && input.spxM5Quotes.length > 0 ? "OK" : "MISSING", true, input.spxPriceSource === "0dtespx" ? "0DTESPX current-RTH 1m aggregated 5m trigger chart" : "SPX 5m trigger chart"),
+    intradayVolume: qualityItem(input.intradayVolumeAvailable === true ? "OK" : "MISSING", false, "Current-RTH trade volume / VWAP"),
     spxD1: qualityItem(Array.isArray(input.spxD1Quotes) && input.spxD1Quotes.length > 0 ? "OK" : "MISSING", false, "SPX D1 structure chart"),
     spxH1: qualityItem(Array.isArray(input.spxH1Quotes) && input.spxH1Quotes.length > 0 ? "OK" : "MISSING", false, "SPX H1 structure chart"),
     vix: qualityItem(toNullableFiniteNumber(input.currentVix) !== null ? "OK" : "MISSING", false, "VIX 15m"),
@@ -1016,6 +1093,7 @@ export function assessMarketDataQuality(input: {
     .map(([key]) => ({
       spxD1: "spx_d1",
       spxH1: "spx_h1",
+      intradayVolume: "intraday_volume",
       vix: "vix",
       vix9d: "vix9d",
       pcr: "pcr",
@@ -1619,23 +1697,35 @@ export function analyzeCompletedM5Bars(quotes: any[], snapshotAt: Date) {
     .filter((quote: any) => quote.date.getTime() + M5_INTERVAL_MS <= snapshotMs);
   const completedWithVolume = completed.filter((quote: any) => Number(quote.volume) > 0);
   const recent = completed.slice(-24);
+  const latestCompleted = completed.at(-1) || null;
   const latestWithVolume = completedWithVolume.at(-1) || null;
   const previousTenWithVolume = completedWithVolume.slice(-11, -1);
   const avgM5Vol = previousTenWithVolume.length === 10
     ? previousTenWithVolume.reduce((sum: number, quote: any) => sum + Number(quote.volume || 0), 0) / 10
     : 0;
-  const currentM5Vol = Number(latestWithVolume?.volume || 0);
+  const hasVolume = completedWithVolume.length >= 11;
+  const currentM5Vol = hasVolume ? Number(latestWithVolume?.volume || 0) : null;
 
   return {
     completedBars: completed,
     boxHigh: recent.length >= 24 ? Math.max(...recent.map((quote: any) => Number(quote.high))) : 0,
     boxLow: recent.length >= 24 ? Math.min(...recent.map((quote: any) => Number(quote.low))) : 0,
-    volumeSurge: avgM5Vol > 0 ? currentM5Vol / avgM5Vol : 1,
+    volumeSurge: hasVolume && avgM5Vol > 0 && currentM5Vol !== null ? currentM5Vol / avgM5Vol : null,
     currentM5Vol,
-    avgM5Vol,
-    latestCompletedAt: latestWithVolume?.date?.toISOString() || null,
+    avgM5Vol: hasVolume ? avgM5Vol : null,
+    latestCompletedAt: latestCompleted?.date?.toISOString() || null,
   };
 }
+
+export const formatM5AnalysisForContext = (analysis: {
+  boxHigh: number | null;
+  boxLow: number | null;
+  volumeSurge: number | null;
+}) => ({
+  boxHigh: Number.isFinite(analysis.boxHigh) ? Number(analysis.boxHigh).toFixed(2) : "UNAVAILABLE",
+  boxLow: Number.isFinite(analysis.boxLow) ? Number(analysis.boxLow).toFixed(2) : "UNAVAILABLE",
+  volumeSurge: Number.isFinite(analysis.volumeSurge) ? `${Number(analysis.volumeSurge).toFixed(2)}x` : "UNAVAILABLE",
+});
 
 export const buildCioContextProjection = (contextData: any, agents: any[]) => ({
   snapshotFacts: { ...(contextData?.snapshotFacts || {}) },
@@ -1754,8 +1844,8 @@ async function calculateIndicators(quotes: any[]) {
     cumulativeTypicalVol += typicalPrice * vol;
     cumulativeVol += vol;
   }
-  const currentVWAP = cumulativeVol > 0 ? cumulativeTypicalVol / cumulativeVol : currentClose;
-  const vwapDeviation = ((currentClose - currentVWAP) / currentVWAP) * 100;
+  const currentVWAP = cumulativeVol > 0 ? cumulativeTypicalVol / cumulativeVol : null;
+  const vwapDeviation = currentVWAP === null ? null : ((currentClose - currentVWAP) / currentVWAP) * 100;
 
   return {
     currentClose,
@@ -1819,7 +1909,8 @@ function computeTrendDayContext(m5Quotes: any[], indicators: any, gexData: GexDa
   const priorWindow = todayQuotes.slice(Math.max(0, todayQuotes.length - 25), Math.max(0, todayQuotes.length - 1));
   const priorBoxHigh = priorWindow.length > 0 ? Math.max(...priorWindow.map((q: any) => Number(q.high ?? q.close))) : null;
   const priorBoxLow = priorWindow.length > 0 ? Math.min(...priorWindow.map((q: any) => Number(q.low ?? q.close))) : null;
-  const aboveVWAP = currentClose > Number(indicators.currentVWAP ?? currentClose);
+  const vwap = toNullableFiniteNumber(indicators.currentVWAP);
+  const aboveVWAP = vwap === null ? null : currentClose > vwap;
   const ema9 = indicators.ema9 != null ? Number(indicators.ema9) : null;
   const aboveEMA9 = ema9 != null ? currentClose > ema9 : false;
   const aboveGammaFlip = gexData?.gammaFlipLevel ? currentClose > gexData.gammaFlipLevel : null;
@@ -1828,7 +1919,7 @@ function computeTrendDayContext(m5Quotes: any[], indicators: any, gexData: GexDa
   let bullScore = 0;
   if ((dayChangePct ?? 0) >= 0.45) bullScore++;
   if ((fromOpenPct ?? 0) >= 0.25) bullScore++;
-  if (aboveVWAP) bullScore++;
+  if (aboveVWAP === true) bullScore++;
   if (aboveEMA9) bullScore++;
   if ((rangePositionPct ?? 50) >= 70) bullScore++;
   if (priorBoxHigh != null && currentClose >= priorBoxHigh - 1) bullScore++;
@@ -1837,14 +1928,14 @@ function computeTrendDayContext(m5Quotes: any[], indicators: any, gexData: GexDa
   let bearScore = 0;
   if ((dayChangePct ?? 0) <= -0.45) bearScore++;
   if ((fromOpenPct ?? 0) <= -0.25) bearScore++;
-  if (!aboveVWAP) bearScore++;
+  if (aboveVWAP === false) bearScore++;
   if (!aboveEMA9) bearScore++;
   if ((rangePositionPct ?? 50) <= 30) bearScore++;
   if (priorBoxLow != null && currentClose <= priorBoxLow + 1) bearScore++;
   if (aboveGammaFlip !== true) bearScore++;
 
-  const isBullTrend = bullScore >= 5 && aboveVWAP && aboveEMA9 && (((dayChangePct ?? 0) >= 0.45) || ((fromOpenPct ?? 0) >= 0.35));
-  const isBearTrend = bearScore >= 5 && !aboveVWAP && !aboveEMA9 && (((dayChangePct ?? 0) <= -0.45) || ((fromOpenPct ?? 0) <= -0.35));
+  const isBullTrend = bullScore >= 4 && aboveVWAP !== false && aboveEMA9 && (((dayChangePct ?? 0) >= 0.45) || ((fromOpenPct ?? 0) >= 0.35));
+  const isBearTrend = bearScore >= 4 && aboveVWAP !== true && !aboveEMA9 && (((dayChangePct ?? 0) <= -0.45) || ((fromOpenPct ?? 0) <= -0.35));
   const confidence = Math.round((Math.max(bullScore, bearScore) / 7) * 100);
   const fmt = (n: number | null) => n == null || !Number.isFinite(n) ? "N/A" : n.toFixed(2);
 
@@ -2332,7 +2423,7 @@ function appendPlanSnapshot(
     ...logItem,
     buyZone: plan?.buy_zone,
     stopLoss: plan?.stop_loss,
-    takeProfit: plan?.take_profit,
+    takeProfit: Array.isArray(plan?.targets) ? plan.targets.join(" | ") : plan?.take_profit,
     riskWarning: plan?.risk_warning,
     ruleEngineVerdict: ruleEngine.verdict,
     signalScore: ruleEngine.signalScore,
@@ -2927,8 +3018,8 @@ async function persistRecapDayToD1(env: Env, date: string, memory: DailyMemory, 
   report: string;
   learnedRules: string[];
   generatedAt?: string | null;
-}) {
-  if (!env.SPX_RECAP_DB) return;
+}): Promise<boolean> {
+  if (!env.SPX_RECAP_DB) return false;
 
   try {
     await upsertRecapDay(env.SPX_RECAP_DB, date, memory, audit ? {
@@ -2939,77 +3030,79 @@ async function persistRecapDayToD1(env: Env, date: string, memory: DailyMemory, 
       actionLogSize: memory.actionLog.length
     } : null);
     console.log('[D1] SPX recap persisted', date);
+    return true;
   } catch (err: any) {
     console.error('[D1] SPX recap persist failed', err?.message || err);
+    return false;
   }
 }
 
-const minutesBetweenEtTimes = (from: string, to: string) => {
-  const fromDate = parseEtTimestamp(from);
-  const toDate = parseEtTimestamp(to);
-  if (!fromDate || !toDate) return null;
-  return (toDate.getTime() - fromDate.getTime()) / 60000;
-};
+type SpxKvPutOptions = { expirationTtl?: number };
+type SpxKvPutLike = { put(key: string, value: string, options?: SpxKvPutOptions): Promise<void> };
 
-const directionalOutcomePoints = (decision: string, entrySpx: number, currentSpx: number) => {
-  const normalized = normalizeAgentDecisionValue(decision);
-  if (LONG_DECISIONS.has(normalized)) return currentSpx - entrySpx;
-  if (SHORT_DECISIONS.has(normalized)) return entrySpx - currentSpx;
-  return null;
-};
-
-async function refreshPendingAgentSignalOutcomes(env: Env, date: string, etTime: string, currentSpx: number) {
-  if (!env.SPX_RECAP_DB) return;
-  try {
-    const pending = await readPendingAgentSignalOutcomes(env.SPX_RECAP_DB, date);
-    await Promise.all(pending.map(async (item) => {
-      const elapsed = minutesBetweenEtTimes(item.timeEt, etTime);
-      const points = directionalOutcomePoints(item.decision, item.entrySpx, currentSpx);
-      if (elapsed === null || points === null || elapsed < 15) return;
-      await updateAgentSignalOutcomeResults(env.SPX_RECAP_DB!, item.runId, {
-        outcome15m: Number(points.toFixed(2)),
-        success15m: points > 0,
-        outcome30m: elapsed >= 30 ? Number(points.toFixed(2)) : null,
-      });
-    }));
-  } catch (err: any) {
-    console.error('[D1] Agent outcome refresh failed', err?.message || err);
+export async function putSpxKvWithRetry(
+  kv: SpxKvPutLike,
+  key: string,
+  value: string,
+  options?: SpxKvPutOptions,
+  retryDelayMs = 250,
+) {
+  const maxAttempts = 2;
+  const valueBytes = new TextEncoder().encode(value).byteLength;
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await kv.put(key, value, options);
+      console.log('[SPX_KV_PUT]', { key, valueBytes, expirationTtl: options?.expirationTtl ?? null, attempt });
+      return { attempts: attempt, valueBytes };
+    } catch (error) {
+      lastError = error;
+      const status = /\b[45]\d\d\b/.exec(String(error instanceof Error ? error.message : error))?.[0] || 'UNKNOWN';
+      console.error('[SPX_KV_PUT_RETRY]', { key, valueBytes, expirationTtl: options?.expirationTtl ?? null, attempt, maxAttempts, status });
+      if (attempt < maxAttempts && retryDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      }
+    }
   }
+  throw lastError instanceof Error ? lastError : new Error('SPX_KV_PUT_FAILED');
 }
 
-async function persistAgentSignalJournal(env: Env, args: {
-  runId: string;
-  date: string;
-  etTime: string;
-  currentSpx: number;
-  ruleVerdict: string;
-  dataQuality: MarketDataQualitySummary;
-  agents: Record<"QM" | "CM" | "NT" | "PA", AgentDecisionContract>;
-}) {
+const finalSignalReturn = (action: 'OPEN_CALL' | 'OPEN_PUT', entry: number, price: number) => (
+  action === 'OPEN_CALL' ? price - entry : entry - price
+);
+
+async function refreshPendingFinalSignalOutcomes(env: Env, tradingDate: string, quotes: any[], now: Date) {
   if (!env.SPX_RECAP_DB) return;
   try {
-    await Promise.all((["QM", "CM", "NT", "PA"] as const).map(async (agentKey) => {
-      const agent = args.agents[agentKey];
-      const decision = normalizeAgentDecisionValue(agent.decision);
-      if (!LONG_DECISIONS.has(decision) && !SHORT_DECISIONS.has(decision)) return;
-      await upsertAgentSignalOutcome(env.SPX_RECAP_DB!, {
-        runId: `${args.runId}-${agentKey}`,
-        date: args.date,
-        timeEt: args.etTime,
-        agentKey,
-        decision,
-        confidence: clampConfidence(agent.confidence ?? agent.confidence_score, 45),
-        ruleVerdict: args.ruleVerdict,
-        dataQuality: args.dataQuality,
-        entrySpx: args.currentSpx,
-        outcome5m: null,
-        outcome15m: null,
-        outcome30m: null,
-        success15m: null,
-      });
-    }));
+    const pending = await readPendingFinalSignalOutcomes(env.SPX_RECAP_DB);
+    for (const item of pending.filter((candidate) => candidate.tradingDate === tradingDate)) {
+      const entryAt = Date.parse(item.entryAt);
+      if (!Number.isFinite(entryAt)) {
+        await updateFinalSignalOutcome(env.SPX_RECAP_DB, item.runId, { outcomeStatus: 'UNAVAILABLE' });
+        continue;
+      }
+      const completeAt = entryAt + 30 * 60_000;
+      if (now.getTime() < completeAt) continue;
+      const window = quotes.filter((quote) => quote?.date instanceof Date && quote.date.getTime() >= entryAt && quote.date.getTime() <= completeAt);
+      const atOffset = (minutes: number) => window.find((quote) => quote.date.getTime() >= entryAt + minutes * 60_000);
+      const five = atOffset(5);
+      const fifteen = atOffset(15);
+      const thirty = atOffset(30);
+      if (!five || !fifteen || !thirty) continue;
+      const returns = window.map((quote) => finalSignalReturn(item.action, item.entrySpx, Number(quote.close))).filter(Number.isFinite);
+      const ready = returns.length > 0;
+      await updateFinalSignalOutcome(env.SPX_RECAP_DB, item.runId, ready ? {
+        outcome5m: Number(finalSignalReturn(item.action, item.entrySpx, Number(five.close)).toFixed(2)),
+        outcome15m: Number(finalSignalReturn(item.action, item.entrySpx, Number(fifteen.close)).toFixed(2)),
+        outcome30m: Number(finalSignalReturn(item.action, item.entrySpx, Number(thirty.close)).toFixed(2)),
+        mae30m: Number(Math.min(...returns).toFixed(2)),
+        mfe30m: Number(Math.max(...returns).toFixed(2)),
+        success15m: finalSignalReturn(item.action, item.entrySpx, Number(fifteen.close)) > 0,
+        outcomeStatus: 'READY',
+      } : { outcomeStatus: 'UNAVAILABLE' });
+    }
   } catch (err: any) {
-    console.error('[D1] Agent signal journal persist failed', err?.message || err);
+    console.error('[D1] Final signal outcome refresh failed', err?.message || err);
   }
 }
 
@@ -3325,9 +3418,9 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
     if (!dailyMemory.icPosition) { dailyMemory.icPosition = 'NONE'; dailyMemory.icDeployTime = null; dailyMemory.icAction = null; }
     const openPositionContext = deriveOpenPositionContext(dailyMemory);
 
-    console.log('[DEBUG] Step 1: Fetching core SPX data, optional market context, canonical SPX GEX...');
-    const spxQuotes = await timedStep('SPX 15m core chart', () => fetchYahooChart('^GSPC', '15m', '7d'));
-    const spxQuotesM5 = await fetchOptionalMarketData('SPX M5 trigger chart', fetchYahooChart('^GSPC', '5m', '2d'), spxQuotes);
+    console.log('[DEBUG] Step 1: Fetching Yahoo SPX intraday, optional market context, canonical SPX GEX...');
+    const spxQuotes = await timedStep('Yahoo SPX 15m core chart', () => fetchYahooChart('^GSPC', '15m', '7d'));
+    const spxQuotesM5 = await fetchOptionalMarketData('Yahoo SPX 5m trigger chart', fetchYahooChart('^GSPC', '5m', '2d'), spxQuotes);
     const [spxQuotesD1, spxQuotesH1, vixQuotes, vixQuotes9d, canonicalGexSnapshot, sentimentData] = await Promise.all([
       fetchOptionalMarketData('SPX D1 price-action chart', fetchYahooChart('^GSPC', '1d', '3mo'), []),
       fetchOptionalMarketData('SPX H1 price-action chart', fetchYahooChart('^GSPC', '1h', '10d'), []),
@@ -3354,7 +3447,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
     if (!spxInd) {
       throw new Error('無法計算技術指標');
     }
-    await refreshPendingAgentSignalOutcomes(env, etDateStr, etTime, spxInd.currentClose);
+    await refreshPendingFinalSignalOutcomes(env, etDateStr, spxQuotes, now);
 
     const snapshotAt = new Date();
     const completedM5 = analyzeCompletedM5Bars(spxQuotesM5, snapshotAt);
@@ -3382,8 +3475,8 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
       ema9: spxInd.ema9?.toFixed(2),
       ema20: spxInd.ema20?.toFixed(2),
       ema9Trend: spxInd.currentClose > (spxInd.ema9 || 0) ? 'Bullish (Above EMA9)' : 'Bearish (Below EMA9)',
-      currentVWAP: spxInd.currentVWAP.toFixed(2),
-      vwapDeviation: spxInd.vwapDeviation.toFixed(2) + '%',
+      currentVWAP: spxInd.currentVWAP === null ? 'UNAVAILABLE' : spxInd.currentVWAP.toFixed(2),
+      vwapDeviation: spxInd.vwapDeviation === null ? 'UNAVAILABLE' : spxInd.vwapDeviation.toFixed(2) + '%',
       pcrValue: pcrValue ? pcrValue.toFixed(2) : 'N/A',
       pcrStatus: pcrStatus
     };
@@ -3392,6 +3485,8 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
     let marketDataQuality = assessMarketDataQuality({
       spxQuotes,
       spxM5Quotes: m5QuotesValid,
+      spxPriceSource: 'yahoo',
+      intradayVolumeAvailable: spxInd.currentVWAP !== null,
       spxD1Quotes: spxQuotesD1,
       spxH1Quotes: spxQuotesH1,
       currentVix,
@@ -3443,12 +3538,9 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
 
     const rawWisdom = await env.SPX_MEMORY.get('SPX_WISDOM_BOOK');
     const learnedRules = rawWisdom ? JSON.parse(rawWisdom) : [];
-    const agentCalibrationWeights = env.SPX_RECAP_DB
-      ? await readAgentCalibrationWeights(env.SPX_RECAP_DB).catch((error) => {
-        console.error('[D1] Agent calibration read failed', error instanceof Error ? error.message : String(error));
-        return null;
-      })
-      : null;
+    // Legacy Council-vote calibration is intentionally no longer a decision input.
+    // Only finalized SPX proxy outcomes can veto a future directional signal.
+    const agentCalibrationWeights = null;
 
     const snapshotFacts: MarketSnapshot['facts'] = {
       'spx.last': spxInd.currentClose,
@@ -3577,11 +3669,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
       macd: spxInd.macd,
       fundFlow,
       learned_rules: learnedRules,
-      m5Analysis: {
-        boxHigh: m5Analysis.boxHigh.toFixed(2),
-        boxLow: m5Analysis.boxLow.toFixed(2),
-        volumeSurge: m5Analysis.volumeSurge.toFixed(2) + 'x',
-      },
+      m5Analysis: formatM5AnalysisForContext(m5Analysis),
       newsSentiment: {
         score: sentimentData.score,
         label: sentimentData.label,
@@ -3650,15 +3738,6 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
       degradedReason: councilResult.degradedReason || null,
       agents: councilResult.agents,
     }, councilResult.latencyMs);
-    await persistAgentSignalJournal(env, {
-      runId,
-      date: etDateStr,
-      etTime,
-      currentSpx: spxInd.currentClose,
-      ruleVerdict: zeroDteRuleEngine.verdict,
-      dataQuality: marketDataQuality,
-      agents: { QM: agent1, CM: agent2, NT: agent3, PA: agent4 },
-    });
     console.log('[DEBUG] Step 4: Triggering Orchestrator...');
     const cioStartedAt = Date.now();
     const fallbackOrchestratorPlan = buildDataBackedCioPlan(extendedContext, [agent1, agent2, agent3, agent4]);
@@ -3756,9 +3835,12 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
       zeroDteRuleEngine.directionalBias === 'NONE';
     const endOfDayDirective = getEndOfDayRiskDirective(marketStatus, dailyMemory.currentPosition);
     const canonicalGexDirective = getCanonicalGexRiskDirective(marketSnapshot, cioDecision);
+    const numericExit = evaluateNumericPositionExit(dailyMemory, spxInd.currentClose);
     let riskDirective: RiskGateDirective = { disposition: 'PASS', reason: 'No safety veto.' };
     if (endOfDayDirective) {
       riskDirective = endOfDayDirective;
+    } else if (numericExit?.shouldClose) {
+      riskDirective = { disposition: 'REQUIRE_CLOSE', reason: `Numeric exit: ${numericExit.reason}` };
     } else if (zeroDteRuleEngine.verdict === 'CLOSE_OR_REDUCE_SUGGESTED' && dailyMemory.currentPosition !== 'NONE') {
       riskDirective = {
         disposition: 'REQUIRE_CLOSE',
@@ -3780,7 +3862,50 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
       };
     }
 
-    const riskGateResult = applyRiskGate(cioDecision, riskDirective, dailyMemory.currentPosition);
+    let riskGateResult = applyRiskGate(cioDecision, riskDirective, dailyMemory.currentPosition);
+    if (dailyMemory.currentPosition !== 'NONE' && riskGateResult.action === 'CLOSE' && riskDirective.disposition === 'PASS') {
+      riskGateResult = {
+        ...riskGateResult,
+        action: 'HOLD',
+        disposition: 'VETO_TO_HOLD',
+        reason: 'Execution exit veto: numeric invalidation/target or Risk Gate close requirement not met.',
+      };
+    }
+    let executionLevels: NumericExecutionLevels | null = null;
+    if (dailyMemory.currentPosition === 'NONE' && (riskGateResult.action === 'OPEN_CALL' || riskGateResult.action === 'OPEN_PUT')) {
+      const entryGate = passesDirectionalEntryGate({
+        action: riskGateResult.action,
+        currentPrice: spxInd.currentClose,
+        completedM5Bars: m5QuotesValid,
+        plan: {
+          buy_zone: cioDecision.entry,
+          stop_loss: cioDecision.invalidation,
+          targets: cioDecision.targets,
+        },
+        actionLog: dailyMemory.actionLog,
+      });
+      executionLevels = entryGate.levels;
+      if (!entryGate.ok) {
+        riskGateResult = {
+          ...riskGateResult,
+          action: 'HOLD',
+          disposition: 'VETO_TO_HOLD',
+          reason: `Execution entry veto: ${entryGate.reason}`,
+        };
+      } else if (env.SPX_RECAP_DB) {
+        const calibrationFrom = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1_000).toISOString().slice(0, 10);
+        const calibration = await readFinalSignalPerformance(env.SPX_RECAP_DB, calibrationFrom, etDateStr);
+        const bucket = calibration.find((candidate) => candidate.action === riskGateResult.action && candidate.regime === trendDayContext.regime);
+        if (bucket && bucket.sampleCount >= 20 && ((bucket.hitRate ?? 0) < 55 || (bucket.averageReturn15m ?? 0) <= 0)) {
+          riskGateResult = {
+            ...riskGateResult,
+            action: 'HOLD',
+            disposition: 'VETO_TO_HOLD',
+            reason: `Calibration veto: ${bucket.action}/${bucket.regime} sample=${bucket.sampleCount} hit=${bucket.hitRate ?? 'N/A'} return15m=${bucket.averageReturn15m ?? 'N/A'}`,
+          };
+        }
+      }
+    }
     orchestratorPlan = {
       ...(orchestratorPlan as any),
       trade_action: riskGateResult.action,
@@ -3833,11 +3958,19 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
       dailyMemory.entryPrice = currentPriceStr;
       dailyMemory.entryTime = etTime;
       dailyMemory.actionLog.push(appendPlanSnapshot({ time: etTime, price: currentPriceStr, action: '買入 Call', reasoning: planReason(orchestratorPlan) }, orchestratorPlan, zeroDteRuleEngine, planSnapshotMeta));
+      if (executionLevels && env.SPX_RECAP_DB) await upsertFinalSignalOutcome(env.SPX_RECAP_DB, {
+        runId, tradingDate: etDateStr, action: 'OPEN_CALL', regime: trendDayContext.regime, entryAt: now.toISOString(),
+        entrySpx: currentPriceStr, entryZoneLow: executionLevels.entryZoneLow, entryZoneHigh: executionLevels.entryZoneHigh,
+      });
     } else if (tradeAction === 'OPEN_PUT' && dailyMemory.currentPosition === 'NONE') {
       dailyMemory.currentPosition = 'PUT';
       dailyMemory.entryPrice = currentPriceStr;
       dailyMemory.entryTime = etTime;
       dailyMemory.actionLog.push(appendPlanSnapshot({ time: etTime, price: currentPriceStr, action: '買入 Put', reasoning: planReason(orchestratorPlan) }, orchestratorPlan, zeroDteRuleEngine, planSnapshotMeta));
+      if (executionLevels && env.SPX_RECAP_DB) await upsertFinalSignalOutcome(env.SPX_RECAP_DB, {
+        runId, tradingDate: etDateStr, action: 'OPEN_PUT', regime: trendDayContext.regime, entryAt: now.toISOString(),
+        entrySpx: currentPriceStr, entryZoneLow: executionLevels.entryZoneLow, entryZoneHigh: executionLevels.entryZoneHigh,
+      });
     } else if (tradeAction === 'CLOSE' && dailyMemory.currentPosition !== 'NONE') {
       const pnlRaw = dailyMemory.currentPosition === 'CALL'
         ? (currentPriceStr - dailyMemory.entryPrice!)
@@ -3859,7 +3992,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
     // Save Memory
     const etNowDateStr = etTime.split(' ')[0].replace(/\//g, '-');
     const dbKey = `spx_memory_${etNowDateStr}`;
-    await env.SPX_MEMORY.put(dbKey, JSON.stringify(dailyMemory));
+    await env.SPX_MEMORY.put(dbKey, JSON.stringify(dailyMemory), { expirationTtl: SPX_KV_RETENTION_SECONDS });
     await persistRecapDayToD1(env, etNowDateStr, dailyMemory);
 
     await decisionStore!.persistDecision(decisionRun!);
@@ -3936,11 +4069,17 @@ export async function runLiveSpxDecisionRun(env: Env, now: Date = new Date(), op
   });
 }
 
-async function runEndOfDayAudit(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}) {
+type EndOfDayAuditResult =
+  | { status: 'COMPLETED'; date: string; kvMirrorFailures: string[] }
+  | { status: 'SKIPPED'; date: string }
+  | { status: 'NO_MEMORY'; date: string }
+  | { status: 'FAILED'; date: string; failureCode: string };
+
+export async function runEndOfDayAudit(env: Env, now: Date = new Date(), options: ScheduledRunOptions = {}): Promise<EndOfDayAuditResult> {
   const marketStatus = getMarketScheduleStatus(now);
   if (!options.force && !marketStatus.isMarketOpenDay) {
     console.log(`[SCHEDULE] Skip audit run: ${marketStatus.skipReason || 'market_closed'} ${marketStatus.etDateKey}`);
-    return;
+    return { status: 'SKIPPED', date: marketStatus.etDateKey };
   }
 
   const etNow = marketStatus.etNow;
@@ -3951,7 +4090,7 @@ async function runEndOfDayAudit(env: Env, now: Date = new Date(), options: Sched
   if (!rawMemory) {
     console.log("[AUDIT] No memory found for today.");
     await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, `⚠️ <b>[盤後審計]</b> 查無今日 (${etDateStr}) 的交易記憶，無需生成審計報告。`);
-    return;
+    return { status: 'NO_MEMORY', date: etDateStr };
   }
   const memory: DailyMemory = JSON.parse(rawMemory);
 
@@ -3991,35 +4130,52 @@ async function runEndOfDayAudit(env: Env, now: Date = new Date(), options: Sched
       report = report.replace(/```json\s*[\s\S]*?\s*```/i, '').trim();
     }
 
-    if (extractedRules.length > 0) {
-      const existingBook = await env.SPX_MEMORY.get('SPX_WISDOM_BOOK');
-      let wisdomBook: string[] = existingBook ? JSON.parse(existingBook) : [];
-      // Prepend new rules and keep only the latest 10
-      wisdomBook = [...extractedRules, ...wisdomBook].slice(0, 10);
-      await env.SPX_MEMORY.put('SPX_WISDOM_BOOK', JSON.stringify(wisdomBook));
-      console.log('[AUDIT] Saved new rules to SPX_WISDOM_BOOK', extractedRules);
-    }
-
-    await env.SPX_MEMORY.put(`spx_audit_${etDateStr}`, JSON.stringify({
+    const generatedAt = new Date().toISOString();
+    const auditPayload = JSON.stringify({
       date: etDateStr,
-      generatedAt: new Date().toISOString(),
+      generatedAt,
       report,
       learnedRules: extractedRules,
       actionLogSize: memory.actionLog.length
-    }));
-    console.log('[AUDIT] Saved daily recap report to SPX_MEMORY', `spx_audit_${etDateStr}`);
-    await persistRecapDayToD1(env, etDateStr, memory, {
+    });
+    const recapPersisted = await persistRecapDayToD1(env, etDateStr, memory, {
       report,
       learnedRules: extractedRules,
-      generatedAt: new Date().toISOString()
+      generatedAt
     });
+    if (!recapPersisted) throw new Error('D1_RECAP_PERSIST_FAILED');
+    if (env.SPX_RECAP_DB) {
+      const retention = await runSpxRetention(env.SPX_RECAP_DB, now);
+      console.log('[D1] SPX retention completed', retention);
+    }
 
-    const finalMsg = `📅 <b>【每日審計清單】 (${etDateStr})</b>\n\n<pre>${tgEscape(report)}</pre>`;
+    const kvMirrorFailures: string[] = [];
+    if (extractedRules.length > 0) {
+      try {
+        const existingBook = await env.SPX_MEMORY.get('SPX_WISDOM_BOOK');
+        const wisdomBook: string[] = [...extractedRules, ...(existingBook ? JSON.parse(existingBook) : [])].slice(0, 10);
+        await putSpxKvWithRetry(env.SPX_MEMORY, 'SPX_WISDOM_BOOK', JSON.stringify(wisdomBook));
+      } catch (error) {
+        kvMirrorFailures.push('wisdom');
+        console.error('[AUDIT] KV wisdom mirror failed after retry', error instanceof Error ? error.message : String(error));
+      }
+    }
+    try {
+      await putSpxKvWithRetry(env.SPX_MEMORY, `spx_audit_${etDateStr}`, auditPayload, { expirationTtl: SPX_KV_RETENTION_SECONDS });
+    } catch (error) {
+      kvMirrorFailures.push('audit');
+      console.error('[AUDIT] KV audit mirror failed after retry', error instanceof Error ? error.message : String(error));
+    }
+
+    const storageNotice = kvMirrorFailures.length ? '\n\n⚠️ 儲存｜D1 已保存；KV 鏡像重試後仍失敗。' : '';
+    const finalMsg = `📅 <b>【每日審計清單】 (${etDateStr})</b>\n\n<pre>${tgEscape(report)}</pre>${storageNotice}`;
 
     await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, finalMsg);
+    return { status: 'COMPLETED', date: etDateStr, kvMirrorFailures };
   } catch (e: any) {
     console.error('[AUDIT] Failed to generate audit', e);
     await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, `❌ <b>[審計失敗]</b> ${tgEscape(e.message || String(e))}`);
+    return { status: 'FAILED', date: etDateStr, failureCode: classifySpxOperationalFailure(e, 'AUDIT_FAILED') };
   }
 }
 
@@ -4550,8 +4706,8 @@ export default {
 
     // ?audit — 手動觸發盤後審計報告
     if (url.searchParams.has('audit')) {
-      ctx.waitUntil(runEndOfDayAudit(env, new Date(), { force: forceManualRun }));
-      return new Response('Audit triggered — check Telegram in ~30s.');
+      const result = await runEndOfDayAudit(env, new Date(), { force: forceManualRun });
+      return Response.json(result, { status: result.status === 'FAILED' ? 502 : 200 });
     }
 
     if (url.searchParams.has('gex')) {

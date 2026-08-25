@@ -29,7 +29,9 @@ export const parseDotEnv = (content) => Object.fromEntries(
 );
 
 export const buildCloudflareDeployEnv = (vars, inherited = process.env) => {
-  const token = inherited.CLOUDFLARE_API_TOKEN || vars.CF_API_TOKEN_2 || vars.CF_API_TOKEN;
+  // A checked local replacement token must not be shadowed by a stale parent-shell token.
+  // CI remains supported when no deploy token is present in the selected vars file.
+  const token = vars.CF_API_TOKEN_2 || vars.CF_API_TOKEN || inherited.CLOUDFLARE_API_TOKEN;
   const accountId = inherited.CLOUDFLARE_ACCOUNT_ID || vars.CF_ACCOUNT_ID;
   if (!token) throw new Error("Cloudflare deploy requires CLOUDFLARE_API_TOKEN or .dev.vars CF_API_TOKEN_2/CF_API_TOKEN.");
   if (!accountId) throw new Error("Cloudflare deploy requires CLOUDFLARE_ACCOUNT_ID or .dev.vars CF_ACCOUNT_ID.");
