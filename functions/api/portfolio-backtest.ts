@@ -8,6 +8,7 @@ import {
 } from "../../src/lib/portfolio-backtest";
 import { MarketCacheTimeoutError, resolveMarketCache, type MarketCacheStatus } from "../../src/lib/market-data-cache";
 import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
+import { reserveMarketCacheRefreshQuota } from "../../src/lib/stocks-watcher-refresh-quota";
 
 interface Env {
   MARKET_CACHE_DB?: D1DatabaseLike;
@@ -304,6 +305,9 @@ const fetchHistory = async (input: {
   deadlineMs: input.deadlineMs,
   signal: input.signal,
   requestId: input.requestId,
+  refreshQuotaGuard: input.db
+    ? () => reserveMarketCacheRefreshQuota(input.db!, { operation: "portfolio_backtest" })
+    : undefined,
   sourceAsOf: (value) => value.points[value.points.length - 1]?.date,
   load: async () => {
     let lastFailure: { host: string; status?: number } | undefined;

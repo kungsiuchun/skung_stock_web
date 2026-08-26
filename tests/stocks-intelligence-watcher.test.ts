@@ -1047,9 +1047,9 @@ test("market cache dataset TTLs and 70 percent guard are explicit", async () => 
   assert.equal(bypassed.cache.observability.rowRead, "bypassed");
 });
 
-test("D1 quota guard blocks at the 70 percent hard threshold and reports headroom", () => {
-  const readThreshold = 3_500_000;
-  const writeThreshold = 70_000;
+test("D1 quota guard blocks at the MARKET_CACHE_DB site allocation and reports headroom", () => {
+  const readThreshold = 1_000_000;
+  const writeThreshold = 20_000;
   const readBlocked = evaluateMarketCacheD1Quota({
     currentUtcDay: "2026-08-10",
     usage: { dayUtc: "2026-08-10", rowsRead: readThreshold - 1, rowsWritten: 0 },
@@ -1060,7 +1060,7 @@ test("D1 quota guard blocks at the 70 percent hard threshold and reports headroo
   assert.equal(readBlocked.reason, "read_threshold_exceeded");
   assert.deepEqual(readBlocked.blockedDimensions, ["read"]);
   assert.equal(readBlocked.readHeadroom, 0);
-  assert.equal(readBlocked.readRemaining, 1_500_000);
+  assert.equal(readBlocked.readRemaining, 0);
 
   const writeBlocked = checkMarketCacheD1Quota({
     currentDayUtc: "2026-08-10",
@@ -1091,13 +1091,13 @@ test("D1 quota guard resets aggregate usage at a new UTC day", () => {
 test("D1 quota guard fails closed when either observed dimension is exhausted", async () => {
   const decision = evaluateMarketCacheD1Quota({
     currentUtcDay: "2026-08-10",
-    usage: { dayUtc: "2026-08-10", rowsRead: 0, rowsWritten: 70_000 },
+    usage: { dayUtc: "2026-08-10", rowsRead: 0, rowsWritten: 20_000 },
     rowsRead: 0,
     rowsWritten: 0,
   });
   assert.equal(decision.allow, false);
   assert.equal(decision.reason, "write_threshold_exceeded");
-  assert.equal(decision.remaining.rowsWritten, 30_000);
+  assert.equal(decision.remaining.rowsWritten, 0);
 
   await assert.rejects(
     resolveMarketCache({

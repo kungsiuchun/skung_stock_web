@@ -5,8 +5,9 @@ import { onRequest as getSentiment } from "../sentiment";
 import { onRequest as getTechnicalRadar } from "../technical-radar";
 import { onRequest as getVix } from "../vix";
 import { buildFinanceDashboardSnapshot } from "../../../src/lib/finance-dashboard-snapshot";
-import { resolveMarketCache } from "../../../src/lib/market-data-cache";
+import { MarketCacheQuotaExceededError, resolveMarketCache } from "../../../src/lib/market-data-cache";
 import type { D1DatabaseLike } from "../../../src/lib/spx-recap-d1";
+import { reserveMarketCacheRefreshQuota } from "../../../src/lib/stocks-watcher-refresh-quota";
 
 interface Env {
   MARKET_CACHE_DB?: D1DatabaseLike;
@@ -62,6 +63,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       scope: "finance-dashboard-snapshot",
       symbol,
       params: { symbol, quantStrategySchemaVersion: "v3" },
+      refreshQuotaGuard: context.env.MARKET_CACHE_DB
+        ? () => reserveMarketCacheRefreshQuota(context.env.MARKET_CACHE_DB!, { operation: "finance_dashboard" })
+        : undefined,
       load: async () => {
         const agentRequest = requestFor(context.request, "/api/agent/chat", {
           method: "POST",
@@ -98,6 +102,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
     return json({ data: resolved.value, cache: resolved.cache }, resolved.cache.status === "stale" ? 206 : 200);
   } catch (error) {
-    return json({ error: error instanceof Error ? error.message : String(error) }, 502);
+    return json({
+      error: error instanceof Error ? error.message : String(error),
+      errorCode: error instanceof MarketCacheQuotaExceededError ? "D1_SAFETY_CUTOFF" : null,
+    }, error instanceof MarketCacheQuotaExceededError ? 429 : 502);
   }
 }

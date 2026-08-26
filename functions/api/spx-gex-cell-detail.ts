@@ -1,6 +1,7 @@
 import { readSpxGexHeatmap } from "../../src/lib/spx-gex-heatmap";
 import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
 import { readSpxEdgeCache, withSpxObservability, writeSpxEdgeCache } from "./_spx-edge-cache";
+import { reserveSpxApiBudget } from "./_spx-d1-budget";
 
 interface Context {
   request: Request;
@@ -36,6 +37,12 @@ export async function onRequest(context: Context) {
   const cached = await readSpxEdgeCache(context.request);
   if (cached) return cached;
   try {
+    const budgetBlocked = await reserveSpxApiBudget(context.env.SPX_RECAP_DB, {
+      operation: "gex_cell_detail",
+      rowsRead: 20,
+      rowsWritten: 10,
+    });
+    if (budgetBlocked) return budgetBlocked;
     const heatmap = await readSpxGexHeatmap(context.env.SPX_RECAP_DB, date!, snapshotMinuteEt);
     const detail = heatmap?.cells.find((cell) => cell.strike === strike && cell.expdate === expdate) || null;
     const response = withSpxObservability(json({

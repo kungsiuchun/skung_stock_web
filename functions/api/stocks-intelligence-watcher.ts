@@ -11,6 +11,7 @@ import {
 import {
   classifyMarketCacheDataset,
   getMarketCacheDatasetTtlMs,
+  MarketCacheQuotaExceededError,
   resolveMarketCache,
   type MarketCacheDataset,
 } from "../../src/lib/market-data-cache";
@@ -81,7 +82,7 @@ interface WatcherApiObservability {
   rowsRead: number;
   rowsWritten: number;
   source: "native_yahoo" | "d1_tracking" | "robinhood_mcp";
-  errorCode?: "UPSTREAM_UNAVAILABLE" | "INVALID_REQUEST";
+  errorCode?: "UPSTREAM_UNAVAILABLE" | "INVALID_REQUEST" | "D1_SAFETY_CUTOFF" | "D1_QUOTA_STORE_UNAVAILABLE";
 }
 
 const requestIdFor = (request: Request) => {
@@ -92,6 +93,27 @@ const requestIdFor = (request: Request) => {
   } catch {
     return `watcher-${Date.now().toString(36)}`;
   }
+};
+
+const watcherQuotaFailure = (error: unknown) => {
+  if (!(error instanceof MarketCacheQuotaExceededError)) return null;
+  const { decision } = error;
+  const unavailable = decision.reason === "quota_store_unavailable" || decision.reason === "quota_state_invalid";
+  return {
+    status: unavailable ? 503 : 429,
+    errorCode: unavailable ? "D1_QUOTA_STORE_UNAVAILABLE" as const : "D1_SAFETY_CUTOFF" as const,
+    error: unavailable
+      ? "D1 quota safety state is unavailable; refresh is stopped rather than guessing usage."
+      : `D1 safety cutoff reached (${decision.reason}); refresh resumes after ${decision.resetsAtUtc}.`,
+    quota: {
+      reason: decision.reason,
+      resetsAtUtc: decision.resetsAtUtc,
+      projectedRowsRead: decision.projectedRowsRead,
+      projectedRowsWritten: decision.projectedRowsWritten,
+      readHeadroom: decision.readHeadroom,
+      writeHeadroom: decision.writeHeadroom,
+    },
+  };
 };
 
 export const classifyStocksWatcherDataset = (
@@ -176,7 +198,7 @@ const resolveCuratedRobinhoodOptions = async (
     };
   const assets = await listStocksWatcherTrackedAssets(env.MARKET_CACHE_DB, {
     activeOnly: true,
-    limit: 500,
+    limit: 20,
   });
   if (!assets.some((asset) => asset.symbol === symbol))
     return { curated: false };
@@ -506,7 +528,7 @@ const callTrackedWatchlist = async (env: Env, requestId: string) => {
     load: async () => {
       const assets = await listStocksWatcherTrackedAssets(env.MARKET_CACHE_DB!, {
         activeOnly: true,
-        limit: 500,
+        limit: 20,
       });
       if (assets.length === 0)
         throw new Error("Curated Watchlist has no active tracked assets.");
@@ -585,14 +607,17 @@ export async function onRequest(context: { request: Request; env?: Env }) {
         requestId,
       );
     } catch (error) {
-      const errorCode = validatedTool
+      const quotaFailure = validatedTool ? watcherQuotaFailure(error) : null;
+      const errorCode = quotaFailure?.errorCode || (validatedTool
         ? "UPSTREAM_UNAVAILABLE"
-        : "INVALID_REQUEST";
+        : "INVALID_REQUEST");
       return json(
         {
           ok: false,
           requestId,
-          error: error instanceof Error ? error.message : String(error),
+          errorCode,
+          error: quotaFailure?.error || (error instanceof Error ? error.message : String(error)),
+          ...(quotaFailure ? { quota: quotaFailure.quota } : {}),
           observability: {
             requestId,
             scope: "stocks-watcher-tool",
@@ -606,7 +631,7 @@ export async function onRequest(context: { request: Request; env?: Env }) {
           } satisfies WatcherApiObservability,
         },
         withRequestId(
-          { status: validatedTool ? 502 : 400 },
+          { status: quotaFailure?.status || (validatedTool ? 502 : 400) },
           {
             "X-Market-Dataset": datasetForTool(requestedTool),
             "X-Market-Cache-TTL-Ms": String(
@@ -679,12 +704,15 @@ export async function onRequest(context: { request: Request; env?: Env }) {
       ),
     );
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const quotaFailure = watcherQuotaFailure(error);
+    const message = quotaFailure?.error || (error instanceof Error ? error.message : String(error));
     return json(
       {
         ok: false,
         requestId,
+        errorCode: quotaFailure?.errorCode || "UPSTREAM_UNAVAILABLE",
         error: message,
+        ...(quotaFailure ? { quota: quotaFailure.quota } : {}),
         observability: {
           requestId,
           scope: "stocks-watcher-snapshot",
@@ -694,11 +722,11 @@ export async function onRequest(context: { request: Request; env?: Env }) {
           rowsRead: 0,
           rowsWritten: 0,
           source: "native_yahoo",
-          errorCode: "UPSTREAM_UNAVAILABLE",
+          errorCode: quotaFailure?.errorCode || "UPSTREAM_UNAVAILABLE",
         } satisfies WatcherApiObservability,
       },
       withRequestId(
-        { status: 502 },
+        { status: quotaFailure?.status || 502 },
         {
           "X-Market-Dataset": "snapshot",
           "X-Market-Cache-TTL-Ms": String(

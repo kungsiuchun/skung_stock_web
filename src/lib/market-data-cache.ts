@@ -1,4 +1,9 @@
 import type { D1DatabaseLike } from "./spx-recap-d1";
+import {
+  D1_DATABASE_BUDGETS,
+  D1_FREE_TIER_DAILY_LIMITS,
+  evaluateD1Budget,
+} from "./d1-free-tier-budget";
 
 export const MARKET_CACHE_TTL_MS = 60_000;
 export const MARKET_CACHE_70_PERCENT_GUARD = 0.7;
@@ -21,11 +26,13 @@ export type MarketCacheGuard = "fresh" | "near_expiry" | "stale" | "bypassed";
 export type MarketCacheRowReadState = "bypassed" | "miss" | "hit" | "failed";
 export type MarketCacheRowWriteState = "bypassed" | "written" | "failed";
 
-export const MARKET_CACHE_D1_DAILY_READ_LIMIT = 5_000_000;
-export const MARKET_CACHE_D1_DAILY_WRITE_LIMIT = 100_000;
-export const MARKET_CACHE_D1_QUOTA_HARD_THRESHOLD = 0.7;
-export const MARKET_CACHE_D1_FREE_READ_LIMIT_PER_DAY = MARKET_CACHE_D1_DAILY_READ_LIMIT;
-export const MARKET_CACHE_D1_FREE_WRITE_LIMIT_PER_DAY = MARKET_CACHE_D1_DAILY_WRITE_LIMIT;
+/** Site-owned allocation inside the Cloudflare Free daily limit. */
+export const MARKET_CACHE_D1_DAILY_READ_LIMIT = D1_DATABASE_BUDGETS.MARKET_CACHE_DB.rowsRead;
+export const MARKET_CACHE_D1_DAILY_WRITE_LIMIT = D1_DATABASE_BUDGETS.MARKET_CACHE_DB.rowsWritten;
+/** Allocations already include the 70% site policy; do not apply it twice. */
+export const MARKET_CACHE_D1_QUOTA_HARD_THRESHOLD = 1;
+export const MARKET_CACHE_D1_FREE_READ_LIMIT_PER_DAY = D1_FREE_TIER_DAILY_LIMITS.rowsRead;
+export const MARKET_CACHE_D1_FREE_WRITE_LIMIT_PER_DAY = D1_FREE_TIER_DAILY_LIMITS.rowsWritten;
 export const MARKET_CACHE_D1_HARD_THRESHOLD = MARKET_CACHE_D1_QUOTA_HARD_THRESHOLD;
 
 /** Maximum number of expired cache rows pruned by one request-path refresh. */
@@ -50,7 +57,7 @@ export interface MarketCacheD1QuotaUsage {
 export interface MarketCacheD1QuotaDecision {
   allow: boolean;
   blocked: boolean;
-  reason: "within_budget" | "utc_day_reset" | "read_threshold_exceeded" | "write_threshold_exceeded" | "read_limit_exhausted" | "write_limit_exhausted" | "invalid_observation";
+  reason: "within_budget" | "utc_day_reset" | "read_threshold_exceeded" | "write_threshold_exceeded" | "read_limit_exhausted" | "write_limit_exhausted" | "invalid_observation" | "quota_state_invalid" | "quota_store_unavailable";
   currentDayUtc: string;
   usageDayUtc: string;
   dayReset: boolean;
@@ -62,6 +69,7 @@ export interface MarketCacheD1QuotaDecision {
   writeRemaining: number;
   readHeadroom: number;
   writeHeadroom: number;
+  resetsAtUtc: string;
   remaining: { rowsRead: number; rowsWritten: number };
   headroom: { rowsRead: number; rowsWritten: number };
   blockedDimensions: Array<"read" | "write">;
@@ -83,76 +91,41 @@ export interface MarketCacheD1QuotaObservation {
   rowsWritten: number;
 }
 
-const utcDay = (value: string | Date | undefined) => {
-  const date = value instanceof Date ? value : value ? new Date(value) : new Date();
-  if (!Number.isFinite(date.getTime())) return null;
-  return date.toISOString().slice(0, 10);
-};
-
-const nonNegativeCount = (value: unknown) =>
-  typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : null;
-
 /**
  * Evaluate the projected D1 row budget for the current UTC day. This is a pure
  * guard: callers provide the aggregated usage and the rows observed by the
  * current operation; no scheduler or persistence is hidden here.
  */
 export const evaluateMarketCacheD1Quota = (input: MarketCacheD1QuotaInput): MarketCacheD1QuotaDecision => {
-  const currentDayUtc = utcDay(input.currentUtcDay || input.currentDayUtc);
-  const usage = input.usage || input.aggregatedUsage;
-  const usageDayUtc = usage?.dayUtc || currentDayUtc || "invalid";
-  const observedRowsRead = nonNegativeCount(input.rowsRead ?? input.observedRowsRead ?? 0);
-  const observedRowsWritten = nonNegativeCount(input.rowsWritten ?? input.observedRowsWritten ?? 0);
-  const usageRowsRead = nonNegativeCount(usage?.rowsRead ?? 0);
-  const usageRowsWritten = nonNegativeCount(usage?.rowsWritten ?? 0);
-  const invalid = !currentDayUtc || !/^\d{4}-\d{2}-\d{2}$/.test(usageDayUtc)
-    || observedRowsRead === null || observedRowsWritten === null
-    || usageRowsRead === null || usageRowsWritten === null;
-  const dayReset = !invalid && usageDayUtc !== currentDayUtc;
-  const baseRowsRead = dayReset || invalid ? 0 : usageRowsRead!;
-  const baseRowsWritten = dayReset || invalid ? 0 : usageRowsWritten!;
-  const projectedRowsRead = baseRowsRead + (observedRowsRead ?? 0);
-  const projectedRowsWritten = baseRowsWritten + (observedRowsWritten ?? 0);
-  const readGuard = Math.floor(MARKET_CACHE_D1_DAILY_READ_LIMIT * MARKET_CACHE_D1_QUOTA_HARD_THRESHOLD);
-  const writeGuard = Math.floor(MARKET_CACHE_D1_DAILY_WRITE_LIMIT * MARKET_CACHE_D1_QUOTA_HARD_THRESHOLD);
-  const blockedDimensions: Array<"read" | "write"> = [];
-  if (!invalid && projectedRowsRead >= readGuard) blockedDimensions.push("read");
-  if (!invalid && projectedRowsWritten >= writeGuard) blockedDimensions.push("write");
-  const reason = invalid
-    ? "invalid_observation"
-    : projectedRowsRead >= MARKET_CACHE_D1_DAILY_READ_LIMIT
-      ? "read_limit_exhausted"
-      : projectedRowsWritten >= MARKET_CACHE_D1_DAILY_WRITE_LIMIT
-        ? "write_limit_exhausted"
-    : blockedDimensions.includes("read")
-      ? "read_threshold_exceeded"
-      : blockedDimensions.includes("write")
-        ? "write_threshold_exceeded"
-        : dayReset
-          ? "utc_day_reset"
-          : "within_budget";
-  const readRemaining = Math.max(0, MARKET_CACHE_D1_DAILY_READ_LIMIT - projectedRowsRead);
-  const writeRemaining = Math.max(0, MARKET_CACHE_D1_DAILY_WRITE_LIMIT - projectedRowsWritten);
-  const readHeadroom = Math.max(0, readGuard - projectedRowsRead);
-  const writeHeadroom = Math.max(0, writeGuard - projectedRowsWritten);
+  const evaluated = evaluateD1Budget({
+    database: "MARKET_CACHE_DB",
+    currentUtcDay: input.currentUtcDay || input.currentDayUtc,
+    usage: input.usage || input.aggregatedUsage,
+    rowsRead: input.rowsRead ?? input.observedRowsRead,
+    rowsWritten: input.rowsWritten ?? input.observedRowsWritten,
+  });
+  const reason = evaluated.reason;
+  const readRemaining = evaluated.readHeadroom;
+  const writeRemaining = evaluated.writeHeadroom;
   return {
-    allow: !invalid && blockedDimensions.length === 0,
-    blocked: invalid || blockedDimensions.length > 0,
+    allow: evaluated.allow,
+    blocked: evaluated.blocked,
     reason,
-    currentDayUtc: currentDayUtc || "invalid",
-    usageDayUtc,
-    dayReset,
-    observedRowsRead: observedRowsRead ?? 0,
-    observedRowsWritten: observedRowsWritten ?? 0,
-    projectedRowsRead,
-    projectedRowsWritten,
+    currentDayUtc: evaluated.currentDayUtc,
+    usageDayUtc: evaluated.usageDayUtc,
+    dayReset: evaluated.dayReset,
+    observedRowsRead: evaluated.observedRowsRead,
+    observedRowsWritten: evaluated.observedRowsWritten,
+    projectedRowsRead: evaluated.projectedRowsRead,
+    projectedRowsWritten: evaluated.projectedRowsWritten,
     readRemaining,
     writeRemaining,
-    readHeadroom,
-    writeHeadroom,
+    readHeadroom: evaluated.readHeadroom,
+    writeHeadroom: evaluated.writeHeadroom,
+    resetsAtUtc: evaluated.resetsAtUtc,
     remaining: { rowsRead: readRemaining, rowsWritten: writeRemaining },
-    headroom: { rowsRead: readHeadroom, rowsWritten: writeHeadroom },
-    blockedDimensions,
+    headroom: { rowsRead: evaluated.readHeadroom, rowsWritten: evaluated.writeHeadroom },
+    blockedDimensions: evaluated.blockedDimensions,
   };
 };
 
@@ -295,12 +268,6 @@ export class MarketCacheQuotaExceededError extends Error {
 }
 
 const inFlight = new Map<string, Promise<MarketCacheResolution<unknown>>>();
-let nextMarketCachePruneAtMs = 0;
-
-/** Test hook for deterministic maintenance scheduling. */
-export const resetMarketCachePruneScheduleForTests = () => {
-  nextMarketCachePruneAtMs = 0;
-};
 
 const stableJson = (value: unknown): string => {
   if (value === undefined) return '"__undefined"';
@@ -405,35 +372,37 @@ const writeSuccess = async <T>(db: D1DatabaseLike, input: {
     expiresAt,
     cachedAt,
   ).run();
-  const shouldPrune = input.now.getTime() >= nextMarketCachePruneAtMs;
-  if (shouldPrune) nextMarketCachePruneAtMs = input.now.getTime() + MARKET_CACHE_PRUNE_INTERVAL_MS;
-  const pruneResult = shouldPrune
-    ? await db.prepare(`
-      DELETE FROM market_cache_entries
-      WHERE cache_key IN (
-        SELECT cache_key
-        FROM market_cache_entries
-        WHERE expires_at < ?
-        ORDER BY expires_at ASC, cache_key ASC
-        LIMIT ?
-      )
-    `).bind(
-      new Date(input.now.getTime() - MARKET_CACHE_RETENTION_MS).toISOString(),
-      MAX_CACHE_PRUNE_ROWS,
-    ).run()
-    : null;
   const upsertRowsRead = Math.max(1, Math.floor(rowsReadFrom(upsertResult) ?? 1));
-  const pruneRowsRead = pruneResult ? rowsReadFrom(pruneResult) : 0;
-  const pruneChanges = pruneResult ? changesFrom(pruneResult) : 0;
-  const pruneRowsWritten = pruneResult ? rowsWrittenFrom(pruneResult) ?? pruneChanges : 0;
-  const prunedRows = pruneResult && (pruneRowsWritten === null || pruneRowsWritten === undefined)
-    ? MAX_CACHE_PRUNE_ROWS
-    : Math.min(MAX_CACHE_PRUNE_ROWS, Math.max(0, Math.floor(pruneRowsWritten || 0)));
-  const boundedPruneRowsRead = pruneResult
-    ? (pruneRowsRead === null ? MAX_CACHE_PRUNE_READ_ROWS : Math.max(0, Math.floor(pruneRowsRead)))
-    : 0;
+  return { cachedAt, expiresAt, prunedRows: 0, rowsRead: upsertRowsRead };
+};
 
-  return { cachedAt, expiresAt, prunedRows, rowsRead: upsertRowsRead + boundedPruneRowsRead };
+/**
+ * Explicit, bounded maintenance. It is deliberately not called by public
+ * request paths: an edge-isolate-local timer cannot enforce a global cadence.
+ */
+export const pruneExpiredMarketCacheEntries = async (
+  db: D1DatabaseLike,
+  now = new Date(),
+) => {
+  const result = await db.prepare(`
+    DELETE FROM market_cache_entries
+    WHERE cache_key IN (
+      SELECT cache_key
+      FROM market_cache_entries
+      WHERE expires_at < ?
+      ORDER BY expires_at ASC, cache_key ASC
+      LIMIT ?
+    )
+  `).bind(
+    new Date(now.getTime() - MARKET_CACHE_RETENTION_MS).toISOString(),
+    MAX_CACHE_PRUNE_ROWS,
+  ).run();
+  const rowsRead = rowsReadFrom(result) ?? MAX_CACHE_PRUNE_READ_ROWS;
+  const rowsWritten = rowsWrittenFrom(result) ?? changesFrom(result) ?? MAX_CACHE_PRUNE_ROWS;
+  return {
+    rowsRead: Math.min(MAX_CACHE_PRUNE_READ_ROWS, Math.max(0, Math.floor(rowsRead))),
+    rowsWritten: Math.min(MAX_CACHE_PRUNE_ROWS, Math.max(0, Math.floor(rowsWritten))),
+  };
 };
 
 const recordRefreshError = async (db: D1DatabaseLike, cacheKey: string, now: Date, error: string) => {
@@ -558,7 +527,13 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
   }
   if (!options.force && existing && Date.parse(existing.expires_at) > initialNow.getTime()) {
     const cache = metadataFromRow(existing, "hit", initialNow, options.dataset, ttlMs, "hit", "bypassed");
-    log({ status: cache.status, ageSeconds: cache.ageSeconds, totalMs: Date.now() - startedAt });
+    log({
+      status: cache.status,
+      ageSeconds: cache.ageSeconds,
+      totalMs: Date.now() - startedAt,
+      rowsRead: cache.rowsRead,
+      rowsWritten: cache.rowsWritten,
+    });
     return { value: parseRow<T>(existing), cache };
   }
 
@@ -580,7 +555,16 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
       const decision = options.refreshQuotaGuard
         ? await runPhase("quota-guard", options.refreshQuotaGuard, d1PhaseCapMs, null)
         : options.quotaGuard?.();
-      if (decision && !decision.allow) throw new MarketCacheQuotaExceededError(decision);
+      if (decision && !decision.allow) {
+        log({
+          status: "quota_blocked",
+          quotaReason: decision.reason,
+          projectedRowsRead: decision.projectedRowsRead,
+          projectedRowsWritten: decision.projectedRowsWritten,
+          resetsAtUtc: decision.resetsAtUtc,
+        });
+        throw new MarketCacheQuotaExceededError(decision);
+      }
       const upstreamMaxMs = deadlineAt === null
         ? undefined
         : Math.max(1, deadlineAt - Date.now() - staleReserveMs);
@@ -614,7 +598,13 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
          rowsWritten: 1 + written.prunedRows,
         sourceAsOf: options.sourceAsOf?.(value) || null,
       };
-      log({ status: cache.status, upstreamMs: Date.now() - upstreamStartedAt, totalMs: Date.now() - startedAt });
+      log({
+        status: cache.status,
+        upstreamMs: Date.now() - upstreamStartedAt,
+        totalMs: Date.now() - startedAt,
+        rowsRead: cache.rowsRead,
+        rowsWritten: cache.rowsWritten,
+      });
       return { value, cache };
     } catch (error) {
       if (error instanceof MarketCacheQuotaExceededError) throw error;

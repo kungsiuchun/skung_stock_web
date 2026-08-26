@@ -1,13 +1,13 @@
 import {
-  listSpxGexHeatmapDates,
   listSpxGexInvalidSnapshotDates,
   listSpxGexInvalidSnapshots,
 } from "../../src/lib/spx-gex-heatmap";
-import { listSpxGexPressureFrames } from "../../src/lib/spx-gex-pressure-d1";
+import { listSpxGexPressureDates, listSpxGexPressureFrames } from "../../src/lib/spx-gex-pressure-d1";
 import { buildSpxGexPressureMatrixFromFrames } from "../../src/lib/spx-gex-pressure-matrix";
 import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
 import { D1SpxGexCollectionStore } from "../../src/lib/spx-gex-collection-lifecycle";
 import { coalesceSpxEdgeRequest, readSpxEdgeCache, withSpxObservability, writeSpxEdgeCache } from "./_spx-edge-cache";
+import { reserveSpxApiBudget } from "./_spx-d1-budget";
 
 interface Env {
   SPX_RECAP_DB?: D1DatabaseLike;
@@ -57,9 +57,15 @@ async function onRequestUncached(context: Context) {
   try {
     // Keep this explicit preflight: the date-list helper intentionally maps a
     // missing table to an empty list, while the public API must fail closed.
-    await context.env.SPX_RECAP_DB.prepare("SELECT 1 FROM spx_gex_intraday_snapshots LIMIT 1").first();
+    await context.env.SPX_RECAP_DB.prepare("SELECT 1 FROM spx_gex_pressure_projections LIMIT 1").first();
+    const budgetBlocked = await reserveSpxApiBudget(context.env.SPX_RECAP_DB, {
+      operation: "pressure_matrix",
+      rowsRead: 40,
+      rowsWritten: 10,
+    });
+    if (budgetBlocked) return budgetBlocked;
     const [activeDates, invalidDates] = await Promise.all([
-      listSpxGexHeatmapDates(context.env.SPX_RECAP_DB),
+      listSpxGexPressureDates(context.env.SPX_RECAP_DB),
       listSpxGexInvalidSnapshotDates(context.env.SPX_RECAP_DB),
     ]);
     const dates = [...new Set([...activeDates, ...invalidDates])].sort().reverse();
@@ -133,7 +139,7 @@ async function onRequestUncached(context: Context) {
     return response;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const missingTable = /no such table:\s*spx_gex_intraday_snapshots/i.test(message);
+    const missingTable = /no such table:\s*(spx_gex_intraday_snapshots|spx_gex_pressure_projections)/i.test(message);
     return json({
       status: missingTable ? "STORAGE_UNAVAILABLE" : "ERROR",
       errorCode: missingTable ? "SPX_GEX_INTRADAY_TABLE_MISSING" : "SPX_GEX_PRESSURE_BUILD_FAILED",
