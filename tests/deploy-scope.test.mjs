@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { deployPages } from "../scripts/deploy-site.js";
 import { deployProduction } from "../scripts/deploy-production.js";
 import { deploySpx } from "../scripts/deploy-spx.js";
@@ -10,6 +12,24 @@ const deployVars = {
   CF_ACCOUNT_ID: "test-account",
   CF_API_TOKEN_2: "test-token",
 };
+const testDirectory = path.dirname(fileURLToPath(import.meta.url));
+const fixtureDirectory = path.join(testDirectory, "fixtures", "deploy-runner");
+const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+
+const runDefaultDeploy = (args = []) => execFileSync(npmCommand, ["run", "deploy", "--", ...args], {
+  cwd: path.resolve(testDirectory, ".."),
+  encoding: "utf8",
+  shell: process.platform === "win32",
+  env: {
+    ...process.env,
+    PATH: `${fixtureDirectory}${path.delimiter}${process.env.PATH}`,
+    CF_DEPLOY_VARS_FILE: path.join(fixtureDirectory, "deploy.vars"),
+  },
+});
+
+const deploymentCommands = (output) => output.split(/\r?\n/)
+  .filter((line) => line.startsWith("DEPLOY_RUNNER "))
+  .map((line) => JSON.parse(line.slice("DEPLOY_RUNNER ".length)));
 
 test("Pages deploy does not synchronize runtime secrets by default", () => {
   const calls = [];
@@ -93,9 +113,10 @@ test("production deploy forwards explicit Pages secret synchronization before th
   ]);
 });
 
-test("default deploy command uses the paired production release", () => {
-  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-  assert.equal(packageJson.scripts.deploy, "npm run deploy:production");
-  assert.equal(packageJson.scripts["deploy:production"], "node scripts/deploy-production.js");
-  assert.equal(packageJson.scripts["deploy:all"], "npm run deploy:production -- --sync-secrets");
+test("default deploy command releases Pages before the SPX Worker", () => {
+  const commands = deploymentCommands(runDefaultDeploy());
+  assert.deepEqual(commands, [
+    ["wrangler", "pages", "deploy", "dist", "--project-name", "sius-ai-workshop", "--branch", "main"],
+    ["wrangler", "deploy", "--config", "wrangler.spx.toml"],
+  ]);
 });
