@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { deployPages } from "../scripts/deploy-site.js";
+import { deployProduction } from "../scripts/deploy-production.js";
+import { deploySpx } from "../scripts/deploy-spx.js";
 import { buildCloudflareDeployEnv } from "../scripts/sync-secrets.js";
 
 const deployVars = {
@@ -48,4 +51,51 @@ test("configured replacement Cloudflare token wins over a stale inherited shell 
   });
   assert.equal(env.CLOUDFLARE_API_TOKEN, "test-token");
   assert.equal(env.CLOUDFLARE_ACCOUNT_ID, "inherited-account");
+});
+
+test("SPX Worker deploy uses the configured Cloudflare deployment environment", () => {
+  const calls = [];
+  deploySpx({
+    vars: deployVars,
+    env: { CLOUDFLARE_API_TOKEN: "stale-token" },
+    run: (...args) => calls.push(args),
+  });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0][1], ["wrangler", "deploy", "--config", "wrangler.spx.toml"]);
+  assert.equal(calls[0][2].env.CLOUDFLARE_API_TOKEN, "test-token");
+});
+
+test("production deploy invokes Pages before the SPX scheduler Worker", () => {
+  const calls = [];
+  deployProduction({
+    deployPagesRun: (options) => calls.push(["pages", options.args]),
+    deploySpxRun: () => calls.push(["spx"]),
+  });
+
+  assert.deepEqual(calls, [
+    ["pages", []],
+    ["spx"],
+  ]);
+});
+
+test("production deploy forwards explicit Pages secret synchronization before the SPX Worker", () => {
+  const calls = [];
+  deployProduction({
+    args: ["--sync-secrets"],
+    deployPagesRun: (options) => calls.push(["pages", options.args]),
+    deploySpxRun: () => calls.push(["spx"]),
+  });
+
+  assert.deepEqual(calls, [
+    ["pages", ["--sync-secrets"]],
+    ["spx"],
+  ]);
+});
+
+test("default deploy command uses the paired production release", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(packageJson.scripts.deploy, "npm run deploy:production");
+  assert.equal(packageJson.scripts["deploy:production"], "node scripts/deploy-production.js");
+  assert.equal(packageJson.scripts["deploy:all"], "npm run deploy:production -- --sync-secrets");
 });
