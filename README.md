@@ -59,6 +59,28 @@ OPENROUTER_MODEL=...
 ADANOS_API_KEY=...
 ```
 
+## 🚢 Production Deployment
+
+`npm run deploy` is the default paired production release: it deploys Cloudflare
+Pages first, then the SPX Worker that collects canonical snapshots and writes the
+Strike Pressure Matrix projections consumed by Pages. Use it whenever the matrix
+or its collector changes.
+
+```powershell
+# Default paired Pages + SPX Worker release
+npm run deploy
+
+# Paired release that explicitly synchronizes Pages runtime secrets first
+npm run deploy -- --sync-secrets
+
+# Intentional Pages-only release (does not deploy the SPX Worker)
+npm run deploy:pages
+```
+
+`--sync-secrets` is opt-in; the normal paired release does not update Pages
+runtime secrets. The SPX Worker can also be released intentionally with
+`npm run deploy:spx`.
+
 ## 🧪 UAT Testing Framework
 
 Run Puppeteer automated tests against `localhost:5173`.
