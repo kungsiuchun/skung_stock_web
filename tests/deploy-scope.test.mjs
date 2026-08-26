@@ -120,3 +120,12 @@ test("default deploy command releases Pages before the SPX Worker", () => {
     ["wrangler", "deploy", "--config", "wrangler.spx.toml"],
   ]);
 });
+
+test("default deploy command forwards explicit Pages secret synchronization before the SPX Worker", () => {
+  const commands = deploymentCommands(runDefaultDeploy(["--sync-secrets"]));
+  assert.deepEqual(commands, [
+    ["wrangler", "pages", "secret", "put", "OPENROUTER_MODEL", "--project-name", "sius-ai-workshop"],
+    ["wrangler", "pages", "deploy", "dist", "--project-name", "sius-ai-workshop", "--branch", "main"],
+    ["wrangler", "deploy", "--config", "wrangler.spx.toml"],
+  ]);
+});
