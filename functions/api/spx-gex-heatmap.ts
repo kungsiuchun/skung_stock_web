@@ -8,6 +8,7 @@ import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
 import { readSpxDecisionCockpitForGexSnapshot } from "../../src/lib/spx-decision-ledger";
 import { D1SpxGexCollectionStore, querySpxGexCollectionCoverage } from "../../src/lib/spx-gex-collection-lifecycle";
 import { coalesceSpxEdgeRequest, readSpxEdgeCache, withSpxObservability, writeSpxEdgeCache } from "./_spx-edge-cache";
+import { reserveSpxApiBudget } from "./_spx-d1-budget";
 
 interface Env {
   SPX_RECAP_DB?: D1DatabaseLike;
@@ -183,6 +184,12 @@ async function onRequestUncached(context: Context) {
     // Keep this explicit preflight: the date-list helper intentionally maps a
     // missing table to an empty list, while the public API must fail closed.
     await context.env.SPX_RECAP_DB.prepare("SELECT 1 FROM spx_gex_intraday_snapshots LIMIT 1").first();
+    const budgetBlocked = await reserveSpxApiBudget(context.env.SPX_RECAP_DB, {
+      operation: "gex_heatmap",
+      rowsRead: 120,
+      rowsWritten: 10,
+    });
+    if (budgetBlocked) return budgetBlocked;
     const availableDates = await listSpxGexHeatmapDates(context.env.SPX_RECAP_DB);
     const selectedDate = chooseSelectedDate(availableDates, url.searchParams.get("date"));
     const sessions = selectedDate ? await listSpxGexHeatmapSessions(context.env.SPX_RECAP_DB, selectedDate) : [];

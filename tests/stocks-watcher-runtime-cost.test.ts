@@ -9,6 +9,7 @@ class MarketCacheD1 implements D1DatabaseLike {
   trackedAssetScans = 0;
   refreshQuotaReservations = 0;
   trackedAssetsAvailable = true;
+  quotaStoreAvailable = true;
   readonly rows = new Map<string, {
     cache_key: string;
     payload_json: string;
@@ -28,7 +29,8 @@ class MarketCacheD1 implements D1DatabaseLike {
         return statement;
       },
       first: async <T>() => {
-        if (query.includes("'stocks-watcher-quota'")) {
+        if (query.includes("'market-cache-quota'")) {
+          if (!this.quotaStoreAvailable) throw new Error("D1 unavailable");
           this.refreshQuotaReservations += 1;
           const key = String(values[0]);
           const initial = JSON.parse(String(values[1])) as { dayUtc: string; rowsRead: number; rowsWritten: number };
@@ -40,7 +42,7 @@ class MarketCacheD1 implements D1DatabaseLike {
               rowsWritten: Math.min(current.rowsWritten + Number(values[8]), Number(values[9])),
             }
             : initial;
-          if (current && (current.rowsRead >= 3_500_000 || current.rowsWritten >= 70_000)) return null;
+          if (current && (current.rowsRead >= 1_000_000 || current.rowsWritten >= 20_000)) return null;
           this.refreshQuota.set(key, next);
           return { payload_json: JSON.stringify(next) } as T;
         }
@@ -124,7 +126,7 @@ test("watchlist fails closed when a stale cache cannot refresh authoritative tra
   });
 
   assert.equal((await call()).status, 200);
-  const cachedWatchlist = [...db.rows.entries()].find(([key]) => !key.startsWith("__stocks_watcher_refresh_quota__"));
+  const cachedWatchlist = [...db.rows.entries()].find(([key]) => !key.startsWith("__market_cache_refresh_quota__"));
   assert.ok(cachedWatchlist);
   cachedWatchlist[1].expires_at = "2000-01-01T00:00:00.000Z";
   db.trackedAssetsAvailable = false;
@@ -141,9 +143,9 @@ test("watchlist fails closed when a stale cache cannot refresh authoritative tra
 test("watchlist quota reserves its bounded authoritative tracking scan", async () => {
   const db = new MarketCacheD1();
   const dayUtc = new Date().toISOString().slice(0, 10);
-  db.refreshQuota.set(`__stocks_watcher_refresh_quota__:${dayUtc}`, {
+  db.refreshQuota.set(`__market_cache_refresh_quota__:${dayUtc}`, {
     dayUtc,
-    rowsRead: 3_499_500,
+    rowsRead: 999_980,
     rowsWritten: 0,
   });
   const response = await stocksWatcherApi({
@@ -155,10 +157,10 @@ test("watchlist quota reserves its bounded authoritative tracking scan", async (
     env: { MARKET_CACHE_DB: db },
   });
 
-  assert.equal(response.status, 502);
+  assert.equal(response.status, 429);
   assert.equal(db.refreshQuotaReservations, 1);
   assert.equal(db.trackedAssetScans, 0);
-  assert.equal(db.refreshQuota.get(`__stocks_watcher_refresh_quota__:${dayUtc}`)?.rowsRead, 3_500_000);
+  assert.equal(db.refreshQuota.get(`__market_cache_refresh_quota__:${dayUtc}`)?.rowsRead, 1_000_000);
 });
 
 test("ignored POST parameters cannot create additional market-cache entries", async () => {
@@ -187,7 +189,7 @@ test("ignored POST parameters cannot create additional market-cache entries", as
     const second = await call({ ticker: "NVDA", range: "5y", interval: "1d", nonce: "second" });
     assert.equal(first.status, 200);
     assert.equal(second.status, 200);
-    assert.equal([...db.rows.keys()].filter((key) => !key.startsWith("__stocks_watcher_refresh_quota__")).length, 1);
+    assert.equal([...db.rows.keys()].filter((key) => !key.startsWith("__market_cache_refresh_quota__")).length, 1);
     assert.equal((await second.json() as { cache: { status: string } }).cache.status, "hit");
     assert.equal(db.refreshQuotaReservations, 1);
   } finally {
@@ -226,7 +228,7 @@ test("ignored ticker input reuses the default quotes market-cache entry", async 
     assert.equal(first.status, 200);
     assert.equal(second.status, 200);
     assert.equal((await second.json() as { cache: { status: string } }).cache.status, "hit");
-    assert.equal([...db.rows.keys()].filter((key) => !key.startsWith("__stocks_watcher_refresh_quota__")).length, 1);
+    assert.equal([...db.rows.keys()].filter((key) => !key.startsWith("__market_cache_refresh_quota__")).length, 1);
     assert.equal(db.refreshQuotaReservations, 1);
     assert.ok(quoteLoads > 0);
   } finally {
@@ -425,10 +427,10 @@ test("normalized ticker and ignored signal intent reuse market-cache entries", a
 test("exhausted refresh quota fails closed before the Yahoo load", async () => {
   const db = new MarketCacheD1();
   const dayUtc = new Date().toISOString().slice(0, 10);
-  db.refreshQuota.set(`__stocks_watcher_refresh_quota__:${dayUtc}`, {
+  db.refreshQuota.set(`__market_cache_refresh_quota__:${dayUtc}`, {
     dayUtc,
     rowsRead: 0,
-    rowsWritten: 70_000 - 260,
+    rowsWritten: 20_000 - 10,
   });
   const originalFetch = globalThis.fetch;
   let fetches = 0;
@@ -445,7 +447,35 @@ test("exhausted refresh quota fails closed before the Yahoo load", async () => {
       }),
       env: { MARKET_CACHE_DB: db },
     });
-    assert.equal(response.status, 502);
+    assert.equal(response.status, 429);
+    assert.equal(fetches, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("quota-store failures return D1_QUOTA_STORE_UNAVAILABLE instead of pretending reads are exhausted", async () => {
+  const db = new MarketCacheD1();
+  db.quotaStoreAvailable = false;
+  let fetches = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    fetches += 1;
+    throw new Error("Yahoo must not run after quota-store failure");
+  };
+  try {
+    const response = await stocksWatcherApi({
+      request: new Request("https://example.com/api/stocks-intelligence-watcher", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool: "get_stock_history", params: { ticker: "NVDA" } }),
+      }),
+      env: { MARKET_CACHE_DB: db },
+    });
+    const payload = await response.json() as { errorCode: string; error: string };
+    assert.equal(response.status, 503);
+    assert.equal(payload.errorCode, "D1_QUOTA_STORE_UNAVAILABLE");
+    assert.equal(payload.error.includes("Cloudflare free read limit"), false);
     assert.equal(fetches, 0);
   } finally {
     globalThis.fetch = originalFetch;

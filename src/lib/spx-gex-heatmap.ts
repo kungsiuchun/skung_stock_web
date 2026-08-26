@@ -1,4 +1,6 @@
 import type { D1DatabaseLike } from "./spx-recap-d1";
+import { prepareSpxGexPressureProjectionUpsert } from "./spx-gex-pressure-projection";
+import { reserveSpxD1Budget, SpxD1SafetyCutoffError } from "./spx-d1-budget";
 
 const MARKET_TIME_ZONE = "America/New_York";
 const DELAYED_FEED_MINUTES = 15;
@@ -2684,9 +2686,9 @@ export const upsertSpxGexIntradaySnapshot = async (
   ).first<D1SpxGexIntradayRow>();
   let replacementQuarantine: ReturnType<typeof prepareSpxGexQuarantineStatements> | null = null;
   let deleteInvalidExisting: ReturnType<D1DatabaseLike["prepare"]> | null = null;
-  if (existingRow) {
+    if (existingRow) {
     const existing = inspectSpxGexIntradayRow(existingRow, { requireCompleteSession: true });
-    if (existing.snapshot) return existing.snapshot;
+      if (existing.snapshot) return existing.snapshot;
     if (!db.batch) {
       throw new Error("Atomic D1 batch support is required to replace an invalid SPX GEX snapshot.");
     }
@@ -2703,8 +2705,9 @@ export const upsertSpxGexIntradaySnapshot = async (
       existingRow.snapshot_minute_et,
       existingRow.snapshot_json,
     );
-  }
-  const upsert = db.prepare(`
+    }
+    const pressureProjection = prepareSpxGexPressureProjectionUpsert(db, canonicalHeatmap);
+    const upsert = db.prepare(`
     INSERT INTO spx_gex_intraday_snapshots (
       trading_date, snapshot_minute_et, snapshot_time_et, generated_at, ticker, spot,
       snapshot_json, created_at, updated_at
@@ -2734,15 +2737,17 @@ export const upsertSpxGexIntradaySnapshot = async (
   if (replacementQuarantine && deleteInvalidExisting && db.batch) {
     await db.batch([
       replacementQuarantine.insert,
-      deleteInvalidExisting,
-      upsert,
-      prune,
+        deleteInvalidExisting,
+        upsert,
+        pressureProjection,
+        prune,
       replacementQuarantine.prune,
     ]);
-  } else if (db.batch) await db.batch([upsert, prune]);
-  else {
-    await upsert.run();
-    await prune.run();
+    } else if (db.batch) await db.batch([upsert, pressureProjection, prune]);
+    else {
+      await upsert.run();
+      await pressureProjection.run();
+      await prune.run();
   }
   return canonicalHeatmap;
 };
@@ -2806,6 +2811,25 @@ export const generateAndStoreSpxGexHeatmap = async (options: {
   if (!options.force && !generationStatus.isGenerationWindow) {
     return { status: "skipped", date, reason: generationStatus.skipReason || "outside_generation_window" };
   }
+
+  const budget = await reserveSpxD1Budget(options.db, {
+    operation: "gex_collection_scheduler",
+    rowsRead: 150,
+    rowsWritten: 80,
+  }, now);
+  console.log(JSON.stringify({
+    event: "d1_budget_reservation",
+    database: budget.database,
+    operation: "gex_collection_scheduler",
+    reservedRowsRead: 150,
+    reservedRowsWritten: 80,
+    allow: budget.allow,
+    denyReason: budget.allow ? null : budget.reason,
+    projectedRowsRead: budget.projectedRowsRead,
+    projectedRowsWritten: budget.projectedRowsWritten,
+    resetsAtUtc: budget.resetsAtUtc,
+  }));
+  if (!budget.allow) throw new SpxD1SafetyCutoffError(budget);
 
   const existing = await readSpxGexIntradaySnapshot(options.db, date, generationStatus.snapshotMinuteEt);
   if (existing) {

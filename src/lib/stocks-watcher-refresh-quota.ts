@@ -3,44 +3,79 @@ import {
   MARKET_CACHE_D1_DAILY_WRITE_LIMIT,
   MARKET_CACHE_D1_QUOTA_HARD_THRESHOLD,
   MARKET_CACHE_WRITE_INDEX_AMPLIFICATION,
-  MAX_CACHE_PRUNE_READ_ROWS,
-  MAX_CACHE_PRUNE_ROWS,
   evaluateMarketCacheD1Quota,
   type MarketCacheD1QuotaDecision,
 } from "./market-data-cache";
 import type { D1DatabaseLike } from "./spx-recap-d1";
 
-export const STOCKS_WATCHER_CACHE_REFRESH_READ_RESERVE = 3 + MAX_CACHE_PRUNE_READ_ROWS;
-export const STOCKS_WATCHER_CACHE_REFRESH_WRITE_RESERVE = (2 + MAX_CACHE_PRUNE_ROWS) * MARKET_CACHE_WRITE_INDEX_AMPLIFICATION;
-export const STOCKS_WATCHER_TRACKED_ASSET_READ_RESERVE = 500;
+/** Cache read + quota reservation + indexed cache write. Public paths never prune. */
+export const STOCKS_WATCHER_CACHE_REFRESH_READ_RESERVE = 3;
+/** The quota row and cache upsert are separate indexed writes. */
+export const STOCKS_WATCHER_CACHE_REFRESH_WRITE_RESERVE = 2 * MARKET_CACHE_WRITE_INDEX_AMPLIFICATION;
+/** The production curated universe is explicitly capped at twenty active assets. */
+export const STOCKS_WATCHER_TRACKED_ASSET_READ_RESERVE = 20;
 export const STOCKS_WATCHER_SNAPSHOT_LOADER_READ_RESERVE = STOCKS_WATCHER_TRACKED_ASSET_READ_RESERVE + 1;
 
 const utcDay = (now: Date) => now.toISOString().slice(0, 10);
 
-const unavailableDecision = (dayUtc: string): MarketCacheD1QuotaDecision =>
-  evaluateMarketCacheD1Quota({
+const blockedDecision = (
+  dayUtc: string,
+  reason: "quota_state_invalid" | "quota_store_unavailable",
+): MarketCacheD1QuotaDecision => {
+  const base = evaluateMarketCacheD1Quota({
     currentUtcDay: dayUtc,
     usage: {
       dayUtc,
-      rowsRead: MARKET_CACHE_D1_DAILY_READ_LIMIT,
-      rowsWritten: MARKET_CACHE_D1_DAILY_WRITE_LIMIT,
+      rowsRead: 0,
+      rowsWritten: 0,
     },
   });
+  return { ...base, allow: false, blocked: true, reason };
+};
 
-export const reserveStocksWatcherCacheRefreshQuota = async (
+const decisionFromStoredUsage = (
+  dayUtc: string,
+  payloadJson: string,
+): MarketCacheD1QuotaDecision => {
+  try {
+    const usage = JSON.parse(payloadJson) as { dayUtc?: unknown; rowsRead?: unknown; rowsWritten?: unknown };
+    if (usage.dayUtc !== dayUtc || typeof usage.rowsRead !== "number" || typeof usage.rowsWritten !== "number") {
+      return blockedDecision(dayUtc, "quota_state_invalid");
+    }
+    return evaluateMarketCacheD1Quota({
+      currentUtcDay: dayUtc,
+      usage: { dayUtc, rowsRead: usage.rowsRead, rowsWritten: usage.rowsWritten },
+    });
+  } catch {
+    return blockedDecision(dayUtc, "quota_state_invalid");
+  }
+};
+
+export interface MarketCacheRefreshQuotaOptions {
+  /** Additional bounded reads performed by the refresh loader itself. */
+  loaderRowsRead?: number;
+  operation?: string;
+}
+
+/**
+ * Atomic site-wide MARKET_CACHE_DB reservation. The row deliberately covers
+ * every cache-backed public feature, so Watcher cannot consume a private
+ * budget while Finance Dashboard or Backtest consumes the same database.
+ */
+export const reserveMarketCacheRefreshQuota = async (
   db: D1DatabaseLike,
-  options: { loaderRowsRead?: number } = {},
+  options: MarketCacheRefreshQuotaOptions = {},
   now = new Date(),
 ): Promise<MarketCacheD1QuotaDecision> => {
   const dayUtc = utcDay(now);
   const loaderRowsRead = options.loaderRowsRead ?? 0;
-  if (!Number.isInteger(loaderRowsRead) || loaderRowsRead < 0) return unavailableDecision(dayUtc);
+  if (!Number.isInteger(loaderRowsRead) || loaderRowsRead < 0) return blockedDecision(dayUtc, "quota_state_invalid");
   const rowsReadReserve = STOCKS_WATCHER_CACHE_REFRESH_READ_RESERVE + loaderRowsRead;
   const readThreshold = Math.floor(MARKET_CACHE_D1_DAILY_READ_LIMIT * MARKET_CACHE_D1_QUOTA_HARD_THRESHOLD);
   const writeThreshold = Math.floor(MARKET_CACHE_D1_DAILY_WRITE_LIMIT * MARKET_CACHE_D1_QUOTA_HARD_THRESHOLD);
   const cachedAt = now.toISOString();
   const expiresAt = new Date(now.getTime() + 48 * 60 * 60_000).toISOString();
-  const cacheKey = `__stocks_watcher_refresh_quota__:${dayUtc}`;
+  const cacheKey = `__market_cache_refresh_quota__:${dayUtc}`;
   const initialPayload = JSON.stringify({
     dayUtc,
     rowsRead: rowsReadReserve,
@@ -51,7 +86,7 @@ export const reserveStocksWatcherCacheRefreshQuota = async (
     row = await db.prepare(`
       INSERT INTO market_cache_entries (
         cache_key, scope, symbol, schema_version, payload_json, source_as_of, cached_at, expires_at, last_refresh_error, last_refresh_attempted_at
-      ) VALUES (?, 'stocks-watcher-quota', 'MARKET', 1, ?, NULL, ?, ?, NULL, ?)
+      ) VALUES (?, 'market-cache-quota', 'MARKET', 1, ?, NULL, ?, ?, NULL, ?)
       ON CONFLICT(cache_key) DO UPDATE SET
         payload_json = json_object(
           'dayUtc', ?,
@@ -90,13 +125,27 @@ export const reserveStocksWatcherCacheRefreshQuota = async (
       writeThreshold,
     ).first<{ payload_json: string }>();
   } catch {
-    return unavailableDecision(dayUtc);
+    return blockedDecision(dayUtc, "quota_store_unavailable");
   }
-  if (!row) return unavailableDecision(dayUtc);
+  if (!row) {
+    try {
+      const current = await db.prepare(`
+        SELECT payload_json
+        FROM market_cache_entries
+        WHERE cache_key = ? AND scope = 'market-cache-quota'
+        LIMIT 1
+      `).bind(cacheKey).first<{ payload_json: string }>();
+      return current
+        ? decisionFromStoredUsage(dayUtc, current.payload_json)
+        : blockedDecision(dayUtc, "quota_state_invalid");
+    } catch {
+      return blockedDecision(dayUtc, "quota_store_unavailable");
+    }
+  }
   try {
     const usage = JSON.parse(row.payload_json) as { dayUtc?: unknown; rowsRead?: unknown; rowsWritten?: unknown };
     if (usage.dayUtc !== dayUtc || typeof usage.rowsRead !== "number" || typeof usage.rowsWritten !== "number") {
-      return unavailableDecision(dayUtc);
+      return blockedDecision(dayUtc, "quota_state_invalid");
     }
     return evaluateMarketCacheD1Quota({
       currentUtcDay: dayUtc,
@@ -109,6 +158,16 @@ export const reserveStocksWatcherCacheRefreshQuota = async (
       rowsWritten: STOCKS_WATCHER_CACHE_REFRESH_WRITE_RESERVE,
     });
   } catch {
-    return unavailableDecision(dayUtc);
+    return blockedDecision(dayUtc, "quota_state_invalid");
   }
 };
+
+/** Watcher needs the bounded twenty-asset tracking query before its refresh. */
+export const reserveStocksWatcherCacheRefreshQuota = (
+  db: D1DatabaseLike,
+  options: { loaderRowsRead?: number } = {},
+  now = new Date(),
+) => reserveMarketCacheRefreshQuota(db, {
+  loaderRowsRead: options.loaderRowsRead,
+  operation: "stocks_watcher",
+}, now);

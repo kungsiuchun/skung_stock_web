@@ -252,7 +252,10 @@ describe("SPX Price Action Compass API", () => {
 
   it("uses 0DTESPX for the current intraday session with a five-minute edge TTL", async () => {
     const originalFetch = globalThis.fetch;
-    const now = Date.now();
+    // Keep all three fixture seconds inside one completed minute. Date.now()
+    // near a minute boundary would otherwise create two candles and make this
+    // source-contract test flaky.
+    const now = Math.floor((Date.now() - 60_000) / 60_000) * 60_000 + 50_000;
     const datetime = new Date(now).toISOString();
     const sessionDate = etTradingDate();
     const calls: Array<{ url: string; authorization: string | null }> = [];

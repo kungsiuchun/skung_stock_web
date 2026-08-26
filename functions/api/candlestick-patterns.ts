@@ -4,8 +4,9 @@ import {
   CandlestickDataError,
   type CandlestickInterval,
 } from "../../src/lib/candlestick-patterns";
-import { MarketCacheTimeoutError, resolveMarketCache } from "../../src/lib/market-data-cache";
+import { MarketCacheQuotaExceededError, MarketCacheTimeoutError, resolveMarketCache } from "../../src/lib/market-data-cache";
 import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
+import { reserveMarketCacheRefreshQuota } from "../../src/lib/stocks-watcher-refresh-quota";
 
 interface Env {
   MARKET_CACHE_DB?: D1DatabaseLike;
@@ -41,6 +42,7 @@ const validInterval = (value: unknown): CandlestickInterval => {
 };
 
 const errorStatus = (error: unknown) => {
+  if (error instanceof MarketCacheQuotaExceededError) return 429;
   if (error instanceof MarketCacheTimeoutError) return 504;
   if (!(error instanceof CandlestickDataError)) return 502;
   if (error.code === "INSUFFICIENT_BARS") return 422;
@@ -72,6 +74,9 @@ export async function onRequestGet(context: { request: Request; env: Env; deadli
       requestId,
       signal: context.request.signal,
       sourceAsOf: (value) => value.sourceAsOf,
+      refreshQuotaGuard: context.env.MARKET_CACHE_DB
+        ? () => reserveMarketCacheRefreshQuota(context.env.MARKET_CACHE_DB!, { operation: "candlestick_patterns" })
+        : undefined,
       load: async () => {
         const controller = new AbortController();
         let timedOut = false;
@@ -135,6 +140,10 @@ export async function onRequestGet(context: { request: Request; env: Env; deadli
       ...(error instanceof MarketCacheTimeoutError ? { timeoutPhase: error.phase, timeoutMs: error.timeoutMs } : {}),
       durationMs: Date.now() - startedAt,
     }));
-    return json({ error: message, requestId }, errorStatus(error), requestId);
+    return json({
+      error: message,
+      errorCode: error instanceof MarketCacheQuotaExceededError ? "D1_SAFETY_CUTOFF" : null,
+      requestId,
+    }, errorStatus(error), requestId);
   }
 }
