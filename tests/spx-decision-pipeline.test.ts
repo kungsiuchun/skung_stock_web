@@ -896,6 +896,37 @@ test("CIO timeout fails closed to DEGRADED HOLD", async () => {
   assert.match(result.run.degradedReason || "", /cio_timeout/i);
 });
 
+test("CIO post-parse failure keeps its exact safe reason instead of relabeling fallback confidence", async () => {
+  const { dependencies } = buildDependencies({
+    cio: {
+      decide: async () => ({
+        action: "HOLD",
+        confidence: 0,
+        thesis: "DEGRADED: cio_schema_invalid_numeric_execution_levels_required",
+        entry: null,
+        invalidation: null,
+        targets: [],
+        noTradeConditions: ["cio_schema_invalid_numeric_execution_levels_required"],
+        evidenceRefs: [],
+        claims: [],
+        modelStatus: "INVALID_SCHEMA",
+        failureReason: "cio_schema_invalid_numeric_execution_levels_required",
+        latencyMs: 20,
+      }),
+    },
+  });
+
+  const result = await runSpxDecisionPipeline({
+    runId: "cio-numeric-levels-invalid",
+    scheduledAt,
+    currentPosition: "NONE",
+  }, dependencies);
+
+  assert.equal(result.finalDecision.action, "HOLD");
+  assert.equal(result.run.cioDecision?.decisionStatus, "INVALID_OUTPUT");
+  assert.equal(result.run.degradedReason, "cio_schema_invalid_numeric_execution_levels_required");
+});
+
 test("Council timeout and required market-data failure both fail closed", async () => {
   const councilTimeout = buildDependencies({
     council: {

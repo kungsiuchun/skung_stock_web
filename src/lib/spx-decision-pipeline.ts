@@ -158,6 +158,8 @@ export interface CioDecision {
   evidenceRefs: string[];
   claims: SpxEvidenceClaim[];
   modelStatus: string;
+  /** Safe, normalized failure class for a fail-closed CIO result. */
+  failureReason?: string;
   decisionStatus?: SpxDecisionStatus;
   latencyMs: number;
   attempts?: ModelAttemptMetadata[];
@@ -981,7 +983,7 @@ export async function runSpxDecisionPipeline(
   }
   const cioValidationFailure = validateCioDecision(cioDecision, snapshot);
   if (cioValidationFailure) {
-    const failureReason = run.degradedReason || cioValidationFailure;
+    const failureReason = run.degradedReason || cioDecision.failureReason || cioValidationFailure;
     cioDecision = holdDecision(failureReason, run.degraded ? cioDecision.modelStatus : "INVALID_SCHEMA");
     run.degraded = true;
     run.degradedReason = failureReason;

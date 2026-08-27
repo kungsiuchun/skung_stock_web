@@ -78,9 +78,9 @@ Output ONLY one valid JSON object with exactly these nine keys in this exact ord
 
 Keep logic concise and high-impact. ${OUTPUT_LANGUAGE_RULE}
 For HOLD, buy_zone and stop_loss MUST be null and targets MUST be empty.
-Every claim and HOLD conflict MUST cite exact supplied snapshotFacts keys.
+Every claim and HOLD conflict MUST cite an exact key from allowedEvidenceRefs only; never invent or reuse a Council-only key outside that list.
 confidence_score must be an integer from 1 to 100. Zero is reserved for pipeline-generated invalid/degraded results and is not valid AI output.
-Contract shapes: HOLD uses {"trade_action":"HOLD","confidence_score":65,"logic":"...","buy_zone":null,"stop_loss":null,"targets":[],"no_trade_conditions":["..."],"evidence_refs":["exact.key"],"claims":[{"text":"...","evidence_refs":["exact.key"]}]}. OPEN_CALL or OPEN_PUT requires non-null buy_zone, non-null stop_loss, and at least one target. CLOSE never opens the opposite direction.
+Contract shapes: HOLD uses {"trade_action":"HOLD","confidence_score":65,"logic":"...","buy_zone":null,"stop_loss":null,"targets":[],"no_trade_conditions":["..."],"evidence_refs":["exact.key"],"claims":[{"text":"...","evidence_refs":["exact.key"]}]}. OPEN_CALL or OPEN_PUT requires buy_zone as exactly two plain SPX numbers (example "7520.25 - 7522.75"), stop_loss containing exactly one plain SPX number, and targets as one or more plain-number strings (example ["7526.00","7530.00"]); do not add prose, labels, inequalities, or extra prices to these execution fields. CLOSE never opens the opposite direction.
 Use literal \\n for newlines inside JSON strings. Never use actual multiline line breaks inside JSON strings.`;
 
 export const SYSTEM_PROMPT_PREFIX = `Based on the following market data, output ONLY valid JSON:

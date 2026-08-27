@@ -300,6 +300,7 @@ test("CIO post-parse contract rejects a fractional confidence without mapping it
   });
 
   assert.equal(result.modelStatus, "INVALID_SCHEMA");
+  assert.equal(result.failureReason, "cio_schema_invalid_confidence_score_not_integer");
   assert.equal(result.plan.trade_action, "HOLD");
   assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["SCHEMA_INVALID"]);
   assert.equal(result.attempts[0].errorCategory, "POST_PARSE_CONTRACT");
@@ -1159,6 +1160,7 @@ test("CIO projection retains decision evidence and drops uncited snapshot noise"
     "spx.last": 7531.98,
     "gex.gamma_regime": "negative",
   });
+  assert.deepEqual(projection.allowedEvidenceRefs, ["spx.last", "gex.gamma_regime"]);
   assert.equal(JSON.stringify(projection).length < 8_192, true);
 });
 

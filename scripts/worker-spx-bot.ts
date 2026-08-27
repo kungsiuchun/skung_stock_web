@@ -1744,8 +1744,8 @@ export const formatM5AnalysisForContext = (analysis: {
   volumeSurge: Number.isFinite(analysis.volumeSurge) ? `${Number(analysis.volumeSurge).toFixed(2)}x` : "UNAVAILABLE",
 });
 
-export const buildCioContextProjection = (contextData: any, agents: any[]) => ({
-  snapshotFacts: (() => {
+export const buildCioContextProjection = (contextData: any, agents: any[]) => {
+  const snapshotFacts = (() => {
     const facts = contextData?.snapshotFacts || {};
     const citedFacts = new Set(agents.flatMap((agent) => [
       ...normalizeEvidenceRefs(agent.evidenceRefs || agent.evidence_refs),
@@ -1753,7 +1753,10 @@ export const buildCioContextProjection = (contextData: any, agents: any[]) => ({
     ]));
     const requiredFacts = new Set(["spx.last", "spx.vwap", "spx.ema9", "spx.ema20", "quality.status"]);
     return Object.fromEntries(Object.entries(facts).filter(([key]) => citedFacts.has(key) || requiredFacts.has(key)));
-  })(),
+  })();
+  return {
+  snapshotFacts,
+  allowedEvidenceRefs: Object.keys(snapshotFacts),
   marketDataQuality: {
     overallStatus: contextData?.marketDataQuality?.overallStatus || "UNKNOWN",
     hardBlocks: contextData?.marketDataQuality?.hardBlocks || [],
@@ -1773,7 +1776,8 @@ export const buildCioContextProjection = (contextData: any, agents: any[]) => ({
     reasoning: compactModelText(agent.reasoning, 180),
     modelStatus: agent.modelStatus || "AI",
   })),
-});
+  };
+};
 
 export async function decideWithCio(
   contextData: any,
@@ -1831,7 +1835,13 @@ export async function decideWithCio(
               ? result.failureStatus.toUpperCase()
               : "REQUEST_FAILED";
   console.error(`[CIO] structured model failed after ${result.attempts.length} attempt(s): ${result.failureStatus}`);
-  return { plan: fallbackPlan, modelStatus, attempts: result.attempts };
+  const invalidField = [...result.attempts].reverse().find((attempt) => attempt.status === "SCHEMA_INVALID")?.invalidField;
+  return {
+    plan: fallbackPlan,
+    modelStatus,
+    attempts: result.attempts,
+    failureReason: invalidField ? `cio_schema_invalid_${invalidField}` : result.failureStatus,
+  };
 }
 
 // --- 分析與邏輯函數 ---
@@ -3357,6 +3367,7 @@ export async function runSpxUatLlm(
         evidenceRefs: normalizeEvidenceRefs(plan?.evidence_refs),
         claims: normalizeEvidenceClaims(plan?.claims).map((claim) => ({ text: claim.text, evidenceRefs: claim.evidenceRefs })),
         modelStatus: result.modelStatus,
+        failureReason: result.failureReason,
         latencyMs: result.attempts.reduce((total, attempt) => total + attempt.latencyMs, 0),
         attempts: result.attempts,
       };
@@ -3775,11 +3786,13 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
     let orchestratorPlan: any = fallbackOrchestratorPlan;
     let cioModelStatus = councilResult.status === 'DEGRADED' ? 'COUNCIL_DEGRADED' : 'NOT_RUN';
     let cioAttempts: ModelAttemptMetadata[] = [];
+    let cioFailureReason: string | undefined;
     if (councilResult.status === 'OK' && marketDataQuality.overallStatus !== 'BLOCK' && shouldRunLlmCio(env.SPX_ENABLE_LLM_CIO)) {
       const cioResult = await decideWithCio(extendedContext, [agent1, agent2, agent3, agent4], env);
       orchestratorPlan = cioResult.plan;
       cioModelStatus = cioResult.modelStatus;
       cioAttempts = cioResult.attempts;
+      cioFailureReason = cioResult.failureReason;
     } else if (marketDataQuality.overallStatus === 'BLOCK') {
       cioModelStatus = 'DATA_BLOCK';
     } else if (councilResult.status === 'DEGRADED') {
@@ -3808,6 +3821,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
       claims: normalizeEvidenceClaims((orchestratorPlan as any).claims)
         .map((claim) => ({ text: claim.text, evidenceRefs: claim.evidenceRefs })),
       modelStatus: cioModelStatus,
+      failureReason: cioFailureReason,
       decisionStatus: resolveSpxDecisionStatus(cioModelStatus),
       latencyMs: Date.now() - cioStartedAt,
       attempts: cioAttempts,
@@ -3829,6 +3843,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
       evidenceRefs: [],
       claims: [],
         modelStatus: cioModelStatus,
+        failureReason: degradedReason,
         decisionStatus: resolveSpxDecisionStatus(cioModelStatus),
         latencyMs: Date.now() - cioStartedAt,
         attempts: cioAttempts,
