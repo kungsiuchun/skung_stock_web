@@ -344,7 +344,7 @@ test("run ledger and Board cockpit retain sanitized OpenRouter attempt evidence"
   assert.equal("errorMessage" in (cm?.attempts[0] || {}), false);
 });
 
-test("degraded HOLD Telegram is concise, human-readable, and never leaks internal fallback codes", async () => {
+test("unavailable Council is visible as a decision outage, never as a CIO HOLD", async () => {
   const { dependencies, sent } = buildDependencies({
     council: {
       analyze: async () => {
@@ -360,10 +360,10 @@ test("degraded HOLD Telegram is concise, human-readable, and never leaks interna
   }, dependencies);
 
   const message = sent[0] || "";
-  assert.match(message, /^SPX: 7523\.96 操作：觀望/m);
+  assert.match(message, /^SPX: 7523\.96 操作：決策不可用（不開新倉）/m);
   assert.match(message, /🟢 Call 0｜🔴 Put 0｜⚪ 觀望 0｜⚫ 無效 4/);
   assert.match(message, /⚠️ 降級｜Council 未完整：QM 模型分析未啟用、CM 模型分析未啟用、NT 模型分析未啟用、PA 模型分析未啟用；CIO 按契約未執行。/);
-  assert.match(message, /🧠 CIO｜🟡 HOLD · 0%/);
+  assert.match(message, /🧠 CIO｜⚫ 決策不可用 · Council 未完成/);
   assert.match(message, /⏸️ 計劃｜不開倉/);
   assert.match(message, /🛰️ GEX｜Canonical snapshot 缺失；本輪不引用 GEX。/);
   assert.doesNotMatch(message, /council_qm_council_disabled|Evidence none|Entry N\/A|Invalidation N\/A|Targets N\/A/);
@@ -571,7 +571,7 @@ test("an open PUT survives CIO schema invalid without a new entry or a lost plan
   assert.equal(result.run.degraded, true);
   assert.equal(result.run.riskGate?.positionDirective, "HOLD_PUT");
   assert.match(sent[0] || "", /操作：持有 Put/);
-  assert.match(sent[0] || "", /CIO 本輪未完成，維持現有 Put/);
+  assert.match(sent[0] || "", /CIO 本輪不可用；既有 Put 只按已存風控處理/);
   assert.match(sent[0] || "", /失效｜SPX 7540 reclaim invalidates the PUT/);
   assert.doesNotMatch(sent[0] || "", /買入 Call|買入 Put|計劃｜不開倉/);
 });
@@ -874,7 +874,7 @@ test("canonical GEX gate exposes missing/schema mismatch and permits a fresh fal
 });
 
 test("CIO timeout fails closed to DEGRADED HOLD", async () => {
-  const { dependencies } = buildDependencies({
+  const { dependencies, store } = buildDependencies({
     cio: {
       decide: async () => {
         throw new Error("CIO timed out after 8000ms");
@@ -889,6 +889,9 @@ test("CIO timeout fails closed to DEGRADED HOLD", async () => {
   }, dependencies);
 
   assert.equal(result.finalDecision.action, "HOLD");
+  assert.equal(result.run.cioDecision?.decisionStatus, "CIO_UNAVAILABLE");
+  const cockpit = buildSpxDecisionCockpitProjection(result.run, store.getOutbox(result.run.runId), store.getLifecycle(result.run.runId));
+  assert.equal(cockpit.cio.decisionStatus, "CIO_UNAVAILABLE");
   assert.equal(result.run.degraded, true);
   assert.match(result.run.degradedReason || "", /cio_timeout/i);
 });

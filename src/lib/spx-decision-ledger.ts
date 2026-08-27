@@ -10,6 +10,8 @@ import {
   type OutboxRecord,
   type RiskGateResult,
   type SpxDecisionAction,
+  type SpxDecisionStatus,
+  resolveSpxDecisionStatus,
   type SpxDecisionStore,
   type SpxLifecycleStage,
 } from "./spx-decision-pipeline";
@@ -80,6 +82,7 @@ export interface SpxDecisionCockpitProjection {
     action: SpxDecisionAction | null;
     confidence: number;
     modelStatus: string;
+    decisionStatus: SpxDecisionStatus;
   };
   riskGate: {
     disposition: RiskGateResult["disposition"] | "NOT_RUN";
@@ -200,6 +203,7 @@ export const buildSpxDecisionCockpitProjection = (
       action: run.cioDecision?.action || null,
       confidence: run.cioDecision?.confidence || 0,
       modelStatus: run.cioDecision?.modelStatus || "NOT_RUN",
+      decisionStatus: run.cioDecision?.decisionStatus || resolveSpxDecisionStatus(run.cioDecision?.modelStatus),
     },
     riskGate: {
       disposition: run.riskGate?.disposition || "NOT_RUN",

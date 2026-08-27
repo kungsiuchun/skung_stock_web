@@ -37,6 +37,7 @@ import {
   runSpxUatLlm,
   runSpxUatReplay,
   resolveAttemptTimeoutMs,
+  SPX_CIO_TIMING_POLICY,
   SPX_COUNCIL_TIMING_POLICY,
   shouldRunLlmCio,
   shouldRunLlmCouncil,
@@ -91,6 +92,14 @@ test("production Council timing policy allows two full 45-second attempts inside
       >= SPX_COUNCIL_TIMING_POLICY.attemptTimeoutMs * 2,
     true,
   );
+});
+
+test("CIO timing policy reserves a bounded 20-second primary attempt and 10-second transient retry", () => {
+  assert.deepEqual(SPX_CIO_TIMING_POLICY, {
+    primaryAttemptTimeoutMs: 20_000,
+    retryAttemptTimeoutMs: 10_000,
+    absoluteDeadlineMs: 30_000,
+  });
 });
 
 test("Council retry keeps a full 45-second timeout while the shared deadline has enough budget", () => {
@@ -253,7 +262,7 @@ test("open-position context is reconstructed from the original entry snapshot, n
   });
 });
 
-test("CIO post-parse contract retries a fractional confidence and preserves a valid confidence without mapping it to zero", async () => {
+test("CIO post-parse contract rejects a fractional confidence without mapping it to zero", async () => {
   const responses = [
     {
       trade_action: "HOLD",
@@ -290,9 +299,9 @@ test("CIO post-parse contract retries a fractional confidence and preserves a va
     }), { status: 200, headers: { "Content-Type": "application/json" } }),
   });
 
-  assert.equal(result.modelStatus, "AI");
-  assert.equal(result.plan.confidence_score, 56);
-  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["SCHEMA_INVALID", "SUCCESS"]);
+  assert.equal(result.modelStatus, "INVALID_SCHEMA");
+  assert.equal(result.plan.trade_action, "HOLD");
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["SCHEMA_INVALID"]);
   assert.equal(result.attempts[0].errorCategory, "POST_PARSE_CONTRACT");
   assert.equal(result.attempts[0].invalidField, "confidence_score_not_integer");
   assert.equal(result.attempts[0].responseHash?.length, 64);
@@ -1085,7 +1094,7 @@ test("four Council agents run concurrently under one absolute deadline", async (
   }), true);
 });
 
-test("CIO non-JSON output retries once and then reports a traceable failure", async () => {
+test("CIO invalid output fails closed without spending its transient retry budget", async () => {
   const requestBodies: any[] = [];
   const fetcher: typeof fetch = async (_input, init) => {
     requestBodies.push(JSON.parse(String(init?.body || "{}")));
@@ -1104,14 +1113,56 @@ test("CIO non-JSON output retries once and then reports a traceable failure", as
 
   assert.equal(result.ok, false);
   assert.equal(result.failureStatus, "cio_output_not_json");
-  assert.equal(requestBodies.length, 2);
+  assert.equal(requestBodies.length, 1);
   assert.equal(requestBodies[0].max_completion_tokens, 1536);
   assert.equal("temperature" in requestBodies[0], false);
   assert.deepEqual(requestBodies[0].provider, { require_parameters: true, order: ["azure"], only: ["azure"], allow_fallbacks: false });
-  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["OUTPUT_NOT_JSON", "OUTPUT_NOT_JSON"]);
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["OUTPUT_NOT_JSON"]);
 });
 
-test("CIO two-attempt schema failure returns fail-closed HOLD with attempt evidence", async () => {
+test("CIO provider unavailable stays Azure-only and reports an unavailable decision status", async () => {
+  const result = await decideWithCio({
+    snapshotFacts: { "spx.last": 7532.8 },
+    marketDataQuality: { overallStatus: "OK", hardBlocks: [], warnings: [] },
+    TODAYS_MEMORY: { currentPosition: "NONE" },
+  }, [], { OPENROUTER_API_KEY: "test-key", SPX_CIO_MODEL: "openai/gpt-5-mini" } as any, {
+    fetcher: async () => new Response(JSON.stringify({
+      error: { code: 404, message: "No endpoints found for Azure" },
+    }), { status: 404, headers: { "Content-Type": "application/json" } }),
+  });
+
+  assert.equal(result.modelStatus, "CIO_PROVIDER_UNAVAILABLE");
+  assert.equal(result.plan.trade_action, "HOLD");
+  assert.deepEqual(result.attempts.map((attempt) => attempt.providerOrder), [["azure"]]);
+});
+
+test("CIO projection retains decision evidence and drops uncited snapshot noise", () => {
+  const projection = buildCioContextProjection({
+    snapshotFacts: {
+      "spx.last": 7531.98,
+      "gex.gamma_regime": "negative",
+      "unrelated.raw_payload": "x".repeat(20_000),
+    },
+    marketDataQuality: { overallStatus: "OK", hardBlocks: [], warnings: [] },
+    TODAYS_MEMORY: { currentPosition: "NONE" },
+  }, [{
+    agent: "QM",
+    decision: "PUT",
+    confidence: 70,
+    evidenceRefs: ["gex.gamma_regime"],
+    claims: [{ text: "Negative gamma supports downside volatility.", evidenceRefs: ["gex.gamma_regime"] }],
+    reasoning: "Gamma regime is negative.",
+    modelStatus: "AI",
+  }]);
+
+  assert.deepEqual(projection.snapshotFacts, {
+    "spx.last": 7531.98,
+    "gex.gamma_regime": "negative",
+  });
+  assert.equal(JSON.stringify(projection).length < 8_192, true);
+});
+
+test("CIO schema failure returns fail-closed HOLD without retrying a deterministic contract failure", async () => {
   const fetcher: typeof fetch = async () => new Response(JSON.stringify({
     choices: [{ finish_reason: "stop", message: { content: "not-json" } }],
   }), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -1136,7 +1187,33 @@ test("CIO two-attempt schema failure returns fail-closed HOLD with attempt evide
 
   assert.equal(result.modelStatus, "INVALID_OUTPUT");
   assert.equal(result.plan.trade_action, "HOLD");
-  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["OUTPUT_NOT_JSON", "OUTPUT_NOT_JSON"]);
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["OUTPUT_NOT_JSON"]);
+});
+
+test("CIO retries Azure 408 within the 30-second budget without provider fallback", async () => {
+  let calls = 0;
+  const result = await runStructuredOpenRouterRequest({
+    callKind: "cio",
+    apiKey: "test-key",
+    model: "openai/gpt-5-mini",
+    messages: [{ role: "user", content: "normalized CIO projection" }],
+    timeoutMs: SPX_CIO_TIMING_POLICY.primaryAttemptTimeoutMs,
+    deadlineAtMs: Date.now() + SPX_CIO_TIMING_POLICY.absoluteDeadlineMs,
+    fetcher: async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ error: { code: 408, message: "request timeout" } }), {
+        status: 408,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(calls, 2);
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["HTTP_ERROR", "HTTP_ERROR"]);
+  assert.deepEqual(result.attempts.map((attempt) => attempt.providerOrder), [["azure"], ["azure"]]);
+  assert.equal(result.attempts[0].attemptTimeoutMs, 20_000);
+  assert.equal(result.attempts[1].attemptTimeoutMs, 10_000);
 });
 
 test("OpenRouter retry policy retries 429 and 5xx but fails fast on 401, 402, and 403", async () => {

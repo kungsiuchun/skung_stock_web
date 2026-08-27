@@ -25,6 +25,7 @@ import {
   type SpxLifecycleStage,
   type SpxOpenPositionContext,
   type SpxPosition,
+  resolveSpxDecisionStatus,
 } from '../src/lib/spx-decision-pipeline';
 import { D1SpxDecisionStore, queryLifecycleCoverage } from '../src/lib/spx-decision-ledger';
 import { D1SpxGexCollectionStore, querySpxGexCollectionCoverage } from '../src/lib/spx-gex-collection-lifecycle';
@@ -584,6 +585,11 @@ export const resolveAttemptTimeoutMs = (timeoutMs: number, deadlineRemainingMs: 
   deadlineRemainingMs === null ? timeoutMs : Math.min(timeoutMs, deadlineRemainingMs)
 );
 
+const isTransientCioFailure = (httpStatus: number | null, timedOut = false) => timedOut
+  || httpStatus === 408
+  || httpStatus === 429
+  || (httpStatus !== null && httpStatus >= 500);
+
 export async function runStructuredOpenRouterRequest(input: {
   callKind: StructuredOpenRouterCallKind;
   apiKey: string;
@@ -664,7 +670,7 @@ export async function runStructuredOpenRouterRequest(input: {
       ? null
       : Math.max(0, input.deadlineAtMs - startedAt);
     if (deadlineRemainingMs === 0) {
-      failureStatus = "council_deadline_exceeded";
+      failureStatus = input.callKind === "cio" ? "cio_deadline_exceeded" : "council_deadline_exceeded";
       attempts.push({
         attempt,
         model: input.model,
@@ -697,6 +703,10 @@ export async function runStructuredOpenRouterRequest(input: {
       retryIgnoredProviders,
     );
     const requestBody = JSON.stringify(body);
+    const configuredAttemptTimeoutMs = input.callKind === "cio"
+      ? attempt === 1 ? SPX_CIO_TIMING_POLICY.primaryAttemptTimeoutMs : SPX_CIO_TIMING_POLICY.retryAttemptTimeoutMs
+      : timeoutMs;
+    const attemptTimeoutMs = resolveAttemptTimeoutMs(configuredAttemptTimeoutMs, deadlineRemainingMs);
     const requestMetadata = {
       requestBytes: new TextEncoder().encode(requestBody).byteLength,
       projectionBytes: input.projectionBytes ?? null,
@@ -704,11 +714,11 @@ export async function runStructuredOpenRouterRequest(input: {
       requestHash: await sha256Text(requestBody),
       maxOutputTokens,
       deadlineRemainingMs,
+      attemptTimeoutMs,
       routingPolicy: routingPolicyFor(input.callKind, input.model),
       providerOrder,
     };
     const controller = new AbortController();
-    const attemptTimeoutMs = resolveAttemptTimeoutMs(timeoutMs, deadlineRemainingMs);
     const timeout = setTimeout(() => controller.abort(), attemptTimeoutMs);
     try {
       const response = await fetcher("https://openrouter.ai/api/v1/chat/completions", {
@@ -741,7 +751,9 @@ export async function runStructuredOpenRouterRequest(input: {
         const errorMessage = nullableString(upstreamError?.message);
         const contractError = classifyOpenRouterRequestFailure(response.status, errorType, errorMessage);
         const unapprovedProvider = !isApprovedStructuredProvider(input.callKind, input.model, selectedProvider);
-        const retryable = !unapprovedProvider && (response.status === 429 || response.status >= 500);
+        const retryable = !unapprovedProvider && (input.callKind === "cio"
+          ? isTransientCioFailure(response.status)
+          : response.status === 429 || response.status >= 500);
         failureStatus = unapprovedProvider
           ? input.callKind === "agent" ? "model_unapproved_provider" : "cio_unapproved_provider"
           : contractError
@@ -876,7 +888,7 @@ export async function runStructuredOpenRouterRequest(input: {
           responseShape: "MISSING_CHOICE",
           ...requestMetadata,
         });
-        if (attempt === 2) break;
+        if (input.callKind === "cio" || attempt === 2) break;
         continue;
       }
       if (!content.trim()) {
@@ -895,7 +907,7 @@ export async function runStructuredOpenRouterRequest(input: {
           responseShape: "EMPTY_CONTENT",
           ...requestMetadata,
         });
-        if (attempt === 2) break;
+        if (input.callKind === "cio" || attempt === 2) break;
         continue;
       }
       if (choice?.finish_reason === "length") {
@@ -914,7 +926,7 @@ export async function runStructuredOpenRouterRequest(input: {
           responseShape: "OUTPUT_TRUNCATED",
           ...requestMetadata,
         });
-        if (attempt === 2) break;
+        if (input.callKind === "cio" || attempt === 2) break;
         if (!isGpt5Model(input.model) && input.callKind === "agent") maxOutputTokens = 640;
         continue;
       }
@@ -941,7 +953,7 @@ export async function runStructuredOpenRouterRequest(input: {
           responseShape: "NON_JSON",
           ...requestMetadata,
         });
-        if (attempt === 2) break;
+        if (input.callKind === "cio" || attempt === 2) break;
         continue;
       }
       const allowedEvidenceRefs = input.allowedEvidenceRefs ? new Set(input.allowedEvidenceRefs) : undefined;
@@ -963,7 +975,7 @@ export async function runStructuredOpenRouterRequest(input: {
           responseShape: "SCHEMA_INVALID",
           ...requestMetadata,
         });
-        if (attempt === 2) break;
+        if (input.callKind === "cio" || attempt === 2) break;
         continue;
       }
 
@@ -990,7 +1002,7 @@ export async function runStructuredOpenRouterRequest(input: {
         && input.deadlineAtMs !== undefined
         && Date.now() >= input.deadlineAtMs - 5;
       failureStatus = deadlineExceeded
-        ? "council_deadline_exceeded"
+        ? input.callKind === "cio" ? "cio_deadline_exceeded" : "council_deadline_exceeded"
         : timedOut
           ? "model_timeout"
           : "model_request_failed";
@@ -1008,7 +1020,7 @@ export async function runStructuredOpenRouterRequest(input: {
         responseShape: "REQUEST_FAILED",
         ...requestMetadata,
       });
-      if (deadlineExceeded || !timedOut || attempt === 2) break;
+      if (deadlineExceeded || !isTransientCioFailure(null, timedOut) || attempt === 2) break;
     } finally {
       clearTimeout(timeout);
     }
@@ -1022,8 +1034,13 @@ export const SPX_COUNCIL_TIMING_POLICY = Object.freeze({
   attemptTimeoutMs: 45_000,
   absoluteDeadlineMs: 100_000,
 });
+export const SPX_CIO_TIMING_POLICY = Object.freeze({
+  primaryAttemptTimeoutMs: 20_000,
+  retryAttemptTimeoutMs: 10_000,
+  absoluteDeadlineMs: 30_000,
+});
 const AGENT_PROJECTION_MAX_BYTES = 8 * 1024;
-const CIO_MODEL_TIMEOUT_MS = 12000;
+const CIO_PROJECTION_MAX_BYTES = 8 * 1024;
 const TELEGRAM_TIMEOUT_MS = 6000;
 const M5_INTERVAL_MS = 5 * 60_000;
 const TRADING_RUN_LOCK_KEY = "spx_trading_run_lock";
@@ -1728,7 +1745,15 @@ export const formatM5AnalysisForContext = (analysis: {
 });
 
 export const buildCioContextProjection = (contextData: any, agents: any[]) => ({
-  snapshotFacts: { ...(contextData?.snapshotFacts || {}) },
+  snapshotFacts: (() => {
+    const facts = contextData?.snapshotFacts || {};
+    const citedFacts = new Set(agents.flatMap((agent) => [
+      ...normalizeEvidenceRefs(agent.evidenceRefs || agent.evidence_refs),
+      ...normalizeEvidenceClaims(agent.claims).flatMap((claim) => claim.evidenceRefs),
+    ]));
+    const requiredFacts = new Set(["spx.last", "spx.vwap", "spx.ema9", "spx.ema20", "quality.status"]);
+    return Object.fromEntries(Object.entries(facts).filter(([key]) => citedFacts.has(key) || requiredFacts.has(key)));
+  })(),
   marketDataQuality: {
     overallStatus: contextData?.marketDataQuality?.overallStatus || "UNKNOWN",
     hardBlocks: contextData?.marketDataQuality?.hardBlocks || [],
@@ -1761,6 +1786,7 @@ export async function decideWithCio(
     return { plan: fallbackPlan, modelStatus: "MISSING_OPENROUTER_KEY", attempts: [] as ModelAttemptMetadata[] };
   }
   const projection = buildCioContextProjection(contextData, agents);
+  const projectionBytes = new TextEncoder().encode(JSON.stringify(projection)).byteLength;
   const result = await runStructuredOpenRouterRequest({
     callKind: "cio",
     apiKey: env.OPENROUTER_API_KEY,
@@ -1773,8 +1799,12 @@ export async function decideWithCio(
       { role: "user", content: `Normalized CIO projection: ${JSON.stringify(projection)}` },
     ],
     fetcher: options.fetcher,
-    timeoutMs: CIO_MODEL_TIMEOUT_MS,
-    allowedEvidenceRefs: Object.keys(contextData?.snapshotFacts || {}),
+    timeoutMs: SPX_CIO_TIMING_POLICY.primaryAttemptTimeoutMs,
+    deadlineAtMs: Date.now() + SPX_CIO_TIMING_POLICY.absoluteDeadlineMs,
+    allowedEvidenceRefs: Object.keys(projection.snapshotFacts),
+    projectionBytes,
+    factCount: Object.keys(projection.snapshotFacts).length,
+    maxProjectionBytes: CIO_PROJECTION_MAX_BYTES,
     postParseValidator: (value) => validateCioModelPlan(
       value,
       new Set(Object.keys(contextData?.snapshotFacts || {})),
@@ -1787,7 +1817,7 @@ export async function decideWithCio(
       attempts: result.attempts,
     };
   }
-  const modelStatus = result.failureStatus === "model_timeout"
+  const modelStatus = result.failureStatus === "model_timeout" || result.failureStatus === "cio_deadline_exceeded"
     ? "TIMEOUT"
     : result.failureStatus === "cio_schema_invalid"
       ? "INVALID_SCHEMA"
@@ -1797,9 +1827,9 @@ export async function decideWithCio(
           ? "UPSTREAM_ERROR"
           : result.failureStatus === "cio_unapproved_provider"
             ? "UNAPPROVED_PROVIDER"
-          : result.failureStatus?.startsWith("openrouter_")
-            ? result.failureStatus.toUpperCase()
-            : "REQUEST_FAILED";
+            : result.failureStatus?.startsWith("cio_") || result.failureStatus?.startsWith("openrouter_")
+              ? result.failureStatus.toUpperCase()
+              : "REQUEST_FAILED";
   console.error(`[CIO] structured model failed after ${result.attempts.length} attempt(s): ${result.failureStatus}`);
   return { plan: fallbackPlan, modelStatus, attempts: result.attempts };
 }
@@ -2947,6 +2977,7 @@ async function completeDegradedDecisionRun(
     evidenceRefs: [],
     claims: [],
     modelStatus: 'PIPELINE_ERROR',
+    decisionStatus: 'PIPELINE_FAILED',
     latencyMs: 0,
     attempts: [],
   };
@@ -3777,6 +3808,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
       claims: normalizeEvidenceClaims((orchestratorPlan as any).claims)
         .map((claim) => ({ text: claim.text, evidenceRefs: claim.evidenceRefs })),
       modelStatus: cioModelStatus,
+      decisionStatus: resolveSpxDecisionStatus(cioModelStatus),
       latencyMs: Date.now() - cioStartedAt,
       attempts: cioAttempts,
     };
@@ -3797,6 +3829,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
       evidenceRefs: [],
       claims: [],
         modelStatus: cioModelStatus,
+        decisionStatus: resolveSpxDecisionStatus(cioModelStatus),
         latencyMs: Date.now() - cioStartedAt,
         attempts: cioAttempts,
       };

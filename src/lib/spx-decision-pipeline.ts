@@ -1,6 +1,7 @@
 import type { SpxGexTelegramSummary } from "./spx-gex-heatmap";
 
 export type SpxDecisionAction = "OPEN_CALL" | "OPEN_PUT" | "HOLD" | "CLOSE";
+export type SpxDecisionStatus = "EXECUTED" | "CIO_UNAVAILABLE" | "COUNCIL_UNAVAILABLE" | "MARKET_DATA_BLOCKED" | "INVALID_OUTPUT" | "PIPELINE_FAILED";
 export type SpxPosition = "NONE" | "CALL" | "PUT";
 export type SpxPositionDirective = "FLAT_WAIT" | "HOLD_CALL" | "HOLD_PUT" | "CLOSE_CALL" | "CLOSE_PUT";
 export type SpxDeliveryMode = "SEND" | "PREVIEW";
@@ -157,9 +158,20 @@ export interface CioDecision {
   evidenceRefs: string[];
   claims: SpxEvidenceClaim[];
   modelStatus: string;
+  decisionStatus?: SpxDecisionStatus;
   latencyMs: number;
   attempts?: ModelAttemptMetadata[];
 }
+
+export const resolveSpxDecisionStatus = (modelStatus: string | null | undefined): SpxDecisionStatus => {
+  const status = String(modelStatus || "").toUpperCase();
+  if (status === "AI" || status === "FIXTURE_REPLAY") return "EXECUTED";
+  if (status.includes("COUNCIL")) return "COUNCIL_UNAVAILABLE";
+  if (status.includes("DATA_BLOCK") || status.includes("MARKET_DATA")) return "MARKET_DATA_BLOCKED";
+  if (status.includes("INVALID") || status.includes("SCHEMA") || status.includes("OUTPUT")) return "INVALID_OUTPUT";
+  if (status.includes("PIPELINE")) return "PIPELINE_FAILED";
+  return "CIO_UNAVAILABLE";
+};
 
 export interface SpxOpenPositionContext {
   side: Exclude<SpxPosition, "NONE">;
@@ -337,6 +349,7 @@ const holdDecision = (reason: string, modelStatus: string): CioDecision => ({
   evidenceRefs: [],
   claims: [],
   modelStatus,
+  decisionStatus: resolveSpxDecisionStatus(modelStatus),
   latencyMs: 0,
 });
 
@@ -491,6 +504,7 @@ export function applyRiskGate(
 
 const withFinalAction = (cio: CioDecision, risk: RiskGateResult): CioDecision => ({
   ...cio,
+  decisionStatus: cio.decisionStatus || resolveSpxDecisionStatus(cio.modelStatus),
   action: risk.action,
   thesis: risk.disposition === "PASS" ? cio.thesis : `${cio.thesis} Risk Gate: ${risk.reason}`,
 });
@@ -637,8 +651,8 @@ const councilFailureSummary = (council: CouncilResult, cioDecision: CioDecision)
   if (council.agents.length !== expectedCouncilAgents.length) {
     return "Council 未完整：agent 數量或身份不符；CIO 按契約未執行。";
   }
-  if (cioDecision.modelStatus !== "AI") {
-    return `CIO 未完成：${humanizeModelFailure(cioDecision.modelStatus)}；按契約保持觀望。`;
+  if (resolveSpxDecisionStatus(cioDecision.modelStatus) !== "EXECUTED") {
+    return `CIO 未完成：${humanizeModelFailure(cioDecision.modelStatus)}；本輪不提供新方向。`;
   }
   return "必要市場資料未完整；Council 與 CIO 按契約未執行。";
 };
@@ -692,6 +706,16 @@ export function formatTelegramDecisionMessage(input: TelegramDecisionMessageInpu
     HOLD: "觀望",
     CLOSE: "平倉",
   };
+  const decisionStatus = cioDecision.decisionStatus || resolveSpxDecisionStatus(cioDecision.modelStatus);
+  const decisionUnavailable = decisionStatus !== "EXECUTED";
+  const decisionStatusLabel: Record<SpxDecisionStatus, string> = {
+    EXECUTED: "已執行",
+    CIO_UNAVAILABLE: "CIO 不可用",
+    COUNCIL_UNAVAILABLE: "Council 未完成",
+    MARKET_DATA_BLOCKED: "市場資料阻擋",
+    INVALID_OUTPUT: "模型輸出無效",
+    PIPELINE_FAILED: "管線失敗",
+  };
   const positionActionLabel: Record<SpxPositionDirective, string> = {
     FLAT_WAIT: actionLabel[riskGate.action],
     HOLD_CALL: "持有 Call",
@@ -738,7 +762,7 @@ export function formatTelegramDecisionMessage(input: TelegramDecisionMessageInpu
   const compactPlanText = (value: string) => value.replace(/\s+/g, " ").trim().slice(0, 150);
   const lines: Array<string | null> = [
     run.runMode === "UAT_LLM" ? "SYSTEM UAT｜非即時訊號｜不可交易" : null,
-    `SPX: ${spxLabel} 操作：${positionActionLabel[riskGate.positionDirective]}`,
+    `SPX: ${spxLabel} 操作：${decisionUnavailable && riskGate.positionDirective === "FLAT_WAIT" ? "決策不可用（不開新倉）" : positionActionLabel[riskGate.positionDirective]}`,
     `⏱️ 美東時間：${scheduledEt.year}/${scheduledEt.month}/${scheduledEt.day} ${scheduledEt.hour}:${scheduledEt.minute}:${scheduledEt.second} ET｜標的：SPX`,
     run.runMode === "UAT_REPLAY" ? "🧪 UAT REPLAY｜非即時訊號，只用固定歷史 fixture 驗證流水線。" : null,
     ...formatTelegramGexSection(snapshot),
@@ -746,13 +770,15 @@ export function formatTelegramDecisionMessage(input: TelegramDecisionMessageInpu
     `🟢 Call ${tally.CALL || 0}｜🔴 Put ${tally.PUT || 0}｜⚪ 觀望 ${tally.HOLD || 0}｜⚫ 無效 ${tally.INVALID || 0}`,
     ...formatCouncilAgentLines(council),
     run.degraded ? `⚠️ 降級｜${councilFailureSummary(council, cioDecision)}` : null,
-    `🧠 CIO｜${actionEmoji[cioDecision.action]} ${cioDecision.action} · ${safeConfidence(cioDecision.confidence)}%`,
+    decisionUnavailable
+      ? `🧠 CIO｜⚫ 決策不可用 · ${decisionStatusLabel[decisionStatus]}`
+      : `🧠 CIO｜${actionEmoji[cioDecision.action]} ${cioDecision.action} · ${safeConfidence(cioDecision.confidence)}%`,
   ];
 
   const holdingPosition = riskGate.positionDirective === "HOLD_CALL" || riskGate.positionDirective === "HOLD_PUT";
   if (holdingPosition) {
     const sideLabel = riskGate.positionDirective === "HOLD_PUT" ? "Put" : "Call";
-    lines.push(`⏸️ 計劃｜${run.degraded ? `CIO 本輪未完成，維持現有 ${sideLabel}。` : `維持現有 ${sideLabel}。`}`);
+    lines.push(`⏸️ 計劃｜${decisionUnavailable ? `CIO 本輪不可用；既有 ${sideLabel} 只按已存風控處理。` : `維持現有 ${sideLabel}。`}`);
     if (openPosition?.entryTime || openPosition?.entryPrice !== null) {
       const entryPrice = openPosition?.entryPrice === null || openPosition?.entryPrice === undefined
         ? "N/A"
@@ -762,7 +788,7 @@ export function formatTelegramDecisionMessage(input: TelegramDecisionMessageInpu
     if (openPosition?.invalidation) lines.push(`🛑 失效｜${compactPlanText(openPosition.invalidation)}`);
     if (openPosition?.targets.length) lines.push(`🏁 目標｜${openPosition.targets.slice(0, 2).map(compactPlanText).join(" · ")}`);
   } else if (riskGate.action === "HOLD") {
-    lines.push(`⏸️ 計劃｜不開倉；${run.degraded ? "等待下一個完整決策週期。" : "等待條件成立。"}`);
+    lines.push(`⏸️ 計劃｜不開倉；${decisionUnavailable ? "CIO 決策不可用，等待下一個完整決策週期。" : "等待條件成立。"}`);
   } else if (riskGate.action === "CLOSE") {
     lines.push(riskGate.reason === "end_of_day_flatten"
       ? "⏸️ 計劃｜收市前策略平倉；不留策略過夜倉。"
@@ -968,6 +994,7 @@ export async function runSpxDecisionPipeline(
   }
   cioDecision.confidence = safeConfidence(cioDecision.confidence);
   cioDecision.latencyMs = cioDecision.latencyMs || toLatency(cioStarted, dependencies);
+  cioDecision.decisionStatus = cioDecision.decisionStatus || resolveSpxDecisionStatus(cioDecision.modelStatus);
   run.cioDecision = cioDecision;
   run.currentStage = "CIO_DECIDED";
   await appendLifecycle(dependencies, run, "CIO_DECIDED", {

@@ -734,7 +734,12 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                       label="Council"
                       value={`C ${data.decision.councilTally.CALL} / P ${data.decision.councilTally.PUT} / H ${data.decision.councilTally.HOLD} / X ${data.decision.councilTally.INVALID ?? 0}`}
                     />
-                    <CockpitMetric label="CIO" value={`${data.decision.cio.action || "NOT_RUN"} · ${data.decision.cio.confidence}/100`} />
+                    <CockpitMetric
+                      label="CIO"
+                      value={data.decision.cio.decisionStatus === "EXECUTED"
+                        ? `${data.decision.cio.action || "NOT_RUN"} · ${data.decision.cio.confidence}/100`
+                        : `決策不可用 · ${(data.decision.cio.decisionStatus || "PIPELINE_FAILED").replace(/_/g, " ")}`}
+                    />
                     <CockpitMetric label="Risk Gate" value={`${data.decision.riskGate.disposition} · ${data.decision.riskGate.action || "N/A"}`} />
                     <CockpitMetric label="Run stage" value={data.decision.currentStage} />
                     <CockpitMetric label="Delivery" value={`${data.decision.delivery.status}${data.decision.delivery.telegramMessageId ? ` · ${data.decision.delivery.telegramMessageId}` : ""}`} />
