@@ -2193,15 +2193,26 @@ function getEtMinutes(date: Date) {
   return date.getHours() * 60 + date.getMinutes();
 }
 
+const MARKET_TIME_ZONE = 'America/New_York';
+
 function parseEtTimestamp(input: string | null): Date | null {
   if (!input) return null;
   const nums = input.match(/\d+/g)?.map(Number);
   if (!nums || nums.length < 5) return null;
   const [year, month, day, hour, minute, second = 0] = nums;
-  return new Date(year, month - 1, day, hour, minute, second);
+  const wallClockUtc = Date.UTC(year, month - 1, day, hour, minute, second);
+  const offsetAt = (epochMs: number) => {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: MARKET_TIME_ZONE,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+    }).formatToParts(new Date(epochMs));
+    const value = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find((part) => part.type === type)?.value);
+    return Date.UTC(value('year'), value('month') - 1, value('day'), value('hour'), value('minute'), value('second')) - epochMs;
+  };
+  const firstPass = wallClockUtc - offsetAt(wallClockUtc);
+  return new Date(wallClockUtc - offsetAt(firstPass));
 }
-
-const MARKET_TIME_ZONE = 'America/New_York';
 const AUDIT_CRON = '15 17-21 * * MON-FRI';
 // SPX GEX collection is gated in src/lib/spx-gex-heatmap.ts as a 15-minute delayed feed:
 // collect 09:45-16:15 ET, display represented market time 09:30-16:00 ET.
@@ -2614,7 +2625,6 @@ export function analyzeZeroDteRules(args: {
     hardBlocks.push(...marketDataQuality.hardBlocks);
   }
 
-  let positionTimedOut = false;
   if (dailyMemory.currentPosition !== "NONE" && dailyMemory.entryPrice != null) {
     const entryDate = parseEtTimestamp(dailyMemory.entryTime);
     const elapsedMinutes = entryDate ? (etNow.getTime() - entryDate.getTime()) / 60000 : null;
@@ -2623,8 +2633,7 @@ export function analyzeZeroDteRules(args: {
         ? currentPrice - dailyMemory.entryPrice
         : dailyMemory.entryPrice - currentPrice;
     if (elapsedMinutes != null && elapsedMinutes >= 15 && expectedMove <= 0) {
-      positionTimedOut = true;
-      hardBlocks.push("position_no_follow_through_after_15m");
+      softWarnings.push("position_review_15m_no_follow_through");
     }
   }
 
@@ -2636,8 +2645,7 @@ export function analyzeZeroDteRules(args: {
   else if (trendDayContext.regime === "RANGE_OR_MIXED") marketRegime = "CHOP";
 
   let verdict: ZeroDteAdvisoryVerdict = "WAIT_AND_OBSERVE";
-  if (positionTimedOut) verdict = "CLOSE_OR_REDUCE_SUGGESTED";
-  else if (hardBlocks.includes("daily_circuit_breaker")) verdict = "FREEZE_NEW_SIGNALS";
+  if (hardBlocks.includes("daily_circuit_breaker")) verdict = "FREEZE_NEW_SIGNALS";
   else if (hardBlocks.length > 0 || score < 45) verdict = "NO_TRADE";
   else if (
     directionalBias !== "NONE" &&
