@@ -118,6 +118,7 @@ export interface SpxGexPressureChartGeometry {
   segments: SpxGexPressureChartPoint[][];
   latestPoint: SpxGexPressureChartPoint | null;
   spotGuide: { price: number; y: number; timeEt: string } | null;
+  expectedMoveRange: { value: number; upper: { price: number; y: number }; lower: { price: number; y: number } } | null;
 }
 
 export interface SpxGexPressureFrame {
@@ -279,6 +280,7 @@ export const buildSpxGexPressureChartGeometry = (
   oneMinuteSegments: SpxGexPressureSpotPoint[][],
   cellWidth: number,
   rowHeight: number,
+  expectedMove: number | null = null,
 ): SpxGexPressureChartGeometry => {
   const width = pressure.timeline.length * cellWidth;
   const height = pressure.rows.length * rowHeight;
@@ -307,12 +309,20 @@ export const buildSpxGexPressureChartGeometry = (
       }, []);
   const latestSegment = segments.length > 0 ? segments[segments.length - 1] : null;
   const latestPoint = latestSegment && latestSegment.length > 0 ? latestSegment[latestSegment.length - 1] : null;
+  const expectedMoveRange = usingOneMinute && latestPoint && finite(expectedMove) && expectedMove > 0
+    ? {
+      value: expectedMove,
+      upper: { price: latestPoint.price + expectedMove, y: toPoint({ ...latestPoint, price: latestPoint.price + expectedMove }).y },
+      lower: { price: latestPoint.price - expectedMove, y: toPoint({ ...latestPoint, price: latestPoint.price - expectedMove }).y },
+    }
+    : null;
   return {
     resolution: usingOneMinute ? "1m" : "15m-fallback",
     pointCount: usingOneMinute ? oneMinutePointCount : segments.reduce((total, segment) => total + segment.length, 0),
     segments,
     latestPoint,
     spotGuide: latestPoint ? { price: latestPoint.price, y: latestPoint.y, timeEt: latestPoint.timeEt } : null,
+    expectedMoveRange,
   };
 };
 

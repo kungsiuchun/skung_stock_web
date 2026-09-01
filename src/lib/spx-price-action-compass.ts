@@ -183,6 +183,12 @@ export interface SpxPriceActionSource {
   fetchedAt: string;
   latestSampleAt?: string | null;
   status?: "READY" | "STALE" | "UNAVAILABLE";
+  expectedMove?: {
+    status: "READY" | "UNAVAILABLE";
+    value: number | null;
+    sampleAt: string | null;
+    errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE" | "ZERO_DTE_SPX_EXPECTED_MOVE_STALE" | null;
+  };
   note: string;
 }
 

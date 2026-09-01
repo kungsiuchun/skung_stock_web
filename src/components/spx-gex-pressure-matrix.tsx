@@ -63,7 +63,15 @@ interface PriceOverlayState {
     ticker: "SPX";
     timeframe: "1m";
     candles: Array<{ time: number; close: number }>;
-    source: { provider: "0dtespx" | "yahoo" | "test"; label: string; interval: string; fetchedAt: string; latestSampleAt?: string | null; status?: "READY" | "STALE" | "UNAVAILABLE" };
+    source: {
+      provider: "0dtespx" | "yahoo" | "test";
+      label: string;
+      interval: string;
+      fetchedAt: string;
+      latestSampleAt?: string | null;
+      status?: "READY" | "STALE" | "UNAVAILABLE";
+      expectedMove?: { status: "READY" | "UNAVAILABLE"; value: number | null; sampleAt: string | null; errorCode: string | null };
+    };
     warnings: string[];
   } | null;
   error: string | null;
@@ -348,8 +356,16 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
   const availableTimelineWidth = Math.max(0, matrixRailWidth - STRIKE_WIDTH - CURRENT_GEX_WIDTH);
   const effectiveCellWidth = timelineLength > 0 ? Math.max(CELL_WIDTH, availableTimelineWidth / timelineLength) : CELL_WIDTH;
   const chartGeometry = useMemo(
-    () => displayPressure ? buildSpxGexPressureChartGeometry(displayPressure, oneMinuteSpotSegments, effectiveCellWidth, ROW_HEIGHT) : null,
-    [displayPressure, effectiveCellWidth, oneMinuteSpotSegments],
+    () => displayPressure ? buildSpxGexPressureChartGeometry(
+      displayPressure,
+      oneMinuteSpotSegments,
+      effectiveCellWidth,
+      ROW_HEIGHT,
+      priceOverlay?.data?.source.provider === "0dtespx" && priceOverlay.data.source.expectedMove?.status === "READY"
+        ? priceOverlay.data.source.expectedMove.value
+        : null,
+    ) : null,
+    [displayPressure, effectiveCellWidth, oneMinuteSpotSegments, priceOverlay?.data],
   );
   const spotPulseKey = useMemo(() => chartGeometry?.latestPoint
     ? getSpxSpotLivePulseKey({
@@ -371,6 +387,13 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
     : null;
   const priceOverlayWarning = !usingOneMinuteSpot && !oneMinuteOverlayPending
     ? priceOverlay?.error || `No SPX 1-minute candles are available for ${selectedDate}; showing the canonical 15-minute snapshot line.`
+    : null;
+  const expectedMoveWarning = usingOneMinuteSpot && priceOverlay?.data?.source.provider === "0dtespx"
+    && priceOverlay.data.source.expectedMove?.status === "UNAVAILABLE"
+    ? `0DTESPX Expected Move unavailable (${priceOverlay.data.source.expectedMove.errorCode || "source did not provide a valid current value"}).`
+    : null;
+  const expectedMoveLabel = chartGeometry?.expectedMoveRange
+    ? `EM ±${spotFormatter.format(chartGeometry.expectedMoveRange.value)} · ${priceOverlay?.data?.source.expectedMove?.sampleAt ? formatEtTime(priceOverlay.data.source.expectedMove.sampleAt) : "current"} ET`
     : null;
   const activateCell = useCallback((element: HTMLElement, strike: number, cell: SpxGexPressureCell, locked: boolean) => {
     if (locked) hoverSuppressedAfterScrollRef.current = false;
@@ -410,6 +433,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
           {pressure && <span className="border border-amber-300/30 bg-amber-300/10 px-2 py-1 font-mono text-[10px] font-black text-amber-100">{pressure.delayMinutes}M DELAYED</span>}
           {pressure && <span className="border border-cyan-300/30 bg-cyan-300/5 px-2 py-1 font-mono text-[10px] font-black text-cyan-100" data-spx-gex-pressure-spot-source="true">{spotSourceLabel}</span>}
           {spotLiveLabel && <span key={spotPulseKey || "spot-live"} className="spx-spot-live-pulse border border-cyan-300/70 bg-cyan-300/10 px-2 py-1 font-mono text-[10px] font-black text-cyan-50 shadow-[0_0_14px_rgba(34,211,238,.14)]" data-spx-gex-pressure-live-spot="true">{spotLiveLabel}</span>}
+          {expectedMoveLabel && <span className="border border-violet-300/60 bg-violet-300/10 px-2 py-1 font-mono text-[10px] font-black text-violet-100" title="0DTESPX expected move risk corridor; it does not alter canonical GEX." data-spx-gex-pressure-expected-move="true">{expectedMoveLabel}</span>}
           {controls}
         </div>
       </div>
@@ -434,7 +458,8 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
             {pressure.warnings.length > 0 && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-warning="true">{pressure.warnings.join(" ")}</div>}
             {reconnecting && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status">Reconnecting SPX source…</div>}
             {refreshError && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-refresh-stale="true">Refresh failed; showing the last verified GEX matrix. {refreshError}</div>}
-          {priceOverlayWarning && <div className="border-b border-cyan-300/20 bg-cyan-300/5 px-3 py-2 text-xs text-cyan-100" role="status" data-spx-gex-pressure-spot-warning="true">{priceOverlayWarning}</div>}
+           {priceOverlayWarning && <div className="border-b border-cyan-300/20 bg-cyan-300/5 px-3 py-2 text-xs text-cyan-100" role="status" data-spx-gex-pressure-spot-warning="true">{priceOverlayWarning}</div>}
+           {expectedMoveWarning && <div className="border-b border-violet-300/20 bg-violet-300/5 px-3 py-2 text-xs text-violet-100" role="status" data-spx-gex-pressure-expected-move-warning="true">{expectedMoveWarning}</div>}
 
           <div className="grid 2xl:grid-cols-[minmax(0,1fr)_320px] 2xl:items-start">
             <div
@@ -548,13 +573,17 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
                       data-spx-gex-pressure-spot-resolution={chartGeometry?.resolution || "15m-fallback"}
                       data-spx-gex-pressure-spot-point-count={chartGeometry?.pointCount || 0}
                     >
-                      {chartGeometry?.spotGuide && <line key={`${spotPulseKey || "spot"}:guide`} className="spx-spot-live-pulse" x1="0" x2={matrixWidth} y1={chartGeometry.spotGuide.y} y2={chartGeometry.spotGuide.y} stroke="#22d3ee" strokeWidth="1" strokeDasharray="5 4" opacity="0.72" data-spx-gex-pressure-spot-guide="true" />}
+                       {chartGeometry?.spotGuide && <line key={`${spotPulseKey || "spot"}:guide`} className="spx-spot-live-pulse" x1="0" x2={matrixWidth} y1={chartGeometry.spotGuide.y} y2={chartGeometry.spotGuide.y} stroke="#22d3ee" strokeWidth="1" strokeDasharray="5 4" opacity="0.72" data-spx-gex-pressure-spot-guide="true" />}
+                       {chartGeometry?.expectedMoveRange && <>
+                         <line x1="0" x2={matrixWidth} y1={chartGeometry.expectedMoveRange.upper.y} y2={chartGeometry.expectedMoveRange.upper.y} stroke="#c4b5fd" strokeWidth="1" strokeDasharray="3 4" opacity="0.88" data-spx-gex-pressure-expected-move-upper="true" />
+                         <line x1="0" x2={matrixWidth} y1={chartGeometry.expectedMoveRange.lower.y} y2={chartGeometry.expectedMoveRange.lower.y} stroke="#c4b5fd" strokeWidth="1" strokeDasharray="3 4" opacity="0.88" data-spx-gex-pressure-expected-move-lower="true" />
+                       </>}
                       {chartGeometry?.segments.map((segment, index) => (
                         <polyline key={index} points={segment.map((point) => `${point.x},${point.y}`).join(" ")} fill="none" stroke="#22d3ee" strokeWidth="1.7" vectorEffect="non-scaling-stroke" />
                       ))}
                       {chartGeometry?.latestPoint && <circle key={`${spotPulseKey || "spot"}:endpoint`} className="spx-spot-live-pulse" cx={chartGeometry.latestPoint.x} cy={chartGeometry.latestPoint.y} r="4" fill="#ecfeff" stroke="#22d3ee" strokeWidth="2" data-spx-gex-pressure-spot-endpoint="true" />}
                     </svg>
-                    <span className="sr-only">{usingOneMinuteSpot ? "SPX 1-minute Yahoo price overlay" : "SPX 15-minute canonical snapshot fallback overlay"}</span>
+                    <span className="sr-only">{usingOneMinuteSpot ? "SPX 1-minute price overlay" : "SPX 15-minute canonical snapshot fallback overlay"}{chartGeometry?.expectedMoveRange ? ` with 0DTESPX expected move plus or minus ${chartGeometry.expectedMoveRange.value}` : ""}</span>
                   </div>
 
                   <div className="sticky right-0 z-30 shrink-0 bg-[#050c14] shadow-[-8px_0_12px_rgba(3,9,16,.75)]" style={{ width: CURRENT_GEX_WIDTH }} data-current-gex-column="body">
@@ -585,7 +614,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
 
           <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#123142] bg-[#030910] px-3 py-2 font-mono text-[10px] text-zinc-500">
             <div className="flex flex-wrap gap-3">
-              <span className="text-green-300">■ Positive GEX</span><span className="text-pink-300">■ Negative GEX</span><span className="text-white">+ Stronger</span><span>− Weaker</span><span className="text-amber-300">↔ Flip</span><span className="text-cyan-300">━ SPX</span>
+              <span className="text-green-300">■ Positive GEX</span><span className="text-pink-300">■ Negative GEX</span><span className="text-white">+ Stronger</span><span>− Weaker</span><span className="text-amber-300">↔ Flip</span><span className="text-cyan-300">━ SPX</span><span className="text-violet-200">┄ Expected Move</span>
             </div>
             <span className="tabular-nums">{pressure.source.provider} / baseline {pressure.baseline.snapshotTimeEt} ET / collected {pressure.baseline.collectedTimeEt} ET</span>
           </div>

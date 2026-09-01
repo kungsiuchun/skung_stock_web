@@ -28,11 +28,21 @@ export interface ZeroDteSpxHistoryPoint {
   datetime?: unknown;
   datetimeUnix?: unknown;
   spx?: unknown;
+  spxExpectedMove?: unknown;
+  spx_expected_move?: unknown;
+}
+
+export interface ZeroDteSpxExpectedMove {
+  status: "READY" | "UNAVAILABLE";
+  value: number | null;
+  sampleAt: string | null;
+  errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE" | "ZERO_DTE_SPX_EXPECTED_MOVE_STALE" | null;
 }
 
 export interface ZeroDteSpxIntradayResult {
   candles: SpxPriceActionCandle[];
   latestSampleAt: string;
+  expectedMove: ZeroDteSpxExpectedMove;
 }
 
 type FetchLike = typeof fetch;
@@ -47,6 +57,11 @@ const asTimestamp = (row: ZeroDteSpxHistoryPoint) => {
 };
 
 const asPrice = (value: unknown) => {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
+const asExpectedMove = (value: unknown) => {
   const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
@@ -105,6 +120,16 @@ export const normalizeZeroDteSpxOneMinuteCandles = (
 
   const latestSampleAt = new Date(points[points.length - 1].time).toISOString();
   if (now - points[points.length - 1].time > STALE_AFTER_MS) throw new ZeroDteSpxError("ZERO_DTE_SPX_STALE");
+  const latestExpectedMove = rows
+    .map((row) => ({ time: asTimestamp(row), value: asExpectedMove(row.spx_expected_move ?? row.spxExpectedMove) }))
+    .filter((row): row is { time: number; value: number } => row.time !== null && row.value !== null)
+    .sort((left, right) => left.time - right.time)
+    .at(-1) || null;
+  const expectedMove: ZeroDteSpxExpectedMove = !latestExpectedMove
+    ? { status: "UNAVAILABLE", value: null, sampleAt: null, errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE" }
+    : now - latestExpectedMove.time > STALE_AFTER_MS
+      ? { status: "UNAVAILABLE", value: null, sampleAt: new Date(latestExpectedMove.time).toISOString(), errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_STALE" }
+      : { status: "READY", value: latestExpectedMove.value, sampleAt: new Date(latestExpectedMove.time).toISOString(), errorCode: null };
 
   const byMinute = new Map<number, Array<{ time: number; price: number }>>();
   for (const point of points) {
@@ -122,7 +147,7 @@ export const normalizeZeroDteSpxOneMinuteCandles = (
     close: bucket[bucket.length - 1].price,
     volume: 0,
   }));
-  return { candles: aggregateSpxOneMinutePriceActionCandles(candles, "1m"), latestSampleAt };
+  return { candles: aggregateSpxOneMinutePriceActionCandles(candles, "1m"), latestSampleAt, expectedMove };
 };
 
 export const fetchZeroDteSpxIntradayCandles = async (

@@ -2444,6 +2444,16 @@ describe("SPX 0DTE pressure matrix", () => {
     assert.equal(geometry.segments[0][0].y, 12.5);
     assert.equal("callout" in geometry, false);
     assert.equal(geometry.spotGuide?.price, 6005);
+    const withExpectedMove = buildSpxGexPressureChartGeometry(pressure, [[
+      { time: 1, minuteEt: 570, timeEt: "09:30", price: 6000 },
+      { time: 2, minuteEt: 585, timeEt: "09:45", price: 6005 },
+    ]], 34, 25, 25);
+    assert.deepEqual(withExpectedMove.expectedMoveRange && {
+      value: withExpectedMove.expectedMoveRange.value,
+      upper: withExpectedMove.expectedMoveRange.upper.price,
+      lower: withExpectedMove.expectedMoveRange.lower.price,
+    }, { value: 25, upper: 6030, lower: 5980 });
+    assert.equal(buildSpxGexPressureChartGeometry(pressure, [], 34, 25, 25).expectedMoveRange, null);
   });
 
   it("uses 15-minute fallback segments without drawing across a missing GEX slot", () => {
