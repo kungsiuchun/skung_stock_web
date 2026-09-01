@@ -1267,6 +1267,24 @@ test("CIO retries Azure 408 within the 30-second budget without provider fallbac
   assert.equal(result.attempts[1].attemptTimeoutMs, 10_000);
 });
 
+test("Council and CIO retry transport failures once", async () => {
+  for (const callKind of ["agent", "cio"] as const) {
+    let calls = 0;
+    const result = await runStructuredOpenRouterRequest({
+      callKind,
+      apiKey: "test-key",
+      model: callKind === "cio" ? "openai/gpt-5-mini" : "same-model",
+      messages: [],
+      fetcher: async () => {
+        calls += 1;
+        throw new TypeError("fetch failed");
+      },
+    });
+    assert.equal(calls, 2);
+    assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["REQUEST_FAILED", "REQUEST_FAILED"]);
+  }
+});
+
 test("OpenRouter retry policy retries 429 and 5xx but fails fast on 401, 402, and 403", async () => {
   let rateLimitedCalls = 0;
   const validAgentContent = JSON.stringify({

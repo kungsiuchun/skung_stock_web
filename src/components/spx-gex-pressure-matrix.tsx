@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Activity, AlertTriangle, TrendingUp } from "lucide-react";
 import { formatSpxGexCompactExposure } from "@/lib/spx-gex-heatmap";
+import { SPX_0DTE_STALE_AFTER_MS } from "@/lib/spx-price-action-compass";
 import { parseJsonResponse } from "@/lib/safe-json-response";
 import { getSpxSpotLivePulseKey } from "@/lib/spx-spot-live-pulse";
 import { isSpxRequestAbort, runSpxRequest } from "@/lib/spx-request-lane";
@@ -10,7 +11,7 @@ import {
   buildSpxGexPressureChartGeometry,
   extendSpxGexPressureForSession,
   getLatestSpxGexSpotPoint,
-  getSpxGexExpectedMoveWarning,
+  resolveSpxGexExpectedMoveOverlay,
   type SpxGexPressureCell,
   type SpxGexPressureMatrixModel,
   type SpxGexPressureMover,
@@ -133,11 +134,11 @@ const cellBackground = (cell: SpxGexPressureCell, missingSlot: boolean) => {
   return `rgba(190, 24, 93, ${alpha})`;
 };
 
-const etClock = () => {
+const etClock = (now = new Date()) => {
   const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
     hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-  }).formatToParts(new Date()).map((part) => [part.type, part.value]));
+  }).formatToParts(now).map((part) => [part.type, part.value]));
   return { tradingDate: `${parts.year}-${parts.month}-${parts.day}`, minuteEt: Number(parts.hour) * 60 + Number(parts.minute) };
 };
 
@@ -232,6 +233,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
   const [loading, setLoading] = useState(false);
   const [activeCell, setActiveCell] = useState<ActiveCell | null>(null);
   const [matrixRailWidth, setMatrixRailWidth] = useState(0);
+  const [overlayNowMs, setOverlayNowMs] = useState(() => Date.now());
   const matrixScrollRef = useRef<HTMLDivElement>(null);
   const dataRef = useRef(data);
   const activeCellRef = useRef(activeCell);
@@ -264,6 +266,19 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
   }, []);
 
   useEffect(() => setActiveCell(null), [refreshKey, selectedDate]);
+
+  useEffect(() => {
+    if (!enabled) return undefined;
+    const source = priceOverlay?.data?.source;
+    const nextExpiryAt = [source?.latestSampleAt, source?.expectedMove?.sampleAt]
+      .map((value) => typeof value === "string" ? Date.parse(value) : Number.NaN)
+      .filter((value) => Number.isFinite(value))
+      .map((value) => value + SPX_0DTE_STALE_AFTER_MS)
+      .sort((left, right) => left - right)[0];
+    if (nextExpiryAt === undefined) return undefined;
+    const timer = window.setTimeout(() => setOverlayNowMs(Date.now()), Math.max(0, nextExpiryAt - Date.now()) + 1);
+    return () => window.clearTimeout(timer);
+  }, [enabled, priceOverlay?.data?.source]);
 
   useEffect(() => {
     const rail = matrixScrollRef.current;
@@ -347,6 +362,13 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
     ? getLatestSpxGexSpotPoint(priceOverlay.data.candles, pressure.tradingDate)
     : null, [pressure, priceOverlay?.data]);
   const displayPressure = useMemo(() => pressure ? extendSpxGexPressureForSession(pressure, etClock()) : null, [pressure, refreshKey]);
+  const overlayClock = useMemo(() => etClock(new Date(overlayNowMs)), [overlayNowMs]);
+  const expectedMoveOverlay = useMemo(() => resolveSpxGexExpectedMoveOverlay({
+    source: priceOverlay?.data?.source,
+    selectedDate,
+    currentTradingDate: overlayClock.tradingDate,
+    nowMs: overlayNowMs,
+  }), [overlayClock.tradingDate, overlayNowMs, priceOverlay?.data?.source, selectedDate]);
   const oneMinuteSpotSegments = useMemo(() => {
     if (!displayPressure || priceOverlay?.selectedDate !== selectedDate || !priceOverlay.data || !latestSpotPoint) return [];
     const startMinute = displayPressure.timeline[0]?.snapshotMinuteEt ?? displayPressure.baseline.snapshotMinuteEt;
@@ -362,11 +384,9 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
       oneMinuteSpotSegments,
       effectiveCellWidth,
       ROW_HEIGHT,
-      priceOverlay?.data?.source.provider === "0dtespx" && priceOverlay.data.source.expectedMove?.status === "READY"
-        ? priceOverlay.data.source.expectedMove.value
-        : null,
+      expectedMoveOverlay.expectedMove,
     ) : null,
-    [displayPressure, effectiveCellWidth, oneMinuteSpotSegments, priceOverlay?.data],
+    [displayPressure, effectiveCellWidth, expectedMoveOverlay.expectedMove, oneMinuteSpotSegments],
   );
   const spotPulseKey = useMemo(() => chartGeometry?.latestPoint
     ? getSpxSpotLivePulseKey({
@@ -389,7 +409,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
   const priceOverlayWarning = !usingOneMinuteSpot && !oneMinuteOverlayPending
     ? priceOverlay?.error || `No SPX 1-minute candles are available for ${selectedDate}; showing the canonical 15-minute snapshot line.`
     : null;
-  const expectedMoveWarning = getSpxGexExpectedMoveWarning(priceOverlay?.data?.source);
+  const expectedMoveWarning = expectedMoveOverlay.warning;
   const expectedMoveLabel = chartGeometry?.expectedMoveRange
     ? `EM ±${spotFormatter.format(chartGeometry.expectedMoveRange.value)} · ${priceOverlay?.data?.source.expectedMove?.sampleAt ? formatEtTime(priceOverlay.data.source.expectedMove.sampleAt) : "current"} ET`
     : null;

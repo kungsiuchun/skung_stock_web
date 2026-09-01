@@ -45,7 +45,7 @@ import {
   buildSpxGexPressureMatrix,
   extendSpxGexPressureForSession,
   getLatestSpxGexSpotPoint,
-  getSpxGexExpectedMoveWarning,
+  resolveSpxGexExpectedMoveOverlay,
   getSpxGexPressureTooltipPosition,
   toSpxGexPressureFrame,
 } from "../src/lib/spx-gex-pressure-matrix";
@@ -2468,16 +2468,40 @@ describe("SPX 0DTE pressure matrix", () => {
 
     assert.equal(geometry.resolution, "15m-fallback");
     assert.equal(geometry.expectedMoveRange, null);
-    assert.equal(getSpxGexExpectedMoveWarning({
-      provider: "0dtespx",
-      status: "READY",
-      expectedMove: { status: "UNAVAILABLE", errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE" },
-    }), "0DTESPX Expected Move unavailable (ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE).");
-    assert.equal(getSpxGexExpectedMoveWarning({
-      provider: "yahoo",
-      status: "READY",
-      expectedMove: { status: "UNAVAILABLE", errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE" },
-    }), null);
+    const nowMs = Date.parse("2026-05-27T13:45:00.000Z");
+    const source = {
+      provider: "0dtespx" as const,
+      status: "READY" as const,
+      latestSampleAt: new Date(nowMs).toISOString(),
+      expectedMove: { status: "UNAVAILABLE" as const, value: null, sampleAt: null, errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE" as const },
+    };
+    assert.deepEqual(resolveSpxGexExpectedMoveOverlay({
+      source,
+      selectedDate: "2026-05-27",
+      currentTradingDate: "2026-05-27",
+      nowMs,
+    }), { expectedMove: null, warning: "0DTESPX Expected Move unavailable (ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE)." });
+    assert.deepEqual(resolveSpxGexExpectedMoveOverlay({
+      source: {
+        ...source,
+        latestSampleAt: new Date(nowMs + 10 * 60 * 1_000 + 1).toISOString(),
+        expectedMove: { status: "READY", value: 25, sampleAt: new Date(nowMs).toISOString(), errorCode: null },
+      },
+      selectedDate: "2026-05-27",
+      currentTradingDate: "2026-05-27",
+      nowMs: nowMs + 10 * 60 * 1_000 + 1,
+    }), { expectedMove: null, warning: "0DTESPX Expected Move unavailable (ZERO_DTE_SPX_EXPECTED_MOVE_STALE)." });
+    assert.deepEqual(resolveSpxGexExpectedMoveOverlay({
+      source: {
+        provider: "yahoo",
+        status: "READY",
+        latestSampleAt: new Date(nowMs).toISOString(),
+        expectedMove: { status: "UNAVAILABLE", value: null, sampleAt: null, errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE" },
+      },
+      selectedDate: "2026-05-26",
+      currentTradingDate: "2026-05-27",
+      nowMs,
+    }), { expectedMove: null, warning: null });
   });
 
   it("uses 15-minute fallback segments without drawing across a missing GEX slot", () => {

@@ -585,8 +585,7 @@ export const resolveAttemptTimeoutMs = (timeoutMs: number, deadlineRemainingMs: 
   deadlineRemainingMs === null ? timeoutMs : Math.min(timeoutMs, deadlineRemainingMs)
 );
 
-const isTransientCioFailure = (httpStatus: number | null, timedOut = false) => timedOut
-  || httpStatus === 408
+const isTransientCioFailure = (httpStatus: number | null) => httpStatus === 408
   || httpStatus === 429
   || (httpStatus !== null && httpStatus >= 500);
 
@@ -1027,7 +1026,7 @@ export async function runStructuredOpenRouterRequest(input: {
         responseShape: "REQUEST_FAILED",
         ...requestMetadata,
       });
-      if (deadlineExceeded || !isTransientCioFailure(null, timedOut) || attempt === 2) break;
+      if (deadlineExceeded || attempt === 2) break;
     } finally {
       clearTimeout(timeout);
     }

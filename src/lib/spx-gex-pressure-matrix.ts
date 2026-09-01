@@ -1,4 +1,5 @@
 import type { SpxGexHeatmapModel } from "./spx-gex-heatmap";
+import { isFreshSpx0DteSample } from "./spx-price-action-compass";
 
 const OPEN_MINUTE_ET = 9 * 60 + 30;
 const CLOSE_MINUTE_ET = 16 * 60;
@@ -121,15 +122,34 @@ export interface SpxGexPressureChartGeometry {
   expectedMoveRange: { value: number; upper: { price: number; y: number }; lower: { price: number; y: number } } | null;
 }
 
-export const getSpxGexExpectedMoveWarning = (source: {
-  provider?: string | null;
-  status?: "READY" | "STALE" | "UNAVAILABLE";
-  expectedMove?: { status: "READY" | "UNAVAILABLE"; errorCode: string | null };
-} | null | undefined) => {
-  if (source?.provider !== "0dtespx" || source.status !== "READY" || source.expectedMove?.status !== "UNAVAILABLE") {
-    return null;
+export const resolveSpxGexExpectedMoveOverlay = (input: {
+  source: {
+    provider?: string | null;
+    status?: "READY" | "STALE" | "UNAVAILABLE";
+    latestSampleAt?: string | null;
+    expectedMove?: { status: "READY" | "UNAVAILABLE"; value: number | null; sampleAt: string | null; errorCode: string | null };
+  } | null | undefined;
+  selectedDate: string;
+  currentTradingDate: string;
+  nowMs?: number;
+}) => {
+  const nowMs = input.nowMs ?? Date.now();
+  const source = input.source;
+  const currentContextIsFresh = input.selectedDate === input.currentTradingDate
+    && source?.provider === "0dtespx"
+    && source.status === "READY"
+    && isFreshSpx0DteSample(source.latestSampleAt, nowMs);
+  if (!currentContextIsFresh) return { expectedMove: null, warning: null };
+  const expectedMove = source.expectedMove;
+  if (expectedMove?.status === "READY"
+    && finite(expectedMove.value)
+    && expectedMove.value > 0
+    && isFreshSpx0DteSample(expectedMove.sampleAt, nowMs)) {
+    return { expectedMove: expectedMove.value, warning: null };
   }
-  return `0DTESPX Expected Move unavailable (${source.expectedMove.errorCode || "source did not provide a valid current value"}).`;
+  const errorCode = expectedMove?.errorCode
+    || (expectedMove?.sampleAt ? "ZERO_DTE_SPX_EXPECTED_MOVE_STALE" : "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE");
+  return { expectedMove: null, warning: `0DTESPX Expected Move unavailable (${errorCode}).` };
 };
 
 export interface SpxGexPressureFrame {
