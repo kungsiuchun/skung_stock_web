@@ -37,6 +37,7 @@ import {
   runSpxUatLlm,
   runSpxUatReplay,
   resolveAttemptTimeoutMs,
+  resolveCioDegradedReason,
   SPX_CIO_TIMING_POLICY,
   SPX_COUNCIL_TIMING_POLICY,
   shouldRunLlmCio,
@@ -362,6 +363,21 @@ test("CIO typed validator reports precise confidence contract fields", () => {
   assert.deepEqual(validateCioModelPlan({ ...valid, confidence_score: "56" }, allowed), { ok: false, invalidField: "confidence_score_not_number" });
   assert.deepEqual(validateCioModelPlan({ ...valid, confidence_score: 0 }, allowed), { ok: false, invalidField: "confidence_score_out_of_range" });
   assert.deepEqual(validateCioModelPlan({ ...valid, confidence_score: 101 }, allowed), { ok: false, invalidField: "confidence_score_out_of_range" });
+});
+
+test("CIO persistence keeps the precise contract failure over generic validation", () => {
+  assert.equal(resolveCioDegradedReason(
+    "cio_schema_invalid_confidence_score_not_integer",
+    undefined,
+    "INVALID_SCHEMA",
+    "cio_model_INVALID_SCHEMA",
+  ), "cio_schema_invalid_confidence_score_not_integer");
+  assert.equal(resolveCioDegradedReason(
+    undefined,
+    undefined,
+    "TIMEOUT",
+    "cio_model_TIMEOUT",
+  ), "cio_timeout");
 });
 
 test("M5 context marks missing 0DTESPX volume as unavailable instead of throwing", () => {

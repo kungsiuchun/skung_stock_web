@@ -590,6 +590,13 @@ const isTransientCioFailure = (httpStatus: number | null, timedOut = false) => t
   || httpStatus === 429
   || (httpStatus !== null && httpStatus >= 500);
 
+export const resolveCioDegradedReason = (
+  cioFailureReason: string | undefined,
+  existingDegradedReason: string | undefined,
+  cioModelStatus: string,
+  cioValidationFailure: string,
+) => cioFailureReason || existingDegradedReason || (cioModelStatus === 'TIMEOUT' ? 'cio_timeout' : cioValidationFailure);
+
 export async function runStructuredOpenRouterRequest(input: {
   callKind: StructuredOpenRouterCallKind;
   apiKey: string;
@@ -3836,7 +3843,12 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
     };
     const cioValidationFailure = getCioValidationFailure(cioDecision, marketSnapshot);
     if (cioValidationFailure) {
-      const degradedReason = decisionRun!.degradedReason || (cioModelStatus === 'TIMEOUT' ? 'cio_timeout' : cioValidationFailure);
+      const degradedReason = resolveCioDegradedReason(
+        cioFailureReason,
+        decisionRun!.degradedReason,
+        cioModelStatus,
+        cioValidationFailure,
+      );
       decisionRun!.degraded = true;
       decisionRun!.degradedReason = degradedReason;
       orchestratorPlan = fallbackOrchestratorPlan;

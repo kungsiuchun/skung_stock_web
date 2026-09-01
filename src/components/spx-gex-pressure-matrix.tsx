@@ -10,6 +10,7 @@ import {
   buildSpxGexPressureChartGeometry,
   extendSpxGexPressureForSession,
   getLatestSpxGexSpotPoint,
+  getSpxGexExpectedMoveWarning,
   type SpxGexPressureCell,
   type SpxGexPressureMatrixModel,
   type SpxGexPressureMover,
@@ -388,10 +389,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
   const priceOverlayWarning = !usingOneMinuteSpot && !oneMinuteOverlayPending
     ? priceOverlay?.error || `No SPX 1-minute candles are available for ${selectedDate}; showing the canonical 15-minute snapshot line.`
     : null;
-  const expectedMoveWarning = usingOneMinuteSpot && priceOverlay?.data?.source.provider === "0dtespx"
-    && priceOverlay.data.source.expectedMove?.status === "UNAVAILABLE"
-    ? `0DTESPX Expected Move unavailable (${priceOverlay.data.source.expectedMove.errorCode || "source did not provide a valid current value"}).`
-    : null;
+  const expectedMoveWarning = getSpxGexExpectedMoveWarning(priceOverlay?.data?.source);
   const expectedMoveLabel = chartGeometry?.expectedMoveRange
     ? `EM ±${spotFormatter.format(chartGeometry.expectedMoveRange.value)} · ${priceOverlay?.data?.source.expectedMove?.sampleAt ? formatEtTime(priceOverlay.data.source.expectedMove.sampleAt) : "current"} ET`
     : null;

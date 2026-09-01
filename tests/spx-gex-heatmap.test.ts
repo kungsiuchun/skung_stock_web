@@ -45,6 +45,7 @@ import {
   buildSpxGexPressureMatrix,
   extendSpxGexPressureForSession,
   getLatestSpxGexSpotPoint,
+  getSpxGexExpectedMoveWarning,
   getSpxGexPressureTooltipPosition,
   toSpxGexPressureFrame,
 } from "../src/lib/spx-gex-pressure-matrix";
@@ -2454,6 +2455,29 @@ describe("SPX 0DTE pressure matrix", () => {
       lower: withExpectedMove.expectedMoveRange.lower.price,
     }, { value: 25, upper: 6030, lower: 5980 });
     assert.equal(buildSpxGexPressureChartGeometry(pressure, [], 34, 25, 25).expectedMoveRange, null);
+  });
+
+  it("reports an unavailable Expected Move with fresh 0DTESPX context even when one point uses geometry fallback", () => {
+    const pressure = buildSpxGexPressureMatrix([
+      buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, baselineValues),
+      buildPressureSnapshot("2026-05-27T14:00:00.000Z", 6005, currentValues),
+    ]);
+    const geometry = buildSpxGexPressureChartGeometry(pressure, [[
+      { time: 1, minuteEt: 585, timeEt: "09:45", price: 6005 },
+    ]], 34, 25, 25);
+
+    assert.equal(geometry.resolution, "15m-fallback");
+    assert.equal(geometry.expectedMoveRange, null);
+    assert.equal(getSpxGexExpectedMoveWarning({
+      provider: "0dtespx",
+      status: "READY",
+      expectedMove: { status: "UNAVAILABLE", errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE" },
+    }), "0DTESPX Expected Move unavailable (ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE).");
+    assert.equal(getSpxGexExpectedMoveWarning({
+      provider: "yahoo",
+      status: "READY",
+      expectedMove: { status: "UNAVAILABLE", errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE" },
+    }), null);
   });
 
   it("uses 15-minute fallback segments without drawing across a missing GEX slot", () => {

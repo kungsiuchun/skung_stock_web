@@ -121,6 +121,17 @@ export interface SpxGexPressureChartGeometry {
   expectedMoveRange: { value: number; upper: { price: number; y: number }; lower: { price: number; y: number } } | null;
 }
 
+export const getSpxGexExpectedMoveWarning = (source: {
+  provider?: string | null;
+  status?: "READY" | "STALE" | "UNAVAILABLE";
+  expectedMove?: { status: "READY" | "UNAVAILABLE"; errorCode: string | null };
+} | null | undefined) => {
+  if (source?.provider !== "0dtespx" || source.status !== "READY" || source.expectedMove?.status !== "UNAVAILABLE") {
+    return null;
+  }
+  return `0DTESPX Expected Move unavailable (${source.expectedMove.errorCode || "source did not provide a valid current value"}).`;
+};
+
 export interface SpxGexPressureFrame {
   tradingDate: string;
   snapshotMinuteEt: number;
