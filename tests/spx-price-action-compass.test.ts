@@ -379,6 +379,14 @@ describe("0DTESPX intraday normalization", () => {
     assert.equal(staleExpectedMove.expectedMove.status, "UNAVAILABLE");
     assert.equal(staleExpectedMove.expectedMove.errorCode, "ZERO_DTE_SPX_EXPECTED_MOVE_STALE");
 
+    const latestInvalidExpectedMove = normalizeZeroDteSpxOneMinuteCandles([
+      { datetimeUnix: Math.floor((now - 60_000) / 1_000), spx: "6000", spxExpectedMove: "30" },
+      { datetimeUnix: Math.floor(now / 1_000), spx: "6001", spxExpectedMove: "bad" },
+    ], now);
+    assert.deepEqual(latestInvalidExpectedMove.expectedMove, {
+      status: "UNAVAILABLE", value: null, sampleAt: null, errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE",
+    });
+
     const futureExpectedMove = normalizeZeroDteSpxOneMinuteCandles([
       { datetimeUnix: Math.floor((now - 1_000) / 1_000), spx: "6000" },
       { datetimeUnix: Math.floor(now / 1_000), spx: "6001" },

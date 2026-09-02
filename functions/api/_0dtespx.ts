@@ -121,11 +121,15 @@ export const normalizeZeroDteSpxOneMinuteCandles = (
   const latestSampleAt = new Date(points[points.length - 1].time).toISOString();
   if (!isFreshSpx0DteSample(points[points.length - 1].time, now)) throw new ZeroDteSpxError("ZERO_DTE_SPX_STALE");
   const latestExpectedMove = rows
-    .map((row) => ({ time: asTimestamp(row), value: asExpectedMove(row.spx_expected_move ?? row.spxExpectedMove) }))
-    .filter((row): row is { time: number; value: number } => row.time !== null && row.value !== null)
+    .map((row) => ({
+      time: asTimestamp(row),
+      hasExpectedMove: "spx_expected_move" in row || "spxExpectedMove" in row,
+      value: asExpectedMove(row.spx_expected_move ?? row.spxExpectedMove),
+    }))
+    .filter((row): row is { time: number; hasExpectedMove: true; value: number | null } => row.time !== null && row.hasExpectedMove)
     .sort((left, right) => left.time - right.time)
     .at(-1) || null;
-  const expectedMove: ZeroDteSpxExpectedMove = !latestExpectedMove
+  const expectedMove: ZeroDteSpxExpectedMove = !latestExpectedMove || latestExpectedMove.value === null
     ? { status: "UNAVAILABLE", value: null, sampleAt: null, errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE" }
     : !isFreshSpx0DteSample(latestExpectedMove.time, now)
       ? { status: "UNAVAILABLE", value: null, sampleAt: new Date(latestExpectedMove.time).toISOString(), errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_STALE" }
