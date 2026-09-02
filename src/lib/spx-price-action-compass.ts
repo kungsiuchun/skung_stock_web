@@ -1,5 +1,15 @@
 export type SpxPriceActionTimeframe = "1m" | "5m" | "15m" | "4h" | "1d";
 
+export const SPX_0DTE_STALE_AFTER_MS = 10 * 60 * 1_000;
+
+export const isFreshSpx0DteSample = (sampleAt: string | number | null | undefined, nowMs = Date.now()) => {
+  const sampleMs = typeof sampleAt === "number"
+    ? sampleAt
+    : typeof sampleAt === "string" ? Date.parse(sampleAt) : Number.NaN;
+  const ageMs = nowMs - sampleMs;
+  return Number.isFinite(sampleMs) && ageMs >= 0 && ageMs <= SPX_0DTE_STALE_AFTER_MS;
+};
+
 export type SpxPriceActionPatternType =
   | "PIN_BAR_BULLISH"
   | "PIN_BAR_BEARISH"
@@ -183,6 +193,12 @@ export interface SpxPriceActionSource {
   fetchedAt: string;
   latestSampleAt?: string | null;
   status?: "READY" | "STALE" | "UNAVAILABLE";
+  expectedMove?: {
+    status: "READY" | "UNAVAILABLE";
+    value: number | null;
+    sampleAt: string | null;
+    errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE" | "ZERO_DTE_SPX_EXPECTED_MOVE_STALE" | null;
+  };
   note: string;
 }
 

@@ -1,4 +1,5 @@
 import type { SpxGexHeatmapModel } from "./spx-gex-heatmap";
+import { isFreshSpx0DteSample } from "./spx-price-action-compass";
 
 const OPEN_MINUTE_ET = 9 * 60 + 30;
 const CLOSE_MINUTE_ET = 16 * 60;
@@ -118,7 +119,38 @@ export interface SpxGexPressureChartGeometry {
   segments: SpxGexPressureChartPoint[][];
   latestPoint: SpxGexPressureChartPoint | null;
   spotGuide: { price: number; y: number; timeEt: string } | null;
+  expectedMoveRange: { value: number; upper: { price: number; y: number }; lower: { price: number; y: number } } | null;
 }
+
+export const resolveSpxGexExpectedMoveOverlay = (input: {
+  source: {
+    provider?: string | null;
+    status?: "READY" | "STALE" | "UNAVAILABLE";
+    latestSampleAt?: string | null;
+    expectedMove?: { status: "READY" | "UNAVAILABLE"; value: number | null; sampleAt: string | null; errorCode: string | null };
+  } | null | undefined;
+  selectedDate: string;
+  currentTradingDate: string;
+  nowMs?: number;
+}) => {
+  const nowMs = input.nowMs ?? Date.now();
+  const source = input.source;
+  const currentContextIsFresh = input.selectedDate === input.currentTradingDate
+    && source?.provider === "0dtespx"
+    && source.status === "READY"
+    && isFreshSpx0DteSample(source.latestSampleAt, nowMs);
+  if (!currentContextIsFresh) return { expectedMove: null, warning: null };
+  const expectedMove = source.expectedMove;
+  if (expectedMove?.status === "READY"
+    && finite(expectedMove.value)
+    && expectedMove.value > 0
+    && isFreshSpx0DteSample(expectedMove.sampleAt, nowMs)) {
+    return { expectedMove: expectedMove.value, warning: null };
+  }
+  const errorCode = expectedMove?.errorCode
+    || (expectedMove?.sampleAt ? "ZERO_DTE_SPX_EXPECTED_MOVE_STALE" : "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE");
+  return { expectedMove: null, warning: `0DTESPX Expected Move unavailable (${errorCode}).` };
+};
 
 export interface SpxGexPressureFrame {
   tradingDate: string;
@@ -279,6 +311,7 @@ export const buildSpxGexPressureChartGeometry = (
   oneMinuteSegments: SpxGexPressureSpotPoint[][],
   cellWidth: number,
   rowHeight: number,
+  expectedMove: number | null = null,
 ): SpxGexPressureChartGeometry => {
   const width = pressure.timeline.length * cellWidth;
   const height = pressure.rows.length * rowHeight;
@@ -307,12 +340,20 @@ export const buildSpxGexPressureChartGeometry = (
       }, []);
   const latestSegment = segments.length > 0 ? segments[segments.length - 1] : null;
   const latestPoint = latestSegment && latestSegment.length > 0 ? latestSegment[latestSegment.length - 1] : null;
+  const expectedMoveRange = usingOneMinute && latestPoint && finite(expectedMove) && expectedMove > 0
+    ? {
+      value: expectedMove,
+      upper: { price: latestPoint.price + expectedMove, y: toPoint({ ...latestPoint, price: latestPoint.price + expectedMove }).y },
+      lower: { price: latestPoint.price - expectedMove, y: toPoint({ ...latestPoint, price: latestPoint.price - expectedMove }).y },
+    }
+    : null;
   return {
     resolution: usingOneMinute ? "1m" : "15m-fallback",
     pointCount: usingOneMinute ? oneMinutePointCount : segments.reduce((total, segment) => total + segment.length, 0),
     segments,
     latestPoint,
     spotGuide: latestPoint ? { price: latestPoint.price, y: latestPoint.y, timeEt: latestPoint.timeEt } : null,
+    expectedMoveRange,
   };
 };
 

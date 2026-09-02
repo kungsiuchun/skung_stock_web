@@ -264,9 +264,9 @@ describe("SPX Price Action Compass API", () => {
       calls.push({ url, authorization: new Headers(init?.headers).get("authorization") });
       if (url.endsWith("/market-data/sessions")) return Response.json({ [sessionDate]: { current: true } });
       return Response.json([
-        { datetime, datetimeUnix: Math.floor(now / 1000) - 2, spx: "6000.25" },
-        { datetime: new Date(now - 1_000).toISOString(), datetimeUnix: Math.floor(now / 1000) - 1, spx: "6001.50" },
-        { datetime: new Date(now).toISOString(), datetimeUnix: Math.floor(now / 1000), spx: "5999.75" },
+        { datetime, datetimeUnix: Math.floor(now / 1000) - 2, spx: "6000.25", spx_expected_move: "42.5" },
+        { datetime: new Date(now - 1_000).toISOString(), datetimeUnix: Math.floor(now / 1000) - 1, spx: "6001.50", spx_expected_move: "42.75" },
+        { datetime: new Date(now).toISOString(), datetimeUnix: Math.floor(now / 1000), spx: "5999.75", spx_expected_move: "43" },
       ]);
     }) as typeof fetch;
     try {
@@ -274,7 +274,7 @@ describe("SPX Price Action Compass API", () => {
         request: new Request("https://example.com/api/spx-price-action-compass?timeframe=1m"),
         env: { ZERO_DTE_SPX_API_TOKEN: "secret-token" },
       });
-      const payload = await response.json() as { source: { provider: string; interval: string; latestSampleAt: string; status: string }; candles: SpxPriceActionCandle[] };
+      const payload = await response.json() as { source: { provider: string; interval: string; latestSampleAt: string; status: string; expectedMove: { status: string; value: number; sampleAt: string } }; candles: SpxPriceActionCandle[] };
 
       assert.equal(response.status, 200);
       assert.equal(response.headers.get("cache-control"), "public, max-age=300");
@@ -282,6 +282,7 @@ describe("SPX Price Action Compass API", () => {
       assert.equal(payload.source.interval, "1s->1m");
       assert.equal(payload.source.status, "READY");
       assert.ok(payload.source.latestSampleAt);
+      assert.deepEqual(payload.source.expectedMove, { status: "READY", value: 43, sampleAt: new Date(now).toISOString(), errorCode: null });
       assert.equal(payload.candles.length, 1);
       assert.equal(payload.candles[0].open, 6000.25);
       assert.equal(payload.candles[0].high, 6001.5);
@@ -353,6 +354,47 @@ describe("0DTESPX intraday normalization", () => {
       () => normalizeZeroDteSpxOneMinuteCandles([{ datetimeUnix: "bad", spx: "n/a" }], Date.now()),
       (error: unknown) => error instanceof ZeroDteSpxError && error.code === "ZERO_DTE_SPX_RESPONSE_INVALID",
     );
+    assert.throws(
+      () => normalizeZeroDteSpxOneMinuteCandles([{ datetimeUnix: 1_787_237_300, spx: "6000" }], 1_787_236_700_000),
+      (error: unknown) => error instanceof ZeroDteSpxError && error.code === "ZERO_DTE_SPX_STALE",
+    );
+  });
+
+  it("keeps valid SPX candles when expected move is absent or stale", () => {
+    const now = Date.parse("2026-08-20T14:31:03.000Z");
+    const unavailable = normalizeZeroDteSpxOneMinuteCandles([
+      { datetimeUnix: Math.floor((now - 1_000) / 1_000), spx: "6000", spxExpectedMove: "0" },
+      { datetimeUnix: Math.floor(now / 1_000), spx: "6001", spxExpectedMove: "bad" },
+    ], now);
+    assert.equal(unavailable.candles.length, 1);
+    assert.deepEqual(unavailable.expectedMove, {
+      status: "UNAVAILABLE", value: null, sampleAt: null, errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE",
+    });
+
+    const staleExpectedMove = normalizeZeroDteSpxOneMinuteCandles([
+      { datetimeUnix: Math.floor((now - 11 * 60_000) / 1_000), spx: "5999", spxExpectedMove: "30" },
+      { datetimeUnix: Math.floor(now / 1_000), spx: "6001" },
+    ], now);
+    assert.equal(staleExpectedMove.candles.length, 2);
+    assert.equal(staleExpectedMove.expectedMove.status, "UNAVAILABLE");
+    assert.equal(staleExpectedMove.expectedMove.errorCode, "ZERO_DTE_SPX_EXPECTED_MOVE_STALE");
+
+    const latestInvalidExpectedMove = normalizeZeroDteSpxOneMinuteCandles([
+      { datetimeUnix: Math.floor((now - 60_000) / 1_000), spx: "6000", spxExpectedMove: "30" },
+      { datetimeUnix: Math.floor(now / 1_000), spx: "6001", spxExpectedMove: "bad" },
+    ], now);
+    assert.deepEqual(latestInvalidExpectedMove.expectedMove, {
+      status: "UNAVAILABLE", value: null, sampleAt: null, errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE",
+    });
+
+    const futureExpectedMove = normalizeZeroDteSpxOneMinuteCandles([
+      { datetimeUnix: Math.floor((now - 1_000) / 1_000), spx: "6000" },
+      { datetimeUnix: Math.floor(now / 1_000), spx: "6001" },
+      { datetimeUnix: Math.floor((now + 60_000) / 1_000), spxExpectedMove: "30" },
+    ], now);
+    assert.equal(futureExpectedMove.candles.length, 1);
+    assert.equal(futureExpectedMove.expectedMove.status, "UNAVAILABLE");
+    assert.equal(futureExpectedMove.expectedMove.errorCode, "ZERO_DTE_SPX_EXPECTED_MOVE_STALE");
   });
 
   it("requires a server-side token before making a 0DTESPX request", async () => {

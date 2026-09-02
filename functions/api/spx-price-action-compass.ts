@@ -103,6 +103,7 @@ async function onRequestUncached(context: Context) {
           latestSampleAt: intraday.latestSampleAt,
           status: "READY",
           note: "Server-side normalized 1-minute SPX context; source does not provide volume.",
+          expectedMove: intraday.expectedMove,
         };
       } else {
         rawCandles = toSpxPriceActionCandles(await fetchNativeYahooHistory("SPX", config.yahooRange, config.yahooInterval));

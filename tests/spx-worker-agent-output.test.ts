@@ -37,6 +37,7 @@ import {
   runSpxUatLlm,
   runSpxUatReplay,
   resolveAttemptTimeoutMs,
+  resolveCioDegradedReason,
   SPX_CIO_TIMING_POLICY,
   SPX_COUNCIL_TIMING_POLICY,
   shouldRunLlmCio,
@@ -159,6 +160,7 @@ test("M5 analysis excludes the in-progress and zero-volume phantom candles", () 
 
 test("0DTE rules use VIX and VIX9D without a removed VIX3M penalty", () => {
   const result = analyzeZeroDteRules({
+    now: new Date("2026-07-14T18:30:59.000Z"),
     etNow: new Date("2026-07-14T18:30:59.000Z"),
     spxInd: {
       currentClose: 7550.55,
@@ -183,6 +185,41 @@ test("0DTE rules use VIX and VIX9D without a removed VIX3M penalty", () => {
   assert.equal(result.softWarnings.includes("vix_term_structure_missing"), false);
   assert.equal(result.dataQuality.status, "OK");
   assert.equal(result.tradeEligibility.hardBlocked, false);
+});
+
+test("a 15-minute call pullback inside its entry plan is reviewed, never force-closed", () => {
+  const now = new Date("2026-08-27T14:45:00.000Z");
+  const result = analyzeZeroDteRules({
+    now,
+    etNow: new Date("2026-08-27T10:45:00.000Z"),
+    spxInd: {
+      currentClose: 7713.38,
+      ema9: 7712.8,
+      ema20: 7711.9,
+      currentVWAP: 7711.2,
+      macd: { histogram: 0.3 },
+    },
+    m5Analysis: { volumeSurge: 1.1, currentM5Vol: 20_000_000, avgM5Vol: 18_000_000 },
+    currentVix: 16.2,
+    currentVix9d: 15.9,
+    pcrValue: 1.0,
+    calculatedGex: { gammaStatus: "positive_gamma", gammaFlipLevel: 7712.32 } as any,
+    trendDayContext: { regime: "BULL_TREND_DAY", directionalBias: "CALL" },
+    intradayStructure: { repeatedSupport: null, repeatedResistance: null },
+    dailyMemory: {
+      currentPosition: "CALL",
+      entryPrice: 7714.72,
+      entryTime: "2026/08/27 10:30:00",
+      actionLog: [{ action: "買入 Call", stopLoss: "7688.79" }],
+    },
+    sentimentData: { score: 0, label: "neutral", reason: "disabled" },
+    priceActionContext: { macroTrend: "UPTREND" },
+    marketDataQuality: { overallStatus: "OK", hardBlocks: [], warnings: [] },
+  } as any);
+
+  assert.equal(result.verdict, "TRADE_ALLOWED");
+  assert.equal(result.hardBlocks.includes("position_no_follow_through_after_15m"), false);
+  assert.equal(result.softWarnings.includes("position_review_15m_no_follow_through"), true);
 });
 
 test("OpenRouter request profiles keep every GPT-5 Mini decision role Azure-only with minimal reasoning and JSON mode", () => {
@@ -329,6 +366,21 @@ test("CIO typed validator reports precise confidence contract fields", () => {
   assert.deepEqual(validateCioModelPlan({ ...valid, confidence_score: "56" }, allowed), { ok: false, invalidField: "confidence_score_not_number" });
   assert.deepEqual(validateCioModelPlan({ ...valid, confidence_score: 0 }, allowed), { ok: false, invalidField: "confidence_score_out_of_range" });
   assert.deepEqual(validateCioModelPlan({ ...valid, confidence_score: 101 }, allowed), { ok: false, invalidField: "confidence_score_out_of_range" });
+});
+
+test("CIO persistence keeps the precise contract failure over generic validation", () => {
+  assert.equal(resolveCioDegradedReason(
+    "cio_schema_invalid_confidence_score_not_integer",
+    undefined,
+    "INVALID_SCHEMA",
+    "cio_model_INVALID_SCHEMA",
+  ), "cio_schema_invalid_confidence_score_not_integer");
+  assert.equal(resolveCioDegradedReason(
+    undefined,
+    undefined,
+    "TIMEOUT",
+    "cio_model_TIMEOUT",
+  ), "cio_timeout");
 });
 
 test("M5 context marks missing 0DTESPX volume as unavailable instead of throwing", () => {
@@ -1216,6 +1268,24 @@ test("CIO retries Azure 408 within the 30-second budget without provider fallbac
   assert.deepEqual(result.attempts.map((attempt) => attempt.providerOrder), [["azure"], ["azure"]]);
   assert.equal(result.attempts[0].attemptTimeoutMs, 20_000);
   assert.equal(result.attempts[1].attemptTimeoutMs, 10_000);
+});
+
+test("Council and CIO retry transport failures once", async () => {
+  for (const callKind of ["agent", "cio"] as const) {
+    let calls = 0;
+    const result = await runStructuredOpenRouterRequest({
+      callKind,
+      apiKey: "test-key",
+      model: callKind === "cio" ? "openai/gpt-5-mini" : "same-model",
+      messages: [],
+      fetcher: async () => {
+        calls += 1;
+        throw new TypeError("fetch failed");
+      },
+    });
+    assert.equal(calls, 2);
+    assert.deepEqual(result.attempts.map((attempt) => attempt.status), ["REQUEST_FAILED", "REQUEST_FAILED"]);
+  }
 });
 
 test("OpenRouter retry policy retries 429 and 5xx but fails fast on 401, 402, and 403", async () => {
