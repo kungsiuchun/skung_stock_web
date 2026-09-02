@@ -93,6 +93,34 @@ ON CONFLICT(trading_date, snapshot_minute_et) DO UPDATE SET
   snapshot_json=excluded.snapshot_json,
   updated_at=excluded.updated_at;`;
 }).join("\n");
+const pressureProjectionsSql = intradayFixtures.map((frame) => {
+  if (!frame.session || !frame.canonical) throw new Error("SPX pressure UAT frame is missing canonical session metadata.");
+  const expiry = frame.zeroDte.expiry;
+  const gexByStrike = frame.cells
+    .filter((cell) => cell.expdate === expiry && typeof cell.strike === "number" && typeof cell.netGex === "number")
+    .map((cell) => ({ strike: cell.strike, netGex: cell.netGex }));
+  if (!expiry || gexByStrike.length === 0) throw new Error("SPX pressure UAT frame is missing finite 0DTE GEX.");
+  return `
+INSERT INTO spx_gex_pressure_projections
+  (trading_date, snapshot_minute_et, snapshot_time_et, collected_minute_et, collected_time_et, generated_at, spot, expiry, calculation_engine_version, provider, fallback_from, source_timestamp, snapshot_id, payload_hash, gex_json, created_at, updated_at)
+VALUES
+  (${quote(frame.session.tradingDate)}, ${frame.session.snapshotMinuteEt}, ${quote(frame.session.snapshotTimeEt)}, ${frame.session.collectedMinuteEt}, ${quote(frame.session.collectedTimeEt)}, ${quote(frame.generatedAt)}, ${frame.session.spot}, ${quote(expiry)}, ${frame.source.calculationEngineVersion || 1}, ${quote(frame.canonical.provider)}, ${frame.canonical.fallbackFrom === null ? "NULL" : quote(frame.canonical.fallbackFrom)}, ${frame.canonical.sourceTimestamp === null ? "NULL" : quote(frame.canonical.sourceTimestamp)}, ${quote(frame.canonical.snapshotId)}, ${quote(frame.canonical.payloadHash)}, ${json(gexByStrike)}, ${quote(frame.generatedAt)}, ${quote(frame.generatedAt)})
+ON CONFLICT(trading_date, snapshot_minute_et) DO UPDATE SET
+  snapshot_time_et=excluded.snapshot_time_et,
+  collected_minute_et=excluded.collected_minute_et,
+  collected_time_et=excluded.collected_time_et,
+  generated_at=excluded.generated_at,
+  spot=excluded.spot,
+  expiry=excluded.expiry,
+  calculation_engine_version=excluded.calculation_engine_version,
+  provider=excluded.provider,
+  fallback_from=excluded.fallback_from,
+  source_timestamp=excluded.source_timestamp,
+  snapshot_id=excluded.snapshot_id,
+  payload_hash=excluded.payload_hash,
+  gex_json=excluded.gex_json,
+  updated_at=excluded.updated_at;`;
+}).join("\n");
 const council = {
   status: "OK",
   latencyMs: 480,
@@ -199,6 +227,7 @@ VALUES
 
 const sql = `
 ${intradaySnapshotsSql}
+${pressureProjectionsSql}
 
 INSERT INTO spx_gex_collection_runs
   (slot_id, trading_date, snapshot_minute_et, snapshot_time_et, collected_minute_et, collected_time_et, current_stage, snapshot_id, payload_hash, provider, fallback_from, error, created_at, updated_at)

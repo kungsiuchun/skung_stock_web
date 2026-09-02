@@ -8,7 +8,7 @@ A full-stack AI-powered portfolio site with an embedded **Finance Analyzer Dashb
 - **Backend**: Cloudflare Pages Functions (Workers runtime)
 - **Charting**: TradingView `lightweight-charts` (K-line/OHLC), Recharts (VIX line chart)
 - **AI Agent**: OpenRouter LLM + multi-tool ReAct agent
-- **Data Sources**: Yahoo Finance API (prices, VIX), EastMoney (A-share fund flow)
+- **Data Sources**: 0DTESPX (current-RTH SPX and Expected Move), Yahoo Finance (historical SPX, VIX), CBOE→D1 (canonical SPX GEX), EastMoney (A-share fund flow)
 
 ## 🏗️ Architecture
 
