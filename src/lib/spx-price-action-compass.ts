@@ -6,7 +6,8 @@ export const isFreshSpx0DteSample = (sampleAt: string | number | null | undefine
   const sampleMs = typeof sampleAt === "number"
     ? sampleAt
     : typeof sampleAt === "string" ? Date.parse(sampleAt) : Number.NaN;
-  return Number.isFinite(sampleMs) && nowMs - sampleMs <= SPX_0DTE_STALE_AFTER_MS;
+  const ageMs = nowMs - sampleMs;
+  return Number.isFinite(sampleMs) && ageMs >= 0 && ageMs <= SPX_0DTE_STALE_AFTER_MS;
 };
 
 export type SpxPriceActionPatternType =

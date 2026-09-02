@@ -354,6 +354,10 @@ describe("0DTESPX intraday normalization", () => {
       () => normalizeZeroDteSpxOneMinuteCandles([{ datetimeUnix: "bad", spx: "n/a" }], Date.now()),
       (error: unknown) => error instanceof ZeroDteSpxError && error.code === "ZERO_DTE_SPX_RESPONSE_INVALID",
     );
+    assert.throws(
+      () => normalizeZeroDteSpxOneMinuteCandles([{ datetimeUnix: 1_787_237_300, spx: "6000" }], 1_787_236_700_000),
+      (error: unknown) => error instanceof ZeroDteSpxError && error.code === "ZERO_DTE_SPX_STALE",
+    );
   });
 
   it("keeps valid SPX candles when expected move is absent or stale", () => {
@@ -374,6 +378,15 @@ describe("0DTESPX intraday normalization", () => {
     assert.equal(staleExpectedMove.candles.length, 2);
     assert.equal(staleExpectedMove.expectedMove.status, "UNAVAILABLE");
     assert.equal(staleExpectedMove.expectedMove.errorCode, "ZERO_DTE_SPX_EXPECTED_MOVE_STALE");
+
+    const futureExpectedMove = normalizeZeroDteSpxOneMinuteCandles([
+      { datetimeUnix: Math.floor((now - 1_000) / 1_000), spx: "6000" },
+      { datetimeUnix: Math.floor(now / 1_000), spx: "6001" },
+      { datetimeUnix: Math.floor((now + 60_000) / 1_000), spxExpectedMove: "30" },
+    ], now);
+    assert.equal(futureExpectedMove.candles.length, 1);
+    assert.equal(futureExpectedMove.expectedMove.status, "UNAVAILABLE");
+    assert.equal(futureExpectedMove.expectedMove.errorCode, "ZERO_DTE_SPX_EXPECTED_MOVE_STALE");
   });
 
   it("requires a server-side token before making a 0DTESPX request", async () => {

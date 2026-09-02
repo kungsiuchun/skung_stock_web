@@ -160,6 +160,7 @@ test("M5 analysis excludes the in-progress and zero-volume phantom candles", () 
 
 test("0DTE rules use VIX and VIX9D without a removed VIX3M penalty", () => {
   const result = analyzeZeroDteRules({
+    now: new Date("2026-07-14T18:30:59.000Z"),
     etNow: new Date("2026-07-14T18:30:59.000Z"),
     spxInd: {
       currentClose: 7550.55,
@@ -187,8 +188,10 @@ test("0DTE rules use VIX and VIX9D without a removed VIX3M penalty", () => {
 });
 
 test("a 15-minute call pullback inside its entry plan is reviewed, never force-closed", () => {
+  const now = new Date("2026-08-27T14:45:00.000Z");
   const result = analyzeZeroDteRules({
-    etNow: new Date("2026-08-27T14:45:00.000Z"),
+    now,
+    etNow: new Date("2026-08-27T10:45:00.000Z"),
     spxInd: {
       currentClose: 7713.38,
       ema9: 7712.8,

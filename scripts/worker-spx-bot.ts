@@ -2492,6 +2492,7 @@ function appendPlanSnapshot(
 }
 
 export function analyzeZeroDteRules(args: {
+  now: Date;
   etNow: Date;
   spxInd: any;
   m5Analysis: { volumeSurge: number; currentM5Vol?: number; avgM5Vol?: number };
@@ -2507,6 +2508,7 @@ export function analyzeZeroDteRules(args: {
   marketDataQuality?: MarketDataQualitySummary;
 }): ZeroDteRuleEngineResult {
   const {
+    now,
     etNow,
     spxInd,
     m5Analysis,
@@ -2633,7 +2635,7 @@ export function analyzeZeroDteRules(args: {
 
   if (dailyMemory.currentPosition !== "NONE" && dailyMemory.entryPrice != null) {
     const entryDate = parseEtTimestamp(dailyMemory.entryTime);
-    const elapsedMinutes = entryDate ? (etNow.getTime() - entryDate.getTime()) / 60000 : null;
+    const elapsedMinutes = entryDate ? (now.getTime() - entryDate.getTime()) / 60000 : null;
     const expectedMove =
       dailyMemory.currentPosition === "CALL"
         ? currentPrice - dailyMemory.entryPrice
@@ -3577,6 +3579,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
     const priceActionContext = calculatePriceActionContext(spxQuotesD1, spxQuotesH1);
     const intradayStructure = computeIntradayStructureContext(m5QuotesValid, spxInd.currentClose);
     const zeroDteRuleEngine = analyzeZeroDteRules({
+      now,
       etNow,
       spxInd,
       m5Analysis,
