@@ -1369,7 +1369,7 @@
 .siw-expiry-head,
 .siw-expiry-row {
   display: grid;
-  grid-template-columns: 82px 64px 70px 64px 32px;
+  grid-template-columns: 82px 64px minmax(82px, 1fr) minmax(82px, 1fr);
   gap: 8px;
   align-items: center;
 }
@@ -1441,6 +1441,76 @@
   display: flex;
   flex-direction: column;
 }
+
+.siw-chart-panel { display: flex; min-height: 0; flex: 1; flex-direction: column; gap: var(--siw-space-3); }
+
+.siw-chart-expiry-toolbar {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
+  border: 1px solid var(--siw-line-soft); border-radius: var(--siw-control-radius);
+  background: rgba(3, 10, 18, 0.62); padding: 10px 12px;
+}
+
+.siw-chart-expiry-toolbar label {
+  display: flex; align-items: center; gap: 8px; color: var(--siw-muted);
+  font-size: 11px; font-weight: 900; text-transform: uppercase;
+}
+
+.siw-chart-expiry-toolbar select {
+  min-width: 130px; border: 1px solid var(--siw-line); border-radius: 5px;
+  background: #06111d; color: var(--siw-text); padding: 7px 9px; font: inherit;
+}
+
+.siw-chart-gex-source { color: var(--siw-muted); font-size: 11px; font-weight: 750; }
+
+.siw-chart-options-layout {
+  display: grid; min-height: 0; flex: 1;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 0.42fr); gap: var(--siw-space-3);
+}
+
+.siw-chart-price-panel,
+.siw-chart-gex-panel {
+  min-width: 0; overflow: hidden; border: 1px solid var(--siw-line-soft);
+  border-radius: var(--siw-control-radius); background: rgba(3, 10, 18, 0.62); padding: var(--siw-space-3);
+}
+
+.siw-chart-price-panel { display: flex; min-height: 34rem; }
+.siw-chart-gex-panel { display: flex; min-height: 34rem; flex-direction: column; }
+
+.siw-chart-gex-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+  margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--siw-line-soft);
+}
+
+.siw-chart-gex-head strong,
+.siw-chart-gex-head span,
+.siw-chart-gex-head b { display: block; }
+.siw-chart-gex-head strong { color: var(--siw-blue-2); font-size: 13px; }
+.siw-chart-gex-head span { margin-top: 3px; color: var(--siw-muted); font-size: 11px; }
+.siw-chart-gex-head b { color: var(--siw-yellow); font-size: 11px; white-space: nowrap; }
+
+.siw-chart-gex-list { min-height: 0; flex: 1; overflow-y: auto; padding-right: 2px; }
+
+.siw-chart-gex-row {
+  display: grid; width: 100%; grid-template-columns: 3.5rem minmax(0, 1fr) 5.5rem;
+  align-items: center; gap: 7px; border: 0; border-bottom: 1px solid rgba(19, 46, 68, 0.68);
+  background: transparent; color: var(--siw-text); padding: 6px 2px; text-align: right;
+  font-family: var(--siw-font-mono); font-size: 11px;
+}
+
+.siw-chart-gex-row:hover,
+.siw-chart-gex-row.is-spot { background: rgba(17, 135, 255, 0.1); }
+.siw-chart-gex-row.is-spot { box-shadow: inset 2px 0 0 var(--siw-yellow); }
+
+.siw-chart-gex-track {
+  position: relative; display: block; height: 15px; overflow: hidden;
+  border-radius: 3px; background: rgba(15, 32, 48, 0.75);
+}
+
+.siw-chart-gex-zero { position: absolute; inset: 0 auto 0 50%; width: 1px; background: rgba(148, 163, 184, 0.72); }
+.siw-chart-gex-fill { position: absolute; top: 2px; bottom: 2px; border-radius: 2px; }
+.siw-chart-gex-fill.is-positive { left: 50%; background: var(--siw-green); }
+.siw-chart-gex-fill.is-negative { right: 50%; background: var(--siw-red); }
+.siw-chart-gex-row b { font-weight: 800; }
 
 .siw-options-subtabs {
   height: 48px;
@@ -2242,6 +2312,14 @@
   .siw-expiry-rail {
     max-height: 420px;
   }
+
+  .siw-chart-options-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .siw-chart-gex-panel {
+    min-height: 22rem;
+  }
 }
 
 @media (max-width: 780px) {
@@ -2435,18 +2513,16 @@
   }
 
   .siw-expiry-row {
-    display: inline-flex;
-    min-width: 148px;
+    display: grid;
+    min-width: 340px;
     min-height: 42px;
-    align-items: center;
-    justify-content: center;
     border: 1px solid var(--siw-line);
     border-radius: 6px;
     margin-right: 8px;
   }
 
   .siw-expiry-row span:not(:first-child) {
-    display: none;
+    display: block;
   }
 
   .siw-view-all {
@@ -2456,6 +2532,15 @@
 
   .siw-options-content [data-options-chart-viewport] {
     min-height: 340px;
+  }
+
+  .siw-chart-price-panel {
+    min-height: 27rem;
+    padding: 8px;
+  }
+
+  .siw-chart-gex-panel {
+    min-height: 20rem;
   }
 
   .siw-ai-grid,

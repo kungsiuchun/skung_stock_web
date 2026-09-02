@@ -27,6 +27,9 @@ export type StocksWatcherOptionsSubTab =
   | "Sweeps"
   | "0DTE";
 
+export const STOCKS_WATCHER_PRICE_RANGES = ["1mo", "3mo", "1y"] as const;
+export type StocksWatcherPriceRange = (typeof STOCKS_WATCHER_PRICE_RANGES)[number];
+
 export interface StocksWatcherToolCallPlan {
   name: string;
   params: Record<string, unknown>;
@@ -49,8 +52,11 @@ export const normalizeWatcherExpiryForYahoo = (expiry: string | null | undefined
   return expiry;
 };
 
-export const getStocksWatcherTopTabCacheKey = (symbol: string, tab: StocksWatcherTopTab) =>
-  `${normalizeSessionSymbol(symbol)}:${tab}`;
+export const getStocksWatcherTopTabCacheKey = (
+  symbol: string,
+  tab: StocksWatcherTopTab,
+  priceRange?: StocksWatcherPriceRange,
+) => `${normalizeSessionSymbol(symbol)}:${tab}${tab === "Chart" ? `:${priceRange || "3mo"}` : ""}`;
 
 export const getStocksWatcherOptionsSubTabCacheKey = (
   symbol: string,
@@ -75,10 +81,11 @@ export const getStocksWatcherYahooExpiryPreloadTargets = (
 export const getStocksWatcherTopTabToolPlan = (
   tab: StocksWatcherTopTab,
   symbol: string,
+  priceRange: StocksWatcherPriceRange = "3mo",
 ): StocksWatcherToolCallPlan[] => {
   const ticker = normalizeSessionSymbol(symbol);
   if (tab === "Overview") return [];
-  if (tab === "Chart") return [{ name: "get_intraday", params: { ticker } }];
+  if (tab === "Chart") return [{ name: "get_stock_history", params: { ticker, range: priceRange, interval: "1d" } }];
   if (tab === "Fundamentals") return [{ name: "get_stock_stats", params: { ticker } }];
   if (tab === "Stats") return [
     { name: "get_stock_stats", params: { ticker } },

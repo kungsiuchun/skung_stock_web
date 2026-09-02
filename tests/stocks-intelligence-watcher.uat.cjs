@@ -983,6 +983,25 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await clickText(page, "Chart");
     await wait(700);
     assert.equal(await page.$("[data-price-chart-surface]") !== null, true, "chart tab should render chart surface");
+    assert.deepEqual(
+      await page.$$eval("[data-primary-tab-panel='Chart'] [data-price-chart-range] button", (nodes) => Array.from(new Set(
+        nodes
+          .filter((node) => {
+            const style = window.getComputedStyle(node);
+            return style.display !== "none" && style.visibility !== "hidden" && node.getBoundingClientRect().width > 0;
+          })
+          .map((node) => node.textContent?.trim())
+          .filter((text) => ["1M", "3M", "1Y"].includes(text)),
+      ))),
+      ["1M", "3M", "1Y"],
+      "chart must expose only source-backed 1M, 3M and 1Y Daily ranges",
+    );
+    for (const [label, range] of [["1M", "1mo"], ["3M", "3mo"], ["1Y", "1y"]]) {
+      await clickText(page, label, true);
+      await wait(220);
+      assert.equal(await page.$eval("[data-price-chart-range]", (node) => node.getAttribute("data-price-chart-range")), range, `${label} must become the active source range`);
+      assert.ok(apiCalls.some((call) => call.tool === "get_stock_history" && call.params?.range === range && call.params?.interval === "1d"), `${label} must request Yahoo Daily ${range} data`);
+    }
     await page.screenshot({ path: path.join(screenshotsDir, "03-chart-tab-ohlc-volume-desktop.png") });
 
     await clickText(page, "Stats");
@@ -1164,6 +1183,28 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       "Robinhood eighth-expiry click must request the selected published chain",
     );
     assert.doesNotMatch(await visibleText(page), /No native Yahoo data for this expiry/i, "Robinhood data must never fall into a Yahoo-only empty state");
+
+    await clickText(page, "Chart", true);
+    await wait(600);
+    assert.equal(await page.$("[data-chart-gex-by-strike]") !== null, true, "chart tab must include the Net GEX-by-strike panel");
+    assert.equal(await page.$$eval("[data-chart-gex-bar]", (nodes) => nodes.length > 5), true, "chart GEX panel must render source-backed strike bars");
+    assert.match(await page.$eval("[data-chart-gex-provenance]", (node) => node.textContent || ""), /Robinhood MCP EOD[\s\S]*OI-signed proxy, not dealer GEX/i, "chart GEX panel must expose the Robinhood proxy methodology");
+    await page.evaluate(() => document.querySelector(".siw-main-scroll")?.scrollTo({ top: 0 }));
+    await wait(150);
+    await page.screenshot({ path: path.join(screenshotsDir, "03b-chart-gex-proxy-desktop.png") });
+    const chartExpiry = expiries[1];
+    const chartExpiryCallsBefore = apiCalls.length;
+    await page.select("select[aria-label='Chart GEX expiry']", chartExpiry);
+    await wait(300);
+    assert.equal(await page.$eval("select[aria-label='Chart GEX expiry']", (node) => node.value), chartExpiry, "chart expiry selector must keep the selected expiry");
+    assert.ok(apiCalls.slice(chartExpiryCallsBefore).some((call) => call.tool === "get_options_gex" && call.params?.expiry === chartExpiry), "chart expiry selection must request matching GEX data");
+    assert.equal(await page.$$eval("[data-chart-gex-spot='true']", (nodes) => nodes.length), 1, "chart GEX panel must mark the spot-nearest strike");
+    await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 1 });
+    await wait(180);
+    assert.equal(await page.$eval("[data-chart-gex-by-strike]", (node) => node.scrollWidth <= node.clientWidth), true, "mobile chart GEX panel must not overflow horizontally");
+    await page.setViewport({ width: 1248, height: 986, deviceScaleFactor: 1 });
+    await clickText(page, "Options", true);
+    await wait(180);
 
     delayedSnapshotSymbol = "QQQI";
     await page.click("[data-watcher-replica] [data-watchlist-row='AAPL']");
