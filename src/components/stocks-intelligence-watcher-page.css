@@ -498,6 +498,10 @@
   color: var(--siw-red);
 }
 
+.siw-unavailable {
+  color: var(--siw-muted);
+}
+
 .siw-sidebar-actions {
   flex: 0 0 auto;
   gap: 0;
@@ -1346,7 +1350,7 @@
 
 .siw-options-stage {
   display: grid;
-  grid-template-columns: minmax(370px, 400px) minmax(0, 1fr);
+  grid-template-columns: minmax(320px, 344px) minmax(0, 1fr);
   gap: var(--siw-space-4);
   min-height: 640px;
   align-items: stretch;
@@ -1369,13 +1373,13 @@
 .siw-expiry-head,
 .siw-expiry-row {
   display: grid;
-  grid-template-columns: 82px 64px minmax(82px, 1fr) minmax(82px, 1fr);
-  gap: 8px;
+  grid-template-columns: 66px 48px minmax(72px, 1fr) minmax(72px, 1fr);
+  gap: 6px;
   align-items: center;
 }
 
 .siw-expiry-head {
-  padding: 12px;
+  padding: 12px 8px;
   border-bottom: 1px solid var(--siw-line-soft);
   color: var(--siw-muted);
   font-size: 11px;
@@ -1397,7 +1401,7 @@
   border-bottom: 1px solid var(--siw-line-soft);
   background: transparent;
   color: var(--siw-text);
-  padding: 8px 12px;
+  padding: 8px;
   text-align: left;
   font-size: 12px;
 }
@@ -1450,15 +1454,28 @@
   background: rgba(3, 10, 18, 0.62); padding: 10px 12px;
 }
 
-.siw-chart-expiry-toolbar label {
-  display: flex; align-items: center; gap: 8px; color: var(--siw-muted);
+.siw-chart-expiry-selector {
+  position: relative; display: flex; align-items: center; gap: 8px; color: var(--siw-muted);
   font-size: 11px; font-weight: 900; text-transform: uppercase;
 }
 
-.siw-chart-expiry-toolbar select {
-  min-width: 130px; border: 1px solid var(--siw-line); border-radius: 5px;
-  background: #06111d; color: var(--siw-text); padding: 7px 9px; font: inherit;
+.siw-chart-expiry-selector > button {
+  display: inline-flex; min-width: 148px; align-items: center; justify-content: space-between; gap: 8px;
+  border: 1px solid var(--siw-line); border-radius: 5px; background: #06111d; color: var(--siw-text);
+  padding: 7px 9px; font: inherit; text-transform: none;
 }
+
+.siw-chart-expiry-menu {
+  position: absolute; z-index: 8; top: calc(100% + 8px); left: 0; display: grid; min-width: 258px;
+  gap: 7px; border: 1px solid var(--siw-line); border-radius: 6px; background: #07131f;
+  padding: 10px; box-shadow: 0 12px 28px rgba(0, 0, 0, 0.42); text-transform: none;
+}
+
+.siw-chart-expiry-menu > strong { color: var(--siw-blue-2); font-size: 12px; }
+.siw-chart-expiry-menu > span { color: var(--siw-muted); font-size: 10px; line-height: 1.35; }
+.siw-chart-expiry-choice { display: flex; align-items: center; gap: 8px; color: var(--siw-text); font-size: 12px; font-weight: 800; }
+.siw-chart-expiry-choice input { accent-color: var(--siw-blue); }
+.siw-chart-expiry-choice b { margin-left: auto; color: var(--siw-yellow); font-size: 10px; }
 
 .siw-chart-gex-source { color: var(--siw-muted); font-size: 11px; font-weight: 750; }
 
@@ -1511,6 +1528,8 @@
 .siw-chart-gex-fill.is-positive { left: 50%; background: var(--siw-green); }
 .siw-chart-gex-fill.is-negative { right: 50%; background: var(--siw-red); }
 .siw-chart-gex-row b { font-weight: 800; }
+.siw-chart-gex-row small { color: var(--siw-muted); font-size: 9px; font-weight: 700; }
+.siw-chart-gex-unavailable { margin-bottom: 8px; color: var(--siw-muted); font-size: 10px; font-weight: 750; line-height: 1.4; }
 
 .siw-options-subtabs {
   height: 48px;
