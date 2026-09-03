@@ -49,6 +49,7 @@ interface SpxGexPressureMatrixProps {
   refreshKey: number;
   enabled?: boolean;
   controls: ReactNode;
+  onLiveSpotChange?: (spot: { price: number; timeEt: string; provider: "0dtespx" } | null) => void;
 }
 
 interface ActiveCell {
@@ -225,7 +226,7 @@ const MoverRow = ({ mover }: { mover: SpxGexPressureMover }) => {
   );
 };
 
-export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey, controls, enabled = true }: SpxGexPressureMatrixProps) {
+export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey, controls, enabled = true, onLiveSpotChange }: SpxGexPressureMatrixProps) {
   const [data, setData] = useState<PressureResponse | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
@@ -406,6 +407,11 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
   const spotLiveLabel = chartGeometry?.latestPoint
     ? `SPX ${spotFormatter.format(chartGeometry.latestPoint.price)} · ${chartGeometry.latestPoint.timeEt} ET`
     : null;
+  const liveZeroDteSpot = priceOverlay?.data?.source.provider === "0dtespx"
+    && priceOverlay.data.source.status === "READY"
+    && latestSpotPoint
+    ? { price: latestSpotPoint.price, timeEt: latestSpotPoint.timeEt, provider: "0dtespx" as const }
+    : null;
   const priceOverlayWarning = !usingOneMinuteSpot && !oneMinuteOverlayPending
     ? priceOverlay?.error || `No SPX 1-minute candles are available for ${selectedDate}; showing the canonical 15-minute snapshot line.`
     : null;
@@ -413,6 +419,11 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
   const expectedMoveLabel = chartGeometry?.expectedMoveRange
     ? `EM ±${spotFormatter.format(chartGeometry.expectedMoveRange.value)} · ${priceOverlay?.data?.source.expectedMove?.sampleAt ? formatEtTime(priceOverlay.data.source.expectedMove.sampleAt) : "current"} ET`
     : null;
+
+  useEffect(() => {
+    onLiveSpotChange?.(liveZeroDteSpot);
+    return () => onLiveSpotChange?.(null);
+  }, [liveZeroDteSpot?.price, liveZeroDteSpot?.timeEt, onLiveSpotChange]);
   const activateCell = useCallback((element: HTMLElement, strike: number, cell: SpxGexPressureCell, locked: boolean) => {
     if (locked) hoverSuppressedAfterScrollRef.current = false;
     const key = `${strike}-${cell.snapshotMinuteEt}`;
@@ -535,6 +546,24 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
                         >
                           <span>SPOT</span><span>{spotFormatter.format(chartGeometry.spotGuide.price)}</span>
                         </div>
+                      )}
+                      {chartGeometry?.expectedMoveRange && (
+                        <>
+                          <div
+                            className="pointer-events-none absolute left-0 z-40 flex w-full -translate-y-1/2 items-center justify-between border-y border-violet-300/70 bg-[#181235] px-1.5 py-0.5 text-[9px] font-black text-violet-100 shadow-[0_0_14px_rgba(196,181,253,.16)]"
+                            style={{ top: chartGeometry.expectedMoveRange.upper.y }}
+                            data-spx-gex-pressure-expected-move-upper-marker="true"
+                          >
+                            <span>EM +</span><span>{spotFormatter.format(chartGeometry.expectedMoveRange.upper.price)}</span>
+                          </div>
+                          <div
+                            className="pointer-events-none absolute left-0 z-40 flex w-full -translate-y-1/2 items-center justify-between border-y border-violet-300/70 bg-[#181235] px-1.5 py-0.5 text-[9px] font-black text-violet-100 shadow-[0_0_14px_rgba(196,181,253,.16)]"
+                            style={{ top: chartGeometry.expectedMoveRange.lower.y }}
+                            data-spx-gex-pressure-expected-move-lower-marker="true"
+                          >
+                            <span>EM −</span><span>{spotFormatter.format(chartGeometry.expectedMoveRange.lower.price)}</span>
+                          </div>
+                        </>
                       )}
                     </div>
                   </div>
