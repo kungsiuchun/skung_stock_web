@@ -249,6 +249,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const [auditDetail, setAuditDetail] = useState<SpxGexHeatmapCell | null>(null);
   const [auditDetailKey, setAuditDetailKey] = useState<string | null>(null);
   const [auditDetailError, setAuditDetailError] = useState<string | null>(null);
+  const [liveZeroDteSpot, setLiveZeroDteSpot] = useState<{ price: number; timeEt: string; provider: "0dtespx" } | null>(null);
   const activeAuditCellRef = useRef(activeAuditCell);
   const auditHoverSuppressedAfterScrollRef = useRef(false);
   activeAuditCellRef.current = activeAuditCell;
@@ -554,6 +555,14 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     timeEt: selectedSession?.snapshotTimeEt,
     resolution: "15m-canonical",
   }), [heatmap?.quote.last, selectedSession?.snapshotTimeEt]);
+  const headerSpot = liveZeroDteSpot
+    ? { label: `0DTE spot · ${liveZeroDteSpot.timeEt} ET`, price: liveZeroDteSpot.price, source: "0dtespx" as const }
+    : heatmap
+      ? { label: "Snapshot spot", price: heatmap.quote.last, source: "canonical" as const }
+      : null;
+  const onLiveSpotChange = useCallback((spot: { price: number; timeEt: string; provider: "0dtespx" } | null) => {
+    setLiveZeroDteSpot((current) => current?.price === spot?.price && current?.timeEt === spot?.timeEt ? current : spot);
+  }, []);
   const isDelayedSnapshot = Boolean(
     selectedSession &&
     selectedSession.collectedMinuteEt !== undefined &&
@@ -637,10 +646,10 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
               <span className="border border-amber-300/30 bg-amber-300/10 px-2 py-1 font-mono text-[10px] font-black tracking-[0.12em] text-amber-100">
                 {sourceModeLabel()}
               </span>
-              {heatmap && (
-                <span key={heatmapSpotPulseKey || "heatmap-spot"} className="spx-spot-live-pulse inline-flex items-center gap-1.5 border border-cyan-300/25 bg-cyan-300/10 px-2 py-1 font-mono text-xs font-black text-cyan-100" data-spx-gex-heatmap-spot-badge="true">
+              {headerSpot && (
+                <span key={headerSpot.source === "0dtespx" ? `${headerSpot.price}:${liveZeroDteSpot?.timeEt}` : heatmapSpotPulseKey || "heatmap-spot"} className="spx-spot-live-pulse inline-flex items-center gap-1.5 border border-cyan-300/25 bg-cyan-300/10 px-2 py-1 font-mono text-xs font-black text-cyan-100" data-spx-gex-heatmap-spot-badge="true" data-spx-gex-heatmap-spot-source={headerSpot.source}>
                   <span className="h-1.5 w-1.5 rounded-full bg-cyan-200 shadow-[0_0_7px_rgba(34,211,238,.9)]" aria-hidden="true" />
-                  Spot ${heatmap.quote.last.toFixed(2)}
+                  {headerSpot.label} ${headerSpot.price.toFixed(2)}
                 </span>
               )}
             </div>
@@ -686,6 +695,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
           refreshKey={pressureRefreshKey}
           enabled={initialCompassSettled}
           controls={snapshotControls}
+          onLiveSpotChange={onLiveSpotChange}
         />
 
         {loading && !heatmap ? (
