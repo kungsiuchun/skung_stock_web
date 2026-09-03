@@ -1319,6 +1319,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(mobileGexLayout.listPosition, "static", "stacked layout must use the readable flow list instead of absolute axis rows");
     assert.equal(mobileGexLayout.provenancePosition, "static", "stacked provenance must remain below the readable GEX list");
     assert.ok((mobileGexLayout.lastBarBottom ?? Infinity) <= (mobileGexLayout.provenanceTop ?? -Infinity), "stacked provenance must not cover the final GEX row");
+    await page.screenshot({ path: path.join(screenshotsDir, "03c-chart-gex-profile-mobile.png"), fullPage: true });
     await page.setViewport({ width: 1248, height: 986, deviceScaleFactor: 1 });
     await clickText(page, "Options", true);
     await wait(180);
