@@ -120,6 +120,10 @@ Stocks Intelligence Watcher uses a repo-native Yahoo backend; the browser receiv
 
 In Stocks Intelligence Watcher, an expiry row is a selectable expiration summary row. Clicking it changes the right-side Options panel to that expiration's OI, volume, GEX, DEX, Greeks, P/C, or chain data.
 
+In the desktop Chart Options view, the K-line remains on the left while the Net GEX-by-strike profile on the right shares its local price coordinates. The profile has no separate vertical scrollbar; its spot-nearest guide and aggregated strike rows remain aligned through page scrolling and Chart rerenders.
+
+On mobile, the Chart Options panels stack and the GEX profile uses a readable flow list.
+
 Contract rows belong in the Chain tab or strike drilldown. They are not the left-side expiry selector.
 
 ## S&P 500 Market Breadth
