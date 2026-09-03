@@ -1210,24 +1210,34 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     const descendingGexStrikes = await page.$$eval("[data-chart-gex-bar]", (nodes) => nodes.map((node) => Number(node.getAttribute("data-chart-gex-strike"))));
     assert.equal(descendingGexStrikes.every((strike, index) => index === 0 || descendingGexStrikes[index - 1] > strike), true, "Chart GEX strikes must descend from top to bottom so the lowest strike is at the bottom");
     assert.equal(await page.$$eval("[data-chart-gex-contributors]", (nodes) => nodes.some((node) => node.getAttribute("data-chart-gex-contributors") === "3/3")), true, "GEX bars must disclose their expiry contributor count");
-    const sharedAxis = await page.evaluate(() => {
-      const price = document.querySelector("[data-price-chart-range]");
-      const gex = document.querySelector("[data-chart-gex-axis]");
-      const bars = Array.from(document.querySelectorAll("[data-chart-gex-bar]"));
+    const measureGexBarCenters = () => page.$$eval("[data-chart-gex-bar]", (nodes) => nodes.map((node) => {
+      const bounds = node.getBoundingClientRect();
       return {
-        priceRange: price?.getAttribute("data-shared-price-axis-range"),
-        gexRange: gex?.getAttribute("data-chart-gex-axis-range"),
-        state: gex?.getAttribute("data-chart-gex-axis"),
-        coordinateCount: gex?.getAttribute("data-chart-gex-axis-coordinate-count"),
-        positions: bars.slice(0, 4).map((node) => ({
-          strike: Number(node.getAttribute("data-chart-gex-strike")),
-          position: Number(node.getAttribute("data-chart-gex-axis-position")),
-        })),
+        strike: Number(node.getAttribute("data-chart-gex-strike")),
+        center: bounds.top + bounds.height / 2,
       };
+    }));
+    const beforePriceScaleDrag = await measureGexBarCenters();
+    assert.equal(
+      beforePriceScaleDrag.every((row, index) => index === 0 || beforePriceScaleDrag[index - 1].center < row.center),
+      true,
+      "desktop GEX bars must render in the same high-to-low order as the price axis",
+    );
+    const priceScaleBounds = await page.$eval("[data-price-chart-range] canvas", (canvas) => {
+      const bounds = canvas.getBoundingClientRect();
+      return { left: bounds.left, right: bounds.right, top: bounds.top, height: bounds.height };
     });
-    assert.equal(sharedAxis.state, "shared", `GEX bars must wait for the shared price-axis layout instead of using independent row spacing: ${JSON.stringify(sharedAxis)}`);
-    assert.equal(sharedAxis.gexRange, sharedAxis.priceRange, "GEX bars and the left OHLC chart must use the same price/strike domain");
-    assert.equal(sharedAxis.positions.every((row, index) => index === 0 || sharedAxis.positions[index - 1].position < row.position), true, "higher strikes must map to higher positions on the shared y-axis");
+    await page.mouse.move(priceScaleBounds.right - 8, priceScaleBounds.top + priceScaleBounds.height * 0.5);
+    await page.mouse.down();
+    await page.mouse.move(priceScaleBounds.right - 8, priceScaleBounds.top + priceScaleBounds.height * 0.72, { steps: 12 });
+    await page.mouse.up();
+    await wait(180);
+    const afterPriceScaleDrag = await measureGexBarCenters();
+    assert.equal(
+      afterPriceScaleDrag.some((row, index) => Math.abs(row.center - beforePriceScaleDrag[index].center) > 1),
+      true,
+      "GEX bar layout must be resampled after a price-axis scale drag",
+    );
     await page.click("[data-chart-gex-expiry-trigger]");
     await clickText(page, "Options", true);
     await wait(220);
@@ -1245,6 +1255,22 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 1 });
     await wait(180);
     assert.equal(await page.$eval("[data-chart-gex-by-strike]", (node) => node.scrollWidth <= node.clientWidth), true, "mobile chart GEX panel must not overflow horizontally");
+    const mobileGexLayout = await page.evaluate(() => {
+      const list = document.querySelector("[aria-label='Net GEX by strike']");
+      const provenance = document.querySelector(".siw-chart-gex-provenance");
+      const bars = Array.from(document.querySelectorAll("[data-chart-gex-bar]"));
+      const lastBar = bars.at(-1)?.getBoundingClientRect();
+      const provenanceBounds = provenance?.getBoundingClientRect();
+      return {
+        listPosition: list ? getComputedStyle(list).position : null,
+        provenancePosition: provenance ? getComputedStyle(provenance).position : null,
+        lastBarBottom: lastBar?.bottom,
+        provenanceTop: provenanceBounds?.top,
+      };
+    });
+    assert.equal(mobileGexLayout.listPosition, "static", "stacked layout must use the readable flow list instead of absolute axis rows");
+    assert.equal(mobileGexLayout.provenancePosition, "static", "stacked provenance must remain below the readable GEX list");
+    assert.ok((mobileGexLayout.lastBarBottom ?? Infinity) <= (mobileGexLayout.provenanceTop ?? -Infinity), "stacked provenance must not cover the final GEX row");
     await page.setViewport({ width: 1248, height: 986, deviceScaleFactor: 1 });
     await clickText(page, "Options", true);
     await wait(180);

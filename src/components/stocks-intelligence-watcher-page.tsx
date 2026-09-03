@@ -1220,6 +1220,10 @@ const OhlcVolumeChart = ({
     };
     const axisObserver = new ResizeObserver(scheduleAxisCoordinates);
     axisObserver.observe(containerRef.current);
+    containerRef.current.addEventListener("wheel", scheduleAxisCoordinates, { passive: true });
+    containerRef.current.addEventListener("pointermove", scheduleAxisCoordinates);
+    containerRef.current.addEventListener("pointerup", scheduleAxisCoordinates);
+    containerRef.current.addEventListener("dblclick", scheduleAxisCoordinates);
     scheduleAxisCoordinates();
 
     const pointByTime = new Map(points.map((point) => [String(point.time), point]));
@@ -1246,6 +1250,10 @@ const OhlcVolumeChart = ({
     return () => {
       if (axisFrame !== null) window.cancelAnimationFrame(axisFrame);
       axisObserver.disconnect();
+      containerRef.current?.removeEventListener("wheel", scheduleAxisCoordinates);
+      containerRef.current?.removeEventListener("pointermove", scheduleAxisCoordinates);
+      containerRef.current?.removeEventListener("pointerup", scheduleAxisCoordinates);
+      containerRef.current?.removeEventListener("dblclick", scheduleAxisCoordinates);
       onPriceAxisCoordinatesChange?.(null);
       chart.remove();
       chartRef.current = null;
@@ -1757,7 +1765,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [chartGexByExpiry, setChartGexByExpiry] = useState<Record<string, AsyncPanelState>>({});
   const [chartExpiryMenuOpen, setChartExpiryMenuOpen] = useState(false);
   const [priceAxisCoordinates, setPriceAxisCoordinates] = useState<Record<string, number> | null>(null);
+  const [pricePanelElement, setPricePanelElement] = useState<HTMLElement | null>(null);
   const [gexPanelElement, setGexPanelElement] = useState<HTMLElement | null>(null);
+  const [chartPanelsAreSideBySide, setChartPanelsAreSideBySide] = useState(false);
   const chartGexCacheRef = useRef<Map<string, Record<string, NativeToolResult>>>(new Map());
   const chartGexInflightRef = useRef<Map<string, Promise<Record<string, NativeToolResult>>>>(new Map());
   const yahooExpiryChainCacheRef = useRef<Map<string, NativeToolResult>>(new Map());
@@ -2161,6 +2171,36 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const gexPanelRef = useCallback((element: HTMLElement | null) => {
     setGexPanelElement(element);
   }, []);
+  const pricePanelRef = useCallback((element: HTMLElement | null) => {
+    setPricePanelElement(element);
+  }, []);
+  const updateChartPanelsLayout = useCallback(() => {
+    if (!pricePanelElement || !gexPanelElement) {
+      setChartPanelsAreSideBySide(false);
+      return;
+    }
+    const pricePanelBounds = pricePanelElement.getBoundingClientRect();
+    const gexPanelBounds = gexPanelElement.getBoundingClientRect();
+    setChartPanelsAreSideBySide(
+      Math.abs(pricePanelBounds.top - gexPanelBounds.top) < 1
+      && pricePanelBounds.right <= gexPanelBounds.left + 1,
+    );
+  }, [gexPanelElement, pricePanelElement]);
+  useEffect(() => {
+    if (!pricePanelElement || !gexPanelElement) {
+      setChartPanelsAreSideBySide(false);
+      return undefined;
+    }
+    const observer = new ResizeObserver(updateChartPanelsLayout);
+    observer.observe(pricePanelElement);
+    observer.observe(gexPanelElement);
+    window.addEventListener("resize", updateChartPanelsLayout);
+    updateChartPanelsLayout();
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateChartPanelsLayout);
+    };
+  }, [gexPanelElement, pricePanelElement, updateChartPanelsLayout]);
 
   const loadExpiryOverview = useCallback(async (expiry: string | null | undefined, force = false) => {
     if (!expiry) return;
@@ -2915,6 +2955,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     const hasSharedGexAxis = Boolean(
       sharedPriceAxisRange
       && gexAxisCoordinates
+      && chartPanelsAreSideBySide
       && gexRows.every((row) => (gexAxisCoordinates[String(row.strike)] ?? -1) >= 0),
     );
     const maxGex = Math.max(1, ...gexRows.map((row) => Math.abs(row.netGex)));
@@ -3005,7 +3046,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         )}
         {priceResult && (
           <div className="siw-chart-options-layout">
-            <div className="siw-chart-price-panel">
+            <div ref={pricePanelRef} className="siw-chart-price-panel">
               <OhlcVolumeChart
                 result={priceResult}
                 priceRange={priceRange}
@@ -3015,7 +3056,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 onPriceAxisCoordinatesChange={updatePriceAxisCoordinates}
               />
             </div>
-            <aside ref={gexPanelRef} className="siw-chart-gex-panel" data-chart-gex-by-strike>
+            <aside ref={gexPanelRef} className={`siw-chart-gex-panel ${hasSharedGexAxis ? "is-axis-aligned" : ""}`} data-chart-gex-by-strike>
               <div className="siw-chart-gex-head">
                 <div>
                   <strong>{gexExpiries.length > 1 ? "Average Net GEX by Strike" : "Net GEX by Strike"}</strong>

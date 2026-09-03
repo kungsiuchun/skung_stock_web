@@ -1551,7 +1551,8 @@
 .siw-chart-gex-row b { font-weight: 800; }
 .siw-chart-gex-row small { color: var(--siw-muted); font-size: 9px; font-weight: 700; }
 .siw-chart-gex-unavailable { margin-bottom: 8px; color: var(--siw-muted); font-size: 10px; font-weight: 750; line-height: 1.4; }
-.siw-chart-gex-provenance { position: absolute; right: var(--siw-space-3); bottom: 0; left: var(--siw-space-3); z-index: 2; }
+.siw-chart-gex-provenance { margin-top: 8px; }
+.siw-chart-gex-panel.is-axis-aligned .siw-chart-gex-provenance { position: absolute; right: var(--siw-space-3); bottom: 0; left: var(--siw-space-3); z-index: 2; margin-top: 0; }
 .siw-chart-gex-provenance [data-options-result-provenance] { margin-bottom: 0; background: #07131f; }
 
 .siw-options-subtabs {
