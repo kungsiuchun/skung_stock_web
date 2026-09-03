@@ -736,8 +736,17 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
       const requestedInterval = typeof params.interval === "string" ? params.interval.trim() : "1d";
       const range = /^(\d+(d|mo|y)|ytd|max)$/.test(requestedRange) ? requestedRange : "5y";
       const interval = /^(1d|1wk|1mo)$/.test(requestedInterval) ? requestedInterval : "1d";
-      const history = (await fetchHistory(ticker, range, interval)).slice(-120);
-      return toolResult(markdownHistory(history, 120), { ticker, range, interval, history });
+      // The Watcher Chart tab exposes actual 1M/3M/1Y source ranges.  Truncating
+      // every response to 120 rows would turn a 1Y daily request into ~6 months.
+      const limit = interval === "1d" && range === "1y"
+        ? 260
+        : interval === "1d" && range === "3mo"
+          ? 80
+          : interval === "1d" && range === "1mo"
+            ? 31
+            : 120;
+      const history = (await fetchHistory(ticker, range, interval)).slice(-limit);
+      return toolResult(markdownHistory(history, limit), { ticker, range, interval, history });
     },
   ),
   tool(

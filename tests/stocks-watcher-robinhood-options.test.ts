@@ -67,6 +67,8 @@ test("valid immutable 20-symbol release produces OI-signed GEX rows", async () =
   const view = toRobinhoodOptionsView(snapshot);
   assert.deepEqual(view.availableExpiries, ["2026-08-21"]);
   assert.equal(view.strikes[0]?.netGex, 10_000);
+  assert.equal(view.expiryRows[0]?.netGex, 10_000);
+  assert.equal(view.expiryRows[0]?.netDex, 500_000);
   assert.equal(snapshot.manifest.completedSymbols, ROBINHOOD_OPTIONS_EXPECTED_SYMBOLS);
 });
 
@@ -143,6 +145,8 @@ test("Robinhood expiry view follows the requested expiry instead of reusing the 
   assert.equal(view.strikes[0]?.strike, 105);
   assert.equal(view.strikes[0]?.putOpenInterest, 80);
   assert.ok((view.strikes[0]?.netGex || 0) < 0);
+  assert.ok((view.expiryRows.find((row) => row.expiry === "2026-08-28")?.netGex || 0) < 0);
+  assert.ok((view.expiryRows.find((row) => row.expiry === "2026-08-28")?.netDex || 0) < 0);
 });
 
 test("provider-neutral expiry guard rejects a response labelled with another expiry", () => {

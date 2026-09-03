@@ -197,12 +197,28 @@ export const toRobinhoodOptionsView = (snapshot: RobinhoodOptionsPublishedSnapsh
   const expiries = [...byExpiry.keys()].sort();
   const expiryRows = expiries.map((expiry) => {
     const contracts = byExpiry.get(expiry)!;
-    const callOi = contracts.filter((row) => row.callPut === "call").reduce((sum, row) => sum + row.openInterest, 0);
-    const putOi = contracts.filter((row) => row.callPut === "put").reduce((sum, row) => sum + row.openInterest, 0);
-    const callVolume = contracts.filter((row) => row.callPut === "call").reduce((sum, row) => sum + row.volume, 0);
-    const putVolume = contracts.filter((row) => row.callPut === "put").reduce((sum, row) => sum + row.volume, 0);
+    const calls = contracts.filter((row) => row.callPut === "call");
+    const puts = contracts.filter((row) => row.callPut === "put");
+    const callOi = calls.reduce((sum, row) => sum + row.openInterest, 0);
+    const putOi = puts.reduce((sum, row) => sum + row.openInterest, 0);
+    const callVolume = calls.reduce((sum, row) => sum + row.volume, 0);
+    const putVolume = puts.reduce((sum, row) => sum + row.volume, 0);
+    const callGex = calls.reduce((sum, row) => sum + robinhoodGex(row), 0);
+    const putGex = puts.reduce((sum, row) => sum - robinhoodGex(row), 0);
+    const callDex = calls.reduce((sum, row) => sum + robinhoodDex(row), 0);
+    const putDex = puts.reduce((sum, row) => sum + robinhoodDex(row), 0);
     const primary = contracts.reduce((best, row) => row.openInterest > best.openInterest ? row : best, contracts[0]);
-    return { expiry, openInterest: callOi + putOi, primaryStrike: primary.strike, strike: primary.strike, volume: callVolume + putVolume, dominantType: callOi >= putOi ? "C" as const : "P" as const, type: callOi >= putOi ? "C" as const : "P" as const };
+    return {
+      expiry,
+      openInterest: callOi + putOi,
+      primaryStrike: primary.strike,
+      strike: primary.strike,
+      volume: callVolume + putVolume,
+      dominantType: callOi >= putOi ? "C" as const : "P" as const,
+      type: callOi >= putOi ? "C" as const : "P" as const,
+      netGex: callGex + putGex,
+      netDex: callDex + putDex,
+    };
   });
   const selectedExpiry = requestedExpiry && byExpiry.has(requestedExpiry) ? requestedExpiry : expiries[0] || null;
   const selected = selectedExpiry ? byExpiry.get(selectedExpiry)! : [];

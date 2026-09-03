@@ -58,7 +58,9 @@ import {
   getStocksWatcherStrikeDetailToolPlan,
   getStocksWatcherTopTabCacheKey,
   getStocksWatcherTopTabToolPlan,
+  STOCKS_WATCHER_PRICE_RANGES,
 } from "@/lib/stocks-intelligence-watcher-session";
+import type { StocksWatcherPriceRange } from "@/lib/stocks-intelligence-watcher-session";
 import {
   getStocksWatcherUniverseStock,
 } from "@/lib/stocks-watcher-universe";
@@ -157,6 +159,12 @@ interface AsyncPanelState {
   data: Record<string, NativeToolResult> | null;
 }
 
+interface ChartGexAggregateRow {
+  strike: number;
+  netGex: number;
+  contributors: number;
+}
+
 interface YahooExpiryPreloadState {
   runId: number;
   total: number;
@@ -249,6 +257,8 @@ interface ExpirySelectorRow {
   primaryStrike?: number;
   volume?: number;
   dominantType?: "C" | "P";
+  netGex?: number;
+  netDex?: number;
 }
 
 interface RawOptionExposure {
@@ -312,6 +322,11 @@ const formatNumber = (value: number) => {
   if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (abs >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
   return value.toLocaleString(undefined, { maximumFractionDigits: 0 });
+};
+
+const formatOptionalSignedExposure = (value: number | null | undefined) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
+  return `${value > 0 ? "+" : ""}${formatNumber(value)}`;
 };
 
 const currency = (value: number) =>
@@ -420,6 +435,12 @@ const modeLabel: Record<StocksWatcherChartMode, string> = {
   oi: "Open Interest",
   volume: "Options Volume",
   gex: "Option GEX",
+};
+
+const priceRangeLabel: Record<StocksWatcherPriceRange, string> = {
+  "1mo": "1M",
+  "3mo": "3M",
+  "1y": "1Y",
 };
 
 const getMaxForMode = (rows: StocksWatcherStrikeRow[], mode: StocksWatcherChartMode) =>
@@ -782,8 +803,54 @@ const buildExpiryRowsForSelector = (snapshot: StocksWatcherSnapshot | null): Exp
       primaryStrike: primary.primaryStrike || primary.strike,
       volume: rows.reduce((sum, row) => sum + row.volume, 0),
       dominantType,
+      netGex: rows.length > 0 && rows.every((row) => typeof row.netGex === "number" && Number.isFinite(row.netGex))
+        ? rows.reduce((sum, row) => sum + (row.netGex || 0), 0)
+        : undefined,
+      netDex: rows.length > 0 && rows.every((row) => typeof row.netDex === "number" && Number.isFinite(row.netDex))
+        ? rows.reduce((sum, row) => sum + (row.netDex || 0), 0)
+        : undefined,
     };
   });
+};
+
+const exposureToneClassName = (value: number | undefined, available: boolean) => {
+  if (!available || typeof value !== "number" || !Number.isFinite(value)) return "siw-unavailable";
+  return value < 0 ? "siw-down" : "siw-up";
+};
+
+const chartGexRowsFromResult = (data: Record<string, NativeToolResult> | null): StocksWatcherStrikeRow[] => {
+  if (!data) return [];
+  const visual = normalizeOptionsVisualModel({
+    chainRaw: data.get_options?.raw,
+    exposureRaw: data.get_options_gex?.raw,
+  });
+  return buildStrikeRowsFromOptionRaw(
+    visual.chain as unknown as RawOptionChain | null,
+    visual.strikeRows as unknown as RawOptionExposure[],
+  ).filter((row) => Number.isFinite(row.netGex));
+};
+
+const aggregateChartGexRows = (
+  expiries: string[],
+  rowsByExpiry: Record<string, AsyncPanelState>,
+): ChartGexAggregateRow[] => {
+  const aggregates = new Map<number, { total: number; contributors: number }>();
+  for (const expiry of expiries) {
+    for (const row of chartGexRowsFromResult(rowsByExpiry[expiry]?.data || null)) {
+      const current = aggregates.get(row.strike) || { total: 0, contributors: 0 };
+      aggregates.set(row.strike, {
+        total: current.total + row.netGex,
+        contributors: current.contributors + 1,
+      });
+    }
+  }
+  return [...aggregates.entries()]
+    .map(([strike, aggregate]) => ({
+      strike,
+      netGex: aggregate.total / aggregate.contributors,
+      contributors: aggregate.contributors,
+    }))
+    .sort((a, b) => b.strike - a.strike);
 };
 
 const summaryFromLoadedOptionChain = (chain: RawOptionChain | null): ExpirySelectorRow | null => {
@@ -940,7 +1007,6 @@ const ExpandableDescription = ({ description }: { description: string }) => {
 };
 
 type PriceChartStyle = "line" | "mountain" | "candle" | "ohlc";
-type PriceChartRange = "1D" | "5D" | "ALL";
 
 interface PriceChartRow extends RawHistoryPoint {
   time: number;
@@ -952,16 +1018,9 @@ interface PriceChartTooltip {
   point: PriceChartRow;
 }
 
-const chartRangeLimits: Record<PriceChartRange, number> = {
-  "1D": 96,
-  "5D": 390,
-  ALL: Number.POSITIVE_INFINITY,
-};
-
-const toChartRows = (points: RawHistoryPoint[], range: PriceChartRange): PriceChartRow[] => {
+const toChartRows = (points: RawHistoryPoint[]): PriceChartRow[] => {
   let previousTime = 0;
   return points
-    .slice(-chartRangeLimits[range])
     .map((point, index) => {
       const parsed = point.date ? Date.parse(point.date) : Number.NaN;
       const fallback = 1_700_000_000 + index * 86_400;
@@ -977,15 +1036,22 @@ const toChartRows = (points: RawHistoryPoint[], range: PriceChartRange): PriceCh
     .filter((point) => point.close && point.high && point.low);
 };
 
-const OhlcVolumeChart = ({ result }: { result: NativeToolResult }) => {
+const OhlcVolumeChart = ({
+  result,
+  priceRange = "3mo",
+  onPriceRangeChange = () => undefined,
+}: {
+  result: NativeToolResult;
+  priceRange?: StocksWatcherPriceRange;
+  onPriceRangeChange?: (range: StocksWatcherPriceRange) => void;
+}) => {
   const allPoints = useMemo(() => historyFromResult(result), [result]);
   const [chartStyle, setChartStyle] = useState<PriceChartStyle>("ohlc");
-  const [chartRange, setChartRange] = useState<PriceChartRange>("ALL");
   const [tooltip, setTooltip] = useState<PriceChartTooltip | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<any>(null);
 
-  const points = useMemo(() => toChartRows(allPoints, chartRange), [allPoints, chartRange]);
+  const points = useMemo(() => toChartRows(allPoints), [allPoints]);
   const latest = points[points.length - 1];
   const activePoint = tooltip?.point || latest;
   const priorPoint = points[Math.max(0, points.length - 2)];
@@ -1125,7 +1191,7 @@ const OhlcVolumeChart = ({ result }: { result: NativeToolResult }) => {
   if (points.length < 2) return <ToolTextSummary result={result} />;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-slate-800 bg-[#05080d]" data-chart-style={chartStyle}>
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-slate-800 bg-[#05080d]" data-chart-style={chartStyle} data-price-chart-range={priceRange}>
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 px-3 py-2">
         <div className="flex flex-wrap items-center gap-2">
           {(["line", "mountain", "candle", "ohlc"] as PriceChartStyle[]).map((style) => (
@@ -1144,18 +1210,19 @@ const OhlcVolumeChart = ({ result }: { result: NativeToolResult }) => {
           ))}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {(["1D", "5D", "ALL"] as PriceChartRange[]).map((range) => (
+          {STOCKS_WATCHER_PRICE_RANGES.map((range) => (
             <button
               key={range}
               type="button"
-              onClick={() => setChartRange(range)}
+              onClick={() => onPriceRangeChange(range)}
               className={`rounded border px-3 py-1.5 text-xs font-black transition ${
-                chartRange === range
+                priceRange === range
                   ? "border-blue-400/60 bg-blue-500/20 text-blue-100"
                   : "border-slate-700 bg-slate-950 text-slate-300 hover:border-blue-400/50"
               }`}
+              aria-pressed={priceRange === range}
             >
-              {range}
+              {priceRangeLabel[range]}
             </button>
           ))}
           <span className="rounded border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs font-bold text-slate-400">
@@ -1206,7 +1273,7 @@ const OhlcVolumeChart = ({ result }: { result: NativeToolResult }) => {
       </div>
       <div className="flex items-center justify-between border-t border-slate-800 px-3 py-2 text-xs text-slate-500">
         <span>{firstLabel} - {latestLabel}</span>
-        <span>{points.length} bars | {result.tool}</span>
+        <span>{priceRangeLabel[priceRange]} Daily | {points.length} bars | Yahoo</span>
       </div>
     </div>
   );
@@ -1614,8 +1681,14 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [tabPanelState, setTabPanelState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
   const [subTabPanelState, setSubTabPanelState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
   const [selectedExpiry, setSelectedExpiry] = useState<string | null>(null);
+  const [priceRange, setPriceRange] = useState<StocksWatcherPriceRange>("3mo");
   const [expiryOverviewState, setExpiryOverviewState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
   const expiryOverviewRequestRef = useRef(0);
+  const [chartSelectedExpiries, setChartSelectedExpiries] = useState<string[]>([]);
+  const [chartGexByExpiry, setChartGexByExpiry] = useState<Record<string, AsyncPanelState>>({});
+  const [chartExpiryMenuOpen, setChartExpiryMenuOpen] = useState(false);
+  const chartGexCacheRef = useRef<Map<string, Record<string, NativeToolResult>>>(new Map());
+  const chartGexInflightRef = useRef<Map<string, Promise<Record<string, NativeToolResult>>>>(new Map());
   const yahooExpiryChainCacheRef = useRef<Map<string, NativeToolResult>>(new Map());
   const yahooExpiryChainInflightRef = useRef<Map<string, Promise<NativeToolResult>>>(new Map());
   const yahooExpiryChainFailuresRef = useRef<Map<string, string>>(new Map());
@@ -1821,7 +1894,12 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       const result = await fetchSnapshotData(nextSymbol, { signal: controller.signal });
       setSnapshot(result.snapshot);
       setSelectedSymbol(result.snapshot.symbol);
-      setSelectedExpiry(getStocksWatcherSnapshotExpiry(result.snapshot));
+      const nextExpiry = getStocksWatcherSnapshotExpiry(result.snapshot);
+      setSelectedExpiry(nextExpiry);
+      setChartSelectedExpiries(nextExpiry ? [nextExpiry] : []);
+      setChartGexByExpiry({});
+      chartGexCacheRef.current.clear();
+      chartGexInflightRef.current.clear();
       setExpiryOverviewState({ loading: false, error: null, data: null });
       setLastUpdatedAt(result.fetchedAt);
     } catch (requestError) {
@@ -1852,14 +1930,24 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     if (decision.cached) {
       setSnapshot(decision.cached.snapshot);
       setSelectedSymbol(decision.cached.snapshot.symbol);
-      setSelectedExpiry(getStocksWatcherSnapshotExpiry(decision.cached.snapshot));
+      const nextExpiry = getStocksWatcherSnapshotExpiry(decision.cached.snapshot);
+      setSelectedExpiry(nextExpiry);
+      setChartSelectedExpiries(nextExpiry ? [nextExpiry] : []);
+      setChartGexByExpiry({});
+      chartGexCacheRef.current.clear();
+      chartGexInflightRef.current.clear();
       setExpiryOverviewState({ loading: false, error: null, data: null });
       setLastUpdatedAt(decision.cached.fetchedAt);
       if (decision.backgroundRefresh) {
         void fetchSnapshotData(decision.symbol).then((result) => {
           if (result.snapshot.symbol === decision.symbol) {
             setSnapshot(result.snapshot);
-            setSelectedExpiry(getStocksWatcherSnapshotExpiry(result.snapshot));
+            const nextExpiry = getStocksWatcherSnapshotExpiry(result.snapshot);
+            setSelectedExpiry(nextExpiry);
+            setChartSelectedExpiries(nextExpiry ? [nextExpiry] : []);
+            setChartGexByExpiry({});
+            chartGexCacheRef.current.clear();
+            chartGexInflightRef.current.clear();
             setLastUpdatedAt(result.fetchedAt);
           }
         }).catch(() => undefined);
@@ -1878,6 +1966,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       setSelectedSymbol(nextSymbol);
       setSnapshot(null);
       setSelectedExpiry(null);
+      setChartSelectedExpiries([]);
+      setChartGexByExpiry({});
+      chartGexCacheRef.current.clear();
+      chartGexInflightRef.current.clear();
       setExpiryOverviewState({ loading: false, error: null, data: null });
       setTabPanelState({ loading: false, error: null, data: null });
       setSubTabPanelState({ loading: false, error: null, data: null });
@@ -1957,7 +2049,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const loadTopTab = useCallback(async (tab: TopTab, force = false) => {
     if (tab === "Options" || tab === "Overview") return;
     const symbol = normalizeSymbol(selectedSymbol);
-    const cacheKey = getStocksWatcherTopTabCacheKey(symbol, tab);
+    const cacheKey = getStocksWatcherTopTabCacheKey(symbol, tab, priceRange);
     const cached = force ? null : tabDataCache.current.get(cacheKey);
     if (cached) {
       setTabPanelState({ loading: false, error: null, data: cached.data });
@@ -1966,7 +2058,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
     setTabPanelState({ loading: true, error: null, data: null });
     try {
-      const data = await runToolBundle(getStocksWatcherTopTabToolPlan(tab, symbol));
+      const data = await runToolBundle(getStocksWatcherTopTabToolPlan(tab, symbol, priceRange));
       tabDataCache.current.set(cacheKey, { data, fetchedAt: Date.now() });
       setTabPanelState({ loading: false, error: null, data });
     } catch (requestError) {
@@ -1976,7 +2068,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         data: null,
       });
     }
-  }, [runToolBundle, selectedSymbol]);
+  }, [priceRange, runToolBundle, selectedSymbol]);
 
   const currentExpiry = selectedExpiry || snapshot?.selectedExpiry || snapshot?.availableExpiries?.[0] || snapshot?.expiries[0]?.expiry;
   const usesNativeYahooOptions = Boolean(snapshot?.source === "native_yahoo" && !snapshot.optionsSnapshot);
@@ -2012,6 +2104,12 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         throw new Error(`OPTIONS_EXPIRY_MISMATCH: requested ${normalizeExpiryDate(expiry)}, received ${returnedExpiry}`);
       }
       tabDataCache.current.set(cacheKey, { data, fetchedAt: Date.now() });
+      const chartCacheKey = `${symbol}:${normalizeExpiryDate(expiry)}`;
+      chartGexCacheRef.current.set(chartCacheKey, data);
+      setChartGexByExpiry((current) => ({
+        ...current,
+        [normalizeExpiryDate(expiry)]: { loading: false, error: null, data },
+      }));
       if (requestId === expiryOverviewRequestRef.current) {
         setExpiryOverviewState({ loading: false, error: null, data });
       }
@@ -2025,6 +2123,70 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       }
     }
   }, [callNativeTool, loadYahooExpiryChain, runToolBundle, selectedSymbol, usesNativeYahooOptions]);
+
+  const loadChartGexExpiry = useCallback(async (expiry: string | null | undefined, force = false) => {
+    const normalizedExpiry = normalizeExpiryDate(expiry);
+    if (!normalizedExpiry || snapshot?.optionsSnapshot?.provider !== "robinhood_mcp") return;
+    const symbol = normalizeSymbol(selectedSymbol);
+    const cacheKey = `${symbol}:${normalizedExpiry}`;
+    const cached = force ? null : chartGexCacheRef.current.get(cacheKey);
+    if (cached) {
+      setChartGexByExpiry((current) => ({
+        ...current,
+        [normalizedExpiry]: { loading: false, error: null, data: cached },
+      }));
+      return;
+    }
+    const inflight = chartGexInflightRef.current.get(cacheKey);
+    if (inflight) {
+      await inflight;
+      return;
+    }
+
+    setChartGexByExpiry((current) => ({
+      ...current,
+      [normalizedExpiry]: { loading: true, error: null, data: current[normalizedExpiry]?.data || null },
+    }));
+    const request = runToolBundle(getStocksWatcherExpiryOverviewToolPlan(symbol, normalizedExpiry));
+    chartGexInflightRef.current.set(cacheKey, request);
+    try {
+      const data = await request;
+      if (!optionsExpiryMatchesRequest(data.get_options?.raw, normalizedExpiry)) {
+        const returnedExpiry = normalizeOptionsVisualModel({ chainRaw: data.get_options?.raw, exposureRaw: null }).expiry || "missing";
+        throw new Error(`OPTIONS_EXPIRY_MISMATCH: requested ${normalizedExpiry}, received ${returnedExpiry}`);
+      }
+      chartGexCacheRef.current.set(cacheKey, data);
+      setChartGexByExpiry((current) => ({
+        ...current,
+        [normalizedExpiry]: { loading: false, error: null, data },
+      }));
+    } catch (requestError) {
+      setChartGexByExpiry((current) => ({
+        ...current,
+        [normalizedExpiry]: {
+          loading: false,
+          error: requestError instanceof Error ? requestError.message : String(requestError),
+          data: null,
+        },
+      }));
+    } finally {
+      chartGexInflightRef.current.delete(cacheKey);
+    }
+  }, [runToolBundle, selectedSymbol, snapshot?.optionsSnapshot?.provider]);
+
+  const selectOptionsExpiry = useCallback((expiry: string | null | undefined) => {
+    const normalizedExpiry = normalizeExpiryDate(expiry);
+    if (!normalizedExpiry) return;
+    setSelectedExpiry(normalizedExpiry);
+    setChartSelectedExpiries([normalizedExpiry]);
+    setChartExpiryMenuOpen(false);
+    setChartTooltip(null);
+    if (activeSubTab === "Overview") {
+      void loadExpiryOverview(normalizedExpiry);
+    } else {
+      setSubTabPanelState({ loading: true, error: null, data: null });
+    }
+  }, [activeSubTab, loadExpiryOverview]);
 
   const preloadYahooExpirySummaries = useCallback(async () => {
     if (!snapshot || !usesNativeYahooOptions) return;
@@ -2091,8 +2253,22 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   }, [activeSubTab, activeTab, loadOptionsSubTab]);
 
   useEffect(() => {
-    if (activeTab === "Options" && activeSubTab === "Overview" && currentExpiry) void loadExpiryOverview(currentExpiry);
+    if ((activeTab === "Options" && activeSubTab === "Overview") || activeTab === "Chart") {
+      if (currentExpiry) void loadExpiryOverview(currentExpiry);
+    }
   }, [activeSubTab, activeTab, currentExpiry, loadExpiryOverview]);
+
+  useEffect(() => {
+    if (activeTab !== "Chart" || snapshot?.optionsSnapshot?.provider !== "robinhood_mcp") return;
+    const normalized = chartSelectedExpiries
+      .map((expiry) => normalizeExpiryDate(expiry))
+      .filter((expiry): expiry is string => Boolean(expiry));
+    const expiries = normalized.length > 0
+      ? [...new Set(normalized)]
+      : currentExpiry ? [normalizeExpiryDate(currentExpiry)].filter((expiry): expiry is string => Boolean(expiry)) : [];
+    if (normalized.length === 0 && expiries.length > 0) setChartSelectedExpiries(expiries);
+    for (const expiry of expiries) void loadChartGexExpiry(expiry);
+  }, [activeTab, chartSelectedExpiries, currentExpiry, loadChartGexExpiry, snapshot?.optionsSnapshot?.provider]);
 
   useEffect(() => {
     if (activeTab === "Options" && activeSubTab === "Overview") void preloadYahooExpirySummaries();
@@ -2621,6 +2797,162 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       )}
     </div>
   );
+
+  const renderChartPanel = () => {
+    const priceResult = tabPanelState.data?.get_stock_history;
+    const isRobinhoodGex = snapshot?.optionsSnapshot?.provider === "robinhood_mcp";
+    // Yahoo's chain can contain calculated Greeks, but that is not a verified
+    // positioning/GEX feed. The Chart-side exposure surface is deliberately
+    // limited to the curated Robinhood EOD OI-signed proxy.
+    const normalizedSelectedExpiries = chartSelectedExpiries
+      .map((expiry) => normalizeExpiryDate(expiry))
+      .filter((expiry): expiry is string => Boolean(expiry));
+    const gexExpiries = normalizedSelectedExpiries.length > 0
+      ? [...new Set(normalizedSelectedExpiries)]
+      : currentExpiry ? [normalizeExpiryDate(currentExpiry)].filter((expiry): expiry is string => Boolean(expiry)) : [];
+    const gexRows = isRobinhoodGex ? aggregateChartGexRows(gexExpiries, chartGexByExpiry) : [];
+    const hasChartGex = gexRows.length > 0;
+    const maxGex = Math.max(1, ...gexRows.map((row) => Math.abs(row.netGex)));
+    const spotRow = snapshot && gexRows.length > 0
+      ? gexRows.reduce((nearest, row) => Math.abs(row.strike - snapshot.spot) < Math.abs(nearest.strike - snapshot.spot) ? row : nearest)
+      : null;
+    const loadingGexExpiryCount = gexExpiries.filter((expiry) => chartGexByExpiry[expiry]?.loading).length;
+    const unavailableGexExpiries = gexExpiries.filter((expiry) => {
+      const state = chartGexByExpiry[expiry];
+      return Boolean(state?.error) || (!state?.loading && chartGexRowsFromResult(state?.data || null).length === 0);
+    });
+    const primaryGexResult = chartGexByExpiry[normalizeExpiryDate(currentExpiry)]?.data?.get_options_gex
+      || expiryOverviewState.data?.get_options_gex;
+    const toggleChartGexExpiry = (expiry: string) => {
+      const normalizedExpiry = normalizeExpiryDate(expiry);
+      if (!normalizedExpiry) return;
+      const selected = gexExpiries.includes(normalizedExpiry);
+      if (selected) {
+        if (gexExpiries.length === 1) return;
+        const remaining = gexExpiries.filter((value) => value !== normalizedExpiry);
+        setChartSelectedExpiries(remaining);
+        if (normalizeExpiryDate(currentExpiry) === normalizedExpiry) {
+          const nextPrimary = remaining[0];
+          setSelectedExpiry(nextPrimary);
+          setChartTooltip(null);
+          void loadExpiryOverview(nextPrimary);
+        }
+      } else {
+        setChartSelectedExpiries([...gexExpiries, normalizedExpiry]);
+        void loadChartGexExpiry(normalizedExpiry);
+      }
+    };
+
+    return (
+      <section className="siw-panel siw-primary-panel siw-chart-panel" data-primary-tab-panel="Chart">
+        <div className="siw-chart-expiry-toolbar" data-chart-gex-controls>
+          <div className="siw-chart-expiry-selector">
+            <span>GEX Expiry</span>
+            <button
+              type="button"
+              aria-label="Chart GEX expiry"
+              aria-haspopup="dialog"
+              aria-expanded={chartExpiryMenuOpen}
+              data-chart-gex-expiry-trigger
+              onClick={() => setChartExpiryMenuOpen((open) => !open)}
+            >
+              {gexExpiries.length > 1
+                ? `${gexExpiries.length} expiries selected`
+                : formatExpiryDate(gexExpiries[0] || currentExpiry, "short")}
+              <ChevronDown size={14} aria-hidden="true" />
+            </button>
+            {chartExpiryMenuOpen && (
+              <div className="siw-chart-expiry-menu" role="dialog" aria-label="Chart GEX expiry choices" data-chart-gex-expiry-menu>
+                <strong>Select one or more expiries</strong>
+                <span>Average uses only expiries that report each strike.</span>
+                {selectorExpiryRows.map((row) => {
+                  const expiry = normalizeExpiryDate(row.expiry);
+                  const checked = Boolean(expiry && gexExpiries.includes(expiry));
+                  return (
+                    <label key={expiry} className="siw-chart-expiry-choice">
+                      <input
+                        type="checkbox"
+                        data-chart-gex-expiry={expiry}
+                        checked={checked}
+                        onChange={() => expiry && toggleChartGexExpiry(expiry)}
+                      />
+                      <span>{formatExpiryDate(expiry, "short")}</span>
+                      {expiry === normalizeExpiryDate(currentExpiry) && <b>Primary</b>}
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          <span className="siw-chart-gex-source" data-chart-gex-provenance>
+            {isRobinhoodGex
+              ? "Robinhood MCP EOD · OI-signed proxy, not dealer GEX"
+              : "Yahoo / unverified option source · Net GEX unavailable"}
+          </span>
+        </div>
+
+        {tabPanelState.loading && (
+          <div className="space-y-3"><SkeletonBlock className="h-10 w-56" /><SkeletonBlock className="h-[34rem] w-full" /></div>
+        )}
+        {tabPanelState.error && <ErrorBanner message={tabPanelState.error} onRetry={() => void loadTopTab("Chart", true)} />}
+        {!tabPanelState.loading && !tabPanelState.error && !priceResult && (
+          <div className="siw-data-empty"><strong>Price history unavailable</strong><span>The selected Yahoo Daily range returned no chart payload.</span></div>
+        )}
+        {priceResult && (
+          <div className="siw-chart-options-layout">
+            <div className="siw-chart-price-panel">
+              <OhlcVolumeChart result={priceResult} priceRange={priceRange} onPriceRangeChange={setPriceRange} />
+            </div>
+            <aside className="siw-chart-gex-panel" data-chart-gex-by-strike>
+              <div className="siw-chart-gex-head">
+                <div>
+                  <strong>{gexExpiries.length > 1 ? "Average Net GEX by Strike" : "Net GEX by Strike"}</strong>
+                  <span>{gexExpiries.length > 1 ? `${gexExpiries.length} selected expiries` : formatExpiryDate(currentExpiry, "short")}</span>
+                </div>
+                {snapshot && <b>Spot {currency(snapshot.spot)}</b>}
+              </div>
+              {loadingGexExpiryCount > 0 && !hasChartGex && <SkeletonBlock className="h-64 w-full" />}
+              {unavailableGexExpiries.length > 0 && (
+                <div className="siw-chart-gex-unavailable" data-chart-gex-unavailable>
+                  Unavailable: {unavailableGexExpiries.map((expiry) => formatExpiryDate(expiry, "short")).join(", ")}. Not included in the average.
+                </div>
+              )}
+              {!loadingGexExpiryCount && (!isRobinhoodGex || !hasChartGex) && (
+                <div className="siw-data-empty"><strong>Net GEX unavailable</strong><span>The active source is not a curated Robinhood EOD OI-signed proxy for this expiry.</span></div>
+              )}
+              {hasChartGex && (
+                <div className="siw-chart-gex-list" role="list" aria-label="Net GEX by strike">
+                  {gexRows.map((row) => {
+                    const positive = row.netGex >= 0;
+                    const width = Math.max(row.netGex === 0 ? 0 : 1.5, Math.abs(row.netGex) / maxGex * 48);
+                    const isSpot = spotRow?.strike === row.strike;
+                    return (
+                      <button
+                        key={`chart-gex-${row.strike}`}
+                        type="button"
+                        data-chart-gex-bar
+                        data-chart-gex-strike={row.strike}
+                        data-chart-gex-spot={isSpot ? "true" : "false"}
+                        data-chart-gex-contributors={`${row.contributors}/${gexExpiries.length}`}
+                        className={`siw-chart-gex-row ${isSpot ? "is-spot" : ""}`}
+                        title={`Strike ${row.strike}: ${formatOptionalSignedExposure(row.netGex)} · ${row.contributors}/${gexExpiries.length} expiries`}
+                        onClick={() => void openStrikeDrawer(row.strike, currentExpiry)}
+                      >
+                        <span>{row.strike}</span>
+                        <i className="siw-chart-gex-track"><i className="siw-chart-gex-zero" /><i className={positive ? "siw-chart-gex-fill is-positive" : "siw-chart-gex-fill is-negative"} style={{ width: `${width}%` }} /></i>
+                        <b className={positive ? "siw-up" : "siw-down"}>{formatOptionalSignedExposure(row.netGex)} <small>{row.contributors}/{gexExpiries.length}</small></b>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {primaryGexResult && <OptionsResultProvenance result={primaryGexResult} />}
+            </aside>
+          </div>
+        )}
+      </section>
+    );
+  };
 
   const renderOptionsOverview = () => (
     <div className="flex min-h-0 flex-1 flex-col p-3 sm:p-4">
@@ -3791,6 +4123,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
   const renderPrimaryPanel = () => {
     if (activeTab === "Overview") return renderOverviewPanel();
+    if (activeTab === "Chart") return renderChartPanel();
 
     if (activeTab !== "Options") {
       if (activeTab === "Stats") return renderStatsReferencePanel();
@@ -3807,9 +4140,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           <div className="siw-expiry-head">
             <span>Expiry</span>
             <span>OI</span>
-            <span>Str</span>
-            <span>Volume</span>
-            <span>Type</span>
+            <span>Net GEX</span>
+            <span>Net DEX</span>
           </div>
           <div className="siw-expiry-list">
             {selectorExpiryRows.map((row) => {
@@ -3822,27 +4154,18 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                   type="button"
                   data-expiry-row={normalizedExpiry}
                   className={`siw-expiry-row ${active ? "is-active" : ""}`}
-                  onClick={() => {
-                    setSelectedExpiry(normalizedExpiry);
-                    setChartTooltip(null);
-                    if (activeSubTab === "Overview") {
-                      void loadExpiryOverview(normalizedExpiry);
-                    } else {
-                      setSubTabPanelState({ loading: true, error: null, data: null });
-                    }
-                  }}
+                  onClick={() => selectOptionsExpiry(normalizedExpiry)}
                 >
                   <span>{formatExpiryDate(row.expiry, "compact")}</span>
                   <span>{row.loaded ? formatNumber(row.openInterest || 0) : loadState === "loading" ? "Loading" : loadState === "retry" ? "Retry" : "Load"}</span>
-                  <span>{row.loaded ? row.primaryStrike || "—" : loadState === "loading" ? "next 8" : loadState === "retry" ? "failed" : "on select"}</span>
-                  <span>{row.loaded ? formatNumber(row.volume || 0) : "—"}</span>
-                  <span className={row.loaded && row.dominantType === "P" ? "siw-down" : "siw-up"}>{row.loaded ? row.dominantType : "—"}</span>
+                  <span className={exposureToneClassName(row.netGex, row.loaded)}>{row.loaded ? formatOptionalSignedExposure(row.netGex) : "n/a"}</span>
+                  <span className={exposureToneClassName(row.netDex, row.loaded)}>{row.loaded ? formatOptionalSignedExposure(row.netDex) : "n/a"}</span>
                 </button>
               );
             })}
           </div>
           {yahooExpiryPreloadLabel && <div className="siw-yahoo-expiry-preload" data-yahoo-expiry-preload>{yahooExpiryPreloadLabel}</div>}
-          <button type="button" className="siw-view-all" onClick={() => setSelectedExpiry(snapshot?.availableExpiries?.[0] || currentExpiry || null)}>
+          <button type="button" className="siw-view-all" onClick={() => selectOptionsExpiry(snapshot?.availableExpiries?.[0] || currentExpiry || null)}>
             View all expiries
           </button>
         </aside>

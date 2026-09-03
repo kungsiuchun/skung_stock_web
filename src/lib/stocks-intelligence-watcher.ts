@@ -100,6 +100,10 @@ export interface StocksWatcherExpiryRow {
   volume: number;
   dominantType: "C" | "P";
   type: "C" | "P";
+  /** Only populated when the source supplied auditable gamma inputs. */
+  netGex?: number;
+  /** Only populated when the source supplied auditable delta inputs. */
+  netDex?: number;
 }
 
 export interface StocksWatcherStrikeRow {
