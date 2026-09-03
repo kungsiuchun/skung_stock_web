@@ -165,6 +165,11 @@ interface ChartGexAggregateRow {
   contributors: number;
 }
 
+interface SharedPriceAxisRange {
+  min: number;
+  max: number;
+}
+
 interface YahooExpiryPreloadState {
   runId: number;
   total: number;
@@ -1036,14 +1041,36 @@ const toChartRows = (points: RawHistoryPoint[]): PriceChartRow[] => {
     .filter((point) => point.close && point.high && point.low);
 };
 
+const getSharedPriceAxisRange = (
+  result: NativeToolResult,
+  gexRows: ChartGexAggregateRow[],
+): SharedPriceAxisRange | null => {
+  const priceRows = toChartRows(historyFromResult(result));
+  const values = [
+    ...priceRows.flatMap((row) => [row.low, row.high].filter((value): value is number => typeof value === "number")),
+    ...gexRows.map((row) => row.strike),
+  ].filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (values.length === 0) return null;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const padding = Math.max((max - min) * 0.04, 0.01);
+  return { min: min - padding, max: max + padding };
+};
+
 const OhlcVolumeChart = ({
   result,
   priceRange = "3mo",
   onPriceRangeChange = () => undefined,
+  sharedPriceAxisRange,
+  sharedAxisStrikes = [],
+  onPriceAxisCoordinatesChange,
 }: {
   result: NativeToolResult;
   priceRange?: StocksWatcherPriceRange;
   onPriceRangeChange?: (range: StocksWatcherPriceRange) => void;
+  sharedPriceAxisRange?: SharedPriceAxisRange | null;
+  sharedAxisStrikes?: number[];
+  onPriceAxisCoordinatesChange?: (coordinates: Record<string, number> | null) => void;
 }) => {
   const allPoints = useMemo(() => historyFromResult(result), [result]);
   const [chartStyle, setChartStyle] = useState<PriceChartStyle>("ohlc");
@@ -1058,6 +1085,11 @@ const OhlcVolumeChart = ({
   const isUp = (activePoint?.close || 0) >= (activePoint?.open || priorPoint?.close || 0);
   const firstLabel = compactDateLabel(points[0]?.date);
   const latestLabel = compactDateLabel(latest?.date);
+  const sharedAxisStrikeKey = sharedAxisStrikes.join("|");
+  const axisStrikes = useMemo(
+    () => sharedAxisStrikes.filter((strike) => Number.isFinite(strike)),
+    [sharedAxisStrikeKey],
+  );
 
   useEffect(() => {
     if (!containerRef.current || points.length < 2) return undefined;
@@ -1156,10 +1188,43 @@ const OhlcVolumeChart = ({
     chart.priceScale("volume").applyOptions({
       scaleMargins: { top: 0.78, bottom: 0 },
     });
+    if (sharedPriceAxisRange) {
+      priceSeries.applyOptions({
+        autoscaleInfoProvider: () => ({
+          priceRange: { minValue: sharedPriceAxisRange.min, maxValue: sharedPriceAxisRange.max },
+        }),
+      });
+    }
 
     priceSeries.setData(chartStyle === "line" || chartStyle === "mountain" ? closeData : candleData);
     volumeSeries.setData(volumeData);
     chart.timeScale().fitContent();
+
+    let axisFrame: number | null = null;
+    const reportAxisCoordinates = () => {
+      if (!onPriceAxisCoordinatesChange || !containerRef.current) return;
+      const chartTop = containerRef.current.getBoundingClientRect().top;
+      const coordinates = Object.fromEntries(
+        axisStrikes.flatMap((strike) => {
+          const coordinate = priceSeries.priceToCoordinate(strike);
+          return coordinate === null || !Number.isFinite(coordinate)
+            ? []
+            : [[String(strike), chartTop + coordinate]];
+        }),
+      );
+      onPriceAxisCoordinatesChange(coordinates);
+    };
+    const scheduleAxisCoordinates = () => {
+      if (axisFrame !== null) window.cancelAnimationFrame(axisFrame);
+      axisFrame = window.requestAnimationFrame(reportAxisCoordinates);
+    };
+    const axisObserver = new ResizeObserver(scheduleAxisCoordinates);
+    axisObserver.observe(containerRef.current);
+    containerRef.current.addEventListener("wheel", scheduleAxisCoordinates, { passive: true });
+    containerRef.current.addEventListener("pointermove", scheduleAxisCoordinates);
+    containerRef.current.addEventListener("pointerup", scheduleAxisCoordinates);
+    containerRef.current.addEventListener("dblclick", scheduleAxisCoordinates);
+    scheduleAxisCoordinates();
 
     const pointByTime = new Map(points.map((point) => [String(point.time), point]));
     chart.subscribeCrosshairMove((param: any) => {
@@ -1183,15 +1248,27 @@ const OhlcVolumeChart = ({
     });
 
     return () => {
+      if (axisFrame !== null) window.cancelAnimationFrame(axisFrame);
+      axisObserver.disconnect();
+      containerRef.current?.removeEventListener("wheel", scheduleAxisCoordinates);
+      containerRef.current?.removeEventListener("pointermove", scheduleAxisCoordinates);
+      containerRef.current?.removeEventListener("pointerup", scheduleAxisCoordinates);
+      containerRef.current?.removeEventListener("dblclick", scheduleAxisCoordinates);
+      onPriceAxisCoordinatesChange?.(null);
       chart.remove();
       chartRef.current = null;
     };
-  }, [chartStyle, points]);
+  }, [axisStrikes, chartStyle, onPriceAxisCoordinatesChange, points, sharedPriceAxisRange?.min, sharedPriceAxisRange?.max]);
 
   if (points.length < 2) return <ToolTextSummary result={result} />;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-slate-800 bg-[#05080d]" data-chart-style={chartStyle} data-price-chart-range={priceRange}>
+    <div
+      className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-slate-800 bg-[#05080d]"
+      data-chart-style={chartStyle}
+      data-price-chart-range={priceRange}
+      data-shared-price-axis-range={sharedPriceAxisRange ? `${sharedPriceAxisRange.min}:${sharedPriceAxisRange.max}` : undefined}
+    >
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 px-3 py-2">
         <div className="flex flex-wrap items-center gap-2">
           {(["line", "mountain", "candle", "ohlc"] as PriceChartStyle[]).map((style) => (
@@ -1687,6 +1764,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [chartSelectedExpiries, setChartSelectedExpiries] = useState<string[]>([]);
   const [chartGexByExpiry, setChartGexByExpiry] = useState<Record<string, AsyncPanelState>>({});
   const [chartExpiryMenuOpen, setChartExpiryMenuOpen] = useState(false);
+  const [priceAxisCoordinates, setPriceAxisCoordinates] = useState<Record<string, number> | null>(null);
+  const [pricePanelElement, setPricePanelElement] = useState<HTMLElement | null>(null);
+  const [gexPanelElement, setGexPanelElement] = useState<HTMLElement | null>(null);
+  const [chartPanelsAreSideBySide, setChartPanelsAreSideBySide] = useState(false);
   const chartGexCacheRef = useRef<Map<string, Record<string, NativeToolResult>>>(new Map());
   const chartGexInflightRef = useRef<Map<string, Promise<Record<string, NativeToolResult>>>>(new Map());
   const yahooExpiryChainCacheRef = useRef<Map<string, NativeToolResult>>(new Map());
@@ -2073,6 +2154,53 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const currentExpiry = selectedExpiry || snapshot?.selectedExpiry || snapshot?.availableExpiries?.[0] || snapshot?.expiries[0]?.expiry;
   const usesNativeYahooOptions = Boolean(snapshot?.source === "native_yahoo" && !snapshot.optionsSnapshot);
   const isYahooOptionsFallback = Boolean(usesNativeYahooOptions && snapshot?.optionsUnavailable);
+  const updatePriceAxisCoordinates = useCallback((coordinates: Record<string, number> | null) => {
+    setPriceAxisCoordinates((current) => {
+      if (!coordinates && !current) return current;
+      if (!coordinates || !current) return coordinates;
+      const nextEntries = Object.entries(coordinates);
+      if (
+        nextEntries.length === Object.keys(current).length
+        && nextEntries.every(([strike, coordinate]) => Math.abs((current[strike] ?? Number.NaN) - coordinate) < 1)
+      ) {
+        return current;
+      }
+      return coordinates;
+    });
+  }, []);
+  const gexPanelRef = useCallback((element: HTMLElement | null) => {
+    setGexPanelElement(element);
+  }, []);
+  const pricePanelRef = useCallback((element: HTMLElement | null) => {
+    setPricePanelElement(element);
+  }, []);
+  const updateChartPanelsLayout = useCallback(() => {
+    if (!pricePanelElement || !gexPanelElement) {
+      setChartPanelsAreSideBySide(false);
+      return;
+    }
+    const pricePanelBounds = pricePanelElement.getBoundingClientRect();
+    const gexPanelBounds = gexPanelElement.getBoundingClientRect();
+    setChartPanelsAreSideBySide(
+      Math.abs(pricePanelBounds.top - gexPanelBounds.top) < 1
+      && pricePanelBounds.right <= gexPanelBounds.left + 1,
+    );
+  }, [gexPanelElement, pricePanelElement]);
+  useEffect(() => {
+    if (!pricePanelElement || !gexPanelElement) {
+      setChartPanelsAreSideBySide(false);
+      return undefined;
+    }
+    const observer = new ResizeObserver(updateChartPanelsLayout);
+    observer.observe(pricePanelElement);
+    observer.observe(gexPanelElement);
+    window.addEventListener("resize", updateChartPanelsLayout);
+    updateChartPanelsLayout();
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateChartPanelsLayout);
+    };
+  }, [gexPanelElement, pricePanelElement, updateChartPanelsLayout]);
 
   const loadExpiryOverview = useCallback(async (expiry: string | null | undefined, force = false) => {
     if (!expiry) return;
@@ -2812,6 +2940,24 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       : currentExpiry ? [normalizeExpiryDate(currentExpiry)].filter((expiry): expiry is string => Boolean(expiry)) : [];
     const gexRows = isRobinhoodGex ? aggregateChartGexRows(gexExpiries, chartGexByExpiry) : [];
     const hasChartGex = gexRows.length > 0;
+    const sharedPriceAxisRange = priceResult && hasChartGex ? getSharedPriceAxisRange(priceResult, gexRows) : null;
+    const gexAxisCoordinates = gexPanelElement && priceAxisCoordinates
+      ? Object.fromEntries(gexRows.flatMap((row) => {
+          const coordinate = priceAxisCoordinates[String(row.strike)];
+          return Number.isFinite(coordinate)
+            ? [[String(row.strike), coordinate - gexPanelElement.getBoundingClientRect().top]]
+            : [];
+        })) as Record<string, number>
+      : null;
+    // `priceToCoordinate` is supplied by the actual lightweight-charts price
+    // scale, not an inferred range. This is the only reliable way to align
+    // strike rows with the visible y-axis after zooming or resizing.
+    const hasSharedGexAxis = Boolean(
+      sharedPriceAxisRange
+      && gexAxisCoordinates
+      && chartPanelsAreSideBySide
+      && gexRows.every((row) => (gexAxisCoordinates[String(row.strike)] ?? -1) >= 0),
+    );
     const maxGex = Math.max(1, ...gexRows.map((row) => Math.abs(row.netGex)));
     const spotRow = snapshot && gexRows.length > 0
       ? gexRows.reduce((nearest, row) => Math.abs(row.strike - snapshot.spot) < Math.abs(nearest.strike - snapshot.spot) ? row : nearest)
@@ -2900,10 +3046,17 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         )}
         {priceResult && (
           <div className="siw-chart-options-layout">
-            <div className="siw-chart-price-panel">
-              <OhlcVolumeChart result={priceResult} priceRange={priceRange} onPriceRangeChange={setPriceRange} />
+            <div ref={pricePanelRef} className="siw-chart-price-panel">
+              <OhlcVolumeChart
+                result={priceResult}
+                priceRange={priceRange}
+                onPriceRangeChange={setPriceRange}
+                sharedPriceAxisRange={sharedPriceAxisRange}
+                sharedAxisStrikes={gexRows.map((row) => row.strike)}
+                onPriceAxisCoordinatesChange={updatePriceAxisCoordinates}
+              />
             </div>
-            <aside className="siw-chart-gex-panel" data-chart-gex-by-strike>
+            <aside ref={gexPanelRef} className={`siw-chart-gex-panel ${hasSharedGexAxis ? "is-axis-aligned" : ""}`} data-chart-gex-by-strike>
               <div className="siw-chart-gex-head">
                 <div>
                   <strong>{gexExpiries.length > 1 ? "Average Net GEX by Strike" : "Net GEX by Strike"}</strong>
@@ -2921,11 +3074,22 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 <div className="siw-data-empty"><strong>Net GEX unavailable</strong><span>The active source is not a curated Robinhood EOD OI-signed proxy for this expiry.</span></div>
               )}
               {hasChartGex && (
-                <div className="siw-chart-gex-list" role="list" aria-label="Net GEX by strike">
+                <div
+                  className={`siw-chart-gex-list ${hasSharedGexAxis ? "is-axis-aligned" : ""}`}
+                  role="list"
+                  aria-label="Net GEX by strike"
+                  data-chart-gex-axis={hasSharedGexAxis ? "shared" : "stacked"}
+                  data-chart-gex-axis-range={sharedPriceAxisRange ? `${sharedPriceAxisRange.min}:${sharedPriceAxisRange.max}` : undefined}
+                  data-chart-gex-axis-coordinate-count={gexAxisCoordinates ? Object.keys(gexAxisCoordinates).length : 0}
+                  style={hasSharedGexAxis ? { top: 0, bottom: 0 } : undefined}
+                >
                   {gexRows.map((row) => {
                     const positive = row.netGex >= 0;
                     const width = Math.max(row.netGex === 0 ? 0 : 1.5, Math.abs(row.netGex) / maxGex * 48);
                     const isSpot = spotRow?.strike === row.strike;
+                    const axisPosition = sharedPriceAxisRange
+                      ? (sharedPriceAxisRange.max - row.strike) / (sharedPriceAxisRange.max - sharedPriceAxisRange.min) * 100
+                      : null;
                     return (
                       <button
                         key={`chart-gex-${row.strike}`}
@@ -2934,9 +3098,13 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                         data-chart-gex-strike={row.strike}
                         data-chart-gex-spot={isSpot ? "true" : "false"}
                         data-chart-gex-contributors={`${row.contributors}/${gexExpiries.length}`}
+                        data-chart-gex-axis-position={axisPosition === null ? undefined : axisPosition.toFixed(4)}
                         className={`siw-chart-gex-row ${isSpot ? "is-spot" : ""}`}
                         title={`Strike ${row.strike}: ${formatOptionalSignedExposure(row.netGex)} · ${row.contributors}/${gexExpiries.length} expiries`}
                         onClick={() => void openStrikeDrawer(row.strike, currentExpiry)}
+                        style={hasSharedGexAxis && gexAxisCoordinates
+                          ? { top: `${gexAxisCoordinates[String(row.strike)]}px` }
+                          : axisPosition === null ? undefined : { top: `${axisPosition}%` }}
                       >
                         <span>{row.strike}</span>
                         <i className="siw-chart-gex-track"><i className="siw-chart-gex-zero" /><i className={positive ? "siw-chart-gex-fill is-positive" : "siw-chart-gex-fill is-negative"} style={{ width: `${width}%` }} /></i>
@@ -2946,7 +3114,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                   })}
                 </div>
               )}
-              {primaryGexResult && <OptionsResultProvenance result={primaryGexResult} />}
+              {primaryGexResult && <div className="siw-chart-gex-provenance"><OptionsResultProvenance result={primaryGexResult} /></div>}
             </aside>
           </div>
         )}

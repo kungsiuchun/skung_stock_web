@@ -1491,7 +1491,7 @@
 }
 
 .siw-chart-price-panel { display: flex; min-height: 34rem; }
-.siw-chart-gex-panel { display: flex; min-height: 34rem; flex-direction: column; }
+.siw-chart-gex-panel { position: relative; display: flex; min-height: 34rem; flex-direction: column; }
 
 .siw-chart-gex-head {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
@@ -1507,12 +1507,33 @@
 
 .siw-chart-gex-list { min-height: 0; flex: 1; overflow-y: auto; padding-right: 2px; }
 
+.siw-chart-gex-list.is-axis-aligned {
+  position: absolute;
+  right: var(--siw-space-3);
+  left: var(--siw-space-3);
+  min-height: 0;
+  overflow: hidden;
+  padding-right: 0;
+}
+
 .siw-chart-gex-row {
   display: grid; width: 100%; grid-template-columns: 3.5rem minmax(0, 1fr) 5.5rem;
   align-items: center; gap: 7px; border: 0; border-bottom: 1px solid rgba(19, 46, 68, 0.68);
   background: transparent; color: var(--siw-text); padding: 6px 2px; text-align: right;
   font-family: var(--siw-font-mono); font-size: 11px;
 }
+
+.siw-chart-gex-list.is-axis-aligned .siw-chart-gex-row {
+  position: absolute;
+  left: 0;
+  transform: translateY(-50%);
+  min-height: 0;
+  padding: 1px 2px;
+}
+
+.siw-chart-gex-list.is-axis-aligned .siw-chart-gex-track { height: 8px; }
+.siw-chart-gex-list.is-axis-aligned .siw-chart-gex-row b { font-size: 10px; }
+.siw-chart-gex-list.is-axis-aligned .siw-chart-gex-row small { font-size: 8px; }
 
 .siw-chart-gex-row:hover,
 .siw-chart-gex-row.is-spot { background: rgba(17, 135, 255, 0.1); }
@@ -1530,6 +1551,9 @@
 .siw-chart-gex-row b { font-weight: 800; }
 .siw-chart-gex-row small { color: var(--siw-muted); font-size: 9px; font-weight: 700; }
 .siw-chart-gex-unavailable { margin-bottom: 8px; color: var(--siw-muted); font-size: 10px; font-weight: 750; line-height: 1.4; }
+.siw-chart-gex-provenance { margin-top: 8px; }
+.siw-chart-gex-panel.is-axis-aligned .siw-chart-gex-provenance { position: absolute; right: var(--siw-space-3); bottom: 0; left: var(--siw-space-3); z-index: 2; margin-top: 0; }
+.siw-chart-gex-provenance [data-options-result-provenance] { margin-bottom: 0; background: #07131f; }
 
 .siw-options-subtabs {
   height: 48px;
