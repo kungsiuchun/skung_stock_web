@@ -1210,6 +1210,24 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     const descendingGexStrikes = await page.$$eval("[data-chart-gex-bar]", (nodes) => nodes.map((node) => Number(node.getAttribute("data-chart-gex-strike"))));
     assert.equal(descendingGexStrikes.every((strike, index) => index === 0 || descendingGexStrikes[index - 1] > strike), true, "Chart GEX strikes must descend from top to bottom so the lowest strike is at the bottom");
     assert.equal(await page.$$eval("[data-chart-gex-contributors]", (nodes) => nodes.some((node) => node.getAttribute("data-chart-gex-contributors") === "3/3")), true, "GEX bars must disclose their expiry contributor count");
+    const sharedAxis = await page.evaluate(() => {
+      const price = document.querySelector("[data-price-chart-range]");
+      const gex = document.querySelector("[data-chart-gex-axis]");
+      const bars = Array.from(document.querySelectorAll("[data-chart-gex-bar]"));
+      return {
+        priceRange: price?.getAttribute("data-shared-price-axis-range"),
+        gexRange: gex?.getAttribute("data-chart-gex-axis-range"),
+        state: gex?.getAttribute("data-chart-gex-axis"),
+        coordinateCount: gex?.getAttribute("data-chart-gex-axis-coordinate-count"),
+        positions: bars.slice(0, 4).map((node) => ({
+          strike: Number(node.getAttribute("data-chart-gex-strike")),
+          position: Number(node.getAttribute("data-chart-gex-axis-position")),
+        })),
+      };
+    });
+    assert.equal(sharedAxis.state, "shared", `GEX bars must wait for the shared price-axis layout instead of using independent row spacing: ${JSON.stringify(sharedAxis)}`);
+    assert.equal(sharedAxis.gexRange, sharedAxis.priceRange, "GEX bars and the left OHLC chart must use the same price/strike domain");
+    assert.equal(sharedAxis.positions.every((row, index) => index === 0 || sharedAxis.positions[index - 1].position < row.position), true, "higher strikes must map to higher positions on the shared y-axis");
     await page.click("[data-chart-gex-expiry-trigger]");
     await clickText(page, "Options", true);
     await wait(220);
