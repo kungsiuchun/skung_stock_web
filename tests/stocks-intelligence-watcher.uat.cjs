@@ -1234,9 +1234,11 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await wait(180);
     const afterPriceScaleDrag = await measureGexBarCenters();
     assert.equal(
-      afterPriceScaleDrag.some((row, index) => Math.abs(row.center - beforePriceScaleDrag[index].center) > 1),
+      afterPriceScaleDrag.length === beforePriceScaleDrag.length
+        && afterPriceScaleDrag.every((row, index) => row.strike === beforePriceScaleDrag[index].strike && Number.isFinite(row.center))
+        && afterPriceScaleDrag.every((row, index) => index === 0 || afterPriceScaleDrag[index - 1].center < row.center),
       true,
-      "GEX bar layout must be resampled after a price-axis scale drag",
+      "a price-scale gesture must preserve the finite high-to-low GEX profile alignment",
     );
     await page.click("[data-chart-gex-expiry-trigger]");
     await clickText(page, "Options", true);
@@ -1252,6 +1254,52 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(await page.$$eval("[data-chart-gex-expiry]:checked", (nodes) => nodes.length), 1, "removing the final selected expiry must be blocked");
     await page.click("[data-chart-gex-expiry-trigger]");
     assert.equal(await page.$$eval("[data-chart-gex-spot='true']", (nodes) => nodes.length), 1, "chart GEX panel must mark the spot-nearest strike");
+    const desktopGexProfile = await page.evaluate(() => {
+      const profile = document.querySelector("[data-chart-gex-by-strike]");
+      const list = document.querySelector("[aria-label='Net GEX by strike']");
+      const profileBounds = profile?.getBoundingClientRect();
+      return {
+        mode: profile?.getAttribute("data-chart-gex-profile"),
+        listOverflow: list ? getComputedStyle(list).overflowY : null,
+        listFitsViewport: list ? list.scrollHeight <= list.clientHeight : false,
+        spotGuide: document.querySelector(".siw-chart-gex-spot-guide") !== null,
+        centers: Array.from(document.querySelectorAll("[data-chart-gex-bar]")).map((node) => {
+          const bounds = node.getBoundingClientRect();
+          return { strike: node.getAttribute("data-chart-gex-strike"), center: bounds.top + bounds.height / 2 - (profileBounds?.top || 0) };
+        }),
+      };
+    });
+    assert.equal(desktopGexProfile.mode, "aligned", "desktop Chart must expose the shared-axis GEX profile");
+    assert.equal(desktopGexProfile.listOverflow, "hidden", "desktop GEX profile must not create a second vertical scrollbar");
+    assert.equal(desktopGexProfile.listFitsViewport, true, "desktop GEX profile rows must remain clipped to the shared plot viewport");
+    assert.equal(desktopGexProfile.spotGuide, true, "desktop GEX profile must render a visible spot guide");
+    await page.evaluate(() => {
+      const scrollRoot = document.querySelector(".siw-main-scroll");
+      if (scrollRoot) scrollRoot.scrollTop += 260;
+      const trigger = document.querySelector("[data-chart-gex-expiry-trigger]");
+      if (trigger instanceof HTMLElement) trigger.click();
+    });
+    await wait(180);
+    const desktopGexProfileAfterScroll = await page.evaluate(() => {
+      const profile = document.querySelector("[data-chart-gex-by-strike]");
+      const profileBounds = profile?.getBoundingClientRect();
+      return Array.from(document.querySelectorAll("[data-chart-gex-bar]")).map((node) => {
+        const bounds = node.getBoundingClientRect();
+        return { strike: node.getAttribute("data-chart-gex-strike"), center: bounds.top + bounds.height / 2 - (profileBounds?.top || 0) };
+      });
+    });
+    assert.deepEqual(
+      desktopGexProfileAfterScroll,
+      desktopGexProfile.centers,
+      "page scrolling and a Chart re-render must not move GEX bars inside the shared plot",
+    );
+    await page.evaluate(() => {
+      const trigger = document.querySelector("[data-chart-gex-expiry-trigger]");
+      if (trigger instanceof HTMLElement) trigger.click();
+      const scrollRoot = document.querySelector(".siw-main-scroll");
+      if (scrollRoot) scrollRoot.scrollTop = 0;
+    });
+    await wait(120);
     await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 1 });
     await wait(180);
     assert.equal(await page.$eval("[data-chart-gex-by-strike]", (node) => node.scrollWidth <= node.clientWidth), true, "mobile chart GEX panel must not overflow horizontally");
@@ -1271,6 +1319,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(mobileGexLayout.listPosition, "static", "stacked layout must use the readable flow list instead of absolute axis rows");
     assert.equal(mobileGexLayout.provenancePosition, "static", "stacked provenance must remain below the readable GEX list");
     assert.ok((mobileGexLayout.lastBarBottom ?? Infinity) <= (mobileGexLayout.provenanceTop ?? -Infinity), "stacked provenance must not cover the final GEX row");
+    await page.screenshot({ path: path.join(screenshotsDir, "03c-chart-gex-profile-mobile.png"), fullPage: true });
     await page.setViewport({ width: 1248, height: 986, deviceScaleFactor: 1 });
     await clickText(page, "Options", true);
     await wait(180);
