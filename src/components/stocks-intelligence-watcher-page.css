@@ -1494,7 +1494,7 @@
 .siw-chart-gex-panel { position: relative; display: flex; min-height: 34rem; flex-direction: column; }
 
 .siw-chart-gex-head {
-  display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+  position: relative; z-index: 4; display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
   margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--siw-line-soft);
 }
 
@@ -1504,6 +1504,8 @@
 .siw-chart-gex-head strong { color: var(--siw-blue-2); font-size: 13px; }
 .siw-chart-gex-head span { margin-top: 3px; color: var(--siw-muted); font-size: 11px; }
 .siw-chart-gex-head b { color: var(--siw-yellow); font-size: 11px; white-space: nowrap; }
+.siw-chart-gex-meta { display: grid; justify-items: end; gap: 3px; text-align: right; }
+.siw-chart-gex-meta [data-chart-gex-scale] { color: var(--siw-muted); font-family: var(--siw-font-mono); font-size: 9px; font-weight: 750; white-space: nowrap; }
 
 .siw-chart-gex-list { min-height: 0; flex: 1; overflow-y: auto; padding-right: 2px; }
 
@@ -1527,13 +1529,18 @@
   position: absolute;
   left: 0;
   transform: translateY(-50%);
-  min-height: 0;
-  padding: 1px 2px;
+  min-height: 12px;
+  padding: 0 2px;
 }
 
-.siw-chart-gex-list.is-axis-aligned .siw-chart-gex-track { height: 8px; }
+.siw-chart-gex-list.is-axis-aligned .siw-chart-gex-track { height: 7px; border-radius: 999px; background: rgba(20, 43, 63, 0.88); }
 .siw-chart-gex-list.is-axis-aligned .siw-chart-gex-row b { font-size: 10px; }
 .siw-chart-gex-list.is-axis-aligned .siw-chart-gex-row small { font-size: 8px; }
+.siw-chart-gex-list.is-axis-aligned .siw-chart-gex-row:not(.is-key-level) .siw-chart-gex-strike-label,
+.siw-chart-gex-list.is-axis-aligned .siw-chart-gex-row:not(.is-key-level) .siw-chart-gex-value { opacity: 0; }
+.siw-chart-gex-list.is-axis-aligned .siw-chart-gex-row.is-key-level { z-index: 2; }
+.siw-chart-gex-list.is-axis-aligned .siw-chart-gex-row.is-key-level .siw-chart-gex-track { height: 10px; box-shadow: 0 0 0 1px rgba(86, 177, 255, 0.22); }
+.siw-chart-gex-list.is-axis-aligned .siw-chart-gex-row:focus-visible { z-index: 5; outline: 1px solid var(--siw-blue-2); outline-offset: 2px; }
 
 .siw-chart-gex-row:hover,
 .siw-chart-gex-row.is-spot { background: rgba(17, 135, 255, 0.1); }
@@ -1550,6 +1557,14 @@
 .siw-chart-gex-fill.is-negative { right: 50%; background: var(--siw-red); }
 .siw-chart-gex-row b { font-weight: 800; }
 .siw-chart-gex-row small { color: var(--siw-muted); font-size: 9px; font-weight: 700; }
+.siw-chart-gex-spot-guide {
+  position: absolute; right: var(--siw-space-3); left: var(--siw-space-3); z-index: 3;
+  pointer-events: none; border-top: 1px solid var(--siw-yellow);
+}
+.siw-chart-gex-spot-guide span {
+  position: absolute; right: 0; top: -9px; border-radius: 2px; background: #15130a;
+  padding: 1px 4px; color: var(--siw-yellow); font-family: var(--siw-font-mono); font-size: 8px; font-weight: 800;
+}
 .siw-chart-gex-unavailable { margin-bottom: 8px; color: var(--siw-muted); font-size: 10px; font-weight: 750; line-height: 1.4; }
 .siw-chart-gex-provenance { margin-top: 8px; }
 .siw-chart-gex-panel.is-axis-aligned .siw-chart-gex-provenance { position: absolute; right: var(--siw-space-3); bottom: 0; left: var(--siw-space-3); z-index: 2; margin-top: 0; }
