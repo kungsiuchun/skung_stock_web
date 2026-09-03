@@ -12,6 +12,8 @@ import {
   extendSpxGexPressureForSession,
   getLatestSpxGexSpotPoint,
   resolveSpxGexExpectedMoveOverlay,
+  resolveSpxGexExpectedMoveRetry,
+  SPX_EXPECTED_MOVE_RETRY_MAX_ATTEMPTS,
   type SpxGexPressureCell,
   type SpxGexPressureMatrixModel,
   type SpxGexPressureMover,
@@ -235,12 +237,15 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
   const [activeCell, setActiveCell] = useState<ActiveCell | null>(null);
   const [matrixRailWidth, setMatrixRailWidth] = useState(0);
   const [overlayNowMs, setOverlayNowMs] = useState(() => Date.now());
+  const [overlayRetry, setOverlayRetry] = useState({ key: "", attempt: 0 });
   const matrixScrollRef = useRef<HTMLDivElement>(null);
   const dataRef = useRef(data);
   const activeCellRef = useRef(activeCell);
   const hoverSuppressedAfterScrollRef = useRef(false);
   activeCellRef.current = activeCell;
   dataRef.current = data;
+  const overlayRetryKey = `${selectedDate}:${refreshKey}`;
+  const overlayRetryAttempt = overlayRetry.key === overlayRetryKey ? overlayRetry.attempt : 0;
   useEffect(() => {
     const dismiss = (event: KeyboardEvent) => {
       if (event.key === "Escape") setActiveCell(null);
@@ -332,6 +337,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
     const load = async () => {
       try {
         const params = new URLSearchParams({ timeframe: "1m", view: "price-overlay" });
+        if (overlayRetryAttempt > 0) params.set("em_retry", "1");
         const response = await runSpxRequest((attemptSignal) => fetch(`/api/spx-price-action-compass?${params.toString()}`, { signal: attemptSignal }), {
           signal: controller.signal,
           onRetry: () => setReconnecting(true),
@@ -352,7 +358,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
     };
     void load();
     return () => controller.abort();
-  }, [enabled, refreshKey, selectedDate]);
+  }, [enabled, overlayRetryAttempt, refreshKey, selectedDate]);
 
   const pressure = data?.selectedDate === selectedDate ? data.pressure : null;
   const openingAttempts = data?.selectedDate === selectedDate
@@ -375,6 +381,17 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
     const startMinute = displayPressure.timeline[0]?.snapshotMinuteEt ?? displayPressure.baseline.snapshotMinuteEt;
     return buildSpxGexOneMinuteSpotSegments(priceOverlay.data.candles, displayPressure.tradingDate, startMinute, latestSpotPoint.minuteEt);
   }, [displayPressure, latestSpotPoint, priceOverlay, selectedDate]);
+  const oneMinutePointCount = oneMinuteSpotSegments.reduce((total, segment) => total + segment.length, 0);
+  const expectedMoveRetry = useMemo(() => resolveSpxGexExpectedMoveRetry({
+    source: priceOverlay?.data?.source,
+    selectedDate,
+    currentTradingDate: overlayClock.tradingDate,
+    minuteEt: overlayClock.minuteEt,
+    nowMs: overlayNowMs,
+    oneMinutePointCount,
+    overlayError: Boolean(priceOverlay?.error),
+    retryAttempt: overlayRetryAttempt,
+  }), [oneMinutePointCount, overlayClock.minuteEt, overlayClock.tradingDate, overlayNowMs, overlayRetryAttempt, priceOverlay?.data?.source, priceOverlay?.error, selectedDate]);
   const axisTicks = useMemo(() => displayPressure ? buildSpxGexPressureAxisTicks(displayPressure.timeline) : [], [displayPressure]);
   const timelineLength = displayPressure?.timeline.length || 0;
   const availableTimelineWidth = Math.max(0, matrixRailWidth - STRIKE_WIDTH - CURRENT_GEX_WIDTH);
@@ -412,10 +429,39 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
     && latestSpotPoint
     ? { price: latestSpotPoint.price, timeEt: latestSpotPoint.timeEt, provider: "0dtespx" as const }
     : null;
+  useEffect(() => {
+    if (!enabled || expectedMoveRetry.status !== "WAITING" || expectedMoveRetry.delayMs === null) return undefined;
+    let timer: number | undefined;
+    const scheduleRetry = () => {
+      if (document.hidden) return;
+      timer = window.setTimeout(() => {
+        setOverlayRetry((current) => {
+          const attempt = current.key === overlayRetryKey ? current.attempt : 0;
+          if (attempt >= SPX_EXPECTED_MOVE_RETRY_MAX_ATTEMPTS) return current;
+          return { key: overlayRetryKey, attempt: attempt + 1 };
+        });
+      }, expectedMoveRetry.delayMs!);
+    };
+    const onVisibilityChange = () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = undefined;
+      if (!document.hidden) scheduleRetry();
+    };
+    scheduleRetry();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [enabled, expectedMoveRetry.delayMs, expectedMoveRetry.status, overlayRetryKey]);
   const priceOverlayWarning = !usingOneMinuteSpot && !oneMinuteOverlayPending
     ? priceOverlay?.error || `No SPX 1-minute candles are available for ${selectedDate}; showing the canonical 15-minute snapshot line.`
     : null;
-  const expectedMoveWarning = expectedMoveOverlay.warning;
+  const expectedMoveWarning = expectedMoveRetry.status === "WAITING"
+    ? `Waiting for fresh 0DTESPX Expected Move · retry ${expectedMoveRetry.nextAttempt}/${SPX_EXPECTED_MOVE_RETRY_MAX_ATTEMPTS}.`
+    : expectedMoveRetry.status === "EXHAUSTED"
+      ? `${expectedMoveOverlay.warning || priceOverlay?.error || "0DTESPX Expected Move is unavailable."} Retry window ended after ${SPX_EXPECTED_MOVE_RETRY_MAX_ATTEMPTS} attempts.`
+      : expectedMoveOverlay.warning;
   const expectedMoveLabel = chartGeometry?.expectedMoveRange
     ? `EM ±${spotFormatter.format(chartGeometry.expectedMoveRange.value)} · ${priceOverlay?.data?.source.expectedMove?.sampleAt ? formatEtTime(priceOverlay.data.source.expectedMove.sampleAt) : "current"} ET`
     : null;

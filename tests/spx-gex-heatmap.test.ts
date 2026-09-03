@@ -46,6 +46,9 @@ import {
   extendSpxGexPressureForSession,
   getLatestSpxGexSpotPoint,
   resolveSpxGexExpectedMoveOverlay,
+  resolveSpxGexExpectedMoveRetry,
+  SPX_EXPECTED_MOVE_RETRY_DELAY_MS,
+  SPX_EXPECTED_MOVE_RETRY_MAX_ATTEMPTS,
   getSpxGexPressureTooltipPosition,
   toSpxGexPressureFrame,
 } from "../src/lib/spx-gex-pressure-matrix";
@@ -64,13 +67,15 @@ it("normalizes volatile refresh keys into one SPX edge-cache key", () => {
   assert.equal(first.url, tracking.url);
 });
 
-it("keeps price-action view and timeframe selections in distinct SPX edge-cache keys", () => {
-  const overlay = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay"));
-  const fourHour = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?timeframe=4h"));
-  const sameOverlay = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay&cacheBust=1"));
-  assert.notEqual(overlay.url, fourHour.url);
-  assert.equal(overlay.url, sameOverlay.url);
-});
+  it("keeps price-action view and timeframe selections in distinct SPX edge-cache keys", () => {
+    const overlay = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay"));
+    const fourHour = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?timeframe=4h"));
+    const sameOverlay = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay&cacheBust=1"));
+    const expectedMoveRetry = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay&em_retry=1&cacheBust=1"));
+    assert.notEqual(overlay.url, fourHour.url);
+    assert.equal(overlay.url, sameOverlay.url);
+    assert.equal(expectedMoveRetry.url, "https://example.com/api/spx-price-action-compass?view=price-overlay&em_retry=1");
+  });
 
 it("normalizes only effective SPX endpoint selections", () => {
   const heatmap = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-gex-heatmap?view=x"));
@@ -2502,6 +2507,46 @@ describe("SPX 0DTE pressure matrix", () => {
       currentTradingDate: "2026-05-27",
       nowMs,
     }), { expectedMove: null, warning: null });
+  });
+
+  it("retries only the bounded current-RTH interval until both EM and 1-minute geometry are ready", () => {
+    const nowMs = Date.parse("2026-05-27T13:45:00.000Z");
+    const source = {
+      provider: "0dtespx" as const,
+      status: "READY" as const,
+      latestSampleAt: new Date(nowMs).toISOString(),
+      expectedMove: { status: "READY" as const, value: 25, sampleAt: new Date(nowMs).toISOString() },
+    };
+    const input = {
+      source,
+      selectedDate: "2026-05-27",
+      currentTradingDate: "2026-05-27",
+      minuteEt: 9 * 60 + 45,
+      nowMs,
+      overlayError: false,
+      retryAttempt: 0,
+    };
+
+    assert.deepEqual(resolveSpxGexExpectedMoveRetry({ ...input, oneMinutePointCount: 1 }), {
+      status: "WAITING", nextAttempt: 1, delayMs: SPX_EXPECTED_MOVE_RETRY_DELAY_MS,
+    });
+    assert.deepEqual(resolveSpxGexExpectedMoveRetry({ ...input, oneMinutePointCount: 2 }), {
+      status: "READY", nextAttempt: null, delayMs: null,
+    });
+    assert.deepEqual(resolveSpxGexExpectedMoveRetry({
+      ...input,
+      source: { ...source, expectedMove: { status: "UNAVAILABLE", value: null, sampleAt: null } },
+      oneMinutePointCount: 2,
+    }), { status: "WAITING", nextAttempt: 1, delayMs: SPX_EXPECTED_MOVE_RETRY_DELAY_MS });
+    assert.deepEqual(resolveSpxGexExpectedMoveRetry({
+      ...input, source: null, overlayError: true, oneMinutePointCount: 0,
+    }), { status: "WAITING", nextAttempt: 1, delayMs: SPX_EXPECTED_MOVE_RETRY_DELAY_MS });
+    assert.deepEqual(resolveSpxGexExpectedMoveRetry({
+      ...input, selectedDate: "2026-05-26", oneMinutePointCount: 0,
+    }), { status: "IDLE", nextAttempt: null, delayMs: null });
+    assert.deepEqual(resolveSpxGexExpectedMoveRetry({
+      ...input, oneMinutePointCount: 0, retryAttempt: SPX_EXPECTED_MOVE_RETRY_MAX_ATTEMPTS,
+    }), { status: "EXHAUSTED", nextAttempt: null, delayMs: null });
   });
 
   it("uses 15-minute fallback segments without drawing across a missing GEX slot", () => {

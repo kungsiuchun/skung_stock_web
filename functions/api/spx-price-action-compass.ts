@@ -54,6 +54,9 @@ const etTradingDate = (now = new Date()) => {
   return `${parts.year}-${parts.month}-${parts.day}`;
 };
 
+export const shouldCacheSpxPriceActionResponse = (isPriceOverlay: boolean, source: SpxPriceActionSource) =>
+  !(isPriceOverlay && source.provider === "0dtespx" && source.expectedMove?.status !== "READY");
+
 async function onRequestUncached(context: Context) {
   const startedAt = Date.now();
   const url = new URL(context.request.url);
@@ -152,8 +155,12 @@ async function onRequestUncached(context: Context) {
         source,
         warnings,
       });
-    const response = withSpxObservability(json(payload, {}, cacheSeconds), Date.now() - startedAt);
-    if (allowCache) await writeSpxEdgeCache(context, response);
+    const shouldCache = shouldCacheSpxPriceActionResponse(isPriceOverlay, source);
+    const response = withSpxObservability(
+      json(payload, shouldCache ? {} : { headers: { "Cache-Control": "no-store" } }, cacheSeconds),
+      Date.now() - startedAt,
+    );
+    if (allowCache && shouldCache) await writeSpxEdgeCache(context, response);
     return response;
   } catch (error) {
     const zeroDteFailure = error instanceof ZeroDteSpxError;

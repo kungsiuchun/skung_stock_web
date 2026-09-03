@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { onRequest as getSpxPriceActionCompassApi } from "../functions/api/spx-price-action-compass";
+import { onRequest as getSpxPriceActionCompassApi, shouldCacheSpxPriceActionResponse } from "../functions/api/spx-price-action-compass";
 import {
   fetchZeroDteSpxCurrentSession,
   normalizeZeroDteSpxOneMinuteCandles,
@@ -250,7 +250,7 @@ describe("SPX Price Action Compass API", () => {
     assert.deepEqual(patterns.map((item) => item.id), before);
   });
 
-  it("uses 0DTESPX for the current intraday session with a five-minute edge TTL", async () => {
+  it("caches a current 0DTESPX pressure overlay only when Expected Move is ready", async () => {
     const originalFetch = globalThis.fetch;
     // Keep all three fixture seconds inside one completed minute. Date.now()
     // near a minute boundary would otherwise create two candles and make this
@@ -271,7 +271,7 @@ describe("SPX Price Action Compass API", () => {
     }) as typeof fetch;
     try {
       const response = await getSpxPriceActionCompassApi({
-        request: new Request("https://example.com/api/spx-price-action-compass?timeframe=1m"),
+        request: new Request("https://example.com/api/spx-price-action-compass?view=price-overlay"),
         env: { ZERO_DTE_SPX_API_TOKEN: "secret-token" },
       });
       const payload = await response.json() as { source: { provider: string; interval: string; latestSampleAt: string; status: string; expectedMove: { status: string; value: number; sampleAt: string } }; candles: SpxPriceActionCandle[] };
@@ -283,12 +283,39 @@ describe("SPX Price Action Compass API", () => {
       assert.equal(payload.source.status, "READY");
       assert.ok(payload.source.latestSampleAt);
       assert.deepEqual(payload.source.expectedMove, { status: "READY", value: 43, sampleAt: new Date(now).toISOString(), errorCode: null });
+      assert.equal(shouldCacheSpxPriceActionResponse(true, payload.source), true);
       assert.equal(payload.candles.length, 1);
       assert.equal(payload.candles[0].open, 6000.25);
       assert.equal(payload.candles[0].high, 6001.5);
       assert.equal(payload.candles[0].low, 5999.75);
       assert.deepEqual(calls.map((call) => call.authorization), ["secret-token", "secret-token"]);
       assert.match(calls[1].url, new RegExp(`/market-data/historical/${sessionDate}`));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("does not cache a current 0DTESPX pressure overlay while Expected Move is unavailable", async () => {
+    const originalFetch = globalThis.fetch;
+    const now = Math.floor((Date.now() - 60_000) / 60_000) * 60_000 + 50_000;
+    const sessionDate = etTradingDate();
+    globalThis.fetch = (async (input) => String(input).endsWith("/market-data/sessions")
+      ? Response.json({ [sessionDate]: { current: true } })
+      : Response.json([
+        { datetimeUnix: Math.floor((now - 1_000) / 1_000), spx: "6000.25", spx_expected_move: "42.5" },
+        { datetimeUnix: Math.floor(now / 1_000), spx: "6001.50", spx_expected_move: "bad" },
+      ])) as typeof fetch;
+    try {
+      const response = await getSpxPriceActionCompassApi({
+        request: new Request("https://example.com/api/spx-price-action-compass?view=price-overlay"),
+        env: { ZERO_DTE_SPX_API_TOKEN: "secret-token" },
+      });
+      const payload = await response.json() as { source: { provider: "0dtespx"; expectedMove: { status: "UNAVAILABLE"; value: null } } };
+
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal(payload.source.expectedMove.status, "UNAVAILABLE");
+      assert.equal(shouldCacheSpxPriceActionResponse(true, payload.source), false);
     } finally {
       globalThis.fetch = originalFetch;
     }

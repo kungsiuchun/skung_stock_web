@@ -152,6 +152,47 @@ export const resolveSpxGexExpectedMoveOverlay = (input: {
   return { expectedMove: null, warning: `0DTESPX Expected Move unavailable (${errorCode}).` };
 };
 
+export const SPX_EXPECTED_MOVE_RETRY_DELAY_MS = 15_000;
+export const SPX_EXPECTED_MOVE_RETRY_MAX_ATTEMPTS = 8;
+
+export type SpxGexExpectedMoveRetryStatus = "IDLE" | "READY" | "WAITING" | "EXHAUSTED";
+
+export const resolveSpxGexExpectedMoveRetry = (input: {
+  source: {
+    provider?: string | null;
+    status?: "READY" | "STALE" | "UNAVAILABLE";
+    latestSampleAt?: string | null;
+    expectedMove?: { status: "READY" | "UNAVAILABLE"; value: number | null; sampleAt: string | null };
+  } | null | undefined;
+  selectedDate: string;
+  currentTradingDate: string;
+  minuteEt: number;
+  nowMs?: number;
+  oneMinutePointCount: number;
+  overlayError: boolean;
+  retryAttempt: number;
+}): { status: SpxGexExpectedMoveRetryStatus; nextAttempt: number | null; delayMs: number | null } => {
+  const nowMs = input.nowMs ?? Date.now();
+  const source = input.source;
+  const currentRth = input.selectedDate === input.currentTradingDate
+    && input.minuteEt >= OPEN_MINUTE_ET
+    && input.minuteEt <= CLOSE_MINUTE_ET;
+  const ready = source?.provider === "0dtespx"
+    && source.status === "READY"
+    && isFreshSpx0DteSample(source.latestSampleAt, nowMs)
+    && source.expectedMove?.status === "READY"
+    && finite(source.expectedMove.value)
+    && source.expectedMove.value > 0
+    && isFreshSpx0DteSample(source.expectedMove.sampleAt, nowMs)
+    && input.oneMinutePointCount >= 2;
+  if (ready) return { status: "READY", nextAttempt: null, delayMs: null };
+
+  const retryable = currentRth && (source?.provider === "0dtespx" || input.overlayError);
+  if (!retryable) return { status: "IDLE", nextAttempt: null, delayMs: null };
+  if (input.retryAttempt >= SPX_EXPECTED_MOVE_RETRY_MAX_ATTEMPTS) return { status: "EXHAUSTED", nextAttempt: null, delayMs: null };
+  return { status: "WAITING", nextAttempt: input.retryAttempt + 1, delayMs: SPX_EXPECTED_MOVE_RETRY_DELAY_MS };
+};
+
 export interface SpxGexPressureFrame {
   tradingDate: string;
   snapshotMinuteEt: number;
