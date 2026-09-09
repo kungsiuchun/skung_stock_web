@@ -127,6 +127,7 @@ export const resolveSpxGexExpectedMoveOverlay = (input: {
     provider?: string | null;
     status?: "READY" | "STALE" | "UNAVAILABLE";
     latestSampleAt?: string | null;
+    sessionState?: "UPCOMING" | "LIVE" | "FINALIZING" | "CLOSED" | "UNAVAILABLE";
     expectedMove?: { status: "READY" | "UNAVAILABLE"; value: number | null; sampleAt: string | null; errorCode: string | null };
   } | null | undefined;
   selectedDate: string;
@@ -135,16 +136,17 @@ export const resolveSpxGexExpectedMoveOverlay = (input: {
 }) => {
   const nowMs = input.nowMs ?? Date.now();
   const source = input.source;
-  const currentContextIsFresh = input.selectedDate === input.currentTradingDate
+  const completedContext = source?.sessionState === "FINALIZING" || source?.sessionState === "CLOSED";
+  const currentContextIsUsable = input.selectedDate === input.currentTradingDate
     && source?.provider === "0dtespx"
     && source.status === "READY"
-    && isFreshSpx0DteSample(source.latestSampleAt, nowMs);
-  if (!currentContextIsFresh) return { expectedMove: null, warning: null };
+    && (completedContext || isFreshSpx0DteSample(source.latestSampleAt, nowMs));
+  if (!currentContextIsUsable) return { expectedMove: null, warning: null };
   const expectedMove = source.expectedMove;
   if (expectedMove?.status === "READY"
     && finite(expectedMove.value)
     && expectedMove.value > 0
-    && isFreshSpx0DteSample(expectedMove.sampleAt, nowMs)) {
+    && (completedContext || isFreshSpx0DteSample(expectedMove.sampleAt, nowMs))) {
     return { expectedMove: expectedMove.value, warning: null };
   }
   const errorCode = expectedMove?.errorCode
@@ -162,6 +164,7 @@ export const resolveSpxGexExpectedMoveRetry = (input: {
     provider?: string | null;
     status?: "READY" | "STALE" | "UNAVAILABLE";
     latestSampleAt?: string | null;
+    sessionState?: "UPCOMING" | "LIVE" | "FINALIZING" | "CLOSED" | "UNAVAILABLE";
     expectedMove?: { status: "READY" | "UNAVAILABLE"; value: number | null; sampleAt: string | null };
   } | null | undefined;
   selectedDate: string;
@@ -170,24 +173,36 @@ export const resolveSpxGexExpectedMoveRetry = (input: {
   nowMs?: number;
   oneMinutePointCount: number;
   overlayError: boolean;
+  failureProvider?: string | null;
+  failureSessionState?: "UPCOMING" | "LIVE" | "FINALIZING" | "CLOSED" | "UNAVAILABLE" | null;
   retryAttempt: number;
 }): { status: SpxGexExpectedMoveRetryStatus; nextAttempt: number | null; delayMs: number | null } => {
   const nowMs = input.nowMs ?? Date.now();
   const source = input.source;
+  const completedContext = source?.sessionState === "FINALIZING" || source?.sessionState === "CLOSED";
   const currentRth = input.selectedDate === input.currentTradingDate
     && input.minuteEt >= OPEN_MINUTE_ET
     && input.minuteEt <= CLOSE_MINUTE_ET;
   const ready = source?.provider === "0dtespx"
     && source.status === "READY"
-    && isFreshSpx0DteSample(source.latestSampleAt, nowMs)
+    && (completedContext || isFreshSpx0DteSample(source.latestSampleAt, nowMs))
     && source.expectedMove?.status === "READY"
     && finite(source.expectedMove.value)
     && source.expectedMove.value > 0
-    && isFreshSpx0DteSample(source.expectedMove.sampleAt, nowMs)
+    && (completedContext || isFreshSpx0DteSample(source.expectedMove.sampleAt, nowMs))
     && input.oneMinutePointCount >= 2;
-  if (ready) return { status: "READY", nextAttempt: null, delayMs: null };
+  if (ready && !input.overlayError) return { status: "READY", nextAttempt: null, delayMs: null };
 
-  const retryable = currentRth && (source?.provider === "0dtespx" || input.overlayError);
+  const sameDayZeroDteState = input.selectedDate === input.currentTradingDate
+    && (source?.sessionState === "LIVE"
+      || source?.sessionState === "FINALIZING"
+      || source?.sessionState === "CLOSED"
+      || input.failureSessionState === "LIVE"
+      || input.failureSessionState === "FINALIZING"
+      || input.failureSessionState === "CLOSED"
+      || input.failureSessionState === "UNAVAILABLE");
+  const retryable = (sameDayZeroDteState || currentRth)
+    && (source?.provider === "0dtespx" || input.failureProvider === "0dtespx" || input.overlayError);
   if (!retryable) return { status: "IDLE", nextAttempt: null, delayMs: null };
   if (input.retryAttempt >= SPX_EXPECTED_MOVE_RETRY_MAX_ATTEMPTS) return { status: "EXHAUSTED", nextAttempt: null, delayMs: null };
   return { status: "WAITING", nextAttempt: input.retryAttempt + 1, delayMs: SPX_EXPECTED_MOVE_RETRY_DELAY_MS };

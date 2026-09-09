@@ -192,12 +192,25 @@ export interface SpxPriceActionSource {
   interval: string;
   fetchedAt: string;
   latestSampleAt?: string | null;
+  priceAgeMs?: number | null;
   status?: "READY" | "STALE" | "UNAVAILABLE";
+  sessionState?: "UPCOMING" | "LIVE" | "FINALIZING" | "CLOSED" | "UNAVAILABLE";
+  sessionDate?: string | null;
+  sessionEndAt?: string | null;
+  routingReason?: string;
   expectedMove?: {
     status: "READY" | "UNAVAILABLE";
     value: number | null;
     sampleAt: string | null;
-    errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE" | "ZERO_DTE_SPX_EXPECTED_MOVE_STALE" | null;
+    ageMs?: number | null;
+    lagMs?: number | null;
+    errorCode:
+      | "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE"
+      | "ZERO_DTE_SPX_EXPECTED_MOVE_STALE"
+      | "ZERO_DTE_SPX_EXPECTED_MOVE_INVALID"
+      | "ZERO_DTE_SPX_EXPECTED_MOVE_FUTURE"
+      | "ZERO_DTE_SPX_EXPECTED_MOVE_LAGGED"
+      | null;
   };
   note: string;
 }

@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { onRequest as getSpxPriceActionCompassApi, shouldCacheSpxPriceActionResponse } from "../functions/api/spx-price-action-compass";
+import { isStrictIsoDate, onRequest as getSpxPriceActionCompassApi, shouldCacheSpxPriceActionResponse } from "../functions/api/spx-price-action-compass";
 import {
   fetchZeroDteSpxCurrentSession,
   normalizeZeroDteSpxOneMinuteCandles,
+  resolveZeroDteSpxSession,
+  ZERO_DTE_SPX_EM_LAG_TOLERANCE_MS,
   ZeroDteSpxError,
 } from "../functions/api/_0dtespx";
 import {
@@ -73,6 +75,14 @@ const etTradingDate = () => {
   }).formatToParts(new Date()).map((part) => [part.type, part.value]));
   return `${parts.year}-${parts.month}-${parts.day}`;
 };
+
+const sessionMetadata = (startMs: number, endMs: number, flags: { current?: boolean; upcoming?: boolean } = {}) => ({
+  "start-time": new Date(startMs).toISOString(),
+  "end-time": new Date(endMs).toISOString(),
+  "data-start-time": new Date(startMs + 60_000).toISOString(),
+  "data-end-time": new Date(endMs).toISOString(),
+  ...flags,
+});
 
 describe("SPX Price Action Compass detector", () => {
   it("sorts Signal Monitor patterns latest-first with deterministic ties without mutating input", () => {
@@ -166,6 +176,31 @@ describe("SPX Price Action Compass detector", () => {
 });
 
 describe("SPX Price Action Compass API", () => {
+  it("requires a real YYYY-MM-DD date for price-overlay before any upstream or cache lookup", async () => {
+    assert.equal(isStrictIsoDate("2026-02-28"), true);
+    assert.equal(isStrictIsoDate("2026-02-30"), false);
+    assert.equal(isStrictIsoDate("2026-2-08"), false);
+    let calls = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      throw new Error("must not fetch");
+    }) as typeof fetch;
+    try {
+      for (const query of ["view=price-overlay", "view=price-overlay&date=2026-02-30"]) {
+        const response = await getSpxPriceActionCompassApi({
+          request: new Request(`https://example.com/api/spx-price-action-compass?${query}`),
+          env: { ZERO_DTE_SPX_API_TOKEN: "secret-token" },
+        });
+        assert.equal(response.status, 400);
+        assert.equal(response.headers.get("cache-control"), "no-store");
+      }
+      assert.equal(calls, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("returns source, candles, patterns, zones, trend, and summary in the API response", async () => {
     const response = await getSpxPriceActionCompassApi({
       request: new Request("https://example.com/api/spx-price-action-compass?timeframe=5m"),
@@ -198,7 +233,7 @@ describe("SPX Price Action Compass API", () => {
   it("returns a compact dense 1-minute series for the GEX pressure overlay without pattern payload", async () => {
     const fixture = buildDetectorFixture();
     const response = await getSpxPriceActionCompassApi({
-      request: new Request("https://example.com/api/spx-price-action-compass?timeframe=15m&view=price-overlay"),
+      request: new Request("https://example.com/api/spx-price-action-compass?timeframe=15m&view=price-overlay&date=2026-08-20"),
       env: { SPX_PRICE_ACTION_TEST_CANDLES: fixture },
     });
     const payload = await response.json() as {
@@ -262,7 +297,7 @@ describe("SPX Price Action Compass API", () => {
     globalThis.fetch = (async (input, init) => {
       const url = String(input);
       calls.push({ url, authorization: new Headers(init?.headers).get("authorization") });
-      if (url.endsWith("/market-data/sessions")) return Response.json({ [sessionDate]: { current: true } });
+      if (url.endsWith("/market-data/sessions")) return Response.json({ [sessionDate]: sessionMetadata(now - 3_600_000, now + 3_600_000, { current: true }) });
       return Response.json([
         { datetime, datetimeUnix: Math.floor(now / 1000) - 2, spx: "6000.25", spx_expected_move: "42.5" },
         { datetime: new Date(now - 1_000).toISOString(), datetimeUnix: Math.floor(now / 1000) - 1, spx: "6001.50", spx_expected_move: "42.75" },
@@ -271,18 +306,23 @@ describe("SPX Price Action Compass API", () => {
     }) as typeof fetch;
     try {
       const response = await getSpxPriceActionCompassApi({
-        request: new Request("https://example.com/api/spx-price-action-compass?view=price-overlay"),
+        request: new Request(`https://example.com/api/spx-price-action-compass?view=price-overlay&date=${sessionDate}`),
         env: { ZERO_DTE_SPX_API_TOKEN: "secret-token" },
       });
-      const payload = await response.json() as { source: { provider: string; interval: string; latestSampleAt: string; status: string; expectedMove: { status: string; value: number; sampleAt: string } }; candles: SpxPriceActionCandle[] };
+      const payload = await response.json() as { source: { provider: string; interval: string; latestSampleAt: string; status: string; expectedMove: { status: string; value: number; sampleAt: string; ageMs: number; lagMs: number; errorCode: string | null } }; candles: SpxPriceActionCandle[] };
 
       assert.equal(response.status, 200);
-      assert.equal(response.headers.get("cache-control"), "public, max-age=300");
+      assert.equal(response.headers.get("cache-control"), "public, max-age=60");
       assert.equal(payload.source.provider, "0dtespx");
       assert.equal(payload.source.interval, "1s->1m");
       assert.equal(payload.source.status, "READY");
       assert.ok(payload.source.latestSampleAt);
-      assert.deepEqual(payload.source.expectedMove, { status: "READY", value: 43, sampleAt: new Date(now).toISOString(), errorCode: null });
+      assert.equal(payload.source.expectedMove.status, "READY");
+      assert.equal(payload.source.expectedMove.value, 43);
+      assert.equal(payload.source.expectedMove.sampleAt, new Date(now).toISOString());
+      assert.ok(payload.source.expectedMove.ageMs >= 0 && payload.source.expectedMove.ageMs <= 10 * 60_000);
+      assert.equal(payload.source.expectedMove.lagMs, 0);
+      assert.equal(payload.source.expectedMove.errorCode, null);
       assert.equal(shouldCacheSpxPriceActionResponse(true, payload.source), true);
       assert.equal(payload.candles.length, 1);
       assert.equal(payload.candles[0].open, 6000.25);
@@ -300,14 +340,14 @@ describe("SPX Price Action Compass API", () => {
     const now = Math.floor((Date.now() - 60_000) / 60_000) * 60_000 + 50_000;
     const sessionDate = etTradingDate();
     globalThis.fetch = (async (input) => String(input).endsWith("/market-data/sessions")
-      ? Response.json({ [sessionDate]: { current: true } })
+      ? Response.json({ [sessionDate]: sessionMetadata(now - 3_600_000, now + 3_600_000, { current: true }) })
       : Response.json([
         { datetimeUnix: Math.floor((now - 1_000) / 1_000), spx: "6000.25", spx_expected_move: "42.5" },
         { datetimeUnix: Math.floor(now / 1_000), spx: "6001.50", spx_expected_move: "bad" },
       ])) as typeof fetch;
     try {
       const response = await getSpxPriceActionCompassApi({
-        request: new Request("https://example.com/api/spx-price-action-compass?view=price-overlay"),
+        request: new Request(`https://example.com/api/spx-price-action-compass?view=price-overlay&date=${sessionDate}`),
         env: { ZERO_DTE_SPX_API_TOKEN: "secret-token" },
       });
       const payload = await response.json() as { source: { provider: "0dtespx"; expectedMove: { status: "UNAVAILABLE"; value: null } } };
@@ -324,8 +364,9 @@ describe("SPX Price Action Compass API", () => {
   it("fails closed with a safe 0DTESPX error when the current-session source is rate limited", async () => {
     const originalFetch = globalThis.fetch;
     const sessionDate = etTradingDate();
+    const now = Date.now();
     globalThis.fetch = (async (input) => String(input).endsWith("/market-data/sessions")
-      ? Response.json({ [sessionDate]: { current: true } })
+      ? Response.json({ [sessionDate]: sessionMetadata(now - 3_600_000, now + 3_600_000, { current: true }) })
       : Response.json({ error: "rate_limit_exceeded" }, { status: 429 })) as typeof fetch;
     try {
       const response = await getSpxPriceActionCompassApi({
@@ -344,9 +385,270 @@ describe("SPX Price Action Compass API", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("keeps the same ET date on 0DTESPX at 15:59, 16:01, and 16:15 without regressing the final timestamp", async () => {
+    const originalFetch = globalThis.fetch;
+    const date = "2026-07-13";
+    const startMs = Date.parse("2026-07-13T13:30:00.000Z");
+    const endMs = Date.parse("2026-07-13T20:00:00.000Z");
+    const samples = [
+      { nowMs: Date.parse("2026-07-13T19:59:00.000Z"), current: true, latestMs: Date.parse("2026-07-13T19:59:00.000Z"), state: "LIVE", cache: "public, max-age=60" },
+      { nowMs: Date.parse("2026-07-13T20:01:00.000Z"), current: false, latestMs: endMs, state: "CLOSED", cache: "public, max-age=3600" },
+      { nowMs: Date.parse("2026-07-13T20:15:00.000Z"), current: false, latestMs: endMs, state: "CLOSED", cache: "public, max-age=3600" },
+    ] as const;
+    const latestTimes: string[] = [];
+    try {
+      for (const sample of samples) {
+        const calls: string[] = [];
+        globalThis.fetch = (async (input) => {
+          const url = String(input);
+          calls.push(url);
+          if (url.endsWith("/market-data/sessions")) {
+            return Response.json({ [date]: sessionMetadata(startMs, endMs, sample.current ? { current: true } : {}) });
+          }
+          if (url.includes(`/market-data/historical/${date}`)) {
+            return Response.json([
+              { datetime: new Date(startMs + 60_000).toISOString(), spx: 6000, spx_expected_move: 25 },
+              { datetime: new Date(sample.latestMs).toISOString(), spx: 6010, spx_expected_move: 26 },
+            ]);
+          }
+          throw new Error(`unexpected Yahoo fallback: ${url}`);
+        }) as typeof fetch;
+        const response = await getSpxPriceActionCompassApi({
+          request: new Request(`https://example.com/api/spx-price-action-compass?view=price-overlay&date=${date}`),
+          env: { ZERO_DTE_SPX_API_TOKEN: "secret-token", SPX_PRICE_ACTION_TEST_NOW_MS: sample.nowMs },
+        });
+        const payload = await response.json() as { source: { provider: string; sessionState: string; latestSampleAt: string; priceAgeMs: number; routingReason: string }; candles: SpxPriceActionCandle[] };
+        assert.equal(response.status, 200);
+        assert.equal(response.headers.get("cache-control"), sample.cache);
+        assert.equal(payload.source.provider, "0dtespx");
+        assert.equal(payload.source.sessionState, sample.state);
+        assert.match(payload.source.routingReason, /CURRENT_ET_SESSION_(LIVE|CLOSED_HISTORICAL)/);
+        assert.equal(payload.candles.at(-1)?.time, sample.latestMs);
+        latestTimes.push(payload.source.latestSampleAt);
+        assert.deepEqual(calls.map((url) => new URL(url).hostname), ["api.0dtespx.com", "api.0dtespx.com"]);
+      }
+      assert.deepEqual(latestTimes, [
+        "2026-07-13T19:59:00.000Z",
+        "2026-07-13T20:00:00.000Z",
+        "2026-07-13T20:00:00.000Z",
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("uses provider metadata for a half-day close and never falls back to Yahoo when post-close history fails", async () => {
+    const originalFetch = globalThis.fetch;
+    const date = "2026-11-27";
+    const startMs = Date.parse("2026-11-27T14:30:00.000Z");
+    const endMs = Date.parse("2026-11-27T18:00:00.000Z");
+    const nowMs = Date.parse("2026-11-27T18:15:00.000Z");
+    const calls: string[] = [];
+    globalThis.fetch = (async (input) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.endsWith("/market-data/sessions")) return Response.json({ [date]: sessionMetadata(startMs, endMs) });
+      if (url.includes(`/market-data/historical/${date}`)) return Response.json({ error: "finalization" }, { status: 503 });
+      throw new Error(`unexpected Yahoo fallback: ${url}`);
+    }) as typeof fetch;
+    try {
+      const response = await getSpxPriceActionCompassApi({
+        request: new Request(`https://example.com/api/spx-price-action-compass?view=price-overlay&date=${date}`),
+        env: { ZERO_DTE_SPX_API_TOKEN: "secret-token", SPX_PRICE_ACTION_TEST_NOW_MS: nowMs },
+      });
+      const payload = await response.json() as { source: { provider: string; sessionState: string; sessionEndAt: string; routingReason: string }; warnings: string[] };
+      assert.equal(response.status, 502);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal(payload.source.provider, "0dtespx");
+      assert.equal(payload.source.sessionState, "CLOSED");
+      assert.equal(payload.source.sessionEndAt, new Date(endMs).toISOString());
+      assert.equal(payload.source.routingReason, "CURRENT_ET_SESSION_CLOSED_HISTORICAL");
+      assert.deepEqual(payload.warnings, ["ZERO_DTE_SPX_UPSTREAM_UNAVAILABLE"]);
+      assert.equal(calls.length, 2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("fails closed instead of using Yahoo when today's provider session metadata is missing", async () => {
+    const originalFetch = globalThis.fetch;
+    const date = "2026-07-13";
+    const nowMs = Date.parse("2026-07-13T20:15:00.000Z");
+    const calls: string[] = [];
+    globalThis.fetch = (async (input) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.endsWith("/market-data/sessions")) return Response.json({});
+      throw new Error(`unexpected Yahoo fallback: ${url}`);
+    }) as typeof fetch;
+    try {
+      const response = await getSpxPriceActionCompassApi({
+        request: new Request(`https://example.com/api/spx-price-action-compass?view=price-overlay&date=${date}`),
+        env: { ZERO_DTE_SPX_API_TOKEN: "secret-token", SPX_PRICE_ACTION_TEST_NOW_MS: nowMs },
+      });
+      const payload = await response.json() as { source: { provider: string; sessionState: string }; warnings: string[] };
+      assert.equal(response.status, 502);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal(payload.source.provider, "0dtespx");
+      assert.equal(payload.source.sessionState, "UNAVAILABLE");
+      assert.deepEqual(payload.warnings, ["ZERO_DTE_SPX_RESPONSE_INVALID"]);
+      assert.equal(calls.length, 1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("marks the post-close provider race FINALIZING and refuses an incomplete final sample", async () => {
+    const originalFetch = globalThis.fetch;
+    const date = "2026-07-13";
+    const startMs = Date.parse("2026-07-13T13:30:00.000Z");
+    const endMs = Date.parse("2026-07-13T20:00:00.000Z");
+    const nowMs = endMs + 60_000;
+    globalThis.fetch = (async (input) => String(input).endsWith("/market-data/sessions")
+      ? Response.json({ [date]: sessionMetadata(startMs, endMs, { current: true }) })
+      : Response.json([{ datetime: new Date(endMs - 60_001).toISOString(), spx: 6000, spx_expected_move: 25 }])) as typeof fetch;
+    try {
+      const response = await getSpxPriceActionCompassApi({
+        request: new Request(`https://example.com/api/spx-price-action-compass?view=price-overlay&date=${date}`),
+        env: { ZERO_DTE_SPX_API_TOKEN: "secret-token", SPX_PRICE_ACTION_TEST_NOW_MS: nowMs },
+      });
+      const payload = await response.json() as { source: { provider: string; sessionState: string; routingReason: string }; warnings: string[] };
+      assert.equal(response.status, 502);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal(payload.source.provider, "0dtespx");
+      assert.equal(payload.source.sessionState, "FINALIZING");
+      assert.equal(payload.source.routingReason, "CURRENT_ET_SESSION_FINALIZING");
+      assert.deepEqual(payload.warnings, ["ZERO_DTE_SPX_FINALIZING"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("routes pre-open and older-date 1m plus 4h/1d to Yahoo", async () => {
+    const originalFetch = globalThis.fetch;
+    const date = "2026-07-13";
+    const olderDate = "2026-07-10";
+    const startMs = Date.parse("2026-07-13T13:30:00.000Z");
+    const endMs = Date.parse("2026-07-13T20:00:00.000Z");
+    const nowMs = Date.parse("2026-07-13T12:00:00.000Z");
+    const yahooPayload = { chart: { result: [{
+      timestamp: [Math.floor(startMs / 1_000)],
+      indicators: { quote: [{ open: [6000], high: [6002], low: [5998], close: [6001], volume: [10] }] },
+    }] } };
+    const urls: string[] = [];
+    globalThis.fetch = (async (input) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.endsWith("/market-data/sessions")) return Response.json({ [date]: sessionMetadata(startMs, endMs, { upcoming: true }) });
+      if (url.includes("query1.finance.yahoo.com")) return Response.json(yahooPayload);
+      throw new Error(`unexpected route: ${url}`);
+    }) as typeof fetch;
+    try {
+      const requests = [
+        `view=price-overlay&date=${date}`,
+        `view=price-overlay&date=${olderDate}`,
+        "timeframe=4h",
+        "timeframe=1d",
+      ];
+      for (const query of requests) {
+        const response = await getSpxPriceActionCompassApi({
+          request: new Request(`https://example.com/api/spx-price-action-compass?${query}`),
+          env: { ZERO_DTE_SPX_API_TOKEN: "secret-token", SPX_PRICE_ACTION_TEST_NOW_MS: nowMs },
+        });
+        const payload = await response.json() as { source: { provider: string; sessionState?: string; routingReason: string } };
+        assert.equal(response.status, 200);
+        assert.equal(payload.source.provider, "yahoo");
+      }
+      assert.equal(urls.filter((url) => url.endsWith("/market-data/sessions")).length, 1);
+      assert.equal(urls.filter((url) => url.includes("/market-data/historical/")).length, 0);
+      assert.equal(urls.filter((url) => url.includes("query1.finance.yahoo.com")).length, 4);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 describe("0DTESPX intraday normalization", () => {
+  it("classifies live, finalizing, closed, upcoming, and half-day sessions from provider metadata", () => {
+    const date = "2026-11-27";
+    const startMs = Date.parse("2026-11-27T14:30:00.000Z");
+    const endMs = Date.parse("2026-11-27T18:00:00.000Z");
+    assert.equal(resolveZeroDteSpxSession({ [date]: sessionMetadata(startMs, endMs, { upcoming: true }) }, date, startMs - 1)?.state, "UPCOMING");
+    assert.equal(resolveZeroDteSpxSession({ [date]: sessionMetadata(startMs, endMs, { current: true }) }, date, endMs - 1)?.state, "LIVE");
+    assert.equal(resolveZeroDteSpxSession({ [date]: sessionMetadata(startMs, endMs, { current: true }) }, date, endMs + 1)?.state, "FINALIZING");
+    assert.equal(resolveZeroDteSpxSession({ [date]: sessionMetadata(startMs, endMs) }, date, endMs + 1)?.state, "CLOSED");
+    assert.throws(
+      () => resolveZeroDteSpxSession({ [date]: sessionMetadata(startMs, endMs, { current: true, upcoming: true }) }, date, startMs),
+      /ZERO_DTE_SPX_RESPONSE_INVALID/,
+    );
+  });
+
+  it("accepts only missing/null newest-row EM backfill within 60,000ms", () => {
+    const now = Date.parse("2026-08-20T14:31:03.001Z");
+    const row = (time: number, spx: number | undefined, em: unknown, include = true) => ({
+      datetime: new Date(time).toISOString(),
+      ...(spx === undefined ? {} : { spx }),
+      ...(include ? { spx_expected_move: em } : {}),
+    });
+    const acceptedMissing = normalizeZeroDteSpxOneMinuteCandles([
+      row(now - ZERO_DTE_SPX_EM_LAG_TOLERANCE_MS, 6000, 25),
+      row(now, 6001, undefined, false),
+    ], now);
+    assert.equal(acceptedMissing.expectedMove.status, "READY");
+    assert.equal(acceptedMissing.expectedMove.lagMs, 60_000);
+
+    const acceptedNull = normalizeZeroDteSpxOneMinuteCandles([
+      row(now - 30_000, 6000, 25),
+      row(now, 6001, null),
+    ], now);
+    assert.equal(acceptedNull.expectedMove.status, "READY");
+    assert.equal(acceptedNull.expectedMove.sampleAt, new Date(now - 30_000).toISOString());
+
+    const lagged = normalizeZeroDteSpxOneMinuteCandles([
+      row(now - 60_001, 6000, 25),
+      row(now, 6001, undefined, false),
+    ], now);
+    assert.equal(lagged.expectedMove.errorCode, "ZERO_DTE_SPX_EXPECTED_MOVE_LAGGED");
+
+    const invalidNewest = normalizeZeroDteSpxOneMinuteCandles([
+      row(now - 30_000, 6000, 25),
+      row(now - 1, undefined, "bad"),
+      row(now, 6001, undefined, false),
+    ], now);
+    assert.equal(invalidNewest.expectedMove.errorCode, "ZERO_DTE_SPX_EXPECTED_MOVE_INVALID");
+    for (const invalidValue of [0, -1]) {
+      const invalidNonPositive = normalizeZeroDteSpxOneMinuteCandles([
+        row(now - 30_000, 6000, 25),
+        row(now, 6001, invalidValue),
+      ], now);
+      assert.equal(invalidNonPositive.expectedMove.errorCode, "ZERO_DTE_SPX_EXPECTED_MOVE_INVALID");
+    }
+
+    const future = normalizeZeroDteSpxOneMinuteCandles([
+      row(now, 6001, undefined, false),
+      row(now + 1, undefined, 25),
+    ], now);
+    assert.equal(future.expectedMove.errorCode, "ZERO_DTE_SPX_EXPECTED_MOVE_FUTURE");
+  });
+
+  it("validates a completed session against data-end-time instead of wall-clock age", () => {
+    const dataEndAt = "2026-07-13T20:00:00.000Z";
+    const weeksLater = Date.parse("2026-08-01T20:00:00.000Z");
+    const closed = normalizeZeroDteSpxOneMinuteCandles([
+      { datetime: dataEndAt, spx: 6000, spx_expected_move: 25 },
+    ], weeksLater, { state: "CLOSED", dataEndAt });
+    assert.equal(closed.latestSampleAt, dataEndAt);
+    assert.equal(closed.expectedMove.status, "READY");
+    assert.ok(closed.priceAgeMs > 10 * 60_000);
+    assert.throws(
+      () => normalizeZeroDteSpxOneMinuteCandles([
+        { datetime: "2026-07-13T19:58:59.999Z", spx: 6000 },
+      ], weeksLater, { state: "CLOSED", dataEndAt }),
+      (error: unknown) => error instanceof ZeroDteSpxError && error.code === "ZERO_DTE_SPX_SESSION_INCOMPLETE",
+    );
+  });
+
   it("builds a minute OHLC candle from valid second prices, including a partial latest minute", () => {
     const now = Date.parse("2026-08-20T14:31:03.000Z");
     const result = normalizeZeroDteSpxOneMinuteCandles([
@@ -395,7 +697,8 @@ describe("0DTESPX intraday normalization", () => {
     ], now);
     assert.equal(unavailable.candles.length, 1);
     assert.deepEqual(unavailable.expectedMove, {
-      status: "UNAVAILABLE", value: null, sampleAt: null, errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE",
+      status: "UNAVAILABLE", value: null, sampleAt: new Date(now).toISOString(), ageMs: 0, lagMs: 0,
+      errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_INVALID",
     });
 
     const staleExpectedMove = normalizeZeroDteSpxOneMinuteCandles([
@@ -404,14 +707,15 @@ describe("0DTESPX intraday normalization", () => {
     ], now);
     assert.equal(staleExpectedMove.candles.length, 2);
     assert.equal(staleExpectedMove.expectedMove.status, "UNAVAILABLE");
-    assert.equal(staleExpectedMove.expectedMove.errorCode, "ZERO_DTE_SPX_EXPECTED_MOVE_STALE");
+    assert.equal(staleExpectedMove.expectedMove.errorCode, "ZERO_DTE_SPX_EXPECTED_MOVE_LAGGED");
 
     const latestInvalidExpectedMove = normalizeZeroDteSpxOneMinuteCandles([
       { datetimeUnix: Math.floor((now - 60_000) / 1_000), spx: "6000", spxExpectedMove: "30" },
       { datetimeUnix: Math.floor(now / 1_000), spx: "6001", spxExpectedMove: "bad" },
     ], now);
     assert.deepEqual(latestInvalidExpectedMove.expectedMove, {
-      status: "UNAVAILABLE", value: null, sampleAt: null, errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE",
+      status: "UNAVAILABLE", value: null, sampleAt: new Date(now).toISOString(), ageMs: 0, lagMs: 0,
+      errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_INVALID",
     });
 
     const futureExpectedMove = normalizeZeroDteSpxOneMinuteCandles([
@@ -421,7 +725,7 @@ describe("0DTESPX intraday normalization", () => {
     ], now);
     assert.equal(futureExpectedMove.candles.length, 1);
     assert.equal(futureExpectedMove.expectedMove.status, "UNAVAILABLE");
-    assert.equal(futureExpectedMove.expectedMove.errorCode, "ZERO_DTE_SPX_EXPECTED_MOVE_STALE");
+    assert.equal(futureExpectedMove.expectedMove.errorCode, "ZERO_DTE_SPX_EXPECTED_MOVE_FUTURE");
   });
 
   it("requires a server-side token before making a 0DTESPX request", async () => {

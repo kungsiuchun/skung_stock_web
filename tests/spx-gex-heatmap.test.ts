@@ -68,13 +68,16 @@ it("normalizes volatile refresh keys into one SPX edge-cache key", () => {
 });
 
   it("keeps price-action view and timeframe selections in distinct SPX edge-cache keys", () => {
-    const overlay = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay"));
+    const overlay = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay&date=2026-07-13"));
     const fourHour = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?timeframe=4h"));
-    const sameOverlay = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay&cacheBust=1"));
-    const expectedMoveRetry = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay&em_retry=1&cacheBust=1"));
+    const sameOverlay = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay&date=2026-07-13&cacheBust=1"));
+    const differentDate = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay&date=2026-07-14"));
+    const expectedMoveRetry = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay&date=2026-07-13&em_retry=1&cacheBust=1"));
     assert.notEqual(overlay.url, fourHour.url);
     assert.equal(overlay.url, sameOverlay.url);
-    assert.equal(expectedMoveRetry.url, "https://example.com/api/spx-price-action-compass?view=price-overlay&em_retry=1");
+    assert.notEqual(overlay.url, differentDate.url);
+    assert.equal(overlay.url, "https://example.com/api/spx-price-action-compass?view=price-overlay&date=2026-07-13");
+    assert.equal(expectedMoveRetry.url, "https://example.com/api/spx-price-action-compass?view=price-overlay&date=2026-07-13&em_retry=1");
   });
 
 it("normalizes only effective SPX endpoint selections", () => {
@@ -2498,6 +2501,17 @@ describe("SPX 0DTE pressure matrix", () => {
     }), { expectedMove: null, warning: "0DTESPX Expected Move unavailable (ZERO_DTE_SPX_EXPECTED_MOVE_STALE)." });
     assert.deepEqual(resolveSpxGexExpectedMoveOverlay({
       source: {
+        ...source,
+        sessionState: "CLOSED",
+        latestSampleAt: new Date(nowMs).toISOString(),
+        expectedMove: { status: "READY", value: 25, sampleAt: new Date(nowMs).toISOString(), errorCode: null },
+      },
+      selectedDate: "2026-05-27",
+      currentTradingDate: "2026-05-27",
+      nowMs: nowMs + 30 * 60 * 1_000,
+    }), { expectedMove: 25, warning: null });
+    assert.deepEqual(resolveSpxGexExpectedMoveOverlay({
+      source: {
         provider: "yahoo",
         status: "READY",
         latestSampleAt: new Date(nowMs).toISOString(),
@@ -2540,6 +2554,21 @@ describe("SPX 0DTE pressure matrix", () => {
     }), { status: "WAITING", nextAttempt: 1, delayMs: SPX_EXPECTED_MOVE_RETRY_DELAY_MS });
     assert.deepEqual(resolveSpxGexExpectedMoveRetry({
       ...input, source: null, overlayError: true, oneMinutePointCount: 0,
+    }), { status: "WAITING", nextAttempt: 1, delayMs: SPX_EXPECTED_MOVE_RETRY_DELAY_MS });
+    assert.deepEqual(resolveSpxGexExpectedMoveRetry({
+      ...input,
+      minuteEt: 16 * 60 + 15,
+      source: { ...source, sessionState: "CLOSED", expectedMove: { status: "UNAVAILABLE", value: null, sampleAt: null } },
+      oneMinutePointCount: 2,
+    }), { status: "WAITING", nextAttempt: 1, delayMs: SPX_EXPECTED_MOVE_RETRY_DELAY_MS });
+    assert.deepEqual(resolveSpxGexExpectedMoveRetry({
+      ...input,
+      minuteEt: 16 * 60 + 15,
+      source: null,
+      overlayError: true,
+      failureProvider: "0dtespx",
+      failureSessionState: "FINALIZING",
+      oneMinutePointCount: 0,
     }), { status: "WAITING", nextAttempt: 1, delayMs: SPX_EXPECTED_MOVE_RETRY_DELAY_MS });
     assert.deepEqual(resolveSpxGexExpectedMoveRetry({
       ...input, selectedDate: "2026-05-26", oneMinutePointCount: 0,

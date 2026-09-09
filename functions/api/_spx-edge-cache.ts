@@ -48,6 +48,8 @@ export const canonicalSpxCacheRequest = (request: Request) => {
   if (url.pathname.endsWith("/spx-price-action-compass")) {
     if (url.searchParams.get("view") === "price-overlay") {
       canonical.set("view", "price-overlay");
+      const date = url.searchParams.get("date");
+      if (/^\d{4}-\d{2}-\d{2}$/.test(date || "")) canonical.set("date", date!);
       if (url.searchParams.get("em_retry") === "1") canonical.set("em_retry", "1");
     }
     else canonical.set("timeframe", normalizeSpxPriceActionTimeframe(url.searchParams.get("timeframe")));
