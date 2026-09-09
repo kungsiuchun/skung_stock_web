@@ -53,7 +53,7 @@ export interface ZeroDteSpxHistoryPoint {
 }
 
 export interface ZeroDteSpxExpectedMove {
-  status: "READY" | "UNAVAILABLE";
+  status: "READY" | "STALE" | "UNAVAILABLE";
   value: number | null;
   sampleAt: string | null;
   ageMs: number | null;
@@ -73,6 +73,59 @@ export interface ZeroDteSpxIntradayResult {
   priceAgeMs: number;
   expectedMove: ZeroDteSpxExpectedMove;
 }
+
+export const refreshZeroDteSpxIntradayFreshness = (
+  result: ZeroDteSpxIntradayResult,
+  now = Date.now(),
+  session?: Pick<ResolvedZeroDteSpxSession, "state" | "dataEndAt">,
+): ZeroDteSpxIntradayResult => {
+  const latestSampleMs = Date.parse(result.latestSampleAt);
+  if (!Number.isFinite(latestSampleMs)) throw new ZeroDteSpxError("ZERO_DTE_SPX_RESPONSE_INVALID");
+  const priceAgeMs = now - latestSampleMs;
+  const completedSession = session?.state === "FINALIZING" || session?.state === "CLOSED";
+  if (!completedSession && !isFreshSpx0DteSample(latestSampleMs, now)) {
+    throw new ZeroDteSpxError("ZERO_DTE_SPX_STALE");
+  }
+  const expectedMove = result.expectedMove;
+  if (typeof expectedMove.value !== "number" || !Number.isFinite(expectedMove.value) || expectedMove.value <= 0 || !expectedMove.sampleAt) {
+    return { ...result, priceAgeMs };
+  }
+
+  const sampleMs = Date.parse(expectedMove.sampleAt);
+  if (!Number.isFinite(sampleMs)) {
+    return {
+      ...result,
+      priceAgeMs,
+      expectedMove: { ...expectedMove, status: "UNAVAILABLE", value: null, errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_INVALID" },
+    };
+  }
+  const ageMs = now - sampleMs;
+  const lagMs = latestSampleMs - sampleMs;
+  if (ageMs < 0 || lagMs < 0) {
+    return {
+      ...result,
+      priceAgeMs,
+      expectedMove: { ...expectedMove, status: "UNAVAILABLE", value: null, ageMs, lagMs, errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_FUTURE" },
+    };
+  }
+  const stale = lagMs > ZERO_DTE_SPX_EM_LAG_TOLERANCE_MS
+    || (!completedSession && !isFreshSpx0DteSample(sampleMs, now));
+  return {
+    ...result,
+    priceAgeMs,
+    expectedMove: {
+      ...expectedMove,
+      status: stale ? "STALE" : "READY",
+      ageMs,
+      lagMs,
+      errorCode: stale
+        ? lagMs > ZERO_DTE_SPX_EM_LAG_TOLERANCE_MS
+          ? "ZERO_DTE_SPX_EXPECTED_MOVE_LAGGED"
+          : "ZERO_DTE_SPX_EXPECTED_MOVE_STALE"
+        : null,
+    },
+  };
+};
 
 type FetchLike = typeof fetch;
 
@@ -238,9 +291,9 @@ export const normalizeZeroDteSpxOneMinuteCandles = (
     } else if (value === null) {
       expectedMove = { status: "UNAVAILABLE", value: null, sampleAt, ageMs, lagMs, errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_INVALID" };
     } else if (lagMs > ZERO_DTE_SPX_EM_LAG_TOLERANCE_MS) {
-      expectedMove = { status: "UNAVAILABLE", value: null, sampleAt, ageMs, lagMs, errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_LAGGED" };
+      expectedMove = { status: "STALE", value, sampleAt, ageMs, lagMs, errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_LAGGED" };
     } else if (!completedSession && !isFreshSpx0DteSample(candidate.time, now)) {
-      expectedMove = { status: "UNAVAILABLE", value: null, sampleAt, ageMs, lagMs, errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_STALE" };
+      expectedMove = { status: "STALE", value, sampleAt, ageMs, lagMs, errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_STALE" };
     } else {
       expectedMove = { status: "READY", value, sampleAt, ageMs, lagMs, errorCode: null };
     }
@@ -262,7 +315,11 @@ export const normalizeZeroDteSpxOneMinuteCandles = (
     close: bucket[bucket.length - 1].price,
     volume: 0,
   }));
-  return { candles: aggregateSpxOneMinutePriceActionCandles(candles, "1m"), latestSampleAt, priceAgeMs, expectedMove };
+  return refreshZeroDteSpxIntradayFreshness(
+    { candles: aggregateSpxOneMinutePriceActionCandles(candles, "1m"), latestSampleAt, priceAgeMs, expectedMove },
+    now,
+    session,
+  );
 };
 
 export const fetchZeroDteSpxIntradayCandles = async (
