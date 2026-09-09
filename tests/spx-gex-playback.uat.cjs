@@ -97,6 +97,43 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     },
     warnings: [],
   };
+  const closedOneMinuteCandles = Array.from({ length: 391 }, (_, index) => {
+    const close = fixture.heatmap.quote.last + Math.sin(index / 11) * 9 + index * 0.015;
+    return {
+      time: Date.parse(`${fixture.selectedDate}T13:30:00.000Z`) + index * 60_000,
+      date_iso: fixture.selectedDate,
+      open: close - 0.5,
+      high: close + 1,
+      low: close - 1,
+      close,
+      volume: 0,
+    };
+  });
+  const closedOneMinutePayload = {
+    ...oneMinutePayload,
+    candles: closedOneMinuteCandles,
+    source: {
+      ...oneMinutePayload.source,
+      provider: "0dtespx",
+      label: "0DTESPX CLOSED SPX index series",
+      interval: "1s->1m",
+      latestSampleAt: new Date(closedOneMinuteCandles.at(-1).time).toISOString(),
+      priceAgeMs: 15 * 60_000,
+      status: "READY",
+      sessionState: "CLOSED",
+      sessionDate: fixture.selectedDate,
+      sessionEndAt: new Date(closedOneMinuteCandles.at(-1).time).toISOString(),
+      routingReason: "CURRENT_ET_SESSION_CLOSED_HISTORICAL",
+      expectedMove: {
+        status: "READY",
+        value: 25,
+        sampleAt: new Date(closedOneMinuteCandles.at(-1).time).toISOString(),
+        ageMs: 15 * 60_000,
+        lagMs: 0,
+        errorCode: null,
+      },
+    },
+  };
   const monitorPatterns = [
     { id: "older-high-confidence", type: "PIN_BAR_BEARISH", name: "Older", label: "Older signal", category: "candle", direction: "bearish", candleIndices: [120], fromIndex: 120, toIndex: 120, price: 7358, confidence: 0.99, description: "Older" },
     { id: "latest-b", type: "DOJI", name: "Latest B", label: "Latest B", category: "candle", direction: "neutral", candleIndices: [280], fromIndex: 280, toIndex: 280, price: 7360, confidence: 0.8, description: "Latest B" },
@@ -113,6 +150,8 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
 
   let secondSnapshotAttempts = 0;
   let forceCompassTextFailure = false;
+  let overlayMode = "live";
+  const overlayDates = [];
   const initialSpqRequestOrder = [];
   const browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
   const page = await browser.newPage();
@@ -123,6 +162,15 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
   page.on("pageerror", (error) => consoleErrors.push(`PAGE_ERROR: ${error.message}`));
   mkdirSync(SCREENSHOT_DIR, { recursive: true });
   await page.setViewport({ width: 1466, height: 986 });
+  await page.evaluateOnNewDocument((fixedNow) => {
+    const RealDate = Date;
+    globalThis.Date = class extends RealDate {
+      constructor(...args) {
+        super(...(args.length > 0 ? args : [fixedNow]));
+      }
+      static now() { return fixedNow; }
+    };
+  }, Date.parse(`${fixture.selectedDate}T20:15:00.000Z`));
   await page.setRequestInterception(true);
   page.on("request", (request) => {
     const url = new URL(request.url());
@@ -137,7 +185,22 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
         body: "<!DOCTYPE html><html><body>upstream unavailable</body></html>",
       });
     }
-    if (url.pathname === "/api/spx-price-action-compass" && (url.searchParams.get("timeframe") === "1m" || url.searchParams.get("view") === "price-overlay")) {
+    if (url.pathname === "/api/spx-price-action-compass" && url.searchParams.get("view") === "price-overlay") {
+      overlayDates.push(url.searchParams.get("date"));
+      if (overlayMode === "closed") return request.respond(jsonResponse(closedOneMinutePayload));
+      if (overlayMode === "closed-failure") return request.respond({
+        status: 502,
+        contentType: "application/json; charset=utf-8",
+        body: JSON.stringify({
+          ...closedOneMinutePayload,
+          candles: [],
+          source: { ...closedOneMinutePayload.source, status: "UNAVAILABLE" },
+          warnings: ["ZERO_DTE_SPX_UPSTREAM_UNAVAILABLE"],
+        }),
+      });
+      return request.respond(jsonResponse(oneMinutePayload));
+    }
+    if (url.pathname === "/api/spx-price-action-compass" && url.searchParams.get("timeframe") === "1m") {
       return request.respond(jsonResponse(oneMinutePayload));
     }
     if (url.pathname === "/api/spx-price-action-compass") return request.respond(jsonResponse(fiveMinutePayload));
@@ -167,7 +230,13 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
       timeout: 20_000,
     });
     await page.waitForSelector('[data-spx-gex-pressure-matrix="true"]', { timeout: 20_000 });
-    await page.waitForSelector('[data-pa-side-pattern="true"]', { timeout: 20_000 });
+    await page.click('[data-pa-signal-density="all"]');
+    try {
+      await page.waitForSelector('[data-pa-side-pattern="true"]', { timeout: 20_000 });
+    } catch (error) {
+      const pageText = await page.$eval("body", (node) => node.textContent || "").catch(() => "");
+      throw new Error(`Signal Monitor did not render. Console: ${consoleErrors.join(" | ")}. Page: ${pageText.slice(0, 800)}`, { cause: error });
+    }
     await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-spot-line="true"] polyline'));
     assert.deepEqual(initialSpqRequestOrder.slice(0, 4), ["heatmap", "compass", "pressure", "overlay"], "initial SPX Page reads must use the stable request lane order");
     const monitorOrder = await page.$$eval('[data-pa-side-pattern="true"]', (nodes) => nodes.map((node) => ({
@@ -365,6 +434,34 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     const reducedMotionAnimation = await page.$eval('[data-spx-gex-pressure-spot-marker="true"]', (element) => getComputedStyle(element).animationName);
     assert.equal(reducedMotionAnimation, "none", "reduced motion must disable the current-spot pulse");
     await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "no-preference" }]);
+    await page.waitForFunction(() => !document.querySelector('button[title="Refresh latest SPX and GEX sources"]')?.hasAttribute("disabled"));
+    overlayMode = "closed";
+    await page.click('button[title="Refresh latest SPX and GEX sources"]');
+    try {
+      await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-spot-source="true"]')?.textContent?.includes("0DTESPX CLOSED"));
+    } catch (error) {
+      const state = await page.evaluate(() => ({
+        source: document.querySelector('[data-spx-gex-pressure-spot-source="true"]')?.textContent || "",
+        warning: document.querySelector('[data-spx-gex-pressure-spot-warning="true"]')?.textContent || "",
+        busy: document.querySelector('[data-spx-gex-pressure-matrix="true"]')?.getAttribute("aria-busy") || "",
+      }));
+      throw new Error(`CLOSED overlay did not load. Requests: ${overlayDates.join(",")}. State: ${JSON.stringify(state)}. Console: ${consoleErrors.join(" | ")}`, { cause: error });
+    }
+    const closedOverlay = await page.evaluate(() => ({
+      source: document.querySelector('[data-spx-gex-pressure-spot-source="true"]')?.textContent || "",
+      spotTime: document.querySelector('[data-spx-gex-pressure-spot-status="true"]')?.textContent || "",
+      expectedMove: document.querySelector('[data-spx-gex-pressure-expected-move="true"]')?.textContent || "",
+      corridorLines: document.querySelectorAll('[data-spx-gex-pressure-expected-move-upper="true"], [data-spx-gex-pressure-expected-move-lower="true"]').length,
+      pulseCount: document.querySelectorAll('[data-spx-gex-pressure-matrix="true"] .spx-spot-live-pulse').length,
+      state: document.querySelector('[data-spx-gex-pressure-session-state]')?.getAttribute("data-spx-gex-pressure-session-state") || "",
+    }));
+    assert.match(closedOverlay.source, /SPX 1M \/ 0DTESPX CLOSED/);
+    assert.match(closedOverlay.spotTime, /16:00 ET/);
+    assert.match(closedOverlay.expectedMove, /EM ±25\.00 · 16:00 ET/);
+    assert.equal(closedOverlay.corridorLines, 2, "CLOSED overlay must retain the contract-valid EM corridor");
+    assert.equal(closedOverlay.pulseCount, 0, "CLOSED overlay must not render any live pulse surface");
+    assert.equal(closedOverlay.state, "CLOSED");
+    assert.ok(overlayDates.length > 0 && overlayDates.every((date) => date === fixture.selectedDate), "every price-overlay request must carry the selected date");
     const readyCell = '[data-pressure-cell="true"][data-pressure-column-status="READY"]';
     await page.hover(readyCell);
     await page.waitForSelector('[data-spx-gex-pressure-tooltip="desktop"]');
@@ -378,7 +475,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     });
     assert.match(desktopTooltip.text, /Collected .* ET/);
     assert.match(desktopTooltip.text, /GEX snapshot SPX/);
-    assert.match(desktopTooltip.text, /Yahoo 1m context/);
+    assert.match(desktopTooltip.text, /0DTESPX 1m context/);
     assert.equal(desktopTooltip.visible, true, "desktop hover tooltip must be visible");
     assert.equal(desktopTooltip.insideViewport, true, "desktop tooltip must remain inside the viewport");
     await page.focus(readyCell);
@@ -498,6 +595,23 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.equal(secondSnapshotAttempts, 4, "one bounded retry must keep the failed playback frame, then the explicit retry may advance it");
     assert.equal(consoleErrors.length, 5, `only deliberately injected Compass and playback 503 responses may reach console: ${consoleErrors.join(" | ")}`);
     assert.ok(consoleErrors.every((error) => /503 \(Service Unavailable\)/.test(error)));
+    overlayMode = "closed-failure";
+    await page.click('button[title="Refresh latest SPX and GEX sources"]');
+    await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-spot-warning="true"]')?.textContent?.includes("showing the last verified 1-minute overlay"));
+    const retainedClosedOverlay = await page.evaluate(() => ({
+      source: document.querySelector('[data-spx-gex-pressure-spot-source="true"]')?.textContent || "",
+      expectedMove: document.querySelector('[data-spx-gex-pressure-expected-move="true"]')?.textContent || "",
+      corridorLines: document.querySelectorAll('[data-spx-gex-pressure-expected-move-upper="true"], [data-spx-gex-pressure-expected-move-lower="true"]').length,
+      pointCount: Number(document.querySelector('[data-spx-gex-pressure-spot-line="true"]')?.getAttribute("data-spx-gex-pressure-spot-point-count") || 0),
+      warning: document.querySelector('[data-spx-gex-pressure-spot-warning="true"]')?.textContent || "",
+      pulseCount: document.querySelectorAll('[data-spx-gex-pressure-matrix="true"] .spx-spot-live-pulse').length,
+    }));
+    assert.match(retainedClosedOverlay.source, /0DTESPX CLOSED/);
+    assert.equal(retainedClosedOverlay.expectedMove, "", "an unavailable refresh must remove the stale EM label and corridor");
+    assert.equal(retainedClosedOverlay.corridorLines, 0, "an unavailable refresh must remove both EM corridor lines");
+    assert.ok(retainedClosedOverlay.pointCount >= 250, "post-close failure must retain the last verified 1-minute overlay");
+    assert.match(retainedClosedOverlay.warning, /ZERO_DTE_SPX_UPSTREAM_UNAVAILABLE/);
+    assert.equal(retainedClosedOverlay.pulseCount, 0, "retained CLOSED overlay must remain non-live");
     console.log("SPX GEX pressure + playback UAT passed: matrix renders with aligned spot/tape, and failed replay retries deterministically.");
   } finally {
     await browser.close();

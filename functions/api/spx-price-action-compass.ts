@@ -12,7 +12,8 @@ import {
 import {
   fetchZeroDteSpxCurrentSession,
   fetchZeroDteSpxIntradayCandles,
-  isZeroDteSpxCurrentSession,
+  resolveZeroDteSpxSession,
+  type ResolvedZeroDteSpxSession,
   ZeroDteSpxError,
 } from "./_0dtespx";
 import { coalesceSpxEdgeRequest, readSpxEdgeCache, withSpxObservability, writeSpxEdgeCache } from "./_spx-edge-cache";
@@ -23,6 +24,7 @@ interface Env {
   /** Local-only migration alias. Production must use ZERO_DTE_SPX_API_TOKEN. */
   spx_0dte_token?: string;
   CF_PAGES?: string;
+  SPX_PRICE_ACTION_TEST_NOW_MS?: number;
 }
 
 interface Context {
@@ -54,25 +56,48 @@ const etTradingDate = (now = new Date()) => {
   return `${parts.year}-${parts.month}-${parts.day}`;
 };
 
+export const isStrictIsoDate = (value: string | null) => {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day)).toISOString().slice(0, 10) === value;
+};
+
+const invalidOverlayDateResponse = () => json(
+  { errorCode: "SPX_PRICE_ACTION_DATE_INVALID", error: "A valid date in YYYY-MM-DD format is required for price-overlay." },
+  { status: 400, headers: { "Cache-Control": "no-store" } },
+);
+
 export const shouldCacheSpxPriceActionResponse = (isPriceOverlay: boolean, source: SpxPriceActionSource) =>
-  !(isPriceOverlay && source.provider === "0dtespx" && source.expectedMove?.status !== "READY");
+  source.provider !== "0dtespx"
+    || (source.sessionState !== "FINALIZING" && (!isPriceOverlay || source.expectedMove?.status === "READY"));
 
 async function onRequestUncached(context: Context) {
   const startedAt = Date.now();
   const url = new URL(context.request.url);
   const isPriceOverlay = url.searchParams.get("view") === "price-overlay";
+  const requestedDate = isPriceOverlay ? url.searchParams.get("date") : null;
+  if (isPriceOverlay && !isStrictIsoDate(requestedDate)) return invalidOverlayDateResponse();
   const timeframe = isPriceOverlay ? "1m" : normalizeSpxPriceActionTimeframe(url.searchParams.get("timeframe"));
   const config = getSpxPriceActionFetchConfig(timeframe);
-  const fetchedAt = new Date().toISOString();
+  const nowMs = typeof context.env.SPX_PRICE_ACTION_TEST_NOW_MS === "number"
+    ? context.env.SPX_PRICE_ACTION_TEST_NOW_MS
+    : Date.now();
+  const fetchedAt = new Date(nowMs).toISOString();
+  const currentEtDate = etTradingDate(new Date(nowMs));
+  const selectedDate = requestedDate || currentEtDate;
   const targetTimeframe = isPriceOverlay ? "1m" : timeframe;
   const zeroDteToken = context.env.ZERO_DTE_SPX_API_TOKEN
     || (context.env.CF_PAGES === "1" ? context.env.spx_0dte_token : undefined);
-  const allowCache = !Array.isArray(context.env.SPX_PRICE_ACTION_TEST_CANDLES);
+  const allowCache = !Array.isArray(context.env.SPX_PRICE_ACTION_TEST_CANDLES)
+    && typeof context.env.SPX_PRICE_ACTION_TEST_NOW_MS !== "number";
   if (allowCache) {
     const cached = await readSpxEdgeCache(context.request);
     if (cached) return cached;
   }
 
+  let zeroDteAttempted = false;
+  let routeSession: ResolvedZeroDteSpxSession | null = null;
+  let routingReason = "";
   try {
     let cacheSeconds = 30;
     let source: SpxPriceActionSource;
@@ -87,28 +112,50 @@ async function onRequestUncached(context: Context) {
         interval: timeframe,
         fetchedAt,
         status: "READY",
+        routingReason: "INJECTED_TEST_CANDLES",
         note: "Only used by local regression tests; production calls the native Yahoo chart path.",
       };
     } else if (targetTimeframe === "1m" || targetTimeframe === "5m" || targetTimeframe === "15m") {
-      const tradingDate = etTradingDate();
-      const sessions = await fetchZeroDteSpxCurrentSession(zeroDteToken);
-      if (isZeroDteSpxCurrentSession(sessions, tradingDate)) {
-        const intraday = await fetchZeroDteSpxIntradayCandles(tradingDate, zeroDteToken);
+      if (selectedDate === currentEtDate) {
+        zeroDteAttempted = true;
+        routingReason = "CURRENT_ET_DATE_SESSION_METADATA";
+        const sessions = await fetchZeroDteSpxCurrentSession(zeroDteToken);
+        routeSession = resolveZeroDteSpxSession(sessions, selectedDate, nowMs);
+        if (!routeSession) throw new ZeroDteSpxError("ZERO_DTE_SPX_RESPONSE_INVALID");
+      }
+      if (routeSession && routeSession.state !== "UPCOMING") {
+        routingReason = routeSession.state === "LIVE"
+          ? "CURRENT_ET_SESSION_LIVE"
+          : routeSession.state === "FINALIZING"
+            ? "CURRENT_ET_SESSION_FINALIZING"
+            : "CURRENT_ET_SESSION_CLOSED_HISTORICAL";
+        const intraday = await fetchZeroDteSpxIntradayCandles(selectedDate, zeroDteToken, fetch, nowMs, routeSession);
         rawCandles = intraday.candles;
-        cacheSeconds = 300;
+        cacheSeconds = routeSession.state === "CLOSED" ? 3_600 : routeSession.state === "LIVE" ? 60 : 0;
         source = {
           provider: "0dtespx",
-          label: "0DTESPX live SPX index series",
+          label: `0DTESPX ${routeSession.state} SPX index series`,
           symbol: "SPX",
-          range: "current RTH session",
+          range: routeSession.state === "LIVE" ? "current RTH session" : "same-day completed session",
           interval: "1s->1m",
           fetchedAt,
           latestSampleAt: intraday.latestSampleAt,
+          priceAgeMs: intraday.priceAgeMs,
           status: "READY",
+          sessionState: routeSession.state,
+          sessionDate: routeSession.sessionDate,
+          sessionEndAt: routeSession.endAt,
+          routingReason,
           note: "Server-side normalized 1-minute SPX context; source does not provide volume.",
           expectedMove: intraday.expectedMove,
         };
       } else {
+        zeroDteAttempted = false;
+        routingReason = selectedDate !== currentEtDate
+          ? "OLDER_SELECTED_DATE_USES_YAHOO"
+          : routeSession?.state === "UPCOMING"
+            ? "UPCOMING_SESSION_USES_YAHOO"
+            : "NO_PROVIDER_SESSION_FOR_CURRENT_ET_DATE";
         rawCandles = toSpxPriceActionCandles(await fetchNativeYahooHistory("SPX", config.yahooRange, config.yahooInterval));
         source = {
           provider: "yahoo",
@@ -118,6 +165,10 @@ async function onRequestUncached(context: Context) {
           interval: config.aggregateTo === "4h" ? "1h->4h" : config.yahooInterval,
           fetchedAt,
           status: "READY",
+          sessionState: routeSession?.state,
+          sessionDate: routeSession?.sessionDate || selectedDate,
+          sessionEndAt: routeSession?.endAt || null,
+          routingReason,
           note: "Historical and out-of-session SPX OHLCV use the native Yahoo chart source path; Cboe remains reserved for options/GEX source truth.",
         };
       }
@@ -131,6 +182,7 @@ async function onRequestUncached(context: Context) {
         interval: config.aggregateTo === "4h" ? "1h->4h" : config.yahooInterval,
         fetchedAt,
         status: "READY",
+        routingReason: "HIGHER_TIMEFRAME_USES_YAHOO",
         note: "Historical and higher-timeframe SPX OHLCV use the native Yahoo chart source path; Cboe remains reserved for options/GEX source truth.",
       };
     }
@@ -156,6 +208,19 @@ async function onRequestUncached(context: Context) {
         warnings,
       });
     const shouldCache = shouldCacheSpxPriceActionResponse(isPriceOverlay, source);
+    console.info("spx_price_action_routing", {
+      provider: source.provider,
+      timeframe: targetTimeframe,
+      selectedDate,
+      sessionState: source.sessionState || null,
+      sessionDate: source.sessionDate || null,
+      sessionEndAt: source.sessionEndAt || null,
+      priceAgeMs: source.priceAgeMs ?? null,
+      expectedMoveAgeMs: source.expectedMove?.ageMs ?? null,
+      expectedMoveLagMs: source.expectedMove?.lagMs ?? null,
+      routingReason: source.routingReason || null,
+      status: source.status || "READY",
+    });
     const response = withSpxObservability(
       json(payload, shouldCache ? {} : { headers: { "Cache-Control": "no-store" } }, cacheSeconds),
       Date.now() - startedAt,
@@ -163,8 +228,26 @@ async function onRequestUncached(context: Context) {
     if (allowCache && shouldCache) await writeSpxEdgeCache(context, response);
     return response;
   } catch (error) {
-    const zeroDteFailure = error instanceof ZeroDteSpxError;
-    const failureCode = zeroDteFailure ? error.code : "SPX_PRICE_ACTION_SOURCE_FAILED";
+    const zeroDteFailure = error instanceof ZeroDteSpxError || zeroDteAttempted;
+    const failureCode = error instanceof ZeroDteSpxError
+      ? error.code
+      : zeroDteFailure ? "ZERO_DTE_SPX_UPSTREAM_UNAVAILABLE" : "SPX_PRICE_ACTION_SOURCE_FAILED";
+    const sessionState = routeSession?.state || (zeroDteFailure ? "UNAVAILABLE" : undefined);
+    const failureRoutingReason = routingReason || (zeroDteFailure ? "ZERO_DTE_SESSION_METADATA_UNAVAILABLE" : "YAHOO_SOURCE_FAILED");
+    console.info("spx_price_action_routing", {
+      provider: zeroDteFailure ? "0dtespx" : "yahoo",
+      timeframe: targetTimeframe,
+      selectedDate,
+      sessionState: sessionState || null,
+      sessionDate: routeSession?.sessionDate || (zeroDteFailure ? selectedDate : null),
+      sessionEndAt: routeSession?.endAt || null,
+      priceAgeMs: null,
+      expectedMoveAgeMs: null,
+      expectedMoveLagMs: null,
+      routingReason: failureRoutingReason,
+      status: "UNAVAILABLE",
+      failureCode,
+    });
     return json(
       {
         ticker: "SPX",
@@ -185,13 +268,17 @@ async function onRequestUncached(context: Context) {
         },
         source: {
           provider: zeroDteFailure ? "0dtespx" : "yahoo",
-          label: zeroDteFailure ? "0DTESPX live SPX index series" : "Native Yahoo Finance chart",
+          label: zeroDteFailure ? `0DTESPX ${sessionState} SPX index series` : "Native Yahoo Finance chart",
           symbol: "SPX",
-          range: zeroDteFailure ? "current RTH session" : config.yahooRange,
+          range: zeroDteFailure && routeSession?.state !== "LIVE" ? "same-day session" : zeroDteFailure ? "current RTH session" : config.yahooRange,
           interval: zeroDteFailure ? "1s->1m" : config.yahooInterval,
           fetchedAt,
           status: failureCode === "ZERO_DTE_SPX_STALE" ? "STALE" : "UNAVAILABLE",
-          note: zeroDteFailure ? "0DTESPX intraday source is unavailable; Yahoo fallback is disabled during the current session." : "SPX Price Action source is unavailable.",
+          sessionState,
+          sessionDate: routeSession?.sessionDate || (zeroDteFailure ? selectedDate : null),
+          sessionEndAt: routeSession?.endAt || null,
+          routingReason: failureRoutingReason,
+          note: zeroDteFailure ? "0DTESPX same-day source is unavailable; Yahoo fallback is disabled for a live, finalizing, or completed current-date session." : "SPX Price Action source is unavailable.",
         },
         warnings: [failureCode],
       },
@@ -201,7 +288,12 @@ async function onRequestUncached(context: Context) {
 }
 
 export async function onRequest(context: Context) {
-  const allowCache = !Array.isArray(context.env.SPX_PRICE_ACTION_TEST_CANDLES);
+  const url = new URL(context.request.url);
+  if (url.searchParams.get("view") === "price-overlay" && !isStrictIsoDate(url.searchParams.get("date"))) {
+    return invalidOverlayDateResponse();
+  }
+  const allowCache = !Array.isArray(context.env.SPX_PRICE_ACTION_TEST_CANDLES)
+    && typeof context.env.SPX_PRICE_ACTION_TEST_NOW_MS !== "number";
   if (!allowCache) return onRequestUncached(context);
   const cached = await readSpxEdgeCache(context.request);
   if (cached) return cached;

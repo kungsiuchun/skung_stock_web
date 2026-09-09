@@ -378,7 +378,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     setPlaying(false);
     setIsFollowingLatest(true);
     try {
-      if (await loadHeatmap(undefined, null) === "READY") setPressureRefreshKey(Date.now());
+      if (await loadHeatmap(undefined, null) === "READY") setPressureRefreshKey((current) => current + 1);
     } finally {
       refreshInFlightRef.current = false;
       setManualRefreshPending(false);
@@ -396,7 +396,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
       const clock = currentEtClock();
       if (document.visibilityState !== "visible" || selectedDate !== clock.tradingDate || clock.minuteEt < 570 || clock.minuteEt > 975) return;
       void loadHeatmap(selectedDate, null).then((result) => {
-        if (result === "READY") setPressureRefreshKey(Date.now());
+        if (result === "READY") setPressureRefreshKey((current) => current + 1);
       });
     };
     const interval = window.setInterval(refreshVisibleLiveSession, 60_000);
