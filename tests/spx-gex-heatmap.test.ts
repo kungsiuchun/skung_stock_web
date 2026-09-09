@@ -2510,6 +2510,41 @@ describe("SPX 0DTE pressure matrix", () => {
     assert.deepEqual(resolveSpxGexExpectedMoveOverlay({
       source: {
         ...source,
+        status: "STALE",
+        sessionDate: "2026-05-27",
+        latestSampleAt: new Date(nowMs).toISOString(),
+        expectedMove: { status: "STALE", value: 25, sampleAt: new Date(nowMs).toISOString(), errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_STALE" },
+      },
+      selectedDate: "2026-05-27",
+      currentTradingDate: "2026-05-27",
+      nowMs: nowMs + 36 * 60_000,
+    }), { expectedMove: 25, warning: "Using stale 0DTESPX Expected Move sampled 36m ago (ZERO_DTE_SPX_EXPECTED_MOVE_STALE); context only." });
+    assert.deepEqual(resolveSpxGexExpectedMoveOverlay({
+      source: {
+        ...source,
+        status: "STALE",
+        sessionDate: "2026-05-27",
+        latestSampleAt: new Date(nowMs).toISOString(),
+        expectedMove: { status: "READY", value: 25, sampleAt: new Date(nowMs).toISOString(), errorCode: null },
+      },
+      selectedDate: "2026-05-27",
+      currentTradingDate: "2026-05-27",
+      nowMs: nowMs + 36 * 60_000,
+    }), { expectedMove: null, warning: "0DTESPX Expected Move unavailable (ZERO_DTE_SPX_EXPECTED_MOVE_STALE)." });
+    assert.deepEqual(resolveSpxGexExpectedMoveOverlay({
+      source: {
+        ...source,
+        status: "STALE",
+        latestSampleAt: new Date(nowMs).toISOString(),
+        expectedMove: { status: "STALE", value: 25, sampleAt: new Date(nowMs).toISOString(), errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_STALE" },
+      },
+      selectedDate: "2026-05-27",
+      currentTradingDate: "2026-05-27",
+      nowMs: nowMs + 36 * 60_000,
+    }), { expectedMove: null, warning: null });
+    assert.deepEqual(resolveSpxGexExpectedMoveOverlay({
+      source: {
+        ...source,
         sessionState: "CLOSED",
         latestSampleAt: new Date(nowMs).toISOString(),
         expectedMove: { status: "READY", value: 25, sampleAt: new Date(nowMs).toISOString(), errorCode: null },

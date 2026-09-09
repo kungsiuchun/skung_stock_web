@@ -6,6 +6,7 @@ import {
   fetchZeroDteSpxCurrentSession,
   normalizeZeroDteSpxOneMinuteCandles,
   refreshZeroDteSpxIntradayFreshness,
+  retainZeroDteSpxIntradayContext,
   resolveZeroDteSpxSession,
   ZERO_DTE_SPX_EM_LAG_TOLERANCE_MS,
   ZeroDteSpxError,
@@ -620,6 +621,72 @@ describe("SPX Price Action Compass API", () => {
     }
   });
 
+  it("serves an existing shared snapshot as explicit stale pressure-map context when provider refresh is stale", async () => {
+    const originalFetch = globalThis.fetch;
+    const db = new SharedCacheMemoryD1();
+    const sampleMs = Math.floor((Date.now() - 60_000) / 60_000) * 60_000;
+    const sessionDate = etTradingDate();
+    const session = sessionMetadata(sampleMs - 3_600_000, sampleMs + 3_600_000, { current: true });
+    globalThis.fetch = (async (input) => String(input).endsWith("/market-data/sessions")
+      ? Response.json({ [sessionDate]: session })
+      : Response.json([{ datetimeUnix: Math.floor(sampleMs / 1_000), spx: "6000", spx_expected_move: "25" }])) as typeof fetch;
+    try {
+      const request = new Request(`https://example.com/api/spx-price-action-compass?view=price-overlay&date=${sessionDate}`);
+      const first = await getSpxPriceActionCompassApi({
+        request,
+        env: { ZERO_DTE_SPX_API_TOKEN: "secret-token", MARKET_CACHE_DB: db, SPX_PRICE_ACTION_TEST_NOW_MS: sampleMs },
+      });
+      assert.equal(first.status, 200);
+
+      const stale = await getSpxPriceActionCompassApi({
+        request,
+        env: { ZERO_DTE_SPX_API_TOKEN: "secret-token", MARKET_CACHE_DB: db, SPX_PRICE_ACTION_TEST_NOW_MS: sampleMs + 11 * 60_000 },
+      });
+      const payload = await stale.json() as {
+        candles: SpxPriceActionCandle[];
+        source: { status: string; routingReason: string; expectedMove: { status: string; value: number }; sharedCache: { status: string; refreshError?: string } };
+        warnings: string[];
+      };
+      assert.equal(stale.status, 200);
+      assert.equal(stale.headers.get("cache-control"), "public, max-age=15");
+      assert.equal(payload.source.status, "STALE");
+      assert.match(payload.source.routingReason, /RETAINED_STALE_SHARED_CACHE$/);
+      assert.equal(payload.source.expectedMove.status, "STALE");
+      assert.equal(payload.source.expectedMove.value, 25);
+      assert.equal(payload.source.sharedCache.status, "STALE");
+      assert.equal(payload.source.sharedCache.refreshError, "ZERO_DTE_SPX_STALE");
+      assert.equal(payload.candles.length, 1);
+      assert.match(payload.warnings.join(" "), /context only/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("keeps a cold stale 0DTESPX response fail-closed when no verified shared snapshot exists", async () => {
+    const originalFetch = globalThis.fetch;
+    const db = new SharedCacheMemoryD1();
+    const nowMs = Date.now();
+    const sampleMs = nowMs - 11 * 60_000;
+    const sessionDate = etTradingDate();
+    globalThis.fetch = (async (input) => String(input).endsWith("/market-data/sessions")
+      ? Response.json({ [sessionDate]: sessionMetadata(nowMs - 3_600_000, nowMs + 3_600_000, { current: true }) })
+      : Response.json([{ datetimeUnix: Math.floor(sampleMs / 1_000), spx: "6000", spx_expected_move: "25" }])) as typeof fetch;
+    try {
+      const response = await getSpxPriceActionCompassApi({
+        request: new Request(`https://example.com/api/spx-price-action-compass?view=price-overlay&date=${sessionDate}`),
+        env: { ZERO_DTE_SPX_API_TOKEN: "secret-token", MARKET_CACHE_DB: db, SPX_PRICE_ACTION_TEST_NOW_MS: nowMs },
+      });
+      const payload = await response.json() as { candles: SpxPriceActionCandle[]; source: { status: string }; warnings: string[] };
+      assert.equal(response.status, 502);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal(payload.source.status, "STALE");
+      assert.deepEqual(payload.candles, []);
+      assert.deepEqual(payload.warnings, ["ZERO_DTE_SPX_STALE"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("still edge-caches current SPX prices when Expected Move is unavailable", async () => {
     const originalFetch = globalThis.fetch;
     const now = Math.floor((Date.now() - 60_000) / 60_000) * 60_000 + 50_000;
@@ -865,6 +932,19 @@ describe("0DTESPX intraday normalization", () => {
       ),
       (error: unknown) => error instanceof ZeroDteSpxError && error.code === "ZERO_DTE_SPX_STALE",
     );
+  });
+
+  it("reclassifies a verified retained price and Expected Move as stale display context", () => {
+    const sampleMs = Date.parse("2026-09-09T14:30:00.000Z");
+    const retained = retainZeroDteSpxIntradayContext(
+      sharedCacheValue(sampleMs, 6000, 25),
+      sampleMs + 11 * 60_000,
+      { state: "LIVE", dataEndAt: "2026-09-09T20:00:00.000Z" },
+    );
+    assert.equal(retained.priceAgeMs, 11 * 60_000);
+    assert.equal(retained.expectedMove.status, "STALE");
+    assert.equal(retained.expectedMove.value, 25);
+    assert.equal(retained.expectedMove.errorCode, "ZERO_DTE_SPX_EXPECTED_MOVE_STALE");
   });
 
   it("classifies live, finalizing, closed, upcoming, and half-day sessions from provider metadata", () => {

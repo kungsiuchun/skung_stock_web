@@ -138,13 +138,21 @@ export const resolveSpxGexExpectedMoveOverlay = (input: {
   const nowMs = input.nowMs ?? Date.now();
   const source = input.source;
   const completedContext = source?.sessionState === "FINALIZING" || source?.sessionState === "CLOSED";
-  const currentContextIsUsable = input.selectedDate === input.currentTradingDate
+  const sameDayZeroDteContext = input.selectedDate === input.currentTradingDate
     && source?.provider === "0dtespx"
-    && source.status === "READY"
-    && (completedContext || isFreshSpx0DteSample(source.latestSampleAt, nowMs));
+    && (source.status === "STALE"
+      ? source.sessionDate === input.selectedDate
+      : !source.sessionDate || source.sessionDate === input.selectedDate);
+  const currentContextIsUsable = sameDayZeroDteContext
+    && ((source.status === "READY" && (completedContext || isFreshSpx0DteSample(source.latestSampleAt, nowMs)))
+      || (source.status === "STALE"
+        && typeof source.latestSampleAt === "string"
+        && Number.isFinite(Date.parse(source.latestSampleAt))
+        && Date.parse(source.latestSampleAt) <= nowMs));
   if (!currentContextIsUsable) return { expectedMove: null, warning: null };
   const expectedMove = source.expectedMove;
-  if (expectedMove?.status === "READY"
+  if (source?.status === "READY"
+    && expectedMove?.status === "READY"
     && finite(expectedMove.value)
     && expectedMove.value > 0
     && (completedContext || isFreshSpx0DteSample(expectedMove.sampleAt, nowMs))) {

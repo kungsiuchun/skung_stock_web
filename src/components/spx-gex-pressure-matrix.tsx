@@ -388,11 +388,22 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
   const displayPressure = useMemo(() => pressure ? extendSpxGexPressureForSession(pressure, etClock()) : null, [pressure, refreshKey]);
   const overlayClock = useMemo(() => etClock(new Date(overlayNowMs)), [overlayNowMs]);
   const effectivePriceSource = useMemo(() => priceOverlay?.data?.source
-    ? {
-      ...priceOverlay.data.source,
-      status: priceOverlay.error ? "UNAVAILABLE" as const : priceOverlay.data.source.status,
-      sessionState: priceOverlay.failureSessionState || priceOverlay.data.source.sessionState,
-    }
+    ? (() => {
+      const retainLastVerified = Boolean(priceOverlay.error && priceOverlay.data.source.provider === "0dtespx");
+      const expectedMove = priceOverlay.data.source.expectedMove;
+      return {
+        ...priceOverlay.data.source,
+        status: retainLastVerified ? "STALE" as const : priceOverlay.data.source.status,
+        sessionState: priceOverlay.failureSessionState || priceOverlay.data.source.sessionState,
+        expectedMove: retainLastVerified && expectedMove
+          ? {
+            ...expectedMove,
+            status: "STALE" as const,
+            errorCode: expectedMove.errorCode || "ZERO_DTE_SPX_EXPECTED_MOVE_STALE" as const,
+          }
+          : expectedMove,
+      };
+    })()
     : undefined, [priceOverlay?.data?.source, priceOverlay?.error, priceOverlay?.failureSessionState]);
   const expectedMoveOverlay = useMemo(() => resolveSpxGexExpectedMoveOverlay({
     source: effectivePriceSource,
@@ -433,29 +444,31 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
   const usingOneMinuteSpot = chartGeometry?.resolution === "1m";
   const overlaySessionState = effectivePriceSource?.sessionState;
   const isLivePriceOverlay = priceOverlay?.data?.source.provider === "0dtespx"
-    ? overlaySessionState === "LIVE"
+    ? effectivePriceSource?.status === "READY" && overlaySessionState === "LIVE"
     : priceOverlay?.data?.source.provider === "test";
   const spotSourceLabel = usingOneMinuteSpot
-    ? `SPX 1M / ${(priceOverlay?.data?.source.provider || "source").toUpperCase()}${priceOverlay?.data?.source.provider === "0dtespx" && overlaySessionState ? ` ${overlaySessionState}` : ""}`
+    ? `SPX 1M / ${(priceOverlay?.data?.source.provider || "source").toUpperCase()}${priceOverlay?.data?.source.provider === "0dtespx" && effectivePriceSource?.status === "STALE" ? " STALE" : priceOverlay?.data?.source.provider === "0dtespx" && overlaySessionState ? ` ${overlaySessionState}` : ""}`
     : oneMinuteOverlayPending ? "SPX 1M LOADING…" : "SPX 15M SNAPSHOT FALLBACK";
   const spotLiveLabel = chartGeometry?.latestPoint
     ? `SPX ${spotFormatter.format(chartGeometry.latestPoint.price)} · ${chartGeometry.latestPoint.timeEt} ET`
     : null;
-  const liveZeroDteSpot = priceOverlay?.data?.source.provider === "0dtespx"
-    && priceOverlay.data.source.status === "READY"
+  const liveZeroDteSpot = effectivePriceSource?.provider === "0dtespx"
+    && effectivePriceSource.status === "READY"
     && overlaySessionState === "LIVE"
     && latestSpotPoint
     ? { price: latestSpotPoint.price, timeEt: latestSpotPoint.timeEt, provider: "0dtespx" as const }
     : null;
   const priceOverlayWarning = priceOverlay?.error
-    ? `0DTESPX overlay unavailable; showing the last verified ${usingOneMinuteSpot ? "1-minute overlay" : "canonical 15-minute snapshot line"}. ${priceOverlay.error}`
+    ? `0DTESPX refresh unavailable; showing the last verified ${usingOneMinuteSpot ? "1-minute SPX and stale Expected Move context" : "canonical 15-minute snapshot line"}. Current SPX is not live. ${priceOverlay.error}`
+    : effectivePriceSource?.status === "STALE"
+      ? `0DTESPX refresh is stale; showing the last verified 1-minute SPX and Expected Move as context only. Current SPX is not live. ${(priceOverlay?.data?.warnings || []).join(" ")}`.trim()
     : !usingOneMinuteSpot && !oneMinuteOverlayPending
       ? `No SPX 1-minute candles are available for ${selectedDate}; showing the canonical 15-minute snapshot line.`
       : null;
   const expectedMoveWarning = expectedMoveOverlay.warning;
-  const expectedMoveIsStale = priceOverlay?.data?.source.expectedMove?.status === "STALE";
+  const expectedMoveIsStale = effectivePriceSource?.expectedMove?.status === "STALE";
   const expectedMoveLabel = chartGeometry?.expectedMoveRange
-    ? `${expectedMoveIsStale ? "STALE EM" : "EM"} ±${spotFormatter.format(chartGeometry.expectedMoveRange.value)} · ${priceOverlay?.data?.source.expectedMove?.sampleAt ? formatEtTime(priceOverlay.data.source.expectedMove.sampleAt) : "current"} ET`
+    ? `${expectedMoveIsStale ? "STALE EM" : "EM"} ±${spotFormatter.format(chartGeometry.expectedMoveRange.value)} · ${effectivePriceSource?.expectedMove?.sampleAt ? formatEtTime(effectivePriceSource.expectedMove.sampleAt) : "current"} ET`
     : null;
 
   useEffect(() => {

@@ -643,7 +643,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.ok(consoleErrors.every((error) => /503 \(Service Unavailable\)/.test(error)));
     overlayMode = "closed-failure";
     await page.click('button[title="Refresh latest SPX and GEX sources"]');
-    await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-spot-warning="true"]')?.textContent?.includes("showing the last verified 1-minute overlay"));
+    await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-spot-warning="true"]')?.textContent?.includes("showing the last verified 1-minute SPX and stale Expected Move context"));
     const retainedClosedOverlay = await page.evaluate(() => ({
       source: document.querySelector('[data-spx-gex-pressure-spot-source="true"]')?.textContent || "",
       expectedMove: document.querySelector('[data-spx-gex-pressure-expected-move="true"]')?.textContent || "",
@@ -652,9 +652,9 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
       warning: document.querySelector('[data-spx-gex-pressure-spot-warning="true"]')?.textContent || "",
       pulseCount: document.querySelectorAll('[data-spx-gex-pressure-matrix="true"] .spx-spot-live-pulse').length,
     }));
-    assert.match(retainedClosedOverlay.source, /0DTESPX CLOSED/);
-    assert.equal(retainedClosedOverlay.expectedMove, "", "an unavailable refresh must remove the stale EM label and corridor");
-    assert.equal(retainedClosedOverlay.corridorLines, 0, "an unavailable refresh must remove both EM corridor lines");
+    assert.match(retainedClosedOverlay.source, /0DTESPX STALE/);
+    assert.match(retainedClosedOverlay.expectedMove, /STALE EM ±25\.00 · 16:00 ET/, "an unavailable refresh must retain the last verified EM with a stale label");
+    assert.equal(retainedClosedOverlay.corridorLines, 2, "an unavailable refresh must retain both visibly stale EM corridor lines");
     assert.ok(retainedClosedOverlay.pointCount >= 250, "post-close failure must retain the last verified 1-minute overlay");
     assert.match(retainedClosedOverlay.warning, /ZERO_DTE_SPX_UPSTREAM_UNAVAILABLE/);
     assert.equal(retainedClosedOverlay.pulseCount, 0, "retained CLOSED overlay must remain non-live");
