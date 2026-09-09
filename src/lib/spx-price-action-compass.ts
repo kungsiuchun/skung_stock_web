@@ -199,7 +199,7 @@ export interface SpxPriceActionSource {
   sessionEndAt?: string | null;
   routingReason?: string;
   expectedMove?: {
-    status: "READY" | "UNAVAILABLE";
+    status: "READY" | "STALE" | "UNAVAILABLE";
     value: number | null;
     sampleAt: string | null;
     ageMs?: number | null;
@@ -211,6 +211,14 @@ export interface SpxPriceActionSource {
       | "ZERO_DTE_SPX_EXPECTED_MOVE_FUTURE"
       | "ZERO_DTE_SPX_EXPECTED_MOVE_LAGGED"
       | null;
+  };
+  sharedCache?: {
+    status: "HIT" | "REFRESHED" | "STALE" | "BYPASSED";
+    cachedAt: string;
+    ageMs: number;
+    refreshAfterMs: number;
+    refreshing: boolean;
+    refreshError?: string;
   };
   note: string;
 }

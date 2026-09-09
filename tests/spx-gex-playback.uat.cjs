@@ -134,6 +134,33 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
       },
     },
   };
+  const staleExpectedMovePayload = {
+    ...closedOneMinutePayload,
+    source: {
+      ...closedOneMinutePayload.source,
+      label: "0DTESPX LIVE SPX index series",
+      latestSampleAt: `${fixture.selectedDate}T20:14:00.000Z`,
+      priceAgeMs: 60_000,
+      status: "READY",
+      sessionState: "LIVE",
+      routingReason: "CURRENT_ET_SESSION_LIVE",
+      expectedMove: {
+        status: "STALE",
+        value: 25,
+        sampleAt: `${fixture.selectedDate}T19:15:00.000Z`,
+        ageMs: 60 * 60_000,
+        lagMs: 45 * 60_000,
+        errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_LAGGED",
+      },
+      sharedCache: {
+        status: "STALE",
+        cachedAt: `${fixture.selectedDate}T20:14:00.000Z`,
+        ageMs: 60_000,
+        refreshAfterMs: 60_000,
+        refreshing: true,
+      },
+    },
+  };
   const monitorPatterns = [
     { id: "older-high-confidence", type: "PIN_BAR_BEARISH", name: "Older", label: "Older signal", category: "candle", direction: "bearish", candleIndices: [120], fromIndex: 120, toIndex: 120, price: 7358, confidence: 0.99, description: "Older" },
     { id: "latest-b", type: "DOJI", name: "Latest B", label: "Latest B", category: "candle", direction: "neutral", candleIndices: [280], fromIndex: 280, toIndex: 280, price: 7360, confidence: 0.8, description: "Latest B" },
@@ -152,6 +179,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
   let forceCompassTextFailure = false;
   let overlayMode = "live";
   const overlayDates = [];
+  const overlayQueries = [];
   const initialSpqRequestOrder = [];
   const browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
   const page = await browser.newPage();
@@ -187,6 +215,8 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     }
     if (url.pathname === "/api/spx-price-action-compass" && url.searchParams.get("view") === "price-overlay") {
       overlayDates.push(url.searchParams.get("date"));
+      overlayQueries.push(url.search);
+      if (overlayMode === "stale-em") return request.respond(jsonResponse(staleExpectedMovePayload));
       if (overlayMode === "closed") return request.respond(jsonResponse(closedOneMinutePayload));
       if (overlayMode === "closed-failure") return request.respond({
         status: 502,
@@ -435,6 +465,22 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.equal(reducedMotionAnimation, "none", "reduced motion must disable the current-spot pulse");
     await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "no-preference" }]);
     await page.waitForFunction(() => !document.querySelector('button[title="Refresh latest SPX and GEX sources"]')?.hasAttribute("disabled"));
+    overlayMode = "stale-em";
+    await page.click('button[title="Refresh latest SPX and GEX sources"]');
+    await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-expected-move-status="STALE"]'));
+    const staleExpectedMove = await page.evaluate(() => ({
+      label: document.querySelector('[data-spx-gex-pressure-expected-move-status="STALE"]')?.textContent || "",
+      warning: document.querySelector('[data-spx-gex-pressure-expected-move-warning="true"]')?.textContent || "",
+      cache: document.querySelector('[data-spx-gex-pressure-shared-cache]')?.textContent || "",
+      corridorLines: document.querySelectorAll('[data-spx-gex-pressure-expected-move-upper="true"], [data-spx-gex-pressure-expected-move-lower="true"]').length,
+    }));
+    assert.match(staleExpectedMove.label, /STALE EM ±25\.00 · 15:15 ET/);
+    assert.match(staleExpectedMove.warning, /Using stale 0DTESPX Expected Move sampled 60m ago/);
+    assert.match(staleExpectedMove.warning, /context only/);
+    assert.match(staleExpectedMove.cache, /CACHE STALE · REFRESHING/);
+    assert.equal(staleExpectedMove.corridorLines, 2, "same-day stale EM must keep the visibly stale context corridor");
+    assert.equal(overlayQueries.some((query) => new URLSearchParams(query).has("em_retry")), false, "browser must never create em_retry source calls");
+
     overlayMode = "closed";
     await page.click('button[title="Refresh latest SPX and GEX sources"]');
     try {

@@ -5,10 +5,16 @@ import { isStrictIsoDate, onRequest as getSpxPriceActionCompassApi, shouldCacheS
 import {
   fetchZeroDteSpxCurrentSession,
   normalizeZeroDteSpxOneMinuteCandles,
+  refreshZeroDteSpxIntradayFreshness,
   resolveZeroDteSpxSession,
   ZERO_DTE_SPX_EM_LAG_TOLERANCE_MS,
   ZeroDteSpxError,
 } from "../functions/api/_0dtespx";
+import {
+  resolveSpxZeroDteSharedCache,
+  SPX_0DTE_SHARED_REFRESH_MS,
+} from "../functions/api/_spx-0dte-shared-cache";
+import type { D1DatabaseLike } from "../src/lib/spx-recap-d1";
 import {
   aggregateSpxOneMinutePriceActionCandles,
   buildSpxPriceActionCompassResponse,
@@ -82,6 +88,241 @@ const sessionMetadata = (startMs: number, endMs: number, flags: { current?: bool
   "data-start-time": new Date(startMs + 60_000).toISOString(),
   "data-end-time": new Date(endMs).toISOString(),
   ...flags,
+});
+
+interface SharedCacheTestRow {
+  payload_json: string;
+  cached_at: string;
+  expires_at: string;
+  last_refresh_error: string | null;
+  scope: string;
+  symbol: string;
+}
+
+class SharedCacheMemoryD1 implements D1DatabaseLike {
+  private readonly rows = new Map<string, SharedCacheTestRow>();
+
+  prepare(query: string) {
+    let values: unknown[] = [];
+    const statement = {
+      bind: (...next: unknown[]) => {
+        values = next;
+        return statement;
+      },
+      first: async <T>() => {
+        if (query.includes("'market-cache-quota'")) {
+          return { payload_json: String(values[1]) } as T;
+        }
+        const [key, scope, symbol] = values;
+        const row = this.rows.get(String(key));
+        if (!row || (scope && row.scope !== scope) || (symbol && row.symbol !== symbol)) return null;
+        return row as T;
+      },
+      all: async <T>() => ({ results: [] as T[] }),
+      run: async () => {
+        if (query.includes("__spx-0dtespx-refresh-lease__") || query.includes("WHERE market_cache_entries.expires_at <= ?")) {
+          const [key, scope, symbol, cachedAt, expiresAt, , compareAt] = values;
+          const existing = this.rows.get(String(key));
+          if (existing && Date.parse(existing.expires_at) > Date.parse(String(compareAt))) return { meta: { changes: 0 } };
+          this.rows.set(String(key), {
+            payload_json: "{}", cached_at: String(cachedAt), expires_at: String(expiresAt),
+            last_refresh_error: null, scope: String(scope), symbol: String(symbol),
+          });
+          return { meta: { changes: 1 } };
+        }
+        if (query.includes("INSERT INTO market_cache_entries")) {
+          const [key, scope, symbol, payloadJson, , cachedAt, expiresAt] = values;
+          this.rows.set(String(key), {
+            payload_json: String(payloadJson), cached_at: String(cachedAt), expires_at: String(expiresAt),
+            last_refresh_error: null, scope: String(scope), symbol: String(symbol),
+          });
+          return { meta: { changes: 1 } };
+        }
+        if (query.includes("SET expires_at = ?")) {
+          const [expiresAt, , key] = values;
+          const row = this.rows.get(String(key));
+          if (row) row.expires_at = String(expiresAt);
+          return { meta: { changes: row ? 1 : 0 } };
+        }
+        if (query.includes("UPDATE market_cache_entries")) {
+          const [error, , key] = values;
+          const row = this.rows.get(String(key));
+          if (row) row.last_refresh_error = String(error);
+          return { meta: { changes: row ? 1 : 0 } };
+        }
+        return { meta: { changes: 0 } };
+      },
+    };
+    return statement;
+  }
+}
+
+const sharedCacheValue = (sampleMs: number, price: number, expectedMove: number) => ({
+  candles: [{
+    time: sampleMs,
+    date_iso: new Date(sampleMs).toISOString().slice(0, 10),
+    open: price,
+    high: price,
+    low: price,
+    close: price,
+    volume: 0,
+  }],
+  latestSampleAt: new Date(sampleMs).toISOString(),
+  priceAgeMs: 0,
+  expectedMove: {
+    status: "READY" as const,
+    value: expectedMove,
+    sampleAt: new Date(sampleMs).toISOString(),
+    ageMs: 0,
+    lagMs: 0,
+    errorCode: null,
+  },
+});
+
+const sharedCacheLoad = (sampleMs: number, price: number, expectedMove: number) => {
+  const tradingDate = new Date(sampleMs).toISOString().slice(0, 10);
+  return {
+    session: {
+      sessionDate: tradingDate,
+      state: "LIVE" as const,
+      startAt: `${tradingDate}T13:30:00.000Z`,
+      endAt: `${tradingDate}T20:00:00.000Z`,
+      dataStartAt: `${tradingDate}T13:30:00.000Z`,
+      dataEndAt: `${tradingDate}T20:00:00.000Z`,
+    },
+    value: sharedCacheValue(sampleMs, price, expectedMove),
+  };
+};
+
+describe("SPX shared 0DTESPX cache", () => {
+  it("serves one D1 snapshot to readers and performs one stale-while-revalidate refresh", async () => {
+    const db = new SharedCacheMemoryD1();
+    const date = "2026-09-09";
+    const start = Date.parse("2026-09-09T13:30:00.000Z");
+    let loads = 0;
+    const cold = await resolveSpxZeroDteSharedCache({
+      db,
+      tradingDate: date,
+      nowMs: start,
+      reserveRefresh: async () => ({ allow: true, reason: "within_budget" }),
+      load: async () => {
+        loads += 1;
+        return sharedCacheLoad(start, 6000, 20);
+      },
+    });
+    assert.equal(cold.cache.status, "REFRESHED");
+    assert.equal(loads, 1);
+
+    const hit = await resolveSpxZeroDteSharedCache({
+      db,
+      tradingDate: date,
+      nowMs: start + 30_000,
+      load: async () => { throw new Error("fresh D1 hit must not reach upstream"); },
+    });
+    assert.equal(hit.cache.status, "HIT");
+
+    const background: Promise<unknown>[] = [];
+    const staleAt = start + SPX_0DTE_SHARED_REFRESH_MS + 1;
+    const stale = await resolveSpxZeroDteSharedCache({
+      db,
+      tradingDate: date,
+      nowMs: staleAt,
+      waitUntil: (promise) => background.push(promise),
+      reserveRefresh: async () => ({ allow: true, reason: "within_budget" }),
+      load: async () => {
+        loads += 1;
+        return sharedCacheLoad(start + 60_000, 6001, 21);
+      },
+    });
+    const concurrent = await resolveSpxZeroDteSharedCache({
+      db,
+      tradingDate: date,
+      nowMs: staleAt,
+      load: async () => { throw new Error("lease loser must not reach upstream"); },
+    });
+    assert.equal(stale.cache.status, "STALE");
+    assert.equal(stale.cache.refreshing, true);
+    assert.equal(concurrent.cache.status, "STALE");
+    assert.equal(background.length, 1);
+    await Promise.all(background);
+
+    const refreshed = await resolveSpxZeroDteSharedCache({
+      db,
+      tradingDate: date,
+      nowMs: staleAt + 1,
+      load: async () => { throw new Error("refreshed D1 hit must not reach upstream"); },
+    });
+    assert.equal(refreshed.cache.status, "HIT");
+    assert.equal(refreshed.value.candles.length, 2);
+    assert.equal(refreshed.value.expectedMove.value, 21);
+    assert.equal(loads, 2);
+  });
+
+  it("releases a failed refresh lease so the next request can retry immediately", async () => {
+    const db = new SharedCacheMemoryD1();
+    const date = "2026-09-09";
+    const start = Date.parse("2026-09-09T13:30:00.000Z");
+    const seed = () => resolveSpxZeroDteSharedCache({
+      db,
+      tradingDate: date,
+      nowMs: start,
+      load: async () => sharedCacheLoad(start, 6000, 20),
+    });
+    await seed();
+
+    const staleAt = start + SPX_0DTE_SHARED_REFRESH_MS + 1;
+    const failed = await resolveSpxZeroDteSharedCache({
+      db,
+      tradingDate: date,
+      nowMs: staleAt,
+      reserveRefresh: async () => ({ allow: true, reason: "within_budget" }),
+      load: async () => { throw new Error("provider timeout"); },
+    });
+    assert.equal(failed.cache.status, "STALE");
+    assert.equal(failed.cache.refreshing, false);
+
+    let retried = 0;
+    const recovered = await resolveSpxZeroDteSharedCache({
+      db,
+      tradingDate: date,
+      nowMs: staleAt + 1,
+      reserveRefresh: async () => ({ allow: true, reason: "within_budget" }),
+      load: async () => {
+        retried += 1;
+        return sharedCacheLoad(start + 60_000, 6001, 21);
+      },
+    });
+    assert.equal(recovered.cache.status, "REFRESHED");
+    assert.equal(retried, 1);
+  });
+
+  it("fails closed on refresh quota while retaining the last shared snapshot", async () => {
+    const db = new SharedCacheMemoryD1();
+    const date = "2026-09-09";
+    const start = Date.parse("2026-09-09T13:30:00.000Z");
+    await resolveSpxZeroDteSharedCache({
+      db,
+      tradingDate: date,
+      nowMs: start,
+      load: async () => sharedCacheLoad(start, 6000, 20),
+    });
+
+    let loads = 0;
+    const stale = await resolveSpxZeroDteSharedCache({
+      db,
+      tradingDate: date,
+      nowMs: start + SPX_0DTE_SHARED_REFRESH_MS + 1,
+      reserveRefresh: async () => ({ allow: false, reason: "rows_written_threshold" }),
+      load: async () => {
+        loads += 1;
+        return sharedCacheLoad(start + 60_000, 6001, 21);
+      },
+    });
+    assert.equal(stale.cache.status, "STALE");
+    assert.equal(stale.cache.refreshError, "SPX_0DTE_SHARED_CACHE_QUOTA_BLOCKED");
+    assert.equal(stale.value.expectedMove.value, 20);
+    assert.equal(loads, 0);
+  });
 });
 
 describe("SPX Price Action Compass detector", () => {
@@ -285,7 +526,7 @@ describe("SPX Price Action Compass API", () => {
     assert.deepEqual(patterns.map((item) => item.id), before);
   });
 
-  it("caches a current 0DTESPX pressure overlay only when Expected Move is ready", async () => {
+  it("edge-caches a current 0DTESPX pressure overlay when Expected Move is ready", async () => {
     const originalFetch = globalThis.fetch;
     // Keep all three fixture seconds inside one completed minute. Date.now()
     // near a minute boundary would otherwise create two candles and make this
@@ -312,7 +553,7 @@ describe("SPX Price Action Compass API", () => {
       const payload = await response.json() as { source: { provider: string; interval: string; latestSampleAt: string; status: string; expectedMove: { status: string; value: number; sampleAt: string; ageMs: number; lagMs: number; errorCode: string | null } }; candles: SpxPriceActionCandle[] };
 
       assert.equal(response.status, 200);
-      assert.equal(response.headers.get("cache-control"), "public, max-age=60");
+      assert.equal(response.headers.get("cache-control"), "public, max-age=15");
       assert.equal(payload.source.provider, "0dtespx");
       assert.equal(payload.source.interval, "1s->1m");
       assert.equal(payload.source.status, "READY");
@@ -335,7 +576,51 @@ describe("SPX Price Action Compass API", () => {
     }
   });
 
-  it("does not cache a current 0DTESPX pressure overlay while Expected Move is unavailable", async () => {
+  it("shares both 0DTESPX session metadata and intraday history across visitors", async () => {
+    const originalFetch = globalThis.fetch;
+    const db = new SharedCacheMemoryD1();
+    const now = Math.floor((Date.now() - 60_000) / 60_000) * 60_000 + 50_000;
+    const sessionDate = etTradingDate();
+    let sessionLoads = 0;
+    let historyLoads = 0;
+    globalThis.fetch = (async (input) => {
+      const url = String(input);
+      if (url.endsWith("/market-data/sessions")) {
+        sessionLoads += 1;
+        return Response.json({ [sessionDate]: sessionMetadata(now - 3_600_000, now + 3_600_000, { current: true }) });
+      }
+      historyLoads += 1;
+      return Response.json([{
+        datetimeUnix: Math.floor(now / 1_000),
+        spx: "6000",
+        spx_expected_move: "25",
+      }]);
+    }) as typeof fetch;
+    try {
+      const call = async (at: number) => {
+        const response = await getSpxPriceActionCompassApi({
+          request: new Request(`https://example.com/api/spx-price-action-compass?view=price-overlay&date=${sessionDate}`),
+          env: {
+            ZERO_DTE_SPX_API_TOKEN: "secret-token",
+            MARKET_CACHE_DB: db,
+            SPX_PRICE_ACTION_TEST_NOW_MS: at,
+          },
+        });
+        assert.equal(response.status, 200);
+        return response.json() as Promise<{ source: { sharedCache: { status: string } } }>;
+      };
+      const first = await call(now);
+      const second = await call(now + 30_000);
+      assert.equal(first.source.sharedCache.status, "REFRESHED");
+      assert.equal(second.source.sharedCache.status, "HIT");
+      assert.equal(sessionLoads, 1, "shared-cache readers must not refetch provider session metadata");
+      assert.equal(historyLoads, 1, "shared-cache readers must not refetch provider intraday history");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("still edge-caches current SPX prices when Expected Move is unavailable", async () => {
     const originalFetch = globalThis.fetch;
     const now = Math.floor((Date.now() - 60_000) / 60_000) * 60_000 + 50_000;
     const sessionDate = etTradingDate();
@@ -353,9 +638,9 @@ describe("SPX Price Action Compass API", () => {
       const payload = await response.json() as { source: { provider: "0dtespx"; expectedMove: { status: "UNAVAILABLE"; value: null } } };
 
       assert.equal(response.status, 200);
-      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal(response.headers.get("cache-control"), "public, max-age=15");
       assert.equal(payload.source.expectedMove.status, "UNAVAILABLE");
-      assert.equal(shouldCacheSpxPriceActionResponse(true, payload.source), false);
+      assert.equal(shouldCacheSpxPriceActionResponse(true, payload.source), true);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -392,7 +677,7 @@ describe("SPX Price Action Compass API", () => {
     const startMs = Date.parse("2026-07-13T13:30:00.000Z");
     const endMs = Date.parse("2026-07-13T20:00:00.000Z");
     const samples = [
-      { nowMs: Date.parse("2026-07-13T19:59:00.000Z"), current: true, latestMs: Date.parse("2026-07-13T19:59:00.000Z"), state: "LIVE", cache: "public, max-age=60" },
+      { nowMs: Date.parse("2026-07-13T19:59:00.000Z"), current: true, latestMs: Date.parse("2026-07-13T19:59:00.000Z"), state: "LIVE", cache: "public, max-age=15" },
       { nowMs: Date.parse("2026-07-13T20:01:00.000Z"), current: false, latestMs: endMs, state: "CLOSED", cache: "public, max-age=3600" },
       { nowMs: Date.parse("2026-07-13T20:15:00.000Z"), current: false, latestMs: endMs, state: "CLOSED", cache: "public, max-age=3600" },
     ] as const;
@@ -570,6 +855,18 @@ describe("SPX Price Action Compass API", () => {
 });
 
 describe("0DTESPX intraday normalization", () => {
+  it("fails closed when a retained live shared-cache price becomes stale", () => {
+    const sampleMs = Date.parse("2026-09-09T14:30:00.000Z");
+    assert.throws(
+      () => refreshZeroDteSpxIntradayFreshness(
+        sharedCacheValue(sampleMs, 6000, 25),
+        sampleMs + 11 * 60_000,
+        { state: "LIVE", dataEndAt: "2026-09-09T20:00:00.000Z" },
+      ),
+      (error: unknown) => error instanceof ZeroDteSpxError && error.code === "ZERO_DTE_SPX_STALE",
+    );
+  });
+
   it("classifies live, finalizing, closed, upcoming, and half-day sessions from provider metadata", () => {
     const date = "2026-11-27";
     const startMs = Date.parse("2026-11-27T14:30:00.000Z");
@@ -609,6 +906,8 @@ describe("0DTESPX intraday normalization", () => {
       row(now - 60_001, 6000, 25),
       row(now, 6001, undefined, false),
     ], now);
+    assert.equal(lagged.expectedMove.status, "STALE");
+    assert.equal(lagged.expectedMove.value, 25);
     assert.equal(lagged.expectedMove.errorCode, "ZERO_DTE_SPX_EXPECTED_MOVE_LAGGED");
 
     const invalidNewest = normalizeZeroDteSpxOneMinuteCandles([
@@ -706,7 +1005,8 @@ describe("0DTESPX intraday normalization", () => {
       { datetimeUnix: Math.floor(now / 1_000), spx: "6001" },
     ], now);
     assert.equal(staleExpectedMove.candles.length, 2);
-    assert.equal(staleExpectedMove.expectedMove.status, "UNAVAILABLE");
+    assert.equal(staleExpectedMove.expectedMove.status, "STALE");
+    assert.equal(staleExpectedMove.expectedMove.value, 30);
     assert.equal(staleExpectedMove.expectedMove.errorCode, "ZERO_DTE_SPX_EXPECTED_MOVE_LAGGED");
 
     const latestInvalidExpectedMove = normalizeZeroDteSpxOneMinuteCandles([

@@ -10,9 +10,7 @@ import { normalizeSpxPriceActionTimeframe } from "../../src/lib/spx-price-action
  *
  * Do not cache arbitrary query strings. They create unique Cache API keys
  * while the endpoint ignores them, which turns harmless tracking parameters
- * and client cache-busters into repeated D1 origin reads. `em_retry=1` is the
- * one bounded exception: it isolates a Pressure Matrix retry from a formerly
- * cached overlay response that did not contain a usable Expected Move.
+ * and client cache-busters into repeated D1 origin reads.
  */
 const inFlightSpxEdgeRequests = new Map<string, Promise<Response>>();
 
@@ -50,7 +48,6 @@ export const canonicalSpxCacheRequest = (request: Request) => {
       canonical.set("view", "price-overlay");
       const date = url.searchParams.get("date");
       if (/^\d{4}-\d{2}-\d{2}$/.test(date || "")) canonical.set("date", date!);
-      if (url.searchParams.get("em_retry") === "1") canonical.set("em_retry", "1");
     }
     else canonical.set("timeframe", normalizeSpxPriceActionTimeframe(url.searchParams.get("timeframe")));
   }

@@ -54,6 +54,8 @@ const decisionFromStoredUsage = (
 export interface MarketCacheRefreshQuotaOptions {
   /** Additional bounded reads performed by the refresh loader itself. */
   loaderRowsRead?: number;
+  /** Cache-entry writes performed by this refresh, excluding the quota row. */
+  cacheEntryWrites?: number;
   operation?: string;
 }
 
@@ -69,8 +71,15 @@ export const reserveMarketCacheRefreshQuota = async (
 ): Promise<MarketCacheD1QuotaDecision> => {
   const dayUtc = utcDay(now);
   const loaderRowsRead = options.loaderRowsRead ?? 0;
-  if (!Number.isInteger(loaderRowsRead) || loaderRowsRead < 0) return blockedDecision(dayUtc, "quota_state_invalid");
+  const cacheEntryWrites = options.cacheEntryWrites ?? 1;
+  if (!Number.isInteger(loaderRowsRead)
+    || loaderRowsRead < 0
+    || !Number.isInteger(cacheEntryWrites)
+    || cacheEntryWrites < 1) {
+    return blockedDecision(dayUtc, "quota_state_invalid");
+  }
   const rowsReadReserve = STOCKS_WATCHER_CACHE_REFRESH_READ_RESERVE + loaderRowsRead;
+  const rowsWrittenReserve = (1 + cacheEntryWrites) * MARKET_CACHE_WRITE_INDEX_AMPLIFICATION;
   const readThreshold = Math.floor(MARKET_CACHE_D1_DAILY_READ_LIMIT * MARKET_CACHE_D1_QUOTA_HARD_THRESHOLD);
   const writeThreshold = Math.floor(MARKET_CACHE_D1_DAILY_WRITE_LIMIT * MARKET_CACHE_D1_QUOTA_HARD_THRESHOLD);
   const cachedAt = now.toISOString();
@@ -79,7 +88,7 @@ export const reserveMarketCacheRefreshQuota = async (
   const initialPayload = JSON.stringify({
     dayUtc,
     rowsRead: rowsReadReserve,
-    rowsWritten: STOCKS_WATCHER_CACHE_REFRESH_WRITE_RESERVE,
+    rowsWritten: rowsWrittenReserve,
   });
   let row: { payload_json: string } | null;
   try {
@@ -115,7 +124,7 @@ export const reserveMarketCacheRefreshQuota = async (
       dayUtc,
       rowsReadReserve,
       readThreshold,
-      STOCKS_WATCHER_CACHE_REFRESH_WRITE_RESERVE,
+      rowsWrittenReserve,
       writeThreshold,
       cachedAt,
       expiresAt,
@@ -152,10 +161,10 @@ export const reserveMarketCacheRefreshQuota = async (
       usage: {
         dayUtc,
         rowsRead: usage.rowsRead - rowsReadReserve,
-        rowsWritten: usage.rowsWritten - STOCKS_WATCHER_CACHE_REFRESH_WRITE_RESERVE,
+        rowsWritten: usage.rowsWritten - rowsWrittenReserve,
       },
       rowsRead: rowsReadReserve,
-      rowsWritten: STOCKS_WATCHER_CACHE_REFRESH_WRITE_RESERVE,
+      rowsWritten: rowsWrittenReserve,
     });
   } catch {
     return blockedDecision(dayUtc, "quota_state_invalid");

@@ -12,11 +12,19 @@ import {
 import {
   fetchZeroDteSpxCurrentSession,
   fetchZeroDteSpxIntradayCandles,
+  refreshZeroDteSpxIntradayFreshness,
   resolveZeroDteSpxSession,
   type ResolvedZeroDteSpxSession,
   ZeroDteSpxError,
 } from "./_0dtespx";
+import {
+  resolveSpxZeroDteSharedCache,
+  SpxZeroDteSharedCacheError,
+  type SpxZeroDteSharedCacheResolution,
+} from "./_spx-0dte-shared-cache";
 import { coalesceSpxEdgeRequest, readSpxEdgeCache, withSpxObservability, writeSpxEdgeCache } from "./_spx-edge-cache";
+import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
+import { reserveMarketCacheRefreshQuota } from "../../src/lib/stocks-watcher-refresh-quota";
 
 interface Env {
   SPX_PRICE_ACTION_TEST_CANDLES?: SpxPriceActionCandle[];
@@ -25,6 +33,7 @@ interface Env {
   spx_0dte_token?: string;
   CF_PAGES?: string;
   SPX_PRICE_ACTION_TEST_NOW_MS?: number;
+  MARKET_CACHE_DB?: D1DatabaseLike;
 }
 
 interface Context {
@@ -67,9 +76,9 @@ const invalidOverlayDateResponse = () => json(
   { status: 400, headers: { "Cache-Control": "no-store" } },
 );
 
-export const shouldCacheSpxPriceActionResponse = (isPriceOverlay: boolean, source: SpxPriceActionSource) =>
+export const shouldCacheSpxPriceActionResponse = (_isPriceOverlay: boolean, source: SpxPriceActionSource) =>
   source.provider !== "0dtespx"
-    || (source.sessionState !== "FINALIZING" && (!isPriceOverlay || source.expectedMove?.status === "READY"));
+    || source.sessionState !== "FINALIZING";
 
 async function onRequestUncached(context: Context) {
   const startedAt = Date.now();
@@ -116,12 +125,52 @@ async function onRequestUncached(context: Context) {
         note: "Only used by local regression tests; production calls the native Yahoo chart path.",
       };
     } else if (targetTimeframe === "1m" || targetTimeframe === "5m" || targetTimeframe === "15m") {
+      let shared: SpxZeroDteSharedCacheResolution | null = null;
       if (selectedDate === currentEtDate) {
         zeroDteAttempted = true;
         routingReason = "CURRENT_ET_DATE_SESSION_METADATA";
-        const sessions = await fetchZeroDteSpxCurrentSession(zeroDteToken);
-        routeSession = resolveZeroDteSpxSession(sessions, selectedDate, nowMs);
-        if (!routeSession) throw new ZeroDteSpxError("ZERO_DTE_SPX_RESPONSE_INVALID");
+        shared = await resolveSpxZeroDteSharedCache({
+          db: context.env.MARKET_CACHE_DB,
+          tradingDate: selectedDate,
+          nowMs,
+          waitUntil: context.waitUntil,
+          load: async () => {
+            const sessions = await fetchZeroDteSpxCurrentSession(zeroDteToken);
+            const session = resolveZeroDteSpxSession(sessions, selectedDate, nowMs);
+            if (!session) throw new ZeroDteSpxError("ZERO_DTE_SPX_RESPONSE_INVALID");
+            // Preserve provider-authoritative session state for an error response
+            // even when the history request that follows fails.
+            routeSession = session;
+            routingReason = session.state === "LIVE"
+              ? "CURRENT_ET_SESSION_LIVE"
+              : session.state === "FINALIZING"
+                ? "CURRENT_ET_SESSION_FINALIZING"
+                : session.state === "CLOSED"
+                  ? "CURRENT_ET_SESSION_CLOSED_HISTORICAL"
+                  : "UPCOMING_SESSION_USES_YAHOO";
+            return {
+              session,
+              value: session.state === "UPCOMING"
+                ? null
+                : await fetchZeroDteSpxIntradayCandles(selectedDate, zeroDteToken, fetch, nowMs, session),
+            };
+          },
+          reserveRefresh: context.env.MARKET_CACHE_DB
+            ? async () => {
+              const decision = await reserveMarketCacheRefreshQuota(
+                context.env.MARKET_CACHE_DB!,
+                {
+                  operation: "spx_0dtespx_intraday",
+                  // Lease + snapshot, or lease + failure record + lease release.
+                  cacheEntryWrites: 3,
+                },
+                new Date(nowMs),
+              );
+              return { allow: decision.allow, reason: decision.reason };
+            }
+            : undefined,
+        });
+        routeSession = shared.session;
       }
       if (routeSession && routeSession.state !== "UPCOMING") {
         routingReason = routeSession.state === "LIVE"
@@ -129,9 +178,10 @@ async function onRequestUncached(context: Context) {
           : routeSession.state === "FINALIZING"
             ? "CURRENT_ET_SESSION_FINALIZING"
             : "CURRENT_ET_SESSION_CLOSED_HISTORICAL";
-        const intraday = await fetchZeroDteSpxIntradayCandles(selectedDate, zeroDteToken, fetch, nowMs, routeSession);
+        if (!shared?.value) throw new SpxZeroDteSharedCacheError("SPX_0DTE_SHARED_CACHE_UNAVAILABLE");
+        const intraday = refreshZeroDteSpxIntradayFreshness(shared.value, nowMs, routeSession);
         rawCandles = intraday.candles;
-        cacheSeconds = routeSession.state === "CLOSED" ? 3_600 : routeSession.state === "LIVE" ? 60 : 0;
+        cacheSeconds = routeSession.state === "CLOSED" ? 3_600 : routeSession.state === "LIVE" ? 15 : 0;
         source = {
           provider: "0dtespx",
           label: `0DTESPX ${routeSession.state} SPX index series`,
@@ -148,6 +198,7 @@ async function onRequestUncached(context: Context) {
           routingReason,
           note: "Server-side normalized 1-minute SPX context; source does not provide volume.",
           expectedMove: intraday.expectedMove,
+          sharedCache: shared.cache,
         };
       } else {
         zeroDteAttempted = false;
@@ -218,6 +269,9 @@ async function onRequestUncached(context: Context) {
       priceAgeMs: source.priceAgeMs ?? null,
       expectedMoveAgeMs: source.expectedMove?.ageMs ?? null,
       expectedMoveLagMs: source.expectedMove?.lagMs ?? null,
+      sharedCacheStatus: source.sharedCache?.status || null,
+      sharedCacheAgeMs: source.sharedCache?.ageMs ?? null,
+      sharedCacheRefreshing: source.sharedCache?.refreshing ?? null,
       routingReason: source.routingReason || null,
       status: source.status || "READY",
     });
@@ -229,7 +283,7 @@ async function onRequestUncached(context: Context) {
     return response;
   } catch (error) {
     const zeroDteFailure = error instanceof ZeroDteSpxError || zeroDteAttempted;
-    const failureCode = error instanceof ZeroDteSpxError
+    const failureCode = error instanceof ZeroDteSpxError || error instanceof SpxZeroDteSharedCacheError
       ? error.code
       : zeroDteFailure ? "ZERO_DTE_SPX_UPSTREAM_UNAVAILABLE" : "SPX_PRICE_ACTION_SOURCE_FAILED";
     const sessionState = routeSession?.state || (zeroDteFailure ? "UNAVAILABLE" : undefined);

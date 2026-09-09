@@ -46,9 +46,6 @@ import {
   extendSpxGexPressureForSession,
   getLatestSpxGexSpotPoint,
   resolveSpxGexExpectedMoveOverlay,
-  resolveSpxGexExpectedMoveRetry,
-  SPX_EXPECTED_MOVE_RETRY_DELAY_MS,
-  SPX_EXPECTED_MOVE_RETRY_MAX_ATTEMPTS,
   getSpxGexPressureTooltipPosition,
   toSpxGexPressureFrame,
 } from "../src/lib/spx-gex-pressure-matrix";
@@ -77,7 +74,7 @@ it("normalizes volatile refresh keys into one SPX edge-cache key", () => {
     assert.equal(overlay.url, sameOverlay.url);
     assert.notEqual(overlay.url, differentDate.url);
     assert.equal(overlay.url, "https://example.com/api/spx-price-action-compass?view=price-overlay&date=2026-07-13");
-    assert.equal(expectedMoveRetry.url, "https://example.com/api/spx-price-action-compass?view=price-overlay&date=2026-07-13&em_retry=1");
+    assert.equal(expectedMoveRetry.url, overlay.url);
   });
 
 it("normalizes only effective SPX endpoint selections", () => {
@@ -2502,6 +2499,17 @@ describe("SPX 0DTE pressure matrix", () => {
     assert.deepEqual(resolveSpxGexExpectedMoveOverlay({
       source: {
         ...source,
+        sessionDate: "2026-05-27",
+        latestSampleAt: new Date(nowMs + 36 * 60_000).toISOString(),
+        expectedMove: { status: "STALE", value: 25, sampleAt: new Date(nowMs).toISOString(), errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_LAGGED" },
+      },
+      selectedDate: "2026-05-27",
+      currentTradingDate: "2026-05-27",
+      nowMs: nowMs + 36 * 60_000,
+    }), { expectedMove: 25, warning: "Using stale 0DTESPX Expected Move sampled 36m ago (ZERO_DTE_SPX_EXPECTED_MOVE_LAGGED); context only." });
+    assert.deepEqual(resolveSpxGexExpectedMoveOverlay({
+      source: {
+        ...source,
         sessionState: "CLOSED",
         latestSampleAt: new Date(nowMs).toISOString(),
         expectedMove: { status: "READY", value: 25, sampleAt: new Date(nowMs).toISOString(), errorCode: null },
@@ -2521,61 +2529,6 @@ describe("SPX 0DTE pressure matrix", () => {
       currentTradingDate: "2026-05-27",
       nowMs,
     }), { expectedMove: null, warning: null });
-  });
-
-  it("retries only the bounded current-RTH interval until both EM and 1-minute geometry are ready", () => {
-    const nowMs = Date.parse("2026-05-27T13:45:00.000Z");
-    const source = {
-      provider: "0dtespx" as const,
-      status: "READY" as const,
-      latestSampleAt: new Date(nowMs).toISOString(),
-      expectedMove: { status: "READY" as const, value: 25, sampleAt: new Date(nowMs).toISOString() },
-    };
-    const input = {
-      source,
-      selectedDate: "2026-05-27",
-      currentTradingDate: "2026-05-27",
-      minuteEt: 9 * 60 + 45,
-      nowMs,
-      overlayError: false,
-      retryAttempt: 0,
-    };
-
-    assert.deepEqual(resolveSpxGexExpectedMoveRetry({ ...input, oneMinutePointCount: 1 }), {
-      status: "WAITING", nextAttempt: 1, delayMs: SPX_EXPECTED_MOVE_RETRY_DELAY_MS,
-    });
-    assert.deepEqual(resolveSpxGexExpectedMoveRetry({ ...input, oneMinutePointCount: 2 }), {
-      status: "READY", nextAttempt: null, delayMs: null,
-    });
-    assert.deepEqual(resolveSpxGexExpectedMoveRetry({
-      ...input,
-      source: { ...source, expectedMove: { status: "UNAVAILABLE", value: null, sampleAt: null } },
-      oneMinutePointCount: 2,
-    }), { status: "WAITING", nextAttempt: 1, delayMs: SPX_EXPECTED_MOVE_RETRY_DELAY_MS });
-    assert.deepEqual(resolveSpxGexExpectedMoveRetry({
-      ...input, source: null, overlayError: true, oneMinutePointCount: 0,
-    }), { status: "WAITING", nextAttempt: 1, delayMs: SPX_EXPECTED_MOVE_RETRY_DELAY_MS });
-    assert.deepEqual(resolveSpxGexExpectedMoveRetry({
-      ...input,
-      minuteEt: 16 * 60 + 15,
-      source: { ...source, sessionState: "CLOSED", expectedMove: { status: "UNAVAILABLE", value: null, sampleAt: null } },
-      oneMinutePointCount: 2,
-    }), { status: "WAITING", nextAttempt: 1, delayMs: SPX_EXPECTED_MOVE_RETRY_DELAY_MS });
-    assert.deepEqual(resolveSpxGexExpectedMoveRetry({
-      ...input,
-      minuteEt: 16 * 60 + 15,
-      source: null,
-      overlayError: true,
-      failureProvider: "0dtespx",
-      failureSessionState: "FINALIZING",
-      oneMinutePointCount: 0,
-    }), { status: "WAITING", nextAttempt: 1, delayMs: SPX_EXPECTED_MOVE_RETRY_DELAY_MS });
-    assert.deepEqual(resolveSpxGexExpectedMoveRetry({
-      ...input, selectedDate: "2026-05-26", oneMinutePointCount: 0,
-    }), { status: "IDLE", nextAttempt: null, delayMs: null });
-    assert.deepEqual(resolveSpxGexExpectedMoveRetry({
-      ...input, oneMinutePointCount: 0, retryAttempt: SPX_EXPECTED_MOVE_RETRY_MAX_ATTEMPTS,
-    }), { status: "EXHAUSTED", nextAttempt: null, delayMs: null });
   });
 
   it("uses 15-minute fallback segments without drawing across a missing GEX slot", () => {
