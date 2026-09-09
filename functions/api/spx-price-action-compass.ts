@@ -13,6 +13,7 @@ import {
   fetchZeroDteSpxCurrentSession,
   fetchZeroDteSpxIntradayCandles,
   refreshZeroDteSpxIntradayFreshness,
+  retainZeroDteSpxIntradayContext,
   resolveZeroDteSpxSession,
   type ResolvedZeroDteSpxSession,
   ZeroDteSpxError,
@@ -179,7 +180,20 @@ async function onRequestUncached(context: Context) {
             ? "CURRENT_ET_SESSION_FINALIZING"
             : "CURRENT_ET_SESSION_CLOSED_HISTORICAL";
         if (!shared?.value) throw new SpxZeroDteSharedCacheError("SPX_0DTE_SHARED_CACHE_UNAVAILABLE");
-        const intraday = refreshZeroDteSpxIntradayFreshness(shared.value, nowMs, routeSession);
+        let retainedStaleContext = false;
+        let intraday;
+        try {
+          intraday = refreshZeroDteSpxIntradayFreshness(shared.value, nowMs, routeSession);
+        } catch (error) {
+          const canRetainSharedContext = isPriceOverlay
+            && error instanceof ZeroDteSpxError
+            && error.code === "ZERO_DTE_SPX_STALE"
+            && (shared.cache.status === "HIT" || shared.cache.status === "STALE");
+          if (!canRetainSharedContext) throw error;
+          intraday = retainZeroDteSpxIntradayContext(shared.value, nowMs, routeSession);
+          retainedStaleContext = true;
+          routingReason = `${routingReason}_RETAINED_STALE_SHARED_CACHE`;
+        }
         rawCandles = intraday.candles;
         cacheSeconds = routeSession.state === "CLOSED" ? 3_600 : routeSession.state === "LIVE" ? 15 : 0;
         source = {
@@ -191,12 +205,14 @@ async function onRequestUncached(context: Context) {
           fetchedAt,
           latestSampleAt: intraday.latestSampleAt,
           priceAgeMs: intraday.priceAgeMs,
-          status: "READY",
+          status: retainedStaleContext ? "STALE" : "READY",
           sessionState: routeSession.state,
           sessionDate: routeSession.sessionDate,
           sessionEndAt: routeSession.endAt,
           routingReason,
-          note: "Server-side normalized 1-minute SPX context; source does not provide volume.",
+          note: retainedStaleContext
+            ? "Last verified shared-cache SPX context; any valid Expected Move is stale, display-only, and must not be treated as live."
+            : "Server-side normalized 1-minute SPX context; source does not provide volume.",
           expectedMove: intraday.expectedMove,
           sharedCache: shared.cache,
         };
@@ -241,6 +257,9 @@ async function onRequestUncached(context: Context) {
       ? aggregateSpxOneMinutePriceActionCandles(rawCandles, targetTimeframe as "1m" | "5m" | "15m")
       : aggregateSpxPriceActionCandles(rawCandles, config.aggregateTo || timeframe);
     const warnings = candles.length === 0 ? ["No SPX OHLCV candles returned from source."] : [];
+    if (source.provider === "0dtespx" && source.status === "STALE") {
+      warnings.push("ZERO_DTE_SPX_STALE: showing last verified shared-cache SPX and any valid Expected Move as context only; current SPX is not live.");
+    }
     const payload = isPriceOverlay
       ? {
         ticker: "SPX",

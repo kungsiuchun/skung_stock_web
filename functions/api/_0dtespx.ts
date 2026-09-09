@@ -74,18 +74,20 @@ export interface ZeroDteSpxIntradayResult {
   expectedMove: ZeroDteSpxExpectedMove;
 }
 
-export const refreshZeroDteSpxIntradayFreshness = (
+const classifyZeroDteSpxIntradayFreshness = (
   result: ZeroDteSpxIntradayResult,
   now = Date.now(),
   session?: Pick<ResolvedZeroDteSpxSession, "state" | "dataEndAt">,
+  allowRetainedStalePrice = false,
 ): ZeroDteSpxIntradayResult => {
   const latestSampleMs = Date.parse(result.latestSampleAt);
   if (!Number.isFinite(latestSampleMs)) throw new ZeroDteSpxError("ZERO_DTE_SPX_RESPONSE_INVALID");
   const priceAgeMs = now - latestSampleMs;
   const completedSession = session?.state === "FINALIZING" || session?.state === "CLOSED";
-  if (!completedSession && !isFreshSpx0DteSample(latestSampleMs, now)) {
+  if (!completedSession && !isFreshSpx0DteSample(latestSampleMs, now) && !allowRetainedStalePrice) {
     throw new ZeroDteSpxError("ZERO_DTE_SPX_STALE");
   }
+  if (allowRetainedStalePrice && priceAgeMs < 0) throw new ZeroDteSpxError("ZERO_DTE_SPX_RESPONSE_INVALID");
   const expectedMove = result.expectedMove;
   if (typeof expectedMove.value !== "number" || !Number.isFinite(expectedMove.value) || expectedMove.value <= 0 || !expectedMove.sampleAt) {
     return { ...result, priceAgeMs };
@@ -126,6 +128,23 @@ export const refreshZeroDteSpxIntradayFreshness = (
     },
   };
 };
+
+export const refreshZeroDteSpxIntradayFreshness = (
+  result: ZeroDteSpxIntradayResult,
+  now = Date.now(),
+  session?: Pick<ResolvedZeroDteSpxSession, "state" | "dataEndAt">,
+) => classifyZeroDteSpxIntradayFreshness(result, now, session, false);
+
+/**
+ * Reclassifies a previously verified shared-cache snapshot for display-only
+ * pressure-map context. Callers must gate this to a retained D1 snapshot; a
+ * cold or direct upstream response must continue through the fail-closed path.
+ */
+export const retainZeroDteSpxIntradayContext = (
+  result: ZeroDteSpxIntradayResult,
+  now = Date.now(),
+  session?: Pick<ResolvedZeroDteSpxSession, "state" | "dataEndAt">,
+) => classifyZeroDteSpxIntradayFreshness(result, now, session, true);
 
 type FetchLike = typeof fetch;
 

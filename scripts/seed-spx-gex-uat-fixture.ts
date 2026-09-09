@@ -247,12 +247,22 @@ ${lifecycleSql}
 `;
 
 const sqliteDirectory = path.join(persistTo, "v3", "d1", "miniflare-D1DatabaseObject");
-// Wrangler 4 stores its own metadata.sqlite beside the actual D1 database.
+// Wrangler 4 stores one opaque SQLite file per D1 binding plus metadata.sqlite.
+// Select the recap database by schema so adding MARKET_CACHE_DB cannot redirect
+// fixture writes or make the isolated UAT environment ambiguous.
 const sqliteFiles = (await readdir(sqliteDirectory)).filter((file) => file.endsWith(".sqlite") && file !== "metadata.sqlite");
-if (sqliteFiles.length !== 1) {
-  throw new Error(`Expected one isolated D1 SQLite file after migrations, found ${sqliteFiles.length}.`);
+const recapSqliteFiles = sqliteFiles.filter((file) => {
+  const candidate = new DatabaseSync(path.join(sqliteDirectory, file), { readOnly: true });
+  try {
+    return Boolean(candidate.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'spx_gex_intraday_snapshots' LIMIT 1").get());
+  } finally {
+    candidate.close();
+  }
+});
+if (recapSqliteFiles.length !== 1) {
+  throw new Error(`Expected one isolated SPX recap D1 SQLite file after migrations, found ${recapSqliteFiles.length} across ${sqliteFiles.length} D1 bindings.`);
 }
-const database = new DatabaseSync(path.join(sqliteDirectory, sqliteFiles[0]));
+const database = new DatabaseSync(path.join(sqliteDirectory, recapSqliteFiles[0]));
 try {
   database.exec("BEGIN IMMEDIATE");
   database.exec(sql);
