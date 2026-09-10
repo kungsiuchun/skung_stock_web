@@ -67,6 +67,10 @@ import {
 import type { StocksWatcherUniverseStock } from "@/lib/stocks-watcher-universe";
 import { getStocksWatcherInitialSymbolFromHash, STOCKS_WATCHER_DEFAULT_SYMBOL } from "@/lib/stocks-intelligence-watcher-route";
 import { normalizeOptionsVisualModel, optionsExpiryMatchesRequest } from "@/lib/stocks-watcher-options-visual";
+import type { FearGreedSnapshot } from "@/lib/fear-greed";
+import type { MarketCacheMetadata } from "@/lib/market-data-cache";
+import { StocksWatcherFearGreedPanel } from "./stocks-watcher-fear-greed-panel";
+import { StocksWatcherFixedIncomePanel } from "./stocks-watcher-fixed-income-panel";
 
 interface StocksIntelligenceWatcherPageProps {
   onBackToWork: () => void;
@@ -82,10 +86,10 @@ const TOP_TABS = [
   "Overview",
   "Chart",
   "Fundamentals",
-  "Stats",
+  "Fixed Income",
   "Earnings",
   "Options",
-  "Short Vol",
+  "F/G Index",
   "News",
   "Holders",
 ] as const;
@@ -116,10 +120,10 @@ const TOP_TAB_ICONS: Record<TopTab, typeof Sparkles> = {
   Overview: Sparkles,
   Chart: LineChart,
   Fundamentals: Building2,
-  Stats: BarChart3,
+  "Fixed Income": BarChart3,
   Earnings: CalendarDays,
   Options: Activity,
-  "Short Vol": Activity,
+  "F/G Index": Activity,
   News: Newspaper,
   Holders: Users,
 };
@@ -157,6 +161,13 @@ interface AsyncPanelState {
   loading: boolean;
   error: string | null;
   data: Record<string, NativeToolResult> | null;
+}
+
+interface FearGreedPanelState {
+  loading: boolean;
+  error: string | null;
+  data: FearGreedSnapshot | null;
+  cache: MarketCacheMetadata | null;
 }
 
 interface ChartGexAggregateRow {
@@ -366,6 +377,23 @@ const formatSignedPercent = (value: number | null | undefined) =>
 
 const formatOptionalNumber = (value: number | null | undefined, digits = 2) =>
   typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "N/A";
+
+/** Regular US equities session only. The exchange timezone handles DST correctly. */
+const getUsEquitiesMarketStatus = (timestamp: number) => {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(timestamp));
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((entry) => entry.type === type)?.value || "";
+  const weekday = part("weekday");
+  const minutesSinceMidnight = Number(part("hour")) * 60 + Number(part("minute"));
+  const isWeekday = ["Mon", "Tue", "Wed", "Thu", "Fri"].includes(weekday);
+  const isOpen = isWeekday && minutesSinceMidnight >= 9 * 60 + 30 && minutesSinceMidnight < 16 * 60;
+  return { label: isOpen ? "Open" : "Closed", isOpen };
+};
 
 const formatNewsTimestamp = (value: string | null | undefined) => {
   if (!value) return "Yahoo";
@@ -1796,6 +1824,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [activeSubTab, setActiveSubTab] = useState<OptionsSubTab>("Overview");
   const tabDataCache = useRef<Map<string, TabCacheEntry>>(new Map());
   const [tabPanelState, setTabPanelState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
+  const [fearGreedState, setFearGreedState] = useState<FearGreedPanelState>({ loading: false, error: null, data: null, cache: null });
+  const fearGreedLoadedRef = useRef(false);
   const [subTabPanelState, setSubTabPanelState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
   const [selectedExpiry, setSelectedExpiry] = useState<string | null>(null);
   const [priceRange, setPriceRange] = useState<StocksWatcherPriceRange>("3mo");
@@ -2168,7 +2198,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   }, [callNativeTool]);
 
   const loadTopTab = useCallback(async (tab: TopTab, force = false) => {
-    if (tab === "Options" || tab === "Overview") return;
+    if (tab === "Options" || tab === "Overview" || tab === "F/G Index") return;
     const symbol = normalizeSymbol(selectedSymbol);
     const cacheKey = getStocksWatcherTopTabCacheKey(symbol, tab, priceRange);
     const cached = force ? null : tabDataCache.current.get(cacheKey);
@@ -2190,6 +2220,22 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       });
     }
   }, [priceRange, runToolBundle, selectedSymbol]);
+
+  const loadFearGreed = useCallback(async (force = false) => {
+    if (fearGreedLoadedRef.current && !force) return;
+    setFearGreedState((current) => ({ ...current, loading: true, error: null }));
+    try {
+      const response = await fetch("/api/fear-greed", { headers: { Accept: "application/json" } });
+      const payload = await response.json() as { data?: FearGreedSnapshot; cache?: MarketCacheMetadata; error?: string };
+      if ((response.status !== 200 && response.status !== 206) || !payload.data || !payload.cache) {
+        throw new Error(payload.error || `Fear & Greed request failed with HTTP ${response.status}.`);
+      }
+      fearGreedLoadedRef.current = true;
+      setFearGreedState({ loading: false, error: null, data: payload.data, cache: payload.cache });
+    } catch (requestError) {
+      setFearGreedState((current) => ({ ...current, loading: false, error: requestError instanceof Error ? requestError.message : String(requestError) }));
+    }
+  }, []);
 
   const currentExpiry = selectedExpiry || snapshot?.selectedExpiry || snapshot?.availableExpiries?.[0] || snapshot?.expiries[0]?.expiry;
   const usesNativeYahooOptions = Boolean(snapshot?.source === "native_yahoo" && !snapshot.optionsSnapshot);
@@ -2413,8 +2459,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   }, [currentExpiry, runToolBundle, selectedSymbol]);
 
   useEffect(() => {
-    if (activeTab !== "Options" && activeTab !== "Overview") void loadTopTab(activeTab);
-  }, [activeTab, loadTopTab]);
+    if (activeTab === "F/G Index") void loadFearGreed();
+    else if (activeTab !== "Options" && activeTab !== "Overview" && activeTab !== "Fixed Income") void loadTopTab(activeTab);
+  }, [activeTab, loadFearGreed, loadTopTab]);
 
   useEffect(() => {
     if (activeTab === "Options" && activeSubTab !== "Overview") void loadOptionsSubTab(activeSubTab);
@@ -2831,6 +2878,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const gammaFlipLevel = snapshot ? getGammaFlipLevel(chartRows, snapshot.spot) : null;
   const flipStrike = gammaFlipLevel === null ? null : getNearestSpotStrike(chartRows, gammaFlipLevel);
   const updatedSecondsAgo = lastUpdatedAt ? Math.max(0, Math.floor((now - lastUpdatedAt) / 1_000)) : null;
+  const marketStatus = getUsEquitiesMarketStatus(now);
   const visibleRows = focusedRows.length > 0 ? focusedRows : chartRows;
   const latestPrice = snapshot?.quote.price || 0;
   const heroSparklinePoints: SparklinePoint[] = (snapshot?.history || [])
@@ -3127,7 +3175,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 >
                   {gexRows.map((row) => {
                     const positive = row.netGex >= 0;
-                    const width = Math.max(row.netGex === 0 ? 0 : 1.5, Math.abs(row.netGex) / maxGex * 48);
+                    // The strongest signed level reaches the edge of its half-axis.
+                    // Do not normalize each row independently: that would misrepresent exposure.
+                    const width = Math.max(row.netGex === 0 ? 0 : 1.5, Math.abs(row.netGex) / maxGex * 50);
                     const isSpot = spotRow?.strike === row.strike;
                     const isKeyLevel = isSpot || row.strike === largestPositiveGexStrike || row.strike === largestNegativeGexStrike;
                     const axisPosition = sharedPriceAxisRange
@@ -3142,6 +3192,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                         data-chart-gex-spot={isSpot ? "true" : "false"}
                         data-chart-gex-key-level={isKeyLevel ? "true" : "false"}
                         data-chart-gex-contributors={`${row.contributors}/${gexExpiries.length}`}
+                        data-chart-gex-width={width.toFixed(4)}
                         data-chart-gex-axis-position={axisPosition === null ? undefined : axisPosition.toFixed(4)}
                         className={`siw-chart-gex-row ${isSpot ? "is-spot" : ""} ${isKeyLevel ? "is-key-level" : ""}`}
                         aria-label={`Strike ${row.strike}: ${formatOptionalSignedExposure(row.netGex)}. ${row.contributors} of ${gexExpiries.length} selected expiries.`}
@@ -3781,10 +3832,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     ];
 
     return (
-      <section className="siw-stats-board" data-primary-tab-panel="Stats">
+      <section className="siw-stats-board" data-primary-tab-panel="Fundamentals" data-fundamentals-metrics>
         <div className="siw-stats-left siw-panel">
           <div className="siw-panel-title">
-            <span>Native Yahoo Stats</span>
+            <span>Fundamentals</span>
             <b>{tabPanelState.loading ? "Loading" : "Yahoo"}</b>
           </div>
           <div className="siw-stat-columns">
@@ -4343,8 +4394,23 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     if (activeTab === "Overview") return renderOverviewPanel();
     if (activeTab === "Chart") return renderChartPanel();
 
+    if (activeTab === "F/G Index") {
+      return (
+        <section className="siw-panel siw-primary-panel siw-fear-greed-panel" data-primary-tab-panel="F/G Index">
+          {fearGreedState.loading && <div className="siw-generic-content"><SkeletonBlock className="h-64 w-full" /></div>}
+          {fearGreedState.error && <div className="siw-generic-content"><ErrorBanner message={fearGreedState.error} onRetry={() => void loadFearGreed(true)} /></div>}
+          {!fearGreedState.loading && !fearGreedState.error && fearGreedState.data && (
+            <StocksWatcherFearGreedPanel snapshot={fearGreedState.data} cache={fearGreedState.cache} onRefresh={() => void loadFearGreed(true)} />
+          )}
+        </section>
+      );
+    }
+
     if (activeTab !== "Options") {
-      if (activeTab === "Stats") return renderStatsReferencePanel();
+      if (activeTab === "Fundamentals") return renderStatsReferencePanel();
+      if (activeTab === "Fixed Income") {
+        return <section className="siw-panel siw-primary-panel siw-fixed-income-panel" data-primary-tab-panel="Fixed Income"><StocksWatcherFixedIncomePanel /></section>;
+      }
       return (
         <section className={`siw-panel siw-primary-panel siw-${activeTab.toLowerCase().replace(/\s+/g, "-")}-panel`} data-primary-tab-panel={activeTab}>
           {renderGenericPanel(tabPanelState, () => void loadTopTab(activeTab, true))}
@@ -4863,7 +4929,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           </div>
 
           <footer className="siw-status-bar">
-            <span><b /> Market: Open</span>
+            <span data-market-status={marketStatus.isOpen ? "open" : "closed"}><b /> Market: {marketStatus.label}</span>
             <span>Data: Yahoo Finance <em>(Delayed 15-20 min)</em></span>
                 <span>Source: {snapshot?.optionsSnapshot ? "Robinhood MCP EOD · OI-signed GEX proxy" : isYahooOptionsFallback ? "Yahoo fallback · Robinhood EOD unavailable" : snapshot?.source === "native_yahoo" ? "Yahoo options chain + local Greek approximation" : "Unavailable"}</span>
             <span>Not financial advice</span>
@@ -5263,7 +5329,14 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                   {renderOptionsSubTab()}
                 </>
               )}
-              {activeTab !== "Options" && renderGenericPanel(tabPanelState, () => void loadTopTab(activeTab, true))}
+              {activeTab === "F/G Index" && !fearGreedState.loading && !fearGreedState.error && fearGreedState.data && (
+                <StocksWatcherFearGreedPanel snapshot={fearGreedState.data} cache={fearGreedState.cache} onRefresh={() => void loadFearGreed(true)} />
+              )}
+              {activeTab === "F/G Index" && fearGreedState.loading && <SkeletonBlock className="m-4 h-64 w-auto" />}
+              {activeTab === "F/G Index" && fearGreedState.error && <div className="m-4"><ErrorBanner message={fearGreedState.error} onRetry={() => void loadFearGreed(true)} /></div>}
+              {activeTab === "Fixed Income" && <StocksWatcherFixedIncomePanel />}
+              {activeTab === "Fundamentals" && renderStatsReferencePanel()}
+              {activeTab !== "Options" && activeTab !== "F/G Index" && activeTab !== "Fixed Income" && activeTab !== "Fundamentals" && renderGenericPanel(tabPanelState, () => void loadTopTab(activeTab, true))}
             </div>
           </section>
 
