@@ -269,6 +269,38 @@ const historyRows = () => Array.from({ length: 90 }, (_, index) => ({
   volume: 1_000_000 + index * 12_000,
 }));
 
+const fearGreedFixture = () => ({
+  data: {
+    schemaVersion: "1.0",
+    source: "CNN Fear & Greed Index",
+    sourceUrl: "https://www.cnn.com/markets/fear-and-greed",
+    asOf: "2026-09-09T20:00:00.000Z",
+    score: 38.9,
+    rating: "fear",
+    comparisons: { previousClose: 40.2, previousWeek: 44.8, previousMonth: 52.1, previousYear: 29.7 },
+    history: Array.from({ length: 60 }, (_, index) => ({
+      at: new Date(Date.UTC(2026, 6, 1 + index)).toISOString(),
+      score: 25 + ((index * 7) % 50),
+      rating: index < 20 ? "fear" : index < 42 ? "neutral" : "greed",
+    })),
+  },
+  cache: { status: "refreshed", dataset: "news", cachedAt: "2026-09-09T20:00:00.000Z", expiresAt: "2026-09-09T20:15:00.000Z", ageSeconds: 0, ttlMs: 900000, ageRatio: 0, guard: "fresh", rowRead: true, rowWritten: true },
+});
+
+const treasuryYieldCurveFixture = () => ({
+  asOfDate: "2026-09-08",
+  sourceUrl: "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/all/all?_format=csv&page=&type=daily_treasury_yield_curve",
+  curves: [
+    { key: "latest", label: "Latest published", date: "2026-09-08", points: [{ label: "1M", years: 1 / 12, yield: 4.2 }, { label: "2Y", years: 2, yield: 3.9 }, { label: "10Y", years: 10, yield: 4.1 }, { label: "30Y", years: 30, yield: 4.5 }] },
+    { key: "oneWeek", label: "1 week ago", date: "2026-09-01", points: [{ label: "1M", years: 1 / 12, yield: 4.18 }, { label: "2Y", years: 2, yield: 3.86 }, { label: "10Y", years: 10, yield: 4.05 }, { label: "30Y", years: 30, yield: 4.46 }] },
+    { key: "oneMonth", label: "1 month ago", date: "2026-08-08", points: [{ label: "1M", years: 1 / 12, yield: 4.11 }, { label: "2Y", years: 2, yield: 3.8 }, { label: "10Y", years: 10, yield: 4.02 }, { label: "30Y", years: 30, yield: 4.43 }] },
+    { key: "startOfYear", label: "Start of year", date: "2026-01-02", points: [{ label: "1M", years: 1 / 12, yield: 4.3 }, { label: "2Y", years: 2, yield: 4.02 }, { label: "10Y", years: 10, yield: 4.2 }, { label: "30Y", years: 30, yield: 4.62 }] },
+  ],
+  yieldRows: [{ maturity: "1M", yield: 4.2, oneDayBps: 2.1, oneWeekBps: 2, oneMonthBps: 9, yearToDateBps: -10 }, { maturity: "2Y", yield: 3.9, oneDayBps: 1.5, oneWeekBps: 4, oneMonthBps: 10, yearToDateBps: -12 }, { maturity: "10Y", yield: 4.1, oneDayBps: 2.5, oneWeekBps: 5, oneMonthBps: 8, yearToDateBps: -10 }, { maturity: "30Y", yield: 4.5, oneDayBps: 4, oneWeekBps: 4, oneMonthBps: 7, yearToDateBps: -12 }],
+  spreadRows: [{ label: "10Y - 2Y", valueBps: 20, oneDayBps: 1, oneWeekBps: 1, oneMonthBps: -2, yearToDateBps: 2 }],
+  source: { provider: "U.S. Department of the Treasury", label: "Daily Treasury Par Yield Curve Rates", url: "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/all/all?_format=csv&page=&type=daily_treasury_yield_curve", fetchedAt: "2026-09-09T20:00:00.000Z" },
+});
+
 let refreshAllMode = false;
 let delayedSnapshotSymbol = null;
 
@@ -482,6 +514,16 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await page.setRequestInterception(true);
     page.on("request", async (request) => {
       const url = new URL(request.url());
+      if (url.pathname.includes("/api/fear-greed")) {
+        apiCalls.push({ method: "GET", endpoint: "fear-greed" });
+        await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(fearGreedFixture()) });
+        return;
+      }
+      if (url.pathname.includes("/api/treasury-yield-curve")) {
+        apiCalls.push({ method: "GET", endpoint: "treasury-yield-curve" });
+        await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(treasuryYieldCurveFixture()) });
+        return;
+      }
       if (!url.pathname.includes("/api/stocks-intelligence-watcher")) {
         request.continue();
         return;
@@ -1008,15 +1050,16 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     }
     await page.screenshot({ path: path.join(screenshotsDir, "03-chart-tab-ohlc-volume-desktop.png") });
 
-    await clickText(page, "Stats");
+    assert.equal(await page.$$eval("button", (nodes) => nodes.some((node) => node.textContent?.trim() === "Stats")), false, "Stats must be merged into Fundamentals instead of remaining as a duplicate tab");
+    await clickText(page, "Fundamentals");
     await wait(700);
-    assert.match(await visibleText(page), /Native Yahoo Stats/i);
+    assert.match(await visibleText(page), /Fundamentals/i);
     assert.match(await visibleText(page), /NMS/);
     assert.match(await visibleText(page), /Semiconductors/);
-    assert.match(await page.$eval("[data-primary-tab-panel='Stats'] [data-company-description]", (node) => node.textContent || ""), /NVIDIA designs accelerated computing/i, "Stats must show the Yahoo company description instead of an empty earnings card");
-    assert.equal(await page.$eval("[data-primary-tab-panel='Stats'] .siw-description-toggle", (node) => node.textContent), "Read more", "long company descriptions must start collapsed");
-    await page.click("[data-primary-tab-panel='Stats'] .siw-description-toggle");
-    assert.equal(await page.$eval("[data-primary-tab-panel='Stats'] .siw-description-toggle", (node) => node.textContent), "Show less", "company description toggle must expand the hidden text");
+    assert.match(await page.$eval("[data-primary-tab-panel='Fundamentals'] [data-company-description]", (node) => node.textContent || ""), /NVIDIA designs accelerated computing/i, "Fundamentals must show the Yahoo company description");
+    assert.equal(await page.$eval("[data-primary-tab-panel='Fundamentals'] .siw-description-toggle", (node) => node.textContent), "Read more", "long company descriptions must start collapsed");
+    await page.click("[data-primary-tab-panel='Fundamentals'] .siw-description-toggle");
+    assert.equal(await page.$eval("[data-primary-tab-panel='Fundamentals'] .siw-description-toggle", (node) => node.textContent), "Show less", "company description toggle must expand the hidden text");
     const statsHeaderAlignment = await page.evaluate(() => [
       [document.querySelector(".siw-stats-left .siw-panel-title span"), document.querySelector(".siw-stats-left .siw-stat-table")],
       [document.querySelector(".siw-financial-summary .siw-panel-title span"), document.querySelector(".siw-financial-summary .siw-stat-table")],
@@ -1025,7 +1068,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(statsHeaderAlignment.every(({ titleLeft, tableLeft }) => Math.abs(titleLeft - tableLeft) <= 1), true, `Stats panel titles must align with their tables; got ${JSON.stringify(statsHeaderAlignment)}`);
     const statsSectionSpacing = await page.evaluate(() => {
       const panelHeader = document.querySelector(".siw-stats-left .siw-panel-title")?.getBoundingClientRect();
-      return Array.from(document.querySelectorAll(".siw-stat-columns h3")).map((heading) => ({
+      return Array.from(document.querySelectorAll(".siw-stat-columns h3")).slice(0, 2).map((heading) => ({
         label: heading.textContent,
         topInset: panelHeader ? heading.getBoundingClientRect().top - panelHeader.bottom : -1,
       }));
@@ -1033,16 +1076,27 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(statsSectionSpacing.every(({ topInset }) => topInset >= 15), true, `Stats subsection headings must keep a 16px gap below the panel divider; got ${JSON.stringify(statsSectionSpacing)}`);
     assert.equal(await page.$eval(".siw-financial-summary .siw-stat-table thead th:nth-child(2)", (node) => getComputedStyle(node).textAlign), "center", "Financial Summary value header must be centered");
     assert.equal(await page.$eval(".siw-financial-summary .siw-stat-table thead th:nth-child(3)", (node) => getComputedStyle(node).textAlign), "center", "Financial Summary context header must be centered");
-    assert.doesNotMatch(await page.$eval("[data-primary-tab-panel='Stats']", (node) => node.textContent || ""), /Needs checking/i, "Stats must render Yahoo values or n\/a, never a placeholder");
+    assert.doesNotMatch(await page.$eval("[data-primary-tab-panel='Fundamentals']", (node) => node.textContent || ""), /Needs checking/i, "Fundamentals must render Yahoo values or n\/a, never a placeholder");
     await page.screenshot({ path: path.join(screenshotsDir, "04-stats-fundamentals-earnings-desktop.png") });
 
-    await clickText(page, "Fundamentals");
+    await clickText(page, "Fixed Income", true);
     await wait(500);
-    assert.equal(await page.$("[data-fundamentals-metrics]") !== null, true, "Fundamentals must use the readable native metrics grid");
-    assert.match(await page.$eval("[data-primary-tab-panel='Fundamentals'] [data-company-description]", (node) => node.textContent || ""), /NVIDIA designs accelerated computing/i, "Fundamentals must include the Yahoo company description");
-    assert.equal(await page.$$eval("[data-fundamentals-metrics] dd", (nodes) => nodes.every((node) => node.scrollWidth <= node.clientWidth)), true, "Fundamentals metric values must not be clipped");
+    assert.equal(await page.$("[data-fixed-income-panel]") !== null, true, "Fixed Income must render the Treasury curve surface");
+    assert.equal(await page.$("[data-fixed-income-chart] .recharts-line") !== null, true, "Fixed Income must render the existing yield curve chart");
+    assert.match(await page.$eval("[data-fixed-income-table]", (node) => node.textContent || ""), /10Y - 2Y/, "Fixed Income must render the Treasury yield and spread table");
+    assert.ok(apiCalls.some((call) => call.endpoint === "treasury-yield-curve"), "Fixed Income must request only the existing server-side Treasury API");
 
-    for (const [topTab, expectedTool] of [["Earnings", "earnings_vol_crush"], ["Short Vol", "signal_scan"], ["News", "morning_briefing"], ["Holders", "get_sector_top_holdings"]]) {
+    await clickText(page, "F/G Index", true);
+    await wait(350);
+    assert.equal(await page.$("[data-fear-greed-panel]") !== null, true, "F/G Index must render the CNN sentiment surface");
+    assert.match(await page.$eval("[data-fear-greed-gauge]", (node) => node.textContent || ""), /38\.9/, "F/G Index must expose the cached CNN score in its gauge");
+    assert.equal(await page.$("[data-fear-greed-line-chart] svg polyline") !== null, true, "F/G Index must render its one-year line chart");
+    assert.equal(await page.$("[data-fear-greed-line-chart] .siw-fear-greed-last-point") === null, true, "F/G Index must not render an unexplained latest-point circle");
+    assert.match(await page.$eval("[data-fear-greed-stages]", (node) => node.textContent || ""), /Extreme Fear[\s\S]*Fear[\s\S]*Neutral[\s\S]*Greed[\s\S]*Extreme Greed/, "F/G Index must show all five sentiment stages instead of only the extremes");
+    assert.match(await page.$eval("[data-fear-greed-cache]", (node) => node.textContent || ""), /D1 cache refreshed[\s\S]*TTL: 15 min/, "F/G Index must disclose the shared D1 cache contract");
+    assert.ok(apiCalls.some((call) => call.endpoint === "fear-greed"), "F/G Index must call only the server-side fear-greed API");
+
+    for (const [topTab, expectedTool] of [["Earnings", "earnings_vol_crush"], ["News", "morning_briefing"], ["Holders", "get_sector_top_holdings"]]) {
       await clickText(page, topTab, true);
       await wait(350);
       const panelText = await page.$eval(`[data-primary-tab-panel='${topTab}']`, (node) => node.textContent || "");
@@ -1193,6 +1247,11 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await wait(600);
     assert.equal(await page.$("[data-chart-gex-by-strike]") !== null, true, "chart tab must include the Net GEX-by-strike panel");
     assert.equal(await page.$$eval("[data-chart-gex-bar]", (nodes) => nodes.length > 5), true, "chart GEX panel must render source-backed strike bars");
+    assert.equal(
+      await page.$$eval("[data-chart-gex-bar]", (nodes) => Math.max(...nodes.map((node) => Number(node.getAttribute("data-chart-gex-width")))) >= 50),
+      true,
+      "the strongest GEX level must consume its full signed half-axis",
+    );
     assert.match(await page.$eval("[data-chart-gex-provenance]", (node) => node.textContent || ""), /Robinhood MCP EOD[\s\S]*OI-signed proxy, not dealer GEX/i, "chart GEX panel must expose the Robinhood proxy methodology");
     await page.evaluate(() => document.querySelector(".siw-main-scroll")?.scrollTo({ top: 0 }));
     await wait(150);
@@ -1270,6 +1329,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       };
     });
     assert.equal(desktopGexProfile.mode, "aligned", "desktop Chart must expose the shared-axis GEX profile");
+    assert.ok((await page.$eval("[data-chart-gex-by-strike]", (node) => node.getBoundingClientRect().width)) >= 340, "desktop GEX profile must retain the expanded readable width");
     assert.equal(desktopGexProfile.listOverflow, "hidden", "desktop GEX profile must not create a second vertical scrollbar");
     assert.equal(desktopGexProfile.listFitsViewport, true, "desktop GEX profile rows must remain clipped to the shared plot viewport");
     assert.equal(desktopGexProfile.spotGuide, true, "desktop GEX profile must render a visible spot guide");
@@ -1321,6 +1381,12 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.ok((mobileGexLayout.lastBarBottom ?? Infinity) <= (mobileGexLayout.provenanceTop ?? -Infinity), "stacked provenance must not cover the final GEX row");
     await page.screenshot({ path: path.join(screenshotsDir, "03c-chart-gex-profile-mobile.png"), fullPage: true });
     await page.setViewport({ width: 1248, height: 986, deviceScaleFactor: 1 });
+    const marketStatus = await page.$eval("[data-market-status]", (node) => ({
+      state: node.getAttribute("data-market-status"),
+      label: node.textContent || "",
+    }));
+    assert.equal(["open", "closed"].includes(marketStatus.state), true, "market label must be derived from the regular US session state");
+    assert.match(marketStatus.label, /Market: (Open|Closed)/, "market label must expose its dynamic regular-session state");
     await clickText(page, "Options", true);
     await wait(180);
 
@@ -1370,7 +1436,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await page.setViewport({ width: 1600, height: 1000, deviceScaleFactor: 1 });
     await page.goto(`${baseUrl}/#/work/stocks-intelligence-watcher?symbol=NVDA`, { waitUntil: "domcontentloaded" });
     await page.waitForSelector("[data-watcher-replica]");
-    for (const topTab of ["Overview", "Chart", "Fundamentals", "Stats", "Earnings", "Options", "Short Vol", "News", "Holders"]) {
+    for (const topTab of ["Overview", "Chart", "Fundamentals", "Fixed Income", "Earnings", "Options", "F/G Index", "News", "Holders"]) {
       await clickText(page, topTab, true);
       await wait(topTab === "Options" ? 900 : 450);
       const tabLayout = await page.evaluate((tab) => {
@@ -1400,7 +1466,8 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       }
       assert.match(tabLayout.activeLabel, new RegExp(topTab.replace(" ", "\\s*"), "i"), `${topTab} must expose its active navigation state`);
       await page.evaluate(() => document.querySelector("[data-primary-tab-panel]")?.scrollIntoView({ block: "start" }));
-      await page.screenshot({ path: path.join(screenshotsDir, `tab-${topTab.toLowerCase().replace(/\s+/g, "-")}-desktop.png`) });
+      const tabFileSlug = topTab.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+      await page.screenshot({ path: path.join(screenshotsDir, `tab-${tabFileSlug}-desktop.png`) });
     }
 
     await page.setViewport({ width: 1180, height: 820, deviceScaleFactor: 1 });
@@ -1417,7 +1484,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.match(await page.$eval("[data-options-robinhood-provenance]", (node) => node.textContent || ""), /Robinhood MCP EOD/i, "mobile proof must use the Robinhood-backed NVDA snapshot");
     await page.screenshot({ path: path.join(screenshotsDir, "uat-mobile.png"), fullPage: true });
     await page.screenshot({ path: path.join(screenshotsDir, "08-responsive-mobile.png"), fullPage: true });
-    for (const topTab of ["Overview", "Chart", "Fundamentals", "Stats", "Earnings", "Options", "Short Vol", "News", "Holders"]) {
+    for (const topTab of ["Overview", "Chart", "Fundamentals", "Fixed Income", "Earnings", "Options", "F/G Index", "News", "Holders"]) {
       await clickText(page, topTab, true);
       await wait(topTab === "Options" ? 500 : 250);
       const mobileOverflow = await page.evaluate(() => ({

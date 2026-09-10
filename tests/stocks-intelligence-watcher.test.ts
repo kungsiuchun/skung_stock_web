@@ -416,7 +416,7 @@ test("native Yahoo registry exposes unique public tool names without compatibili
 
 test("watcher session plans native tool calls and cache keys without UI state", () => {
   assert.equal(normalizeWatcherExpiryForYahoo("26-06-19"), "2026-06-19");
-  assert.equal(getStocksWatcherTopTabCacheKey(" nvda ", "Stats"), "NVDA:Stats");
+  assert.equal(getStocksWatcherTopTabCacheKey(" nvda ", "Fundamentals"), "NVDA:Fundamentals");
   assert.equal(getStocksWatcherTopTabCacheKey(" nvda ", "Chart", "1y"), "NVDA:Chart:1y");
   assert.equal(getStocksWatcherOptionsSubTabCacheKey("nvda", "26-06-19", "Greeks"), "NVDA:2026-06-19:Greeks");
   assert.equal(getStocksWatcherYahooExpiryChainCacheKey(" nvda ", "26-06-19"), "NVDA:2026-06-19:YahooOptionsChain");
@@ -429,10 +429,11 @@ test("watcher session plans native tool calls and cache keys without UI state", 
   );
   assert.equal(STOCKS_WATCHER_YAHOO_EXPIRY_PRELOAD_LIMIT, 8);
 
-  assert.deepEqual(getStocksWatcherTopTabToolPlan("Stats", "nvda"), [
+  assert.deepEqual(getStocksWatcherTopTabToolPlan("Fundamentals", "nvda"), [
     { name: "get_stock_stats", params: { ticker: "NVDA" } },
     { name: "get_beta", params: { ticker: "NVDA" } },
   ]);
+  assert.deepEqual(getStocksWatcherTopTabToolPlan("Fixed Income", "nvda"), []);
   assert.deepEqual(getStocksWatcherTopTabToolPlan("Chart", "nvda", "1mo"), [
     { name: "get_stock_history", params: { ticker: "NVDA", range: "1mo", interval: "1d" } },
   ]);

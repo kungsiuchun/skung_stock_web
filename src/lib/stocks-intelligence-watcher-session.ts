@@ -8,10 +8,10 @@ export type StocksWatcherTopTab =
   | "Overview"
   | "Chart"
   | "Fundamentals"
-  | "Stats"
+  | "Fixed Income"
   | "Earnings"
   | "Options"
-  | "Short Vol"
+  | "F/G Index"
   | "News"
   | "Holders";
 
@@ -86,8 +86,7 @@ export const getStocksWatcherTopTabToolPlan = (
   const ticker = normalizeSessionSymbol(symbol);
   if (tab === "Overview") return [];
   if (tab === "Chart") return [{ name: "get_stock_history", params: { ticker, range: priceRange, interval: "1d" } }];
-  if (tab === "Fundamentals") return [{ name: "get_stock_stats", params: { ticker } }];
-  if (tab === "Stats") return [
+  if (tab === "Fundamentals") return [
     { name: "get_stock_stats", params: { ticker } },
     { name: "get_beta", params: { ticker } },
   ];
@@ -95,10 +94,8 @@ export const getStocksWatcherTopTabToolPlan = (
     { name: "earnings_vol_crush", params: { ticker } },
     { name: "historical_context", params: { ticker, event: "earnings" } },
   ];
-  if (tab === "Short Vol") return [
-    { name: "get_options_pcr", params: { ticker } },
-    { name: "signal_scan", params: { ticker } },
-  ];
+  if (tab === "F/G Index") return [];
+  if (tab === "Fixed Income") return [];
   if (tab === "News") return [
     { name: "morning_briefing", params: { ticker } },
     { name: "pre_event_brief", params: { ticker } },
