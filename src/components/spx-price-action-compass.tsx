@@ -129,7 +129,16 @@ const toneClasses = (pattern: SpxPriceActionPattern | null | undefined) => {
   return "border-amber-300/35 bg-amber-300/10 text-amber-100";
 };
 
-export function SpxPriceActionCompass({ enabled = true, onInitialLoadSettled }: { enabled?: boolean; onInitialLoadSettled?: () => void }) {
+export function SpxPriceActionCompass({
+  enabled = true,
+  refreshKey = 0,
+  onInitialLoadSettled,
+}: {
+  enabled?: boolean;
+  /** Parent-owned source refresh signal shared with the GEX pressure matrix. */
+  refreshKey?: number;
+  onInitialLoadSettled?: () => void;
+}) {
   const [timeframe, setTimeframe] = useState<SpxPriceActionTimeframe>("5m");
   const [data, setData] = useState<SpxPriceActionCompassResponse>(emptyCompass);
   const [loading, setLoading] = useState(true);
@@ -184,7 +193,7 @@ export function SpxPriceActionCompass({ enabled = true, onInitialLoadSettled }: 
   useEffect(() => {
     if (!enabled) return;
     void loadCompass(timeframe).finally(onInitialLoadSettled);
-  }, [enabled, timeframe]);
+  }, [enabled, refreshKey, timeframe]);
 
   const availablePatternTypes = useMemo(() => {
     return Array.from(new Set(data.patterns.map((pattern) => pattern.type))).sort();

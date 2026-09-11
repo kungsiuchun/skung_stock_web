@@ -262,6 +262,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const activeRequestRef = useRef<AbortController | null>(null);
   const requestVersionRef = useRef(0);
   const refreshInFlightRef = useRef(false);
+  const postCloseRevalidationDateRef = useRef<string | null>(null);
   const playbackRunRef = useRef(0);
   const playbackStateRef = useRef({
     sessions: data.sessions,
@@ -378,8 +379,11 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     setPlaying(false);
     setIsFollowingLatest(true);
     try {
-      if (await loadHeatmap(undefined, null) === "READY") setPressureRefreshKey((current) => current + 1);
+      await loadHeatmap(undefined, null);
     } finally {
+      // The GEX request and the 0DTESPX requests are independent. A manual
+      // refresh must retry both surfaces even when the heatmap request failed.
+      setPressureRefreshKey((current) => current + 1);
       refreshInFlightRef.current = false;
       setManualRefreshPending(false);
     }
@@ -391,21 +395,30 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   }, [initialSelection.date, initialSelection.snapshot, loadHeatmap]);
 
   useEffect(() => {
-    if (!isFollowingLatest || playing || !selectedDate) return undefined;
-    const refreshVisibleLiveSession = () => {
+    if (!initialHeatmapSettled || !isFollowingLatest || playing || !selectedDate) return undefined;
+    const refreshVisibleCurrentSession = () => {
       const clock = currentEtClock();
-      if (document.visibilityState !== "visible" || selectedDate !== clock.tradingDate || clock.minuteEt < 570 || clock.minuteEt > 975) return;
+      if (document.visibilityState !== "visible" || selectedDate !== clock.tradingDate) return;
+      const isLiveSession = clock.minuteEt >= 570 && clock.minuteEt <= 975;
+      const needsPostCloseRevalidation = clock.minuteEt > 975 && postCloseRevalidationDateRef.current !== selectedDate;
+      if (!isLiveSession && !needsPostCloseRevalidation) return;
+      if (needsPostCloseRevalidation) postCloseRevalidationDateRef.current = selectedDate;
       void loadHeatmap(selectedDate, null).then((result) => {
-        if (result === "READY") setPressureRefreshKey((current) => current + 1);
+        // Refresh the 0DTESPX Compass and overlay independently of a GEX
+        // response, so a stale client state cannot survive the close.
+        if (result !== "STALE") setPressureRefreshKey((current) => current + 1);
       });
     };
-    const interval = window.setInterval(refreshVisibleLiveSession, 60_000);
-    document.addEventListener("visibilitychange", refreshVisibleLiveSession);
+    const interval = window.setInterval(refreshVisibleCurrentSession, 60_000);
+    document.addEventListener("visibilitychange", refreshVisibleCurrentSession);
+    // The live interval is intentionally not fired on mount. After close,
+    // however, a background tab must obtain the completed same-day snapshot.
+    if (currentEtClock().minuteEt > 975) refreshVisibleCurrentSession();
     return () => {
       window.clearInterval(interval);
-      document.removeEventListener("visibilitychange", refreshVisibleLiveSession);
+      document.removeEventListener("visibilitychange", refreshVisibleCurrentSession);
     };
-  }, [isFollowingLatest, loadHeatmap, playing, selectedDate]);
+  }, [initialHeatmapSettled, isFollowingLatest, loadHeatmap, playing, selectedDate]);
 
   useEffect(() => {
     if (!playing) return undefined;
@@ -687,7 +700,11 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
           <span className="break-all">REQUEST <strong className="text-zinc-200">{requestState.requestUrl}</strong></span>
         </div>
 
-        <SpxPriceActionCompass enabled={initialHeatmapSettled} onInitialLoadSettled={() => setInitialCompassSettled(true)} />
+        <SpxPriceActionCompass
+          enabled={initialHeatmapSettled}
+          refreshKey={pressureRefreshKey}
+          onInitialLoadSettled={() => setInitialCompassSettled(true)}
+        />
 
         <SpxGexPressureMatrix
           selectedDate={selectedDate}

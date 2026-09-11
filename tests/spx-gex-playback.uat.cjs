@@ -177,6 +177,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
 
   let secondSnapshotAttempts = 0;
   let forceCompassTextFailure = false;
+  let compassMode = "live";
   let overlayMode = "live";
   const overlayDates = [];
   const overlayQueries = [];
@@ -233,7 +234,11 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     if (url.pathname === "/api/spx-price-action-compass" && url.searchParams.get("timeframe") === "1m") {
       return request.respond(jsonResponse(oneMinutePayload));
     }
-    if (url.pathname === "/api/spx-price-action-compass") return request.respond(jsonResponse(fiveMinutePayload));
+    if (url.pathname === "/api/spx-price-action-compass") {
+      return request.respond(jsonResponse(compassMode === "closed"
+        ? { ...fiveMinutePayload, source: { ...closedOneMinutePayload.source, interval: "1s->1m" } }
+        : fiveMinutePayload));
+    }
     if (url.pathname !== "/api/spx-gex-heatmap") return request.continue();
 
     const requestedMinute = Number(url.searchParams.get("snapshot"));
@@ -482,9 +487,11 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.equal(overlayQueries.some((query) => new URLSearchParams(query).has("em_retry")), false, "browser must never create em_retry source calls");
 
     overlayMode = "closed";
+    compassMode = "closed";
     await page.click('button[title="Refresh latest SPX and GEX sources"]');
     try {
       await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-spot-source="true"]')?.textContent?.includes("0DTESPX CLOSED"));
+      await page.waitForFunction(() => document.querySelector('[data-spx-price-action-compass="true"]')?.textContent?.includes("0DTESPX CLOSED"));
     } catch (error) {
       const state = await page.evaluate(() => ({
         source: document.querySelector('[data-spx-gex-pressure-spot-source="true"]')?.textContent || "",
