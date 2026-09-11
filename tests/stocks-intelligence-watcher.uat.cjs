@@ -53,6 +53,16 @@ const uatStocks = [
   ["TSLA", "Tesla Inc.", "Consumer Discretionary", "Stock", 435.79, -6.31, -1.43],
   ["META", "Meta Platforms Inc.", "Communication Services", "Stock", 632.51, -2.78, -0.44],
   ["QQQI", "NEOS Nasdaq-100 High Income ETF", "Income ETFs", "ETF", 50.42, 0.18, 0.36],
+  ["TSM", "Taiwan Semiconductor Manufacturing Company", "Semiconductors", "ADR", 418.45, -6.41, -1.51],
+  ["MU", "Micron Technology Inc.", "Semiconductors", "Stock", 971, 47.48, 5.14],
+  ["BRK-B", "Berkshire Hathaway Inc.", "Financials", "Stock", 474.48, -2.94, -0.62],
+  ["LLY", "Eli Lilly and Company", "Health Care", "Stock", 1105, -21.8, -1.93],
+  ["WMT", "Walmart Inc.", "Consumer Staples", "Stock", 115.75, -3.15, -2.65],
+  ["AMD", "Advanced Micro Devices Inc.", "Semiconductors", "Stock", 516.1, -1.99, -0.38],
+  ["JPM", "JPMorgan Chase & Co.", "Financials", "Stock", 299.31, 2.58, 0.87],
+  ["V", "Visa Inc.", "Financials", "Stock", 326.36, 1.41, 0.43],
+  ["XOM", "Exxon Mobil Corporation", "Energy", "Stock", 145.26, -1.7, -1.16],
+  ["ORCL", "Oracle Corporation", "Technology", "Stock", 225.78, 22.08, 10.84],
 ];
 
 const stockRecords = uatStocks.map(([symbol, companyName, sector, type, fallbackPrice, fallbackChange, fallbackChangePercent]) => ({
@@ -307,6 +317,13 @@ let delayedSnapshotSymbol = null;
 const buildToolResponse = (tool, params = {}) => {
   if (tool === "get_watchlist") {
     return { ok: true, tool, params, text: "watchlist", raw: { stocks: stockRecords }, calledAt: "2026-07-08T21:33:01.000Z" };
+  }
+
+  if (tool === "get_valuation_bands") {
+    const symbol = String(params.symbol || "NVDA").toUpperCase();
+    const metric = String(params.metric || "pe").toLowerCase();
+    const valuation = buildSnapshot(symbol).valuation;
+    return { ok: true, tool, params, text: "valuation bands", raw: { ...valuation, symbol, metric }, calledAt: "2026-07-09T20:00:00.000Z" };
   }
 
   if (tool === "save_memory") {
@@ -602,8 +619,8 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       refreshAllButtonBox.iconHeight >= 15,
       `left nav refresh-all button should have a normal aligned icon; got ${JSON.stringify(refreshAllButtonBox)}`,
     );
-    await page.waitForFunction(() => document.querySelector("[data-watchlist-breadth]")?.getAttribute("data-watchlist-coverage") === "9/10", { timeout: 5000 });
-    assert.equal(await page.$eval("[data-watchlist-breadth]", (node) => node.getAttribute("data-watchlist-coverage")), "9/10", "entering the Watcher must automatically refresh the visible Yahoo quote rows");
+    await page.waitForFunction(() => document.querySelector("[data-watchlist-breadth]")?.getAttribute("data-watchlist-coverage") === "19/20", { timeout: 5000 });
+    assert.equal(await page.$eval("[data-watchlist-breadth]", (node) => node.getAttribute("data-watchlist-coverage")), "19/20", "entering the Watcher must automatically refresh the 20-symbol curated Yahoo quote rows");
     assert.ok(await page.$$("[data-watchlist-sector]").then((nodes) => nodes.length) > 0, "automatic refresh must also populate the source-backed sector panel");
     assert.equal(await page.$eval("[data-watchlist-row='GOOG']", (node) => node.getAttribute("data-row-source")), "yahoo_quote", "automatic refresh must expose Yahoo row provenance");
     for (const tool of ["get_macro_regime", "market_breadth", "get_sector_stats", "get_sector_top_holdings"]) {
@@ -665,20 +682,20 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.match(approvedUniverseContext, /BREADTH\s*4\/5 · 80%/);
     assert.match(approvedUniverseContext, /AVERAGE DAY MOVE\s*\+1\.27%/);
     assert.match(approvedUniverseContext, /COVERAGE\s*5 Yahoo symbols/);
-    assert.match(await visibleText(page), /Technology · 2\/2/);
+    assert.match(await visibleText(page), /Technology · 3\/3/);
     assert.doesNotMatch(await visibleText(page), /Stale cache sector/);
     assert.match(await visibleText(page), /LEAD \+4\.20%/);
     assert.match(await visibleText(page), /LOSS -2\.70%/);
     assert.match(await visibleText(page), /Watchlist Market Breadth \(Yahoo live quotes\)/i);
-    assert.equal(await page.$eval("[data-watchlist-breadth]", (node) => node.getAttribute("data-watchlist-coverage")), "9/10", "breadth coverage must exclude a Yahoo row whose change fields are unavailable");
+    assert.equal(await page.$eval("[data-watchlist-breadth]", (node) => node.getAttribute("data-watchlist-coverage")), "19/20", "breadth coverage must exclude a Yahoo row whose change fields are unavailable");
     assert.equal(await page.$eval("[data-watchlist-row='QQQI']", (node) => node.getAttribute("data-row-change")), "", "missing Yahoo change fields must remain unavailable instead of becoming a fake unchanged quote");
     assert.equal(await page.$eval("[data-watchlist-row='QQQI']", (node) => node.getAttribute("data-row-change-available")), "false", "missing Yahoo change evidence must remain observable in the row contract");
     assert.match(await page.$eval("[data-watchlist-row='QQQI'] .siw-row-change", (node) => node.textContent || ""), /--/, "missing Yahoo change fields must render explicitly unavailable");
-    assert.match(await visibleText(page), /Change coverage 9\/10 · 1 unavailable/i, "breadth header must disclose unavailable change evidence");
+    assert.match(await visibleText(page), /Change coverage 19\/20 · 1 unavailable/i, "breadth header must disclose unavailable change evidence");
     assert.match(await page.$eval(".siw-breadth-counts", (node) => node.textContent || ""), /Unchanged\s*1\s*·\s*META/i, "a genuine zero-change Yahoo quote must remain unchanged and identify its ticker");
-    assert.equal(await page.$eval("[data-watchlist-sector='Technology']", (node) => node.getAttribute("data-watchlist-sector-coverage")), "2/2", "sector coverage should derive from visible Yahoo quote rows");
+    assert.equal(await page.$eval("[data-watchlist-sector='Technology']", (node) => node.getAttribute("data-watchlist-sector-coverage")), "3/3", "sector coverage should derive from visible Yahoo quote rows");
     await page.select("select[aria-label='Sector filter']", "Technology");
-    await page.waitForFunction(() => document.querySelector("[data-watchlist-breadth]")?.getAttribute("data-watchlist-coverage") === "2/2", { timeout: 5000 });
+    await page.waitForFunction(() => document.querySelector("[data-watchlist-breadth]")?.getAttribute("data-watchlist-coverage") === "3/3", { timeout: 5000 });
     assert.equal(await page.$$("[data-watchlist-sector]").then((nodes) => nodes.length), 1, "sector filter should limit the watchlist sector panel to visible rows");
     assert.equal(await page.$eval("[data-watchlist-sector]", (node) => node.getAttribute("data-watchlist-sector")), "Technology");
     await page.select("select[aria-label='Sector filter']", "All Sectors");
@@ -698,49 +715,11 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.ok(sectorEmptyLayout.spanWidth >= sectorEmptyLayout.emptyWidth * 0.75, `sector unavailable copy must retain readable line width; got ${JSON.stringify(sectorEmptyLayout)}`);
     await page.setViewport({ width: 1508, height: 1471, deviceScaleFactor: 1 });
     await wait(300);
-    const bottomPanelRects = await page.$$eval("[data-bottom-panels] > .siw-panel", (panels) => panels.map((panel) => {
-      const rect = panel.getBoundingClientRect();
-      return { top: rect.top, bottom: rect.bottom, height: rect.height };
-    }));
-    assert.equal(bottomPanelRects.length, 3, "the bottom audit area must contain three columns");
-    assert.ok(Math.max(...bottomPanelRects.map((rect) => rect.top)) - Math.min(...bottomPanelRects.map((rect) => rect.top)) <= 1, `bottom column tops must align; got ${JSON.stringify(bottomPanelRects)}`);
-    assert.ok(Math.max(...bottomPanelRects.map((rect) => rect.bottom)) - Math.min(...bottomPanelRects.map((rect) => rect.bottom)) <= 1, `bottom column bottoms must align; got ${JSON.stringify(bottomPanelRects)}`);
-    const auditPanelInsets = await page.evaluate(() => [
-      [".siw-tool-runs", ".siw-run-table"],
-      [".siw-market-context", ".siw-context-cards"],
-      [".siw-tool-catalog", ".siw-tool-catalog label"],
-    ].map(([panelSelector, bodySelector]) => {
-      const panel = document.querySelector(panelSelector)?.getBoundingClientRect();
-      const bodyNode = document.querySelector(bodySelector);
-      const body = bodyNode?.getBoundingClientRect();
-      const style = bodyNode ? getComputedStyle(bodyNode) : null;
-      const usesPadding = bodySelector !== ".siw-tool-catalog label";
-      return {
-        panelSelector,
-        left: usesPadding ? Number.parseFloat(style?.paddingLeft || "-1") : body && panel ? body.left - panel.left : -1,
-        right: usesPadding ? Number.parseFloat(style?.paddingRight || "-1") : body && panel ? panel.right - body.right : -1,
-      };
-    }));
-    assert.equal(
-      auditPanelInsets.every(({ left, right }) => left >= 15 && right >= 15),
-      true,
-      `bottom audit content must keep at least a 16px visual gutter from panel borders; got ${JSON.stringify(auditPanelInsets)}`,
-    );
-    const auditInnerInsets = await page.evaluate(() => {
-      const runRow = document.querySelector(".siw-run-row");
-      const runIndex = runRow?.querySelector("span");
-      const toolTitle = document.querySelector(".siw-tool-group-title");
-      const rowRect = runRow?.getBoundingClientRect();
-      const indexRect = runIndex?.getBoundingClientRect();
-      const titleStyle = toolTitle ? getComputedStyle(toolTitle) : null;
-      return {
-        runIndexLeft: rowRect && indexRect ? indexRect.left - rowRect.left : -1,
-        toolTitlePaddingLeft: Number.parseFloat(titleStyle?.paddingLeft || "-1"),
-      };
-    });
-    assert.ok(auditInnerInsets.runIndexLeft >= 9, `tool-run row content must not touch its divider edge; got ${JSON.stringify(auditInnerInsets)}`);
-    assert.ok(auditInnerInsets.toolTitlePaddingLeft >= 9, `tool-catalog section headings must not touch their divider edge; got ${JSON.stringify(auditInnerInsets)}`);
-    const overviewAndAuditColumns = await page.evaluate(() => {
+    assert.equal(await page.$("[data-coverage-request-panel]"), null, "coverage request must not occupy dashboard space");
+    assert.equal(await page.$("[data-bottom-panels]"), null, "the removed coverage row must not leave an empty layout wrapper");
+    assert.equal(await page.$(".siw-tool-runs[data-tool-runs]"), null, "tool telemetry must not take permanent dashboard space");
+    assert.equal(await page.$(".siw-tool-catalog[data-tool-catalog]"), null, "tool catalog must not take permanent dashboard space");
+    const overviewColumns = await page.evaluate(() => {
       const uniqueColumns = (selector) => {
         const columns = [];
         for (const node of document.querySelectorAll(selector)) {
@@ -749,17 +728,9 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
         }
         return columns.sort((a, b) => a.left - b.left);
       };
-      return {
-        overview: uniqueColumns("[data-overview-tertiary] > .siw-panel"),
-        audit: uniqueColumns("[data-bottom-panels] > .siw-panel"),
-      };
+      return uniqueColumns("[data-overview-tertiary] > .siw-panel");
     });
-    assert.equal(overviewAndAuditColumns.overview.length, 3, `overview tertiary area must have three columns; got ${JSON.stringify(overviewAndAuditColumns)}`);
-    assert.equal(overviewAndAuditColumns.audit.length, 3, `bottom audit area must have three columns; got ${JSON.stringify(overviewAndAuditColumns)}`);
-    assert.equal(overviewAndAuditColumns.audit.every((column, index) =>
-      Math.abs(column.left - overviewAndAuditColumns.overview[index].left) <= 1 &&
-      Math.abs(column.right - overviewAndAuditColumns.overview[index].right) <= 1
-    ), true, `overview and bottom column boundaries must align; got ${JSON.stringify(overviewAndAuditColumns)}`);
+    assert.equal(overviewColumns.length, 3, `overview tertiary area must have three columns; got ${JSON.stringify(overviewColumns)}`);
     const heroTitleAndPriceRects = await page.evaluate(() => {
       const title = document.querySelector(".siw-hero-identity h1");
       const price = document.querySelector(".siw-hero-price strong");
@@ -776,7 +747,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       heroTitleAndPriceRects.title.bottom <= heroTitleAndPriceRects.price.top ||
       heroTitleAndPriceRects.price.bottom <= heroTitleAndPriceRects.title.top;
     assert.ok(noHeroOverlap, `hero title and price must not overlap at 1508px viewport; got ${JSON.stringify(heroTitleAndPriceRects)}`);
-    await page.evaluate(() => document.querySelector("[data-bottom-panels]")?.scrollIntoView({ block: "start" }));
+    await page.evaluate(() => document.querySelector("[data-overview-tertiary]")?.scrollIntoView({ block: "start" }));
     await wait(200);
     await page.screenshot({ path: path.join(screenshotsDir, "02b-audit-columns-premium-spacing-desktop.png") });
     await page.setViewport({ width: 1600, height: 1000, deviceScaleFactor: 1 });
@@ -792,7 +763,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
         return { panel: node.getAttribute("data-overview-tertiary-panel"), left: rect.left, top: rect.top, width: rect.width };
       }),
     );
-    assert.equal(tertiaryBoxes.length, 6, "overview must render news, earnings, valuation, financials, owner coverage, and key metrics panels");
+    assert.equal(tertiaryBoxes.length, 6, "overview must render news, earnings, valuation, financials, market context, and key metrics panels");
     const tertiaryByPanel = Object.fromEntries(tertiaryBoxes.map((box) => [box.panel, box]));
     assert.ok(
       ["news", "earnings", "metrics"].every((panel) => Math.abs(tertiaryByPanel[panel].top - tertiaryByPanel.news.top) <= 2),
@@ -802,8 +773,8 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       tertiaryByPanel.news.left < tertiaryByPanel.earnings.left && tertiaryByPanel.earnings.left < tertiaryByPanel.metrics.left,
       "key metrics must swap into valuation's prior top-right position",
     );
-    assert.ok(tertiaryByPanel.financials.top > tertiaryByPanel.news.top && tertiaryByPanel.valuation.top > tertiaryByPanel.news.top, "valuation must swap below with key metrics");
-    assert.ok(tertiaryByPanel.financials.left < tertiaryByPanel.valuation.left && tertiaryByPanel.valuation.left < tertiaryByPanel['admin-coverage'].left, "valuation must swap with coverage request in the second tertiary row");
+    assert.ok(tertiaryByPanel.financials.top > tertiaryByPanel.news.top && tertiaryByPanel.valuation.top > tertiaryByPanel.news.top, "valuation must remain below key metrics");
+    assert.ok(tertiaryByPanel.financials.left < tertiaryByPanel.valuation.left && tertiaryByPanel.valuation.left < tertiaryByPanel['market-context'].left, "approved universe market context must replace coverage request in the second tertiary row");
     const overviewText = await visibleText(page);
     assert.match(overviewText, /High\s+205\.15/i, "hero high must come from quote OHLC, not copied price fallback");
     assert.match(overviewText, /Low\s+195\.11/i, "hero low must come from quote OHLC, not copied price fallback");
@@ -818,7 +789,13 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.match(overviewText, /Last earnings\s+2026-05-20/i);
     assert.match(overviewText, /EPS 1\.87 vs 1\.77/i);
     assert.match(overviewText, /Earnings-date move\s+\+1\.30%/i);
-    assert.match(overviewText, /Coverage request/i, "overview must expose the owner-only coverage request panel");
+    assert.doesNotMatch(overviewText, /Coverage request|Sign in to queue a ticker/i, "the removed owner-only coverage request must not be visible in the overview");
+    assert.equal(await page.$("[data-valuation-rainbow-chart]") !== null, true, "valuation card must render the metric-based rainbow band chart");
+    assert.equal(await page.$$eval("select[aria-label='Curated valuation ticker'] option", (nodes) => nodes.length), 20, "valuation ticker selector must exactly match the 20 admin-curated symbols");
+    await page.select("select[aria-label='Curated valuation ticker']", "MSFT");
+    await page.waitForFunction(() => document.querySelector("[data-valuation-rainbow-chart]")?.getAttribute("data-valuation-metric") === "pe", { timeout: 5000 });
+    await page.select("select[aria-label='Valuation metric']", "ps");
+    await page.waitForFunction(() => document.querySelector("[data-valuation-rainbow-chart]")?.getAttribute("data-valuation-metric") === "ps", { timeout: 5000 });
     const indexSparklineBoxes = await page.$$eval("[data-market-index-card]", (cards) =>
       cards.map((card) => {
         const cardRect = card.getBoundingClientRect();
@@ -1021,6 +998,9 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await page.waitForFunction(() => document.querySelectorAll("[data-watcher-replica] [data-watchlist-row]").length > 0);
     await page.click("button[aria-label='Settings']");
     assert.equal(await page.$("[data-settings-panel]") !== null, true, "settings should open panel");
+    assert.equal(await page.$("[data-settings-panel] .siw-tool-runs") !== null, true, "Help must contain the native Yahoo tool-run diagnostics");
+    assert.equal(await page.$("[data-settings-panel] .siw-tool-catalog") !== null, true, "Help must contain the native Yahoo tool catalog");
+    assert.doesNotMatch(await page.$eval("[data-settings-panel]", (node) => node.textContent || ""), /Approved Universe Market Context/, "market context must remain outside Help as a dashboard panel");
     await clickText(page, "Retry / refresh");
     await page.click("button[aria-label='Settings']");
     await wait(150);
@@ -1321,6 +1301,13 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
         mode: profile?.getAttribute("data-chart-gex-profile"),
         listOverflow: list ? getComputedStyle(list).overflowY : null,
         listFitsViewport: list ? list.scrollHeight <= list.clientHeight : false,
+        allRowsInProfile: Array.from(document.querySelectorAll("[data-chart-gex-bar]")).every((node) => {
+          const bounds = node.getBoundingClientRect();
+          return bounds.top >= (profileBounds?.top || 0) && bounds.bottom <= (profileBounds?.bottom || 0);
+        }),
+        allRowLabelsVisible: Array.from(document.querySelectorAll(".siw-chart-gex-strike-label, .siw-chart-gex-value")).every((node) => getComputedStyle(node).opacity === "1"),
+        profileHeight: profileBounds?.height || 0,
+        rowCount: document.querySelectorAll("[data-chart-gex-bar]").length,
         spotGuide: document.querySelector(".siw-chart-gex-spot-guide") !== null,
         centers: Array.from(document.querySelectorAll("[data-chart-gex-bar]")).map((node) => {
           const bounds = node.getBoundingClientRect();
@@ -1331,7 +1318,10 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(desktopGexProfile.mode, "aligned", "desktop Chart must expose the shared-axis GEX profile");
     assert.ok((await page.$eval("[data-chart-gex-by-strike]", (node) => node.getBoundingClientRect().width)) >= 340, "desktop GEX profile must retain the expanded readable width");
     assert.equal(desktopGexProfile.listOverflow, "hidden", "desktop GEX profile must not create a second vertical scrollbar");
-    assert.equal(desktopGexProfile.listFitsViewport, true, "desktop GEX profile rows must remain clipped to the shared plot viewport");
+    assert.equal(desktopGexProfile.listFitsViewport, true, "desktop GEX profile must fit every strike row without an internal scrollbar");
+    assert.equal(desktopGexProfile.allRowsInProfile, true, "desktop GEX profile must expand until every strike row is visible");
+    assert.equal(desktopGexProfile.allRowLabelsVisible, true, "desktop GEX profile must keep every strike label and value visible");
+    assert.ok(desktopGexProfile.profileHeight >= 156 + desktopGexProfile.rowCount * 22, "desktop GEX profile height must scale with all strike rows");
     assert.equal(desktopGexProfile.spotGuide, true, "desktop GEX profile must render a visible spot guide");
     await page.evaluate(() => {
       const scrollRoot = document.querySelector(".siw-main-scroll");

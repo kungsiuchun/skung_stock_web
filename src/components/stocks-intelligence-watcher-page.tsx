@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
+import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import {
   Activity,
   ArrowLeft,
@@ -69,6 +69,7 @@ import { getStocksWatcherInitialSymbolFromHash, STOCKS_WATCHER_DEFAULT_SYMBOL } 
 import { normalizeOptionsVisualModel, optionsExpiryMatchesRequest } from "@/lib/stocks-watcher-options-visual";
 import type { FearGreedSnapshot } from "@/lib/fear-greed";
 import type { MarketCacheMetadata } from "@/lib/market-data-cache";
+import type { WatcherValuationBands, WatcherValuationMetric } from "@/lib/stocks-watcher-valuation-data";
 import { StocksWatcherFearGreedPanel } from "./stocks-watcher-fear-greed-panel";
 import { StocksWatcherFixedIncomePanel } from "./stocks-watcher-fixed-income-panel";
 
@@ -81,6 +82,13 @@ const FAVORITES_STORAGE_KEY = "stocks-intelligence-favorites";
 const FAVORITES_MEMORY_KEY = "stocks-intelligence-favorites";
 const CUSTOM_STOCKS_STORAGE_KEY = "stocks-intelligence-custom-stocks";
 const ROW_QUOTE_REFRESH_CHUNK_SIZE = 20;
+const CURATED_VALUATION_TICKER_COUNT = 20;
+const VALUATION_METRICS: readonly WatcherValuationMetric[] = ["pe", "fcf", "ps"];
+const VALUATION_METRIC_LABEL: Record<WatcherValuationMetric, string> = {
+  pe: "P/E",
+  fcf: "P/FCF",
+  ps: "P/S",
+};
 
 const TOP_TABS = [
   "Overview",
@@ -133,11 +141,6 @@ interface NativeToolResult {
   params: Record<string, unknown>;
   text: string;
   raw: unknown;
-}
-
-interface WatcherOwnerSession {
-  email: string;
-  expiresAt: number;
 }
 
 interface ToolRunLogEntry {
@@ -968,6 +971,52 @@ const MetricTile = ({
     <strong>{value}</strong>
   </div>
 );
+
+const ValuationRainbowChart = ({ valuation }: { valuation: WatcherValuationBands }) => {
+  const bands = valuation.latest.bands;
+  const values = [bands.down2, bands.down1, bands.mean, bands.up1, bands.up2, valuation.latest.price]
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (values.length < 2 || valuation.latest.price === null) return null;
+
+  const low = Math.min(...values);
+  const high = Math.max(...values);
+  const range = Math.max(high - low, Math.max(1, Math.abs(high)) * 0.04);
+  const position = (value: number | null) => typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.min(100, ((value - low) / range) * 100))
+    : null;
+  const currentPosition = position(valuation.latest.price);
+  const labels = [
+    { key: "down2", label: "−2σ", value: bands.down2 },
+    { key: "down1", label: "−1σ", value: bands.down1 },
+    { key: "mean", label: "Mean", value: bands.mean },
+    { key: "up1", label: "+1σ", value: bands.up1 },
+    { key: "up2", label: "+2σ", value: bands.up2 },
+  ];
+
+  return (
+    <div
+      className="siw-valuation-rainbow"
+      data-valuation-rainbow-chart
+      data-valuation-metric={valuation.metric}
+      aria-label={`${valuation.symbol} ${VALUATION_METRIC_LABEL[valuation.metric]} ${valuation.window} valuation band chart`}
+    >
+      <div className="siw-valuation-rainbow-rail" aria-hidden="true">
+        {currentPosition !== null && <i className="siw-valuation-rainbow-marker" style={{ left: `${currentPosition}%` }} />}
+      </div>
+      <div className="siw-valuation-rainbow-labels">
+        {labels.map((band) => {
+          const bandPosition = position(band.value);
+          return bandPosition === null ? null : (
+            <span key={band.key} style={{ left: `${bandPosition}%` }}>
+              <b>{band.label}</b>{currency(band.value || 0)}
+            </span>
+          );
+        })}
+      </div>
+      <p><b>Current {currency(valuation.latest.price)}</b><span>Discounted → Fair value → Stretched</span></p>
+    </div>
+  );
+};
 
 const ErrorBanner = ({ message, onRetry }: { message: string; onRetry?: () => void }) => (
   <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-100">
@@ -1811,6 +1860,13 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   });
   const [watchlistSource, setWatchlistSource] = useState<"all" | "favorites">("all");
   const [nativeWatchlist, setNativeWatchlist] = useState<StocksWatcherUniverseStock[]>([]);
+  const [valuationTicker, setValuationTicker] = useState(selectedSymbol);
+  const [valuationMetric, setValuationMetric] = useState<WatcherValuationMetric>("pe");
+  const [valuationPanel, setValuationPanel] = useState<{ loading: boolean; error: string | null; data: WatcherValuationBands | null }>({
+    loading: false,
+    error: null,
+    data: null,
+  });
   const [customStocks, setCustomStocks] = useState<StocksWatcherUniverseStock[]>(() => readStoredCustomStocks());
   const [rowQuotesBySymbol, setRowQuotesBySymbol] = useState<Record<string, StocksWatcherRowQuote>>({});
   const [watchlistRefreshing, setWatchlistRefreshing] = useState(false);
@@ -1869,36 +1925,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [toolSearch, setToolSearch] = useState("");
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [now, setNow] = useState(Date.now());
-  const [ownerSession, setOwnerSession] = useState<WatcherOwnerSession | null>(null);
-  const [ownerAuthLoading, setOwnerAuthLoading] = useState(true);
-  const [coverageRequestSymbol, setCoverageRequestSymbol] = useState(selectedSymbol);
-  const [coverageRequestStatus, setCoverageRequestStatus] = useState<string | null>(null);
-  const [coverageRequestLoading, setCoverageRequestLoading] = useState(false);
-
   useEffect(() => {
     selectedSymbolRef.current = selectedSymbol;
   }, [selectedSymbol]);
-
-  useEffect(() => {
-    setCoverageRequestSymbol(selectedSymbol);
-    setCoverageRequestStatus(null);
-  }, [selectedSymbol]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void fetch("/api/stocks-intelligence-watcher/auth/session", { credentials: "include" })
-      .then(async (response) => {
-        const payload = await response.json() as { authenticated?: boolean; user?: WatcherOwnerSession };
-        if (!cancelled) setOwnerSession(response.ok && payload.authenticated && payload.user ? payload.user : null);
-      })
-      .catch(() => {
-        if (!cancelled) setOwnerSession(null);
-      })
-      .finally(() => {
-        if (!cancelled) setOwnerAuthLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -1984,32 +2013,6 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       throw requestError;
     }
   }, []);
-
-  const requestCoverage = useCallback(async () => {
-    const symbol = normalizeSymbol(coverageRequestSymbol || selectedSymbol);
-    if (!/^[A-Z][A-Z0-9.-]{0,9}$/.test(symbol)) {
-      setCoverageRequestStatus("Enter a valid ticker symbol.");
-      return;
-    }
-    setCoverageRequestLoading(true);
-    setCoverageRequestStatus(null);
-    try {
-      const response = await fetch("/api/stocks-intelligence-watcher/admin", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tool: "request_valuation_coverage", params: { symbol } }),
-      });
-      const payload = await response.json() as { ok?: boolean; queued?: boolean; error?: string; symbol?: string };
-      if (!response.ok || payload.ok === false) throw new Error(payload.error || `Coverage request failed with HTTP ${response.status}`);
-      setCoverageRequestStatus(`${payload.symbol || symbol} queued for the next daily batch.`);
-      setCoverageRequestSymbol(symbol);
-    } catch (requestError) {
-      setCoverageRequestStatus(requestError instanceof Error ? requestError.message : String(requestError));
-    } finally {
-      setCoverageRequestLoading(false);
-    }
-  }, [coverageRequestSymbol, selectedSymbol]);
 
   const fetchSnapshotData = async (symbol: string, options: { signal?: AbortSignal } = {}) => {
     const nextSymbol = normalizeSymbol(symbol);
@@ -2158,6 +2161,46 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     loadFavoritesFromLocal();
     void loadNativeWatchlist();
   }, [loadFavoritesFromLocal, loadNativeWatchlist]);
+
+  const curatedValuationTickers = useMemo(
+    () => nativeWatchlist.length === CURATED_VALUATION_TICKER_COUNT ? nativeWatchlist : [],
+    [nativeWatchlist],
+  );
+
+  useEffect(() => {
+    if (nativeWatchlist.length === 0) return;
+    if (curatedValuationTickers.length === 0) {
+      setValuationPanel({ loading: false, error: "The admin curated valuation universe is unavailable.", data: null });
+      return;
+    }
+    if (!curatedValuationTickers.some((stock) => stock.symbol === valuationTicker)) {
+      setValuationTicker(curatedValuationTickers[0].symbol);
+      return;
+    }
+    if (snapshot?.valuation && snapshot.valuation.symbol === valuationTicker && snapshot.valuation.metric === valuationMetric) {
+      setValuationPanel({ loading: false, error: null, data: snapshot.valuation });
+      return;
+    }
+
+    let cancelled = false;
+    setValuationPanel({ loading: true, error: null, data: null });
+    void callNativeTool("get_valuation_bands", { symbol: valuationTicker, metric: valuationMetric, window: "3Y" })
+      .then((result) => {
+        const raw = rawRecord(result.raw);
+        if (!raw || raw.symbol !== valuationTicker || raw.metric !== valuationMetric || !raw.latest || !Array.isArray(raw.points)) {
+          throw new Error("Published valuation response does not match the requested curated ticker and metric.");
+        }
+        if (!cancelled) setValuationPanel({ loading: false, error: null, data: raw as unknown as WatcherValuationBands });
+      })
+      .catch((requestError) => {
+        if (!cancelled) setValuationPanel({
+          loading: false,
+          error: requestError instanceof Error ? requestError.message : String(requestError),
+          data: null,
+        });
+      });
+    return () => { cancelled = true; };
+  }, [callNativeTool, curatedValuationTickers, nativeWatchlist.length, snapshot?.valuation, valuationMetric, valuationTicker]);
 
   const runToolBundle = useCallback(async (
     tools: { name: string; params: Record<string, unknown> }[],
@@ -3028,6 +3071,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       : currentExpiry ? [normalizeExpiryDate(currentExpiry)].filter((expiry): expiry is string => Boolean(expiry)) : [];
     const gexRows = isRobinhoodGex ? aggregateChartGexRows(gexExpiries, chartGexByExpiry) : [];
     const hasChartGex = gexRows.length > 0;
+    // A shared-axis profile cannot safely scroll internally: rows outside its
+    // fixed viewport were both clipped and visually undiscoverable. Give each
+    // strike enough vertical room while preserving its true chart coordinate.
+    const chartGexExpandedMinHeight = Math.max(544, 156 + gexRows.length * 22);
     const sharedPriceAxisRange = priceResult && hasChartGex ? getSharedPriceAxisRange(priceResult, gexRows) : null;
     const gexAxisCoordinates = priceAxisCoordinates;
     // `priceToCoordinate` is supplied by the actual lightweight-charts price
@@ -3132,7 +3179,11 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           <div className="siw-data-empty"><strong>Price history unavailable</strong><span>The selected Yahoo Daily range returned no chart payload.</span></div>
         )}
         {priceResult && (
-          <div className="siw-chart-options-layout">
+          <div
+            className="siw-chart-options-layout"
+            data-chart-gex-expanded={hasChartGex ? "true" : undefined}
+            style={{ "--siw-chart-gex-min-height": `${chartGexExpandedMinHeight}px` } as CSSProperties}
+          >
             <div ref={pricePanelRef} className="siw-chart-price-panel">
               <OhlcVolumeChart
                 result={priceResult}
@@ -4101,6 +4152,81 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     );
   };
 
+  const renderApprovedUniverseMarketContext = () => (
+    <div className="siw-panel siw-market-context" data-overview-tertiary-panel="market-context">
+      <div className="siw-panel-title">
+        <Building2 className="h-4 w-4" />
+        <span>Approved Universe Market Context</span>
+        <button type="button" onClick={() => void loadMarketContext()} disabled={marketContext.loading}>{marketContext.loading ? "Refreshing" : "Refresh"}</button>
+      </div>
+      {(() => {
+        const context = approvedUniverseRegimeFromResult(marketContext.regime);
+        const holdings = approvedUniverseHoldingsFromResult(marketContext.sectorTopHoldings);
+        const positiveRate = context ? Math.round((context.advancers / Math.max(1, context.universeCount)) * 100) : 0;
+        const posture = context?.regime === "risk_on" ? "Risk-on" : context?.regime === "risk_off" ? "Risk-off" : context?.regime === "mixed" ? "Mixed" : "Needs checking";
+        const postureTone = context?.regime === "risk_on" ? "positive" : context?.regime === "risk_off" ? "negative" : "blue";
+        const leaders = holdings.slice(0, 3);
+        const laggards = holdings.slice(-3).reverse();
+        return <>
+          <div className="siw-context-cards" data-approved-universe-market-context>
+            <MetricTile label="Market posture" value={posture} tone={postureTone} />
+            <MetricTile label="Breadth" value={context ? `${context.advancers}/${context.universeCount} · ${positiveRate}%` : "Needs checking"} tone="blue" />
+            <MetricTile label="Average day move" value={context ? formatSignedPercent(context.avgChange) : "Needs checking"} tone={context && context.avgChange < 0 ? "negative" : "positive"} />
+            <MetricTile label="Coverage" value={context ? `${context.universeCount} Yahoo symbols` : "Needs checking"} tone="blue" />
+          </div>
+          <div className="siw-breadth-bar" aria-label={context ? `${context.advancers} of ${context.universeCount} Yahoo approved-universe symbols are positive` : "Yahoo approved-universe breadth unavailable"}>
+            <span style={{ width: `${positiveRate}%` }} />
+            <em style={{ width: `${100 - positiveRate}%` }} />
+          </div>
+          <div className="siw-leader-laggard">
+            <div><b>Top Leaders</b>{leaders.length ? leaders.map((holding) => <span key={holding.symbol}>{holding.symbol} {formatSignedPercent(holding.changePercent)}</span>) : <span>Needs checking</span>}</div>
+            <div><b>Top Laggards</b>{laggards.length ? laggards.map((holding) => <span key={holding.symbol}>{holding.symbol} {formatSignedPercent(holding.changePercent)}</span>) : <span>Needs checking</span>}</div>
+          </div>
+        </>;
+      })()}
+      <p className="siw-context-source">Yahoo approved universe · {marketContext.error ? `Refresh failed: ${marketContext.error}` : "Daily change uses Yahoo quote changePercent."}</p>
+    </div>
+  );
+
+  const renderToolRunsPanel = () => (
+    <div className="siw-panel siw-tool-runs">
+      <div className="siw-panel-title">
+        <BarChart3 className="h-4 w-4" />
+        <span>Native Yahoo Tool Runs</span>
+        <b>{toolRunLog.length || snapshot?.toolRuns.length || 0}</b>
+      </div>
+      <div className="siw-run-table">
+        {(toolRunLog.length > 0 ? toolRunLog : (snapshot?.toolRuns || []).map((run, index) => ({
+          id: `${run.name}-${index}`, name: run.name, params: {}, status: run.status === "ok" ? "ok" as ToolStatus : "failed" as ToolStatus,
+          startedAt: Date.now(), durationMs: undefined, payload: run.detail,
+        }))).slice(0, 8).map((run, index) => (
+          <button key={run.id} type="button" onClick={() => setExpandedRunId(expandedRunId === run.id ? null : run.id)} className={`siw-run-row ${run.status}`}>
+            <span>{index + 1}</span><strong>{run.name}</strong><b>{run.status}</b><em>{run.durationMs ? `${run.durationMs}ms` : "--"}</em>
+          </button>
+        ))}
+      </div>
+      {expandedRunId && <pre>{stringifyPayload(toolRunLog.find((run) => run.id === expandedRunId))}</pre>}
+    </div>
+  );
+
+  const renderToolCatalogPanel = () => (
+    <div className="siw-panel siw-tool-catalog">
+      <div className="siw-panel-title"><span>Tool Catalog (Yahoo Native)</span><b>local proxy</b></div>
+      <label>
+        <Search className="h-4 w-4" />
+        <input value={toolSearch} onChange={(event) => setToolSearch(event.target.value)} aria-label="Search native Yahoo tools" name="native-yahoo-tool-search" placeholder="Search tools..." />
+      </label>
+      <div className="siw-tool-groups">
+        {Object.entries(groupedTools).map(([category, tools]) => (
+          <div key={category}><button type="button" className="siw-tool-group-title">{category}</button><div>
+            {tools.slice(0, 8).map((tool) => <button key={tool.name} type="button" title={tool.description || tool.name} onClick={() => openRunToolModal(tool.name)}>{tool.name}</button>)}
+          </div></div>
+        ))}
+        {availableTools.length === 0 && <span>Tool list unavailable in fallback mode.</span>}
+      </div>
+    </div>
+  );
+
   const renderOverviewPanel = () => {
     const visibleWatchlistCount = watchlist.length;
     const visibleWatchlistSectorTotals = watchlist.reduce<Map<string, number>>((totals, stock) => {
@@ -4139,7 +4265,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     const recentNews = snapshot?.recentNews?.slice(0, 3) || [];
     const earnings = snapshot?.earnings || null;
     const earningsMove = earnings?.priceMove;
-    const valuation = snapshot?.valuation || null;
+    const valuation = valuationPanel.data;
     const valuationBands = valuation?.latest.bands;
     const valuationPrice = valuation?.latest.price ?? null;
     const valuationGap = valuationBands?.mean && valuationPrice !== null
@@ -4292,15 +4418,33 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           <div className="siw-panel siw-valuation-panel" data-overview-tertiary-panel="valuation">
             <div className="siw-overview-head">
               <h2>Valuation</h2>
-              <span>{valuation ? `${valuation?.metric.toUpperCase()} ${valuation?.window} · ${valuation?.dataAsOf}` : "Needs checking"}</span>
+              <span>{valuation ? `${VALUATION_METRIC_LABEL[valuation.metric]} ${valuation.window} · ${valuation.dataAsOf}` : "Needs checking"}</span>
             </div>
-            {valuation && valuationBands ? (
+            <div className="siw-valuation-controls">
+              <label>Ticker
+                <select
+                  aria-label="Curated valuation ticker"
+                  value={valuationTicker}
+                  onChange={(event) => setValuationTicker(event.target.value)}
+                  disabled={curatedValuationTickers.length === 0}
+                >
+                  {curatedValuationTickers.map((stock) => <option key={stock.symbol} value={stock.symbol}>{stock.symbol}</option>)}
+                </select>
+              </label>
+              <label>Metric
+                <select aria-label="Valuation metric" value={valuationMetric} onChange={(event) => setValuationMetric(event.target.value as WatcherValuationMetric)}>
+                  {VALUATION_METRICS.map((metric) => <option key={metric} value={metric}>{VALUATION_METRIC_LABEL[metric]}</option>)}
+                </select>
+              </label>
+            </div>
+            {valuationPanel.loading ? <div className="siw-data-empty"><strong>Loading valuation</strong><span>Reading published ValuationCalculation bands.</span></div> : valuation && valuationBands ? (
               <div className="siw-earnings-summary">
                 <div>
                   <span>Current vs mean</span>
                   <strong className={(valuationGap || 0) <= 0 ? "siw-up" : "siw-down"}>{formatSignedPercent(valuationGap)}</strong>
                   <em>Price {currency(valuation.latest.price || 0)} · Mean {currency(valuationBands.mean || 0)}</em>
                 </div>
+                <ValuationRainbowChart valuation={valuation} />
                 <div>
                   <span>Upside band</span>
                   <strong>{currency(valuationBands.up1 || 0)}</strong>
@@ -4312,7 +4456,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                   <em>-2σ {currency(valuationBands.down2 || 0)} · {valuation.source}</em>
                 </div>
               </div>
-            ) : <div className="siw-data-empty"><strong>{valuationCoverage === "queued" ? "Coverage queued" : "Needs checking"}</strong><span>{valuationCoverage === "queued" ? "This ticker is queued for the next daily ValuationCalculation batch. Yahoo data is not used as a substitute." : "Published ValuationCalculation data is unavailable, invalid, or stale. Yahoo data is not used as a substitute."}</span></div>}
+            ) : <div className="siw-data-empty"><strong>{valuationPanel.error || (valuationCoverage === "queued" ? "Coverage queued" : "Needs checking")}</strong><span>{valuationCoverage === "queued" ? "This ticker is queued for the next daily ValuationCalculation batch. Yahoo data is not used as a substitute." : "Published ValuationCalculation data is unavailable, invalid, or stale. Yahoo data is not used as a substitute."}</span></div>}
           </div>
 
           <div className="siw-panel siw-financials-panel" data-overview-tertiary-panel="financials">
@@ -4341,38 +4485,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             ) : <div className="siw-data-empty"><strong>{valuationCoverage === "queued" ? "Coverage queued" : "Needs checking"}</strong><span>{valuationCoverage === "queued" ? "Financial statements will be published with the next daily valuation batch." : "Published quarterly financial statements are unavailable, invalid, or stale."}</span></div>}
           </div>
 
-          <div className="siw-panel siw-admin-coverage-panel" data-overview-tertiary-panel="admin-coverage">
-            <div className="siw-overview-head">
-              <h2>Coverage request</h2>
-              <span>{ownerSession ? ownerSession.email : "Owner only"}</span>
-            </div>
-            {ownerAuthLoading ? (
-              <div className="siw-data-empty"><strong>Checking owner session</strong><span>Please wait…</span></div>
-            ) : ownerSession ? (
-              <div className="siw-admin-coverage-form">
-                <label>
-                  <span>Queue a ticker for ValuationCalculation</span>
-                  <input
-                    value={coverageRequestSymbol}
-                    onChange={(event) => setCoverageRequestSymbol(event.target.value.toUpperCase())}
-                    maxLength={10}
-                    pattern="[A-Z][A-Z0-9.\\-]{0,9}"
-                    aria-label="Ticker symbol to queue"
-                  />
-                </label>
-                <button type="button" onClick={() => void requestCoverage()} disabled={coverageRequestLoading}>
-                  {coverageRequestLoading ? <Loader2 size={14} className="animate-spin" /> : "Queue coverage"}
-                </button>
-                {coverageRequestStatus && <span className="siw-admin-coverage-status">{coverageRequestStatus}</span>}
-              </div>
-            ) : (
-              <div className="siw-data-empty">
-                <strong>Sign in to queue a ticker</strong>
-                <span>Only the configured GitHub owner can add permanent daily coverage.</span>
-                <a href="/api/stocks-intelligence-watcher/auth/login">Sign in with GitHub</a>
-              </div>
-            )}
-          </div>
+          {renderApprovedUniverseMarketContext()}
 
           <div className="siw-panel siw-key-metrics-panel" data-overview-tertiary-panel="metrics">
             <div className="siw-overview-head">
@@ -4811,11 +4924,17 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             )}
             {settingsOpen && (
               <section className="siw-settings-panel" data-settings-panel>
-                <div>
-                  <strong>Watcher config</strong>
-                <span>Source: {snapshot?.source === "native_yahoo" ? "Yahoo Finance native" : "Unavailable"}</span>
+                <div className="siw-settings-head">
+                  <div>
+                    <strong>Watcher diagnostics</strong>
+                    <span>Source: {snapshot?.source === "native_yahoo" ? "Yahoo Finance native" : "Unavailable"}</span>
+                  </div>
+                  <button type="button" onClick={refreshCurrent}>Retry / refresh</button>
                 </div>
-                <button type="button" onClick={refreshCurrent}>Retry / refresh</button>
+                <div className="siw-help-tools-grid">
+                  {renderToolRunsPanel()}
+                  {renderToolCatalogPanel()}
+                </div>
               </section>
             )}
 
@@ -4823,108 +4942,6 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
             <div className="siw-detail-stack" data-detail-stack>
               {renderAiSummaryPanel()}
-              <section data-bottom-panels className="siw-audit-grid">
-                <div className="siw-panel siw-tool-runs">
-                  <div className="siw-panel-title">
-                    <BarChart3 className="h-4 w-4" />
-                    <span>1) Native Yahoo Tool Runs</span>
-                    <b>{toolRunLog.length || snapshot?.toolRuns.length || 0}</b>
-                  </div>
-                  <div className="siw-run-table">
-                    {(toolRunLog.length > 0 ? toolRunLog : (snapshot?.toolRuns || []).map((run, index) => ({
-                      id: `${run.name}-${index}`,
-                      name: run.name,
-                      params: {},
-                      status: run.status === "ok" ? "ok" as ToolStatus : "failed" as ToolStatus,
-                      startedAt: Date.now(),
-                      durationMs: undefined,
-                      payload: run.detail,
-                    }))).slice(0, 8).map((run, index) => (
-                      <button key={run.id} type="button" onClick={() => setExpandedRunId(expandedRunId === run.id ? null : run.id)} className={`siw-run-row ${run.status}`}>
-                        <span>{index + 1}</span>
-                        <strong>{run.name}</strong>
-                        <b>{run.status}</b>
-                        <em>{run.durationMs ? `${run.durationMs}ms` : "--"}</em>
-                      </button>
-                    ))}
-                  </div>
-                  {expandedRunId && (
-                    <pre>{stringifyPayload(toolRunLog.find((run) => run.id === expandedRunId))}</pre>
-                  )}
-                </div>
-
-                <div className="siw-panel siw-market-context">
-                  <div className="siw-panel-title">
-                    <Building2 className="h-4 w-4" />
-                    <span>2) Approved Universe Market Context</span>
-                    <button type="button" onClick={() => void loadMarketContext()} disabled={marketContext.loading}>{marketContext.loading ? "Refreshing" : "Refresh"}</button>
-                  </div>
-                  {(() => {
-                    const context = approvedUniverseRegimeFromResult(marketContext.regime);
-                    const holdings = approvedUniverseHoldingsFromResult(marketContext.sectorTopHoldings);
-                    const positiveRate = context ? Math.round((context.advancers / Math.max(1, context.universeCount)) * 100) : 0;
-                    const posture = context?.regime === "risk_on" ? "Risk-on" : context?.regime === "risk_off" ? "Risk-off" : context?.regime === "mixed" ? "Mixed" : "Needs checking";
-                    const postureTone = context?.regime === "risk_on" ? "positive" : context?.regime === "risk_off" ? "negative" : "blue";
-                    const leaders = holdings.slice(0, 3);
-                    const laggards = holdings.slice(-3).reverse();
-                    return <>
-                      <div className="siw-context-cards" data-approved-universe-market-context>
-                        <MetricTile label="Market posture" value={posture} tone={postureTone} />
-                        <MetricTile label="Breadth" value={context ? `${context.advancers}/${context.universeCount} · ${positiveRate}%` : "Needs checking"} tone="blue" />
-                        <MetricTile label="Average day move" value={context ? formatSignedPercent(context.avgChange) : "Needs checking"} tone={context && context.avgChange < 0 ? "negative" : "positive"} />
-                        <MetricTile label="Coverage" value={context ? `${context.universeCount} Yahoo symbols` : "Needs checking"} tone="blue" />
-                      </div>
-                      <div className="siw-breadth-bar" aria-label={context ? `${context.advancers} of ${context.universeCount} Yahoo approved-universe symbols are positive` : "Yahoo approved-universe breadth unavailable"}>
-                        <span style={{ width: `${positiveRate}%` }} />
-                        <em style={{ width: `${100 - positiveRate}%` }} />
-                      </div>
-                      <div className="siw-leader-laggard">
-                        <div>
-                          <b>Top Leaders</b>
-                          {leaders.length ? leaders.map((holding) => <span key={holding.symbol}>{holding.symbol} {formatSignedPercent(holding.changePercent)}</span>) : <span>Needs checking</span>}
-                        </div>
-                        <div>
-                          <b>Top Laggards</b>
-                          {laggards.length ? laggards.map((holding) => <span key={holding.symbol}>{holding.symbol} {formatSignedPercent(holding.changePercent)}</span>) : <span>Needs checking</span>}
-                        </div>
-                      </div>
-                    </>;
-                  })()}
-                  <p className="siw-context-source">Yahoo approved universe · {marketContext.error ? `Refresh failed: ${marketContext.error}` : "Daily change uses Yahoo quote changePercent."}</p>
-                </div>
-
-                <div className="siw-panel siw-tool-catalog">
-                  <div className="siw-panel-title">
-                    <span>3) Tool Catalog (Yahoo Native)</span>
-                    <b>local proxy</b>
-                  </div>
-                  <label>
-                    <Search className="h-4 w-4" />
-                    <input
-                      value={toolSearch}
-                      onChange={(event) => setToolSearch(event.target.value)}
-                      aria-label="Search native Yahoo tools"
-                      name="native-yahoo-tool-search"
-                      placeholder="Search tools..."
-                    />
-                  </label>
-                  <div className="siw-tool-groups">
-                    {Object.entries(groupedTools).map(([category, tools]) => (
-                      <div key={category}>
-                        <button type="button" className="siw-tool-group-title">{category}</button>
-                        <div>
-                          {tools.slice(0, 8).map((tool) => (
-                            <button key={tool.name} type="button" title={tool.description || tool.name} onClick={() => openRunToolModal(tool.name)}>
-                              {tool.name}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                    {availableTools.length === 0 && <span>Tool list unavailable in fallback mode.</span>}
-                  </div>
-                </div>
-              </section>
             </div>
           </div>
 
@@ -5343,7 +5360,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           <div data-detail-stack className="mt-[clamp(0.75rem,1.2vw,1rem)] space-y-[clamp(0.75rem,1.2vw,1rem)]">
             {renderAiSummaryPanel()}
 
-            <section data-bottom-panels className="grid min-w-0 gap-3 xl:grid-cols-3">
+            <section className="grid min-w-0 gap-3 xl:grid-cols-3">
             <div className="rounded-md border border-slate-800 bg-slate-950/60 p-3">
               <div className="mb-2 flex items-center gap-2 text-sm font-bold text-blue-100">
                 <BarChart3 className="h-4 w-4" />

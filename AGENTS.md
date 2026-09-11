@@ -1,11 +1,12 @@
 <!-- code-review-graph MCP tools -->
 ## MCP Tools: code-review-graph
 
-**IMPORTANT: This project has a knowledge graph. ALWAYS use the
-code-review-graph MCP tools BEFORE using Grep/Glob/Read to explore
-the codebase.** The graph is faster, cheaper (fewer tokens), and gives
-you structural context (callers, dependents, test coverage) that file
-scanning cannot.
+**IMPORTANT: This project has a knowledge graph. Use the repo-scoped
+code-review-graph MCP tools first when they are available.** They are faster,
+cheaper (fewer tokens), and give structural context (callers, dependents, test
+coverage) that file scanning cannot. If graph tools are unavailable, fail, or
+do not cover the needed material, immediately use the least-invasive local
+inspection method and state the fallback once.
 
 ### When to use graph tools FIRST
 
@@ -15,7 +16,9 @@ scanning cannot.
 - **Finding relationships**: `query_graph` with callers_of/callees_of/imports_of/tests_for
 - **Architecture questions**: `get_architecture_overview` + `list_communities`
 
-Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
+Fall back to local search/read when the graph is unavailable, failing, or does
+not cover what you need. Do not stop work or install tooling merely to satisfy
+this preference.
 
 ### Key Tools
 
@@ -61,19 +64,18 @@ Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 
 ## Codex Plugin Routing
 
-- Use `cloudflare@openai-curated` for Workers, Pages Functions, Wrangler config, D1 migrations, cron/scheduled Workers, and production deploy questions.
-- Use `browser@openai-bundled` after meaningful frontend/UI changes; verify the actual route, visible text, charts, and console errors instead of trusting code inspection.
-- Use `github@openai-curated` for PRs, CI, issues, and publish flows when GitHub context is needed.
-- Use `build-web-apps@openai-curated` for React/Vite/Tailwind implementation and frontend architecture work.
-- Use `build-web-data-visualization@openai-curated` for chart-heavy surfaces such as SPX GEX, Stocks Intelligence Watcher, OHLC, options exposure, and dashboard data visualization.
+- When `cloudflare@openai-curated` is available, prefer it for Workers, Pages Functions, Wrangler config, D1 migrations, cron/scheduled Workers, and production deploy questions. Otherwise use the available CLI/API tooling; do not install a connector unless the user explicitly asks.
+- When `browser@openai-bundled` is available, use it after meaningful frontend/UI changes; otherwise use an available browser/runtime check. Verify the actual route, visible text, charts, and console errors instead of trusting code inspection.
+- When `github@openai-curated` is available, prefer it for PRs, CI, issues, and publish flows when GitHub context is needed. Otherwise use available GitHub tooling without expanding write authority.
+- Prefer `build-web-apps@openai-curated` and `build-web-data-visualization@openai-curated` when available for their matching implementation work; their absence is not a blocker.
 - Keep `documents`, `spreadsheets`, `presentations`, and `pdf` enabled for artifact work, but do not route normal repo coding tasks through them.
 - Do not install or invoke Figma, Notion, Gmail, Slack, Stripe, Vercel, Netlify, or Sentry plugins unless the task explicitly depends on those external systems; extra connectors increase noise and auth surface.
 
 ## Git Worktree Lifecycle
 
-- Normal fixes must not create a Git worktree. Create one only when the main checkout has uncommitted changes, genuinely independent work must run in parallel, or a high-risk release needs isolation; state the reason before creating it.
-- In the same task that creates a worktree, complete its lifecycle: commit, verify, merge/push/deploy when authorized, `git worktree remove`, delete the merged branch, and run `git worktree prune --expire now`.
-- Do not use detached deployment worktrees as long-lived checkouts. Do not silently leave a stash, untracked output, or unmerged feature worktree behind.
+- Normal fixes use the current checkout. A worktree is optional only when clean separation is needed because the checkout is dirty, genuinely independent work must run in parallel, or a high-risk release needs isolation; state the reason before creating it.
+- A worktree never authorizes a commit, merge, push, or deploy. Treat each as a separate explicit user gate. Complete the requested implementation and local verification within scope even when a later release gate is not authorized.
+- After authorized lifecycle work, remove a clean merged worktree, delete its merged branch, and run `git worktree prune --expire now`. Do not use detached deployment worktrees as long-lived checkouts. Never discard uncommitted, unmerged, unknown, or user-owned state merely to clean up; report its exact path, branch, and status instead.
 - Never force-remove a worktree with uncommitted files or unclear ownership. Report the exact blocker and wait for the user to choose whether to preserve, commit, or discard it.
 
 ---
@@ -221,7 +223,7 @@ ADANOS_API_KEY=...
 - Every State Street and Massive request has a bounded abort deadline shorter than the GitHub job timeout, so provider hangs become persisted `PROVIDER_TIMEOUT` failures rather than silent hard-kills.
 - The Pages API performs two R2 reads per request. Keep this invariant: at the 100,000/day Workers Free request ceiling it remains below the 10-million/month R2 Class B free allowance. Two daily publishes are far below the one-million Class A allowance.
 - Regression commands: `npm run test:market-breadth`, `npm run test:market-breadth:uat`, `npm run build`, and a local Pages Functions bundle check.
-- Remote R2 creation, scoped S3 credentials, GitHub secrets, initial production backfill, workflow enablement, and Pages deploy are separate approval gates.
+- Remote R2 creation, scoped S3 credentials, GitHub secrets, initial production backfill, workflow enablement, and Pages deploy are approval gates. A user may explicitly authorize a named bundled plan (for example, a named migration plus deploy); deploy authority alone never authorizes resource creation, credentials, secrets, backfill, or workflow enablement.
 
 ## Stock Watcher Valuation Coverage
 
