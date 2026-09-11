@@ -25,6 +25,7 @@ import {
   projectSpxChartClientPoint,
   selectActionablePatterns,
   sortSpxPriceActionPatternsLatestFirst,
+  SPX_0DTE_FUTURE_SKEW_TOLERANCE_MS,
   type SpxPriceActionCandle,
   type SpxPriceActionPattern,
   type SpxPriceActionZone,
@@ -527,7 +528,7 @@ describe("SPX Price Action Compass API", () => {
     assert.deepEqual(patterns.map((item) => item.id), before);
   });
 
-  it("edge-caches a current 0DTESPX pressure overlay when Expected Move is ready", async () => {
+  it("uses 0DTESPX during an active session when its upcoming marker is stale", async () => {
     const originalFetch = globalThis.fetch;
     // Keep all three fixture seconds inside one completed minute. Date.now()
     // near a minute boundary would otherwise create two candles and make this
@@ -539,7 +540,7 @@ describe("SPX Price Action Compass API", () => {
     globalThis.fetch = (async (input, init) => {
       const url = String(input);
       calls.push({ url, authorization: new Headers(init?.headers).get("authorization") });
-      if (url.endsWith("/market-data/sessions")) return Response.json({ [sessionDate]: sessionMetadata(now - 3_600_000, now + 3_600_000, { current: true }) });
+      if (url.endsWith("/market-data/sessions")) return Response.json({ [sessionDate]: sessionMetadata(now - 3_600_000, now + 3_600_000, { upcoming: true }) });
       return Response.json([
         { datetime, datetimeUnix: Math.floor(now / 1000) - 2, spx: "6000.25", spx_expected_move: "42.5" },
         { datetime: new Date(now - 1_000).toISOString(), datetimeUnix: Math.floor(now / 1000) - 1, spx: "6001.50", spx_expected_move: "42.75" },
@@ -551,11 +552,13 @@ describe("SPX Price Action Compass API", () => {
         request: new Request(`https://example.com/api/spx-price-action-compass?view=price-overlay&date=${sessionDate}`),
         env: { ZERO_DTE_SPX_API_TOKEN: "secret-token" },
       });
-      const payload = await response.json() as { source: { provider: string; interval: string; latestSampleAt: string; status: string; expectedMove: { status: string; value: number; sampleAt: string; ageMs: number; lagMs: number; errorCode: string | null } }; candles: SpxPriceActionCandle[] };
+      const payload = await response.json() as { source: { provider: string; interval: string; latestSampleAt: string; status: string; sessionState: string; sessionStartAt: string; expectedMove: { status: string; value: number; sampleAt: string; ageMs: number; lagMs: number; errorCode: string | null } }; candles: SpxPriceActionCandle[] };
 
       assert.equal(response.status, 200);
       assert.equal(response.headers.get("cache-control"), "public, max-age=15");
       assert.equal(payload.source.provider, "0dtespx");
+      assert.equal(payload.source.sessionState, "LIVE");
+      assert.equal(payload.source.sessionStartAt, new Date(now - 3_600_000).toISOString());
       assert.equal(payload.source.interval, "1s->1m");
       assert.equal(payload.source.status, "READY");
       assert.ok(payload.source.latestSampleAt);
@@ -952,6 +955,7 @@ describe("0DTESPX intraday normalization", () => {
     const startMs = Date.parse("2026-11-27T14:30:00.000Z");
     const endMs = Date.parse("2026-11-27T18:00:00.000Z");
     assert.equal(resolveZeroDteSpxSession({ [date]: sessionMetadata(startMs, endMs, { upcoming: true }) }, date, startMs - 1)?.state, "UPCOMING");
+    assert.equal(resolveZeroDteSpxSession({ [date]: sessionMetadata(startMs, endMs, { upcoming: true }) }, date, startMs + 1)?.state, "LIVE");
     assert.equal(resolveZeroDteSpxSession({ [date]: sessionMetadata(startMs, endMs, { current: true }) }, date, endMs - 1)?.state, "LIVE");
     assert.equal(resolveZeroDteSpxSession({ [date]: sessionMetadata(startMs, endMs, { current: true }) }, date, endMs + 1)?.state, "FINALIZING");
     assert.equal(resolveZeroDteSpxSession({ [date]: sessionMetadata(startMs, endMs) }, date, endMs + 1)?.state, "CLOSED");
@@ -1064,6 +1068,25 @@ describe("0DTESPX intraday normalization", () => {
     );
     assert.throws(
       () => normalizeZeroDteSpxOneMinuteCandles([{ datetimeUnix: 1_787_237_300, spx: "6000" }], 1_787_236_700_000),
+      (error: unknown) => error instanceof ZeroDteSpxError && error.code === "ZERO_DTE_SPX_STALE",
+    );
+  });
+
+  it("accepts only bounded provider clock skew for live 0DTESPX samples", () => {
+    const now = Date.parse("2026-08-20T14:31:00.000Z");
+    const withinTolerance = normalizeZeroDteSpxOneMinuteCandles([{
+      datetimeUnix: (now + SPX_0DTE_FUTURE_SKEW_TOLERANCE_MS) / 1_000,
+      spx: "6000",
+      spx_expected_move: "25",
+    }], now);
+    assert.equal(withinTolerance.latestSampleAt, "2026-08-20T14:31:05.000Z");
+    assert.equal(withinTolerance.expectedMove.status, "READY");
+
+    assert.throws(
+      () => normalizeZeroDteSpxOneMinuteCandles([{
+        datetimeUnix: (now + SPX_0DTE_FUTURE_SKEW_TOLERANCE_MS + 1_000) / 1_000,
+        spx: "6000",
+      }], now),
       (error: unknown) => error instanceof ZeroDteSpxError && error.code === "ZERO_DTE_SPX_STALE",
     );
   });

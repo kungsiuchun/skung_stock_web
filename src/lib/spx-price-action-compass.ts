@@ -1,13 +1,16 @@
 export type SpxPriceActionTimeframe = "1m" | "5m" | "15m" | "4h" | "1d";
 
 export const SPX_0DTE_STALE_AFTER_MS = 10 * 60 * 1_000;
+export const SPX_0DTE_FUTURE_SKEW_TOLERANCE_MS = 5_000;
 
 export const isFreshSpx0DteSample = (sampleAt: string | number | null | undefined, nowMs = Date.now()) => {
   const sampleMs = typeof sampleAt === "number"
     ? sampleAt
     : typeof sampleAt === "string" ? Date.parse(sampleAt) : Number.NaN;
   const ageMs = nowMs - sampleMs;
-  return Number.isFinite(sampleMs) && ageMs >= 0 && ageMs <= SPX_0DTE_STALE_AFTER_MS;
+  return Number.isFinite(sampleMs)
+    && ageMs >= -SPX_0DTE_FUTURE_SKEW_TOLERANCE_MS
+    && ageMs <= SPX_0DTE_STALE_AFTER_MS;
 };
 
 export type SpxPriceActionPatternType =
@@ -196,6 +199,7 @@ export interface SpxPriceActionSource {
   status?: "READY" | "STALE" | "UNAVAILABLE";
   sessionState?: "UPCOMING" | "LIVE" | "FINALIZING" | "CLOSED" | "UNAVAILABLE";
   sessionDate?: string | null;
+  sessionStartAt?: string | null;
   sessionEndAt?: string | null;
   routingReason?: string;
   expectedMove?: {

@@ -103,7 +103,7 @@ const classifyZeroDteSpxIntradayFreshness = (
   }
   const ageMs = now - sampleMs;
   const lagMs = latestSampleMs - sampleMs;
-  if (ageMs < 0 || lagMs < 0) {
+  if ((ageMs < 0 && !isFreshSpx0DteSample(sampleMs, now)) || lagMs < 0) {
     return {
       ...result,
       priceAgeMs,
@@ -230,9 +230,18 @@ export const resolveZeroDteSpxSession = (
   }
 
   let state: ZeroDteSpxSessionState;
-  if (session.upcoming === true || now < startMs) state = "UPCOMING";
+  if (now < startMs) state = "UPCOMING";
   else if (now < endMs) {
-    if (session.current !== true) throw new ZeroDteSpxError("ZERO_DTE_SPX_RESPONSE_INVALID");
+    // Provider boolean markers can lag their own declared session window.
+    // The validated time window is authoritative while the market is open;
+    // otherwise a stale `upcoming` marker silently diverts live SPX and EM to Yahoo.
+    if (session.upcoming === true) {
+      console.warn("0dtespx_session_marker_inconsistent", {
+        date,
+        marker: "upcoming",
+        derivedState: "LIVE",
+      });
+    }
     state = "LIVE";
   } else state = session.current === true ? "FINALIZING" : "CLOSED";
   return { sessionDate: date, state, startAt, endAt, dataStartAt, dataEndAt };
@@ -276,6 +285,12 @@ export const normalizeZeroDteSpxOneMinuteCandles = (
       throw new ZeroDteSpxError(session.state === "FINALIZING" ? "ZERO_DTE_SPX_FINALIZING" : "ZERO_DTE_SPX_SESSION_INCOMPLETE");
     }
   } else if (!isFreshSpx0DteSample(latestPoint.time, now)) {
+    console.warn("0dtespx_intraday_sample_stale", {
+      latestSampleAt,
+      nowAt: new Date(now).toISOString(),
+      ageMs: priceAgeMs,
+      normalizedPointCount: points.length,
+    });
     throw new ZeroDteSpxError("ZERO_DTE_SPX_STALE");
   }
 
