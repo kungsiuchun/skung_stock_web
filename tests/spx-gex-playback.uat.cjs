@@ -161,6 +161,70 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
       },
     },
   };
+  const liveOneMinuteCandles = Array.from({ length: 406 }, (_, index) => {
+    const close = fixture.heatmap.quote.last + Math.sin(index / 11) * 9 + index * 0.015;
+    return {
+      time: Date.parse(`${fixture.selectedDate}T13:30:00.000Z`) + index * 60_000,
+      date_iso: fixture.selectedDate,
+      open: close - 0.5,
+      high: close + 1,
+      low: close - 1,
+      close,
+      volume: 0,
+    };
+  });
+  const liveExpectedMovePayload = {
+    ...oneMinutePayload,
+    candles: liveOneMinuteCandles,
+    source: {
+      ...oneMinutePayload.source,
+      provider: "0dtespx",
+      label: "0DTESPX LIVE SPX index series",
+      interval: "1s->1m",
+      latestSampleAt: `${fixture.selectedDate}T20:15:00.000Z`,
+      priceAgeMs: 0,
+      status: "READY",
+      sessionState: "LIVE",
+      sessionDate: fixture.selectedDate,
+      routingReason: "CURRENT_ET_SESSION_LIVE",
+      expectedMove: {
+        status: "READY",
+        value: 25,
+        sampleAt: `${fixture.selectedDate}T20:15:00.000Z`,
+        ageMs: 0,
+        lagMs: 0,
+        errorCode: null,
+      },
+      sharedCache: {
+        status: "HIT",
+        cachedAt: `${fixture.selectedDate}T20:15:00.000Z`,
+        ageMs: 0,
+        refreshAfterMs: 60_000,
+        refreshing: false,
+      },
+    },
+  };
+  const missingExpectedMovePayload = {
+    ...liveExpectedMovePayload,
+    source: {
+      ...liveExpectedMovePayload.source,
+      expectedMove: {
+        status: "UNAVAILABLE",
+        value: null,
+        sampleAt: null,
+        ageMs: null,
+        lagMs: null,
+        errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE",
+      },
+      sharedCache: {
+        status: "STALE",
+        cachedAt: `${fixture.selectedDate}T20:14:00.000Z`,
+        ageMs: 60_000,
+        refreshAfterMs: 60_000,
+        refreshing: true,
+      },
+    },
+  };
   const monitorPatterns = [
     { id: "older-high-confidence", type: "PIN_BAR_BEARISH", name: "Older", label: "Older signal", category: "candle", direction: "bearish", candleIndices: [120], fromIndex: 120, toIndex: 120, price: 7358, confidence: 0.99, description: "Older" },
     { id: "latest-b", type: "DOJI", name: "Latest B", label: "Latest B", category: "candle", direction: "neutral", candleIndices: [280], fromIndex: 280, toIndex: 280, price: 7360, confidence: 0.8, description: "Latest B" },
@@ -179,6 +243,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
   let forceCompassTextFailure = false;
   let compassMode = "live";
   let overlayMode = "live";
+  let recoveredExpectedMoveRequests = 0;
   const overlayDates = [];
   const overlayQueries = [];
   const initialSpqRequestOrder = [];
@@ -217,6 +282,10 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     if (url.pathname === "/api/spx-price-action-compass" && url.searchParams.get("view") === "price-overlay") {
       overlayDates.push(url.searchParams.get("date"));
       overlayQueries.push(url.search);
+      if (overlayMode === "recover-expected-move") {
+        recoveredExpectedMoveRequests += 1;
+        return request.respond(jsonResponse(recoveredExpectedMoveRequests === 1 ? missingExpectedMovePayload : liveExpectedMovePayload));
+      }
       if (overlayMode === "stale-em") return request.respond(jsonResponse(staleExpectedMovePayload));
       if (overlayMode === "closed") return request.respond(jsonResponse(closedOneMinutePayload));
       if (overlayMode === "closed-failure") return request.respond({
@@ -465,6 +534,26 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.equal(pressureLayout.unifiedBoardShell, true, "Board header, cockpit, playback, and exposure table must share one shell");
     assert.equal(pressureLayout.cellsMeetMinimumSize, true, "pressure cells must remain at least 34 by 25 CSS pixels");
     assert.equal(pressureLayout.betweenCompassAndBoard, true, "pressure matrix must sit between Compass and GEX Board");
+    await page.waitForFunction(() => !document.querySelector('button[title="Refresh latest SPX and GEX sources"]')?.hasAttribute("disabled"));
+    overlayMode = "recover-expected-move";
+    const pageUrlBeforeExpectedMoveRecovery = page.url();
+    await page.click('button[title="Refresh latest SPX and GEX sources"]');
+    await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-expected-move-warning="true"]')?.textContent?.includes("Expected Move unavailable"));
+    const missingExpectedMove = await page.evaluate(() => ({
+      corridorLines: document.querySelectorAll('[data-spx-gex-pressure-expected-move-upper="true"], [data-spx-gex-pressure-expected-move-lower="true"]').length,
+      warning: document.querySelector('[data-spx-gex-pressure-expected-move-warning="true"]')?.textContent || "",
+    }));
+    assert.equal(missingExpectedMove.corridorLines, 0, "an unverified Expected Move must not fabricate a corridor");
+    assert.match(missingExpectedMove.warning, /ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE/);
+    await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-expected-move-status="READY"]'));
+    const recoveredExpectedMove = await page.evaluate(() => ({
+      label: document.querySelector('[data-spx-gex-pressure-expected-move-status="READY"]')?.textContent || "",
+      corridorLines: document.querySelectorAll('[data-spx-gex-pressure-expected-move-upper="true"], [data-spx-gex-pressure-expected-move-lower="true"]').length,
+    }));
+    assert.equal(page.url(), pageUrlBeforeExpectedMoveRecovery, "Expected Move recovery must not require a page reload");
+    assert.ok(recoveredExpectedMoveRequests >= 2, "a shared-cache refresh must trigger a bounded overlay-only follow-up read");
+    assert.match(recoveredExpectedMove.label, /EM ±25\.00 · 16:15 ET/);
+    assert.equal(recoveredExpectedMove.corridorLines, 2, "a recovered Expected Move must render both corridor rails");
     await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
     const reducedMotionAnimation = await page.$eval('[data-spx-gex-pressure-spot-marker="true"]', (element) => getComputedStyle(element).animationName);
     assert.equal(reducedMotionAnimation, "none", "reduced motion must disable the current-spot pulse");
@@ -630,6 +719,8 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     await page.setViewport({ width: 1600, height: 1000 });
 
     await page.waitForSelector('button[title="Play timeline"]', { timeout: 20_000 });
+    const spotOverlayBeforePlayback = await page.$eval('[data-spx-gex-pressure-spot-line="true"] polyline', (element) => element.getAttribute("points") || "");
+    const overlayRequestsBeforePlayback = overlayQueries.length;
     await page.click('button[title="Play timeline"]');
     await page.waitForSelector('[data-spx-gex-playback-error="true"]', { timeout: 10_000 });
 
@@ -646,6 +737,9 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     await page.waitForFunction((minute) => !document.querySelector('[data-spx-gex-playback-error="true"]')
       && document.querySelector('button[class*="text-yellow-300"]')?.textContent === minute, {}, formatMinute(secondMinute));
     assert.equal(secondSnapshotAttempts, 4, "one bounded retry must keep the failed playback frame, then the explicit retry may advance it");
+    const spotOverlayAfterPlayback = await page.$eval('[data-spx-gex-pressure-spot-line="true"] polyline', (element) => element.getAttribute("points") || "");
+    assert.equal(spotOverlayAfterPlayback, spotOverlayBeforePlayback, "GEX playback must not replay or reshape the current SPX context line");
+    assert.equal(overlayQueries.length, overlayRequestsBeforePlayback, "GEX playback must not make one SPX overlay request per snapshot frame");
     assert.equal(consoleErrors.length, 5, `only deliberately injected Compass and playback 503 responses may reach console: ${consoleErrors.join(" | ")}`);
     assert.ok(consoleErrors.every((error) => /503 \(Service Unavailable\)/.test(error)));
     overlayMode = "closed-failure";
