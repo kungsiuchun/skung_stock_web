@@ -81,23 +81,18 @@ npm run deploy:pages
 runtime secrets. The SPX Worker can also be released intentionally with
 `npm run deploy:spx`.
 
-## 🧪 UAT Testing Framework
+## 🧪 UAT Testing
 
-Run Puppeteer automated tests against `localhost:5173`.
+Use the feature-specific Puppeteer scripts in `package.json`, for example:
 
 ```powershell
-node run_pup.cjs
+npm run test:stocks-watcher:uat
+npm run test:market-breadth:uat
+npm run test:portfolio-backtest:uat
 ```
-*(Screenshots saved to `./uat_screenshots/`)*
 
-**Checklist:**
-- [ ] K線圖 renders with OHLC candles
-- [ ] 市場情緒指數 shows gauge insights
-- [ ] 恐慌指數 (VIX) shows value + sparkline
-- [ ] 資金分佈 displays dollar-denominated bars
-- [ ] 策略對沖與點位 readable in light mode
-- [ ] 個股解讀 in Traditional Chinese
-- [ ] Price tags formatting (e.g. `$XXX.XX +X.XX%`)
+They run against `localhost:5173` and write temporary screenshots under
+`./uat_screenshots/`.
 
 ## 🧠 AI integration & AlphaEar Skills
 

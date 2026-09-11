@@ -1,14 +1,13 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { spawn } = require("node:child_process");
 const puppeteer = require("puppeteer");
+const { startVite, stopProcessTree, wait, waitForServer } = require("./helpers/browser-uat.cjs");
 
 const rootDir = path.resolve(__dirname, "..");
 const port = 5187;
 const baseUrl = `http://127.0.0.1:${port}`;
 const screenshotsDir = path.join(rootDir, "uat_screenshots", "market-breadth");
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const clickButtonText = async (page, text, scope = "body") => {
   const clicked = await page.$$eval(`${scope} button`, (buttons, expected) => {
@@ -18,30 +17,6 @@ const clickButtonText = async (page, text, scope = "body") => {
     return true;
   }, text);
   assert.equal(clicked, true, `button containing "${text}" was not found in ${scope}`);
-};
-
-const stopProcessTree = (processToStop) => new Promise((resolve) => {
-  if (!processToStop || processToStop.killed) return resolve();
-  if (process.platform === "win32") {
-    const killer = spawn("taskkill", ["/pid", String(processToStop.pid), "/T", "/F"], { stdio: "ignore" });
-    killer.on("close", resolve);
-    killer.on("error", resolve);
-    return;
-  }
-  processToStop.kill();
-  resolve();
-});
-
-const waitForServer = async () => {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < 30_000) {
-    try {
-      const response = await fetch(baseUrl);
-      if (response.ok) return;
-    } catch {}
-    await wait(250);
-  }
-  throw new Error(`Vite did not start on ${baseUrl}`);
 };
 
 const sectors = [
@@ -122,14 +97,8 @@ const readyPayload = (stale = false) => ({
   let apiMode = "READY";
   fs.mkdirSync(screenshotsDir, { recursive: true });
   try {
-    const serverCommand = process.platform === "win32" ? "cmd.exe" : "npx";
-    const serverArgs = process.platform === "win32"
-      ? ["/c", "npx", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"]
-      : ["vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"];
-    server = spawn(serverCommand, serverArgs, { cwd: rootDir, stdio: ["ignore", "pipe", "pipe"] });
-    server.stdout.on("data", (data) => process.stdout.write(data));
-    server.stderr.on("data", (data) => process.stderr.write(data));
-    await waitForServer();
+    server = startVite({ rootDir, port, host: "127.0.0.1", logOutput: true });
+    await waitForServer(baseUrl);
 
     browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
     const page = await browser.newPage();

@@ -1,6 +1,8 @@
 import type { D1DatabaseLike } from "./spx-recap-d1";
 import { prepareSpxGexPressureProjectionUpsert } from "./spx-gex-pressure-projection";
 import { reserveSpxD1Budget, SpxD1SafetyCutoffError } from "./spx-d1-budget";
+import { getFullMarketHolidayKeys } from "./nyse-calendar";
+export { getFullMarketHolidayKeys } from "./nyse-calendar";
 
 const MARKET_TIME_ZONE = "America/New_York";
 const DELAYED_FEED_MINUTES = 15;
@@ -437,71 +439,6 @@ const getEtMinutes = (date: Date) => date.getHours() * 60 + date.getMinutes();
 
 const formatEtMinute = (minute: number) =>
   `${Math.floor(minute / 60).toString().padStart(2, "0")}:${(minute % 60).toString().padStart(2, "0")}`;
-
-const observedHolidayKey = (year: number, monthIndex: number, day: number) => {
-  const date = new Date(year, monthIndex, day);
-  const weekday = date.getDay();
-  if (weekday === 6) date.setDate(date.getDate() - 1);
-  if (weekday === 0) date.setDate(date.getDate() + 1);
-  return toDateKey(date.getFullYear(), date.getMonth() + 1, date.getDate());
-};
-
-const nthWeekdayOfMonth = (year: number, monthIndex: number, weekday: number, nth: number) => {
-  const date = new Date(year, monthIndex, 1);
-  const offset = (weekday - date.getDay() + 7) % 7;
-  date.setDate(1 + offset + (nth - 1) * 7);
-  return date;
-};
-
-const lastWeekdayOfMonth = (year: number, monthIndex: number, weekday: number) => {
-  const date = new Date(year, monthIndex + 1, 0);
-  const offset = (date.getDay() - weekday + 7) % 7;
-  date.setDate(date.getDate() - offset);
-  return date;
-};
-
-const getEasterSunday = (year: number) => {
-  const a = year % 19;
-  const b = Math.floor(year / 100);
-  const c = year % 100;
-  const d = Math.floor(b / 4);
-  const e = b % 4;
-  const f = Math.floor((b + 8) / 25);
-  const g = Math.floor((b - f + 1) / 3);
-  const h = (19 * a + b - d - g + 15) % 30;
-  const i = Math.floor(c / 4);
-  const k = c % 4;
-  const l = (32 + 2 * e + 2 * i - h - k) % 7;
-  const m = Math.floor((a + 11 * h + 22 * l) / 451);
-  const month = Math.floor((h + l - 7 * m + 114) / 31);
-  const day = ((h + l - 7 * m + 114) % 31) + 1;
-  return new Date(year, month - 1, day);
-};
-
-export const getFullMarketHolidayKeys = (year: number) => {
-  const holidays = new Set<string>();
-  const addDate = (date: Date) => holidays.add(toDateKey(date.getFullYear(), date.getMonth() + 1, date.getDate()));
-
-  holidays.add(observedHolidayKey(year, 0, 1));
-  holidays.add(observedHolidayKey(year + 1, 0, 1));
-  addDate(nthWeekdayOfMonth(year, 0, 1, 3));
-  addDate(nthWeekdayOfMonth(year, 1, 1, 3));
-
-  const goodFriday = getEasterSunday(year);
-  goodFriday.setDate(goodFriday.getDate() - 2);
-  addDate(goodFriday);
-
-  addDate(lastWeekdayOfMonth(year, 4, 1));
-
-  if (year >= 2022) holidays.add(observedHolidayKey(year, 5, 19));
-
-  holidays.add(observedHolidayKey(year, 6, 4));
-  addDate(nthWeekdayOfMonth(year, 8, 1, 1));
-  addDate(nthWeekdayOfMonth(year, 10, 4, 4));
-  holidays.add(observedHolidayKey(year, 11, 25));
-
-  return holidays;
-};
 
 export const getSpxGexGenerationStatus = (now: Date = new Date()) => {
   const etNow = toEasternDate(now);

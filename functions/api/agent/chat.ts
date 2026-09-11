@@ -28,7 +28,7 @@ import { ALL_SEARCH_TOOLS } from "../agent/tools/search-tools";
 import { ALL_ALPHAEAR_TOOLS } from "../agent/tools/alphaear-tools";
 import { ALL_RETAIL_TOOLS } from "../agent/tools/retail-tools";
 import { macroTools } from "../agent/tools/macro-tools";
-import { SkillManager } from "../agent/skills/base";
+import { BUILTIN_STRATEGIES } from "../agent/strategies";
 import { dashboardDecisionTool } from "../agent/tools/dashboard-decision-tool";
 import {
   DASHBOARD_DECISION_TOOL_NAME,
@@ -54,6 +54,19 @@ const DASHBOARD_TOOL_ALLOWLIST = new Set([
 
 const onlyAllowedDashboardTools = (tools: any[]) =>
   tools.filter((tool) => DASHBOARD_TOOL_ALLOWLIST.has(tool.name));
+
+const CORE_SKILL_INSTRUCTIONS = `
+=============================================
+【啟用交易策略框架 (Active Trading Strategies)】
+=============================================
+你目前已啟用了以下交易策略，請嚴格按照這些策略的指示進行分析：
+
+${[
+  BUILTIN_STRATEGIES.bull_trend.instructions,
+  BUILTIN_STRATEGIES.financial_expert.instructions,
+].map((instructions) => instructions.trim()).join("\n\n---\n\n")}
+=============================================
+`;
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
@@ -115,12 +128,6 @@ ${message}`;
       registry.registerAll(macroTools);
     }
 
-    // 2. Initialize Strategy System
-    const skillManager = new SkillManager();
-    // Activate core skills for the "AI 智能分析" mode
-    skillManager.activate(["bull_trend", "financial_expert"]); 
-    const skillInstructions = skillManager.getSkillInstructions();
-
     // 2. Load user memories from request
     const userMemories: string[] = body.user_memories || [];
     const memoryContext = userMemories.length > 0 
@@ -133,7 +140,7 @@ ${message}`;
       maxSteps: isFinanceDashboard ? 6 : 10,
       requiredFinalToolName: isFinanceDashboard ? DASHBOARD_DECISION_TOOL_NAME : undefined,
       requiredFinalContentValidator: isFinanceDashboard ? validateDashboardNarrative : undefined,
-      skillInstructions: skillInstructions + memoryContext + (isFinanceDashboard
+      skillInstructions: CORE_SKILL_INSTRUCTIONS + memoryContext + (isFinanceDashboard
         ? "\nDashboard surface rule: use only the registered dashboard tools. First call get_realtime_quote, get_options_chain, and run_algorithmic_strategy with strategy_name=all. After all three successful results, call record_dashboard_decision exactly once with a schema-valid AI verdict. The decision must cite at least two distinct source types from quote/options/quant and must not invent facts. Do not invent entry, stop, target, support, or resistance levels: only describe levels returned by the deterministic strategy tool or the options chain, and state when a strategy is WAIT, NO_TRADE, or RESEARCH_ONLY. Do not delegate to subagents, do not save user memory, do not request macro/search/retail tools, and label missing data instead of inventing fallback data. After the decision tool succeeds, your final response must be a complete Traditional Chinese Markdown report using exactly these sections: 即時行情、期權鏈分析、量化策略分析、綜合分析結論、交易建議. Include quote price/change/volume or market state, call/put open interest and support/resistance, the highest and lowest scoring results from all 11 deterministic strategies, strategy conflicts, key reasons/risks, and how the evidence supports the recorded Trend/Action. Do not make the final response a tool confirmation, a JSON dump, or a short decision summary; the UI renders this final response as the main AI Key Insights narrative."
         : "")
     });

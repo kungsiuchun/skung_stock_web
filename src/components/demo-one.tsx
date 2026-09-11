@@ -26,7 +26,7 @@ const getRandomOffset = (index: number) => {
 const DemoOne = () => {
   return (
     <div className="w-full h-full min-h-screen overflow-hidden">
-      <DraggableContainer variant="polaroid">
+    <DraggableContainer>
         <GridBody>
           {portfolioConfig.images.map((image, index) => {
             const offset = getRandomOffset(index);

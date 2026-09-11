@@ -1,25 +1,10 @@
 const assert = require("node:assert/strict");
-const { spawn } = require("node:child_process");
 const puppeteer = require("puppeteer");
+const { startVite, waitForServer } = require("./helpers/browser-uat.cjs");
 
 const rootDir = require("node:path").resolve(__dirname, "..");
 const port = 5175;
 const baseUrl = `http://localhost:${port}`;
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function waitForServer() {
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    try {
-      if ((await fetch(baseUrl)).ok) return;
-    } catch {
-      // Vite is still starting.
-    }
-    await wait(250);
-  }
-  throw new Error(`Vite did not start on ${baseUrl}`);
-}
-
 async function expectDocumentScroll(page, name) {
   const before = await page.evaluate(() => ({
     height: document.scrollingElement.scrollHeight,
@@ -57,14 +42,11 @@ async function expectChatAccessible(page, name) {
 }
 
 (async () => {
-  const server = spawn(process.execPath, ["node_modules/vite/bin/vite.js", "--port", String(port), "--strictPort"], {
-    cwd: rootDir,
-    stdio: "ignore",
-  });
+  const server = startVite({ rootDir, port });
   let browser;
 
   try {
-    await waitForServer();
+    await waitForServer(baseUrl);
     browser = await puppeteer.launch({ headless: true });
     const page = await browser.newPage();
     for (const width of [390, 768]) {

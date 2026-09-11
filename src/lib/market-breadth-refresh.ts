@@ -10,6 +10,8 @@ import {
   MarketBreadthSourceError,
   type MarketBreadthDataClient,
 } from "./market-breadth-sources";
+import { isNyseTradingDay } from "./nyse-calendar";
+export { isNyseTradingDay } from "./nyse-calendar";
 
 type RefreshMode = "DAILY" | "BACKFILL";
 type RefreshStatus = "READY" | "SKIPPED" | "FAILED" | "PARTIAL";
@@ -77,52 +79,6 @@ const marketDateInNewYork = (date: Date) => {
   }).formatToParts(date);
   const value = (type: "year" | "month" | "day") => parts.find((part) => part.type === type)?.value || "";
   return `${value("year")}-${value("month")}-${value("day")}`;
-};
-
-const nthWeekday = (year: number, month: number, weekday: number, nth: number) => {
-  const first = new Date(Date.UTC(year, month, 1));
-  return 1 + (7 + weekday - first.getUTCDay()) % 7 + (nth - 1) * 7;
-};
-
-const lastWeekday = (year: number, month: number, weekday: number) => {
-  const last = new Date(Date.UTC(year, month + 1, 0));
-  return last.getUTCDate() - (7 + last.getUTCDay() - weekday) % 7;
-};
-
-const observed = (year: number, month: number, day: number) => {
-  const date = new Date(Date.UTC(year, month, day));
-  if (date.getUTCDay() === 6) date.setUTCDate(date.getUTCDate() - 1);
-  if (date.getUTCDay() === 0) date.setUTCDate(date.getUTCDate() + 1);
-  return date.toISOString().slice(0, 10);
-};
-
-const easterSunday = (year: number) => {
-  const a = year % 19; const b = Math.floor(year / 100); const c = year % 100;
-  const d = Math.floor(b / 4); const e = b % 4; const f = Math.floor((b + 8) / 25);
-  const g = Math.floor((b - f + 1) / 3); const h = (19 * a + b - d - g + 15) % 30;
-  const i = Math.floor(c / 4); const k = c % 4; const l = (32 + 2 * e + 2 * i - h - k) % 7;
-  const m = Math.floor((a + 11 * h + 22 * l) / 451); const month = Math.floor((h + l - 7 * m + 114) / 31) - 1;
-  const day = (h + l - 7 * m + 114) % 31 + 1;
-  return new Date(Date.UTC(year, month, day));
-};
-
-export const isNyseTradingDay = (date: string) => {
-  const parsed = new Date(`${date}T00:00:00.000Z`);
-  if (!Number.isFinite(parsed.getTime()) || parsed.getUTCDay() === 0 || parsed.getUTCDay() === 6) return false;
-  const year = parsed.getUTCFullYear();
-  const goodFriday = easterSunday(year); goodFriday.setUTCDate(goodFriday.getUTCDate() - 2);
-  const holidays = new Set([
-    observed(year, 0, 1),
-    `${year}-01-${String(nthWeekday(year, 0, 1, 3)).padStart(2, "0")}`,
-    `${year}-02-${String(nthWeekday(year, 1, 1, 3)).padStart(2, "0")}`,
-    goodFriday.toISOString().slice(0, 10),
-    `${year}-05-${String(lastWeekday(year, 4, 1)).padStart(2, "0")}`,
-    observed(year, 5, 19), observed(year, 6, 4),
-    `${year}-09-${String(nthWeekday(year, 8, 1, 1)).padStart(2, "0")}`,
-    `${year}-11-${String(nthWeekday(year, 10, 4, 4)).padStart(2, "0")}`,
-    observed(year, 11, 25),
-  ]);
-  return !holidays.has(date);
 };
 
 const previousNyseTradingDay = (date: string) => {

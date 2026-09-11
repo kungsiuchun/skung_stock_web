@@ -7,19 +7,10 @@ import {
 } from "motion/react";
 import {
   memo,
-  useContext,
   useLayoutEffect,
   useRef,
-  createContext,
 } from "react";
-import { cva } from "class-variance-authority";
 import { cn } from "@/lib/utils";
-
-//Types
-type variants = "default" | "masonry" | "polaroid";
-
-// Create Context
-const GridVariantContext = createContext<variants | undefined>(undefined);
 
 //Motion Variants
 const rowVariants = {
@@ -37,11 +28,9 @@ const rowVariants = {
 export const DraggableContainer = ({
   className,
   children,
-  variant,
 }: {
   className?: string;
   children: React.ReactNode;
-  variant?: variants;
 }) => {
   const ref = useRef<HTMLDivElement | null>(null);
   const wrapBoundsRef = useRef({ x: -1, y: -1 });
@@ -111,30 +100,28 @@ export const DraggableContainer = ({
   }, [x, y]);
 
   return (
-    <GridVariantContext.Provider value={variant}>
-      <div className="h-dvh overflow-hidden bg-[#141414]">
+    <div className="h-dvh overflow-hidden bg-[#141414]">
+      <motion.div
+        className="h-dvh overflow-hidden"
+      >
         <motion.div
-          className="h-dvh overflow-hidden"
+          className={cn(
+            "grid h-fit w-fit cursor-grab grid-cols-[repeat(2,1fr)] active:cursor-grabbing will-change-transform",
+            className,
+          )}
+          drag
+          dragConstraints={{ left: -10000, right: 10000, top: -10000, bottom: 10000 }} // Arbitrary large constraints to prevent drag inhibition
+          dragElastic={0}
+          dragMomentum={false}
+          onDragStart={handleIsDragging}
+          onDragEnd={handleIsNotDragging}
+          style={{ x, y }}
+          ref={ref}
         >
-          <motion.div
-            className={cn(
-              "grid h-fit w-fit cursor-grab grid-cols-[repeat(2,1fr)] active:cursor-grabbing will-change-transform",
-              className,
-            )}
-            drag
-            dragConstraints={{ left: -10000, right: 10000, top: -10000, bottom: 10000 }} // Arbitrary large constraints to prevent drag inhibition
-            dragElastic={0}
-            dragMomentum={false}
-            onDragStart={handleIsDragging}
-            onDragEnd={handleIsNotDragging}
-            style={{ x, y }}
-            ref={ref}
-          >
-            {children}
-          </motion.div>
+          {children}
         </motion.div>
-      </div>
-    </GridVariantContext.Provider>
+      </motion.div>
+    </div>
   );
 };
 
@@ -145,28 +132,12 @@ export const GridItem = ({
   children: React.ReactNode;
   className?: string;
 }) => {
-  const variant = useContext(GridVariantContext);
-
-  const gridItemStyles = cva(
-    "overflow-hidden hover:cursor-pointer w-full h-full will-change-transform",
-    {
-      variants: {
-        variant: {
-          default: "rounded-sm",
-          masonry: "rounded-sm",
-          polaroid:
-            "border-[10px] border-b-[28px] border-white shadow-xl even:rotate-3 odd:-rotate-2 hover:rotate-0 transition-transform ease-out duration-300",
-        },
-      },
-      defaultVariants: {
-        variant: "default",
-      },
-    },
-  );
-
   return (
     <motion.div
-      className={cn(gridItemStyles({ variant, className }))}
+      className={cn(
+        "h-full w-full overflow-hidden border-[10px] border-b-[28px] border-white shadow-xl transition-transform duration-300 ease-out even:rotate-3 odd:-rotate-2 hover:rotate-0 hover:cursor-pointer will-change-transform",
+        className,
+      )}
       variants={rowVariants}
       initial="initial"
       animate="animate"
@@ -184,27 +155,15 @@ export const GridBody = memo(
     children: React.ReactNode;
     className?: string;
   }) => {
-    const variant = useContext(GridVariantContext);
-
-    const gridBodyStyles = cva("grid grid-cols-[repeat(6,1fr)] h-fit w-fit", {
-      variants: {
-        variant: {
-          default: "gap-14 p-7 md:gap-28 md:p-14",
-          masonry: "gap-14 p-7 md:gap-28 md:p-14",
-          polaroid: "gap-14 p-7 md:gap-28 md:p-14",
-        },
-      },
-      defaultVariants: {
-        variant: "default",
-      },
-    });
-
     return (
       <>
         {Array.from({ length: 4 }).map((_, index) => (
           <div
             key={index}
-            className={cn(gridBodyStyles({ variant, className }))}
+            className={cn(
+              "grid h-fit w-fit grid-cols-[repeat(6,1fr)] gap-14 p-7 md:gap-28 md:p-14",
+              className,
+            )}
           >
             {children}
           </div>

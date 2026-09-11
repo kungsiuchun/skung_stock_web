@@ -17,7 +17,6 @@ import type {
 } from "./types";
 import { ToolRegistry } from "./registry";
 import { OpenRouterAdapter } from "./llm-adapter";
-import { LoggerHook, type AgentHook } from "./hooks";
 
 const ANALYSIS_SYSTEM_PROMPT = `你是一位專業的金融分析師 AI 助手。
 
@@ -61,7 +60,6 @@ export const CHAT_SYSTEM_PROMPT = `你是一位專業的金融分析師 AI 助�
 export interface ExecutorConfig {
   maxSteps?: number;
   skillInstructions?: string;
-  hooks?: AgentHook[];
   requiredFinalToolName?: string;
   requiredFinalContentValidator?: (content: string) => { valid: boolean; reason?: string };
 }
@@ -71,7 +69,6 @@ export class AgentExecutor {
   private adapter: OpenRouterAdapter;
   private maxSteps: number;
   private skillInstructions: string;
-  private hooks: AgentHook[];
   private requiredFinalToolName?: string;
   private requiredFinalContentValidator?: (content: string) => { valid: boolean; reason?: string };
 
@@ -84,7 +81,6 @@ export class AgentExecutor {
     this.adapter = adapter;
     this.maxSteps = config?.maxSteps ?? 5;
     this.skillInstructions = config?.skillInstructions || "";
-    this.hooks = config?.hooks || [new LoggerHook()];
     this.requiredFinalToolName = config?.requiredFinalToolName;
     this.requiredFinalContentValidator = config?.requiredFinalContentValidator;
   }
@@ -156,7 +152,7 @@ export class AgentExecutor {
           tool_calls: assistantToolCalls,
         });
 
-        // 3. Execute tools in parallel (chunked to protect downstream limits) with Hooks
+        // 3. Execute tools in parallel (chunked to protect downstream limits)
         const CHUNK_SIZE = 3;
         const results: { tc: typeof response.tool_calls[0]; resultStr: string; success: boolean; duration: number }[] = [];
 
@@ -164,21 +160,10 @@ export class AgentExecutor {
           const chunk = response.tool_calls.slice(i, i + CHUNK_SIZE);
           const chunkResults = await Promise.all(
             chunk.map(async (tc) => {
-              const execContext = {
-                toolName: tc.name,
-                toolArgs: JSON.stringify(tc.arguments),
-                toolId: String(tc.id),
-                timestamp: Date.now(),
-              };
-
-              // PreToolUse Hook
-              for (const hook of this.hooks) {
-                if (hook.preToolUse) await hook.preToolUse(execContext);
-              }
+              const startedAt = Date.now();
 
               let resultStr: string;
               let success = true;
-              let error: Error | undefined;
 
               try {
                 // Special Case: delegate_task (Internal Handling)
@@ -205,17 +190,11 @@ export class AgentExecutor {
                   resultStr = JSON.stringify(result, null, 0);
                 }
               } catch (err: any) {
-                error = err;
                 resultStr = JSON.stringify({ error: err.message });
                 success = false;
               }
 
-              const duration = Date.now() - execContext.timestamp;
-
-              // PostToolUse Hook
-              for (const hook of this.hooks) {
-                if (hook.postToolUse) await hook.postToolUse(execContext, success ? resultStr : undefined, error);
-              }
+              const duration = Date.now() - startedAt;
 
               return { tc, resultStr, success, duration };
             })
