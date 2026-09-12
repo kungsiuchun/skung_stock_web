@@ -69,7 +69,7 @@ import { getStocksWatcherInitialSymbolFromHash, STOCKS_WATCHER_DEFAULT_SYMBOL } 
 import { normalizeOptionsVisualModel, optionsExpiryMatchesRequest } from "@/lib/stocks-watcher-options-visual";
 import type { FearGreedSnapshot } from "@/lib/fear-greed";
 import type { MarketCacheMetadata } from "@/lib/market-data-cache";
-import type { WatcherValuationBands, WatcherValuationMetric } from "@/lib/stocks-watcher-valuation-data";
+import type { WatcherFinancialQuarter, WatcherFinancialSource, WatcherFinancialStatements, WatcherValuationBands, WatcherValuationMetric } from "@/lib/stocks-watcher-valuation-data";
 import { StocksWatcherFearGreedPanel } from "./stocks-watcher-fear-greed-panel";
 import { StocksWatcherFixedIncomePanel } from "./stocks-watcher-fixed-income-panel";
 
@@ -141,6 +141,7 @@ interface NativeToolResult {
   params: Record<string, unknown>;
   text: string;
   raw: unknown;
+  error?: string;
 }
 
 interface ToolRunLogEntry {
@@ -632,6 +633,108 @@ const rawNumber = (value: unknown) => {
     return Number.isFinite(parsed) ? parsed : 0;
   }
   return 0;
+};
+
+const rawNullableNumber = (value: unknown): number | null => {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value.replace(/[$,%]/g, "").replace(/,/g, ""));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+};
+
+const rawNullableString = (value: unknown): string | null =>
+  typeof value === "string" && value.trim() ? value.trim() : null;
+
+const financialStatementsFromResult = (result: NativeToolResult | undefined): WatcherFinancialStatements | null => {
+  const body = rawRecord(result?.raw);
+  const financialSourceRaw = rawRecord(body?.financialSource);
+  const rawQuarters = Array.isArray(body?.quarters) ? body.quarters : null;
+  const source = rawNullableString(financialSourceRaw?.source);
+  const sourceType = rawNullableString(financialSourceRaw?.sourceType);
+  const fetchedAt = rawNullableString(financialSourceRaw?.fetchedAt);
+  const sourceDataAsOf = rawNullableString(financialSourceRaw?.dataAsOf);
+  const generatedAt = rawNullableString(body?.generatedAt);
+  const dataAsOf = rawNullableString(body?.dataAsOf);
+  const symbol = rawNullableString(body?.symbol);
+  if (!body || body.schemaVersion !== "1.0" || !rawQuarters || rawQuarters.length < 1 || rawQuarters.length > 12 || !source || !sourceType || !fetchedAt || !sourceDataAsOf || !generatedAt || !dataAsOf || !symbol) return null;
+
+  const quarters = rawQuarters.map((value): WatcherFinancialQuarter | null => {
+    const row = rawRecord(value);
+    const date = rawNullableString(row?.date);
+    if (!row || !date) return null;
+    const number = (field: string) => rawNullableNumber(row[field]);
+    return {
+      date,
+      filingDate: rawNullableString(row.filingDate),
+      fiscalYear: rawNullableString(row.fiscalYear),
+      period: rawNullableString(row.period),
+      currency: rawNullableString(row.currency),
+      revenue: number("revenue"),
+      netIncome: number("netIncome"),
+      eps: number("eps"),
+      operatingCashFlow: number("operatingCashFlow"),
+      freeCashFlow: number("freeCashFlow"),
+      revenue_qoq: number("revenue_qoq"),
+      revenue_yoy: number("revenue_yoy"),
+      netIncome_qoq: number("netIncome_qoq"),
+      netIncome_yoy: number("netIncome_yoy"),
+      eps_qoq: number("eps_qoq"),
+      eps_yoy: number("eps_yoy"),
+      operatingCashFlow_qoq: number("operatingCashFlow_qoq"),
+      operatingCashFlow_yoy: number("operatingCashFlow_yoy"),
+    };
+  });
+  if (!quarters.length || quarters.some((quarter) => !quarter)) return null;
+
+  const financialSource: WatcherFinancialSource = {
+    source,
+    sourceType,
+    sourceUrl: rawNullableString(financialSourceRaw?.sourceUrl),
+    fetchedAt,
+    dataAsOf: sourceDataAsOf,
+    filingDate: rawNullableString(financialSourceRaw?.filingDate),
+  };
+  return {
+    schemaVersion: rawNullableString(body.schemaVersion) || "unknown",
+    source: rawNullableString(body.source) || "ValuationCalculation",
+    symbol,
+    generatedAt,
+    dataAsOf,
+    financialSource,
+    quarters: quarters as WatcherFinancialQuarter[],
+  };
+};
+
+const formatFinancialAmount = (value: number | null, currencyCode: string | null) => {
+  if (value === null) return "N/A";
+  if (!currencyCode || !/^[A-Z]{3}$/.test(currencyCode)) return formatNumber(value);
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: currencyCode,
+      notation: "compact",
+      maximumFractionDigits: 1,
+    }).format(value);
+  } catch {
+    return formatNumber(value);
+  }
+};
+
+const formatProvenanceTimestamp = (value: string) => {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return value;
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+    timeZone: "UTC",
+    timeZoneName: "short",
+  }).format(new Date(timestamp));
 };
 
 const historyFromResult = (result: NativeToolResult | undefined): RawHistoryPoint[] => {
@@ -1877,6 +1980,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [typeFilter, setTypeFilter] = useState("All Types");
   const [sectorState, setSectorState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
   const [activeTab, setActiveTab] = useState<TopTab>("Overview");
+  const [earningsQuarterLimit, setEarningsQuarterLimit] = useState<4 | 8 | 12>(8);
   const [activeSubTab, setActiveSubTab] = useState<OptionsSubTab>("Overview");
   const tabDataCache = useRef<Map<string, TabCacheEntry>>(new Map());
   const [tabPanelState, setTabPanelState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
@@ -2204,9 +2308,23 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
   const runToolBundle = useCallback(async (
     tools: { name: string; params: Record<string, unknown> }[],
+    options: { allowPartial?: boolean } = {},
   ) => {
     const entries = await Promise.all(
-      tools.map(async (tool) => [tool.name, await callNativeTool(tool.name, tool.params)] as const),
+      tools.map(async (tool) => {
+        try {
+          return [tool.name, await callNativeTool(tool.name, tool.params)] as const;
+        } catch (requestError) {
+          if (!options.allowPartial) throw requestError;
+          return [tool.name, {
+            tool: tool.name,
+            params: tool.params,
+            text: "",
+            raw: null,
+            error: requestError instanceof Error ? requestError.message : String(requestError),
+          }] as const;
+        }
+      }),
     );
     return Object.fromEntries(entries);
   }, [callNativeTool]);
@@ -2252,7 +2370,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
     setTabPanelState({ loading: true, error: null, data: null });
     try {
-      const data = await runToolBundle(getStocksWatcherTopTabToolPlan(tab, symbol, priceRange));
+      const data = await runToolBundle(
+        getStocksWatcherTopTabToolPlan(tab, symbol, priceRange),
+        { allowPartial: tab === "Earnings" },
+      );
       tabDataCache.current.set(cacheKey, { data, fetchedAt: Date.now() });
       setTabPanelState({ loading: false, error: null, data });
     } catch (requestError) {
@@ -3823,6 +3944,170 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     return <ToolResultBlock result={result} />;
   };
 
+  const renderEarningsPanel = () => {
+    const earningsResult = tabPanelState.data?.earnings_vol_crush;
+    const historicalResult = tabPanelState.data?.historical_context;
+    const financialsResult = tabPanelState.data?.get_financial_statements;
+    const earnings = rawRecord(rawRecord(earningsResult?.raw)?.earnings);
+    const financials = financialStatementsFromResult(financialsResult);
+    const financialsError = financialsResult?.error
+      || (financialsResult && !financials ? "Published financial response does not match the ValuationCalculation contract." : null);
+    const eventError = earningsResult?.error
+      || (earningsResult && !earnings ? "Yahoo earnings response does not contain a structured event record." : null);
+    const quarterRows = financials?.quarters.slice(0, earningsQuarterLimit) || [];
+    const chronologicalRows = [...quarterRows].reverse();
+    const revenueMax = Math.max(0, ...chronologicalRows.map((row) => Math.abs(row.revenue || 0)));
+    const epsPoints = chronologicalRows
+      .filter((row) => row.eps !== null)
+      .map((row) => ({ label: row.date, value: row.eps as number, source: financials?.source }));
+    const currencyCode = quarterRows.find((row) => row.currency)?.currency || null;
+    const eventValue = (key: string) => earnings ? earnings[key] : null;
+    const eventDate = (key: string) => rawNullableString(eventValue(key)) || "N/A";
+    const eventNumber = (key: string) => rawNullableNumber(eventValue(key));
+    const eventText = (key: string) => rawNullableString(eventValue(key)) || "N/A";
+    const priceMove = rawRecord(eventValue("priceMove"));
+    const priceMovePercent = rawNullableNumber(priceMove?.changePercent);
+    const historicalLines = historicalResult?.text
+      ? historicalResult.text.split(/\r?\n/).map((line) => line.replace(/^\s*[-#]\s*/, "").trim()).filter(Boolean)
+      : [];
+
+    return (
+      <section className="siw-panel siw-primary-panel siw-earnings-workspace" data-primary-tab-panel="Earnings" data-earnings-report>
+        <header className="siw-earnings-workspace-head">
+          <div>
+            <p>EVENT + REPORTED RESULTS</p>
+            <h2>Earnings intelligence</h2>
+            <span>Yahoo event estimates stay separate from published company financials.</span>
+          </div>
+          <button type="button" onClick={() => void loadTopTab("Earnings", true)} disabled={tabPanelState.loading}>
+            <RefreshCw className={tabPanelState.loading ? "animate-spin" : ""} />
+            {tabPanelState.loading ? "Refreshing" : "Refresh"}
+          </button>
+        </header>
+
+        {tabPanelState.loading && (
+          <div className="siw-earnings-loading">
+            <SkeletonBlock className="h-28 w-full" />
+            <SkeletonBlock className="h-72 w-full" />
+          </div>
+        )}
+        {!tabPanelState.loading && tabPanelState.error && <div className="siw-earnings-loading"><ErrorBanner message={tabPanelState.error} onRetry={() => void loadTopTab("Earnings", true)} /></div>}
+        {!tabPanelState.loading && !tabPanelState.error && (
+          <div className="siw-earnings-body">
+            <section className="siw-earnings-event-section" data-earnings-yahoo-event>
+              <div className="siw-earnings-section-head">
+                <div><p>Yahoo Finance</p><h3>Event pulse</h3></div>
+                <span>{eventText("source")}</span>
+              </div>
+              {eventError ? (
+                <div className="siw-data-empty siw-earnings-unavailable">
+                  <strong>Yahoo earnings event unavailable</strong>
+                  <span>{eventError}</span>
+                </div>
+              ) : (
+                <div className="siw-earnings-event-grid">
+                  <article>
+                    <span>Next earnings</span>
+                    <strong>{eventDate("nextEarningsDate")}</strong>
+                    <em>EPS est. {formatOptionalNumber(eventNumber("nextEpsEstimate"))} · Revenue est. {eventText("nextRevenueEstimate")}</em>
+                  </article>
+                  <article>
+                    <span>Latest EPS result</span>
+                    <strong>{formatOptionalNumber(eventNumber("epsActual"))} <small>vs {formatOptionalNumber(eventNumber("epsEstimate"))}</small></strong>
+                    <em className={eventText("result").toLowerCase() === "beat" ? "siw-up" : eventText("result").toLowerCase() === "miss" ? "siw-down" : ""}>{eventText("result")} · surprise {formatSignedPercent(eventNumber("surprisePercent"))}</em>
+                  </article>
+                  <article>
+                    <span>Latest price reaction</span>
+                    <strong className={priceMovePercent !== null && priceMovePercent < 0 ? "siw-down" : "siw-up"}>{formatSignedPercent(priceMovePercent)}</strong>
+                    <em>{eventDate("lastEarningsDate")} · {rawNullableString(priceMove?.basis) || "N/A"}</em>
+                  </article>
+                </div>
+              )}
+            </section>
+
+            <section className="siw-earnings-financial-section" data-earnings-financials>
+              <div className="siw-earnings-section-head">
+                <div><p>ValuationCalculation</p><h3>Reported quarterly results</h3></div>
+                {financials && <div className="siw-earnings-period-controls" aria-label="Reported quarter range">
+                  {([4, 8, 12] as const).map((limit) => (
+                    <button key={limit} type="button" aria-pressed={earningsQuarterLimit === limit} onClick={() => setEarningsQuarterLimit(limit)}>{limit} quarters</button>
+                  ))}
+                </div>}
+              </div>
+              {financialsError || !financials ? (
+                <div className="siw-data-empty siw-earnings-unavailable">
+                  <strong>Published quarterly report unavailable</strong>
+                  <span>{financialsError || "No published ValuationCalculation quarterly report was returned for this ticker."}</span>
+                </div>
+              ) : (
+                <>
+                  <div className="siw-earnings-source-strip" data-earnings-source>
+                    <div><span>Financial source</span><strong>{financials.financialSource.source}</strong><em>{financials.financialSource.sourceType}</em></div>
+                    <div><span>Financial data as of</span><strong>{financials.financialSource.dataAsOf}</strong><em>Latest filing {financials.financialSource.filingDate || "N/A"}</em></div>
+                    <div><span>Fetched / published</span><strong>{formatProvenanceTimestamp(financials.financialSource.fetchedAt)}</strong><em>Release {formatProvenanceTimestamp(financials.generatedAt)}</em></div>
+                    {financials.financialSource.sourceUrl && /^https?:\/\//i.test(financials.financialSource.sourceUrl) && <a href={financials.financialSource.sourceUrl} target="_blank" rel="noreferrer">Open source</a>}
+                  </div>
+
+                  <div className="siw-earnings-trend-grid" data-earnings-trend>
+                    <section>
+                      <div className="siw-earnings-chart-head"><span>Revenue by reported quarter</span><b>{currencyCode || "reported currency"}</b></div>
+                      <div className="siw-earnings-revenue-bars" aria-label="Reported quarterly revenue chart">
+                        {chronologicalRows.map((row) => {
+                          const revenue = row.revenue;
+                          const barHeight = revenue === null || revenueMax === 0 ? 0 : Math.max(6, Math.round((Math.abs(revenue) / revenueMax) * 100));
+                          return <div key={row.date} data-earnings-revenue-bar title={`${row.date}: ${formatFinancialAmount(revenue, row.currency)}`}>
+                            <i className={revenue !== null && revenue < 0 ? "is-negative" : ""} style={{ height: `${barHeight}%` }} />
+                            <span>{row.date.slice(2)}</span>
+                          </div>;
+                        })}
+                      </div>
+                    </section>
+                    <section className="siw-earnings-eps-trend" data-earnings-eps-trend>
+                      <div className="siw-earnings-chart-head"><span>EPS trend</span><b>reported</b></div>
+                      {epsPoints.length >= 2
+                        ? <MiniSparkline points={epsPoints} positive={(epsPoints[epsPoints.length - 1]?.value || 0) >= epsPoints[0].value} className="siw-earnings-eps-sparkline" sourceLabel={financials.source} valueFormatter={(value) => formatOptionalNumber(value)} />
+                        : <p>EPS trend unavailable: fewer than two reported values.</p>}
+                    </section>
+                  </div>
+
+                  <div className="siw-earnings-table-scroll">
+                    <table className="siw-earnings-table">
+                      <thead><tr><th>Quarter</th><th>Reported</th><th>Revenue</th><th>QoQ</th><th>YoY</th><th>EPS</th><th>EPS YoY</th><th>Net income</th><th>Free cash flow</th></tr></thead>
+                      <tbody>
+                        {quarterRows.map((row) => (
+                          <tr key={`${row.date}-${row.period || "quarter"}`} data-earnings-quarter-row>
+                            <th>{[row.fiscalYear, row.period].filter(Boolean).join(" ") || row.date}</th>
+                            <td>{row.filingDate || row.date}</td>
+                            <td>{formatFinancialAmount(row.revenue, row.currency)}</td>
+                            <td className={row.revenue_qoq !== null && row.revenue_qoq < 0 ? "siw-down" : "siw-up"}>{formatSignedPercent(row.revenue_qoq)}</td>
+                            <td className={row.revenue_yoy !== null && row.revenue_yoy < 0 ? "siw-down" : "siw-up"}>{formatSignedPercent(row.revenue_yoy)}</td>
+                            <td>{formatOptionalNumber(row.eps)}</td>
+                            <td className={row.eps_yoy !== null && row.eps_yoy < 0 ? "siw-down" : "siw-up"}>{formatSignedPercent(row.eps_yoy)}</td>
+                            <td>{formatFinancialAmount(row.netIncome, row.currency)}</td>
+                            <td>{formatFinancialAmount(row.freeCashFlow, row.currency)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </section>
+
+            {historicalResult?.error ? (
+              <div className="siw-data-empty siw-earnings-context"><strong>Yahoo market context unavailable</strong><span>{historicalResult.error}</span></div>
+            ) : historicalLines.length > 0 ? (
+              <section className="siw-earnings-context" data-earnings-market-context>
+                <div><p>Yahoo Finance</p><h3>Market context</h3></div>
+                <ul>{historicalLines.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ul>
+              </section>
+            ) : null}
+          </div>
+        )}
+      </section>
+    );
+  };
+
   const renderStatsReferencePanel = () => {
     const statsRaw = rawRecord(tabPanelState.data?.get_stock_stats?.raw) || {};
     const betaRaw = rawRecord(tabPanelState.data?.get_beta?.raw) || {};
@@ -4521,6 +4806,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
     if (activeTab !== "Options") {
       if (activeTab === "Fundamentals") return renderStatsReferencePanel();
+      if (activeTab === "Earnings") return renderEarningsPanel();
       if (activeTab === "Fixed Income") {
         return <section className="siw-panel siw-primary-panel siw-fixed-income-panel" data-primary-tab-panel="Fixed Income"><StocksWatcherFixedIncomePanel /></section>;
       }
@@ -5353,7 +5639,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
               {activeTab === "F/G Index" && fearGreedState.error && <div className="m-4"><ErrorBanner message={fearGreedState.error} onRetry={() => void loadFearGreed(true)} /></div>}
               {activeTab === "Fixed Income" && <StocksWatcherFixedIncomePanel />}
               {activeTab === "Fundamentals" && renderStatsReferencePanel()}
-              {activeTab !== "Options" && activeTab !== "F/G Index" && activeTab !== "Fixed Income" && activeTab !== "Fundamentals" && renderGenericPanel(tabPanelState, () => void loadTopTab(activeTab, true))}
+              {activeTab === "Earnings" && renderEarningsPanel()}
+              {activeTab !== "Options" && activeTab !== "F/G Index" && activeTab !== "Fixed Income" && activeTab !== "Fundamentals" && activeTab !== "Earnings" && renderGenericPanel(tabPanelState, () => void loadTopTab(activeTab, true))}
             </div>
           </section>
 

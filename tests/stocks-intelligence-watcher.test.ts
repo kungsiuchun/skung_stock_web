@@ -50,6 +50,11 @@ import {
   onRequest as stocksWatcherApi,
 } from "../functions/api/stocks-intelligence-watcher";
 import {
+  loadWatcherFinancialStatements,
+  type R2BucketLike,
+  type WatcherValuationRelease,
+} from "../src/lib/stocks-watcher-valuation-data";
+import {
   checkMarketCacheD1Quota,
   evaluateMarketCacheD1Quota,
   getMarketCacheD1QuotaObservation,
@@ -433,6 +438,11 @@ test("watcher session plans native tool calls and cache keys without UI state", 
     { name: "get_stock_stats", params: { ticker: "NVDA" } },
     { name: "get_beta", params: { ticker: "NVDA" } },
   ]);
+  assert.deepEqual(getStocksWatcherTopTabToolPlan("Earnings", "nvda"), [
+    { name: "earnings_vol_crush", params: { ticker: "NVDA" } },
+    { name: "historical_context", params: { ticker: "NVDA", event: "earnings" } },
+    { name: "get_financial_statements", params: { symbol: "NVDA", periods: 12 } },
+  ]);
   assert.deepEqual(getStocksWatcherTopTabToolPlan("Fixed Income", "nvda"), []);
   assert.deepEqual(getStocksWatcherTopTabToolPlan("Chart", "nvda", "1mo"), [
     { name: "get_stock_history", params: { ticker: "NVDA", range: "1mo", interval: "1d" } },
@@ -461,6 +471,58 @@ test("watcher session plans native tool calls and cache keys without UI state", 
     { name: "get_options_iv_intraday", params: { ticker: "NVDA", expiry: "2026-06-19", strike: 180 } },
     { name: "get_options_mispricing", params: { ticker: "NVDA", expiry: "2026-06-19", strike: 180 } },
   ]);
+});
+
+test("published quarterly financial statements preserve their mandatory source provenance", async () => {
+  const generatedAt = new Date().toISOString();
+  const release: WatcherValuationRelease = { schemaVersion: "1.0", releaseId: "uat-release", generatedAt };
+  const financials = {
+    schemaVersion: "1.0",
+    source: "ValuationCalculation financial statements export",
+    symbol: "NVDA",
+    generatedAt,
+    dataAsOf: "2026-06-30",
+    financialSource: {
+      source: "SEC companyfacts",
+      sourceType: "company_filing",
+      sourceUrl: "https://data.sec.gov/api/xbrl/companyfacts/CIK0001045810.json",
+      fetchedAt: generatedAt,
+      dataAsOf: "2026-06-30",
+      filingDate: "2026-08-28",
+    },
+    quarters: [{
+      date: "2026-06-30", filingDate: "2026-08-28", fiscalYear: "2027", period: "Q2", currency: "USD",
+      revenue: 91_000_000_000, netIncome: 48_000_000_000, eps: 1.04, operatingCashFlow: 53_000_000_000, freeCashFlow: 45_000_000_000,
+      revenue_qoq: 12.5, revenue_yoy: 48.7, netIncome_qoq: 10.2, netIncome_yoy: 52.1, eps_qoq: 9.8, eps_yoy: 51.4, operatingCashFlow_qoq: 8.1, operatingCashFlow_yoy: 43.2,
+    }],
+  };
+  const bucket: R2BucketLike = {
+    get: async (key) => key === "releases/uat-release/financials/NVDA.json"
+      ? { json: async () => financials }
+      : null,
+  };
+
+  const result = await loadWatcherFinancialStatements(bucket, { symbol: "nvda", periods: 12, release });
+  assert.equal(result.financialSource.source, "SEC companyfacts");
+  assert.equal(result.financialSource.sourceType, "company_filing");
+  assert.equal(result.financialSource.filingDate, "2026-08-28");
+  assert.equal(result.quarters.length, 1);
+  assert.equal(result.quarters[0].revenue, 91_000_000_000);
+});
+
+test("published quarterly financial statements fail closed when source provenance is absent", async () => {
+  const generatedAt = new Date().toISOString();
+  const release: WatcherValuationRelease = { schemaVersion: "1.0", releaseId: "uat-release", generatedAt };
+  const bucket: R2BucketLike = {
+    get: async (key) => key === "releases/uat-release/financials/NVDA.json"
+      ? { json: async () => ({ schemaVersion: "1.0", source: "ValuationCalculation financial statements export", symbol: "NVDA", generatedAt, dataAsOf: "2026-06-30", quarters: [{ date: "2026-06-30" }] }) }
+      : null,
+  };
+
+  await assert.rejects(
+    () => loadWatcherFinancialStatements(bucket, { symbol: "NVDA", release }),
+    /financial metadata or provenance is missing/,
+  );
 });
 
 test("watcher session resolves snapshot cache and custom stock decisions", () => {

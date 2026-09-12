@@ -294,6 +294,84 @@ const buildToolResponse = (tool, params = {}) => {
     return { ok: true, tool, params, text: "valuation bands", raw: { ...valuation, symbol, metric }, calledAt: "2026-07-09T20:00:00.000Z" };
   }
 
+  if (tool === "get_financial_statements") {
+    const symbol = String(params.symbol || "NVDA").toUpperCase();
+    const dates = ["2026-06-30", "2026-03-31", "2025-12-31", "2025-09-30", "2025-06-30", "2025-03-31", "2024-12-31", "2024-09-30", "2024-06-30", "2024-03-31", "2023-12-31", "2023-09-30"];
+    const quarters = dates.map((date, index) => ({
+      date,
+      filingDate: date,
+      fiscalYear: index < 2 ? "2027" : index < 6 ? "2026" : index < 10 ? "2025" : "2024",
+      period: `Q${((3 - index) % 4 + 4) % 4 + 1}`,
+      currency: "USD",
+      revenue: 96_000_000_000 - index * 3_500_000_000,
+      netIncome: 52_000_000_000 - index * 2_100_000_000,
+      eps: 1.22 - index * 0.045,
+      operatingCashFlow: 57_000_000_000 - index * 2_300_000_000,
+      freeCashFlow: 49_000_000_000 - index * 2_000_000_000,
+      revenue_qoq: 4.8 - index * 0.18,
+      revenue_yoy: 55.2 - index * 1.3,
+      netIncome_qoq: 3.9 - index * 0.14,
+      netIncome_yoy: 58.7 - index * 1.4,
+      eps_qoq: 4.1 - index * 0.16,
+      eps_yoy: 57.9 - index * 1.35,
+      operatingCashFlow_qoq: 3.4 - index * 0.11,
+      operatingCashFlow_yoy: 49.6 - index * 1.2,
+    }));
+    return {
+      ok: true,
+      tool,
+      params,
+      text: `${symbol} financial statements through 2026-06-30.`,
+      raw: {
+        schemaVersion: "1.0",
+        source: "ValuationCalculation financial statements export",
+        symbol,
+        generatedAt: "2026-07-09T20:00:00.000Z",
+        dataAsOf: "2026-06-30",
+        financialSource: {
+          source: "SEC companyfacts",
+          sourceType: "company_filing",
+          sourceUrl: "https://data.sec.gov/api/xbrl/companyfacts/CIK0001045810.json",
+          fetchedAt: "2026-07-09T19:54:00.000Z",
+          dataAsOf: "2026-06-30",
+          filingDate: "2026-08-28",
+        },
+        quarters,
+      },
+      calledAt: "2026-07-09T20:00:00.000Z",
+    };
+  }
+
+  if (tool === "earnings_vol_crush") {
+    return {
+      ok: true,
+      tool,
+      params,
+      text: "NVDA earnings event context",
+      raw: {
+        earnings: {
+          source: "Yahoo quoteSummary calendarEvents + earningsHistory",
+          nextEarningsDate: "2026-08-26",
+          nextEpsEstimate: 2.08,
+          nextRevenueEstimate: "91.73B",
+          lastEarningsDate: "2026-05-20",
+          lastReportedQuarter: "2026-04-30",
+          epsActual: 1.87,
+          epsEstimate: 1.77,
+          epsDifference: 0.1,
+          surprisePercent: 5.54,
+          result: "beat",
+          priceMove: { eventTradingDate: "2026-05-20", previousClose: 134.38, close: 135.5, changePercent: 0.83, basis: "close_to_close" },
+        },
+      },
+      calledAt: "2026-07-09T20:00:00.000Z",
+    };
+  }
+
+  if (tool === "historical_context") {
+    return { ok: true, tool, params, text: "NVDA earnings context\n- 1M return: +2.56%\n- 30-session close range: $195.04 - $230.36", raw: { source: "Yahoo Finance" }, calledAt: "2026-07-09T20:00:00.000Z" };
+  }
+
   if (tool === "save_memory") {
     return { ok: true, tool, params, text: "saved", raw: { saved: true }, calledAt: "2026-07-08T21:33:02.000Z" };
   }
@@ -1038,7 +1116,26 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.match(await page.$eval("[data-fear-greed-cache]", (node) => node.textContent || ""), /D1 cache refreshed[\s\S]*TTL: 15 min/, "F/G Index must disclose the shared D1 cache contract");
     assert.ok(apiCalls.some((call) => call.endpoint === "fear-greed"), "F/G Index must call only the server-side fear-greed API");
 
-    for (const [topTab, expectedTool] of [["Earnings", "earnings_vol_crush"], ["News", "morning_briefing"], ["Holders", "get_sector_top_holdings"]]) {
+    await clickText(page, "Earnings", true);
+    await wait(350);
+    assert.equal(await page.$("[data-earnings-report]") !== null, true, "Earnings must render the dedicated earnings intelligence workspace");
+    assert.match(await page.$eval("[data-earnings-yahoo-event]", (node) => node.textContent || ""), /Next earnings[\s\S]*Latest EPS result[\s\S]*Latest price reaction/i, "Earnings must keep Yahoo event fields distinct");
+    assert.match(await page.$eval("[data-earnings-source]", (node) => node.textContent || ""), /SEC companyfacts[\s\S]*company_filing[\s\S]*Fetched \/ published/i, "Earnings must disclose financial-source provenance and release freshness");
+    const visibleEarningsQuarterRows = async () => page.$$eval("[data-earnings-quarter-row]", (rows) => rows.filter((row) => {
+      const rect = row.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    }).length);
+    assert.equal(await visibleEarningsQuarterRows(), 8, "Earnings must default to an 8-quarter reported-results table");
+    assert.ok(apiCalls.some((call) => call.tool === "earnings_vol_crush"), "Earnings must execute the Yahoo event plan");
+    const earningsSymbol = await page.$eval(".siw-hero-identity h1", (node) => node.textContent || "");
+    assert.ok(apiCalls.some((call) => call.tool === "get_financial_statements" && call.params?.symbol === earningsSymbol && call.params?.periods === 12), `Earnings must request 12 ValuationCalculation quarters once; got ${JSON.stringify(apiCalls.filter((call) => call.tool === "get_financial_statements"))}`);
+    const financialCallsBeforeQuarterChange = apiCalls.filter((call) => call.tool === "get_financial_statements").length;
+    await clickText(page, "12 quarters", true);
+    await wait(100);
+    assert.equal(await visibleEarningsQuarterRows(), 12, "Earnings quarter selector must reveal the cached 12-quarter report");
+    assert.equal(apiCalls.filter((call) => call.tool === "get_financial_statements").length, financialCallsBeforeQuarterChange, "Earnings quarter selector must not refetch the report");
+
+    for (const [topTab, expectedTool] of [["News", "morning_briefing"], ["Holders", "get_sector_top_holdings"]]) {
       await clickText(page, topTab, true);
       await wait(350);
       const panelText = await page.$eval(`[data-primary-tab-panel='${topTab}']`, (node) => node.textContent || "");
