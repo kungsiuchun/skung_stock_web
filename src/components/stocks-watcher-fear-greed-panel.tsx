@@ -39,11 +39,11 @@ const cacheLabel = (cache: MarketCacheMetadata | null) => {
 };
 
 const FEAR_GREED_STAGES = [
-  { label: "Extreme Fear", range: "0–24", tone: "extreme-fear" },
-  { label: "Fear", range: "25–44", tone: "fear" },
-  { label: "Neutral", range: "45–55", tone: "neutral" },
-  { label: "Greed", range: "56–74", tone: "greed" },
-  { label: "Extreme Greed", range: "75–100", tone: "extreme-greed" },
+  { label: "Extreme Fear", range: "0–24", tone: "extreme-fear", start: 0, end: 25 },
+  { label: "Fear", range: "25–44", tone: "fear", start: 25, end: 45 },
+  { label: "Neutral", range: "45–55", tone: "neutral", start: 45, end: 56 },
+  { label: "Greed", range: "56–74", tone: "greed", start: 56, end: 75 },
+  { label: "Extreme Greed", range: "75–100", tone: "extreme-greed", start: 75, end: 100 },
 ] as const;
 
 const gaugeMarker = (score: number) => {
@@ -82,14 +82,14 @@ export function StocksWatcherFearGreedPanel({ snapshot, cache, onRefresh }: Stoc
           <div className="siw-fear-greed-gauge-wrap">
             <svg viewBox="0 0 220 132" role="img" aria-label={`Fear and Greed score ${snapshot.score.toFixed(1)} of 100: ${fearGreedLabel(snapshot.rating)}`}>
               <path className="siw-fear-greed-track" d="M 24 112 A 86 86 0 0 1 196 112" pathLength="100" />
-              {FEAR_GREED_STAGES.map((stage, index) => (
+              {FEAR_GREED_STAGES.map((stage) => (
                 <path
                   key={stage.tone}
                   className={`siw-fear-greed-stage is-${stage.tone}`}
                   d="M 24 112 A 86 86 0 0 1 196 112"
                   pathLength="100"
-                  strokeDasharray="16 100"
-                  strokeDashoffset={-index * 20}
+                  strokeDasharray={`${stage.end - stage.start} 100`}
+                  strokeDashoffset={-stage.start}
                 />
               ))}
               <circle className={`siw-fear-greed-marker is-${tone}`} cx={marker.x} cy={marker.y} r="7" />

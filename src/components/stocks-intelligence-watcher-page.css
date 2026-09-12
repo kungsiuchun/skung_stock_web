@@ -999,6 +999,86 @@
   gap: var(--siw-space-4);
 }
 
+.siw-spx-market-breadth-panel {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  border: 1px solid var(--siw-line);
+  border-radius: var(--siw-panel-radius);
+  background:
+    linear-gradient(180deg, rgba(10, 23, 36, 0.94), rgba(5, 12, 20, 0.94)),
+    var(--siw-panel);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 12px 32px rgba(0, 0, 0, 0.16);
+}
+
+.siw-spx-market-breadth-content {
+  padding: clamp(16px, 2vw, 24px);
+}
+
+.siw-spx-market-breadth-header {
+  border-bottom: 1px solid var(--siw-line-soft);
+  padding-bottom: 16px;
+}
+
+.siw-spx-market-breadth-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.siw-spx-market-breadth-title {
+  margin: 5px 0 0;
+  color: var(--siw-text);
+  font-size: 18px;
+  font-weight: 900;
+  letter-spacing: -0.03em;
+  text-transform: uppercase;
+}
+
+.siw-spx-market-breadth-subtitle {
+  max-width: 720px;
+  margin: 7px 0 0;
+  color: var(--siw-muted);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.siw-spx-market-breadth-refresh {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--siw-line);
+  border-radius: 6px;
+  background: rgba(17, 135, 255, 0.1);
+  padding: 7px 10px;
+  color: var(--siw-text);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.siw-spx-market-breadth-refresh:hover,
+.siw-spx-market-breadth-refresh:focus-visible {
+  border-color: var(--siw-blue);
+  background: rgba(17, 135, 255, 0.18);
+  outline: 2px solid rgba(17, 135, 255, 0.45);
+  outline-offset: 2px;
+}
+
+.siw-spx-market-breadth-refresh:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.siw-spx-market-breadth-body {
+  display: grid;
+  gap: 20px;
+  padding-top: 20px;
+}
+
 /* Keep the compact, actionable GEX metrics above valuation; source-order remains stable for assistive technology. */
 .siw-news-panel { order: 1; }
 .siw-earnings-panel { order: 2; }
@@ -2644,6 +2724,19 @@
 
   .siw-overview-tertiary {
     grid-template-columns: 1fr;
+  }
+
+  .siw-spx-market-breadth-content {
+    padding: 16px;
+  }
+
+  .siw-spx-market-breadth-heading {
+    flex-direction: column;
+  }
+
+  .siw-spx-market-breadth-refresh {
+    width: 100%;
+    justify-content: center;
   }
 
   .siw-expiry-head {

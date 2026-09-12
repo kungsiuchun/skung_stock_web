@@ -72,6 +72,7 @@ import type { MarketCacheMetadata } from "@/lib/market-data-cache";
 import type { WatcherValuationBands, WatcherValuationMetric } from "@/lib/stocks-watcher-valuation-data";
 import { StocksWatcherFearGreedPanel } from "./stocks-watcher-fear-greed-panel";
 import { StocksWatcherFixedIncomePanel } from "./stocks-watcher-fixed-income-panel";
+import { MarketBreadthPanel } from "./market-breadth-page";
 
 interface StocksIntelligenceWatcherPageProps {
   onBackToWork: () => void;
@@ -4498,6 +4499,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
               <MetricTile label="P/C OI" value={hasOverviewOptionsOpenInterest ? (overviewPutOi / Math.max(1, overviewCallOi)).toFixed(2) : "n/a"} tone="neutral" />
             </div>
           </div>
+        </div>
+
+        <div className="siw-spx-market-breadth-panel" data-overview-bottom-panel="spx-market-breadth">
+          <MarketBreadthPanel variant="embedded" />
         </div>
       </section>
     );

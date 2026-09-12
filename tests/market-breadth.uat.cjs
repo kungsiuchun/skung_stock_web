@@ -33,7 +33,23 @@ const sectors = [
   ["Materials", "XLB", 1.96],
 ];
 
-const readyPayload = (stale = false) => ({
+const marketBreadthSnapshotId = (payload) => {
+  const content = { ...payload };
+  delete content.snapshotId;
+  delete content.generatedAt;
+  delete content.status;
+  delete content.freshness;
+  const serialized = JSON.stringify(content);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < serialized.length; index += 1) {
+    hash ^= serialized.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `market-breadth-v1-${payload.priceAsOf}-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+};
+
+const readyPayload = (stale = false) => {
+  const payload = {
   status: "READY",
   schemaVersion: 1,
   snapshotId: "market-breadth-v1-2026-08-11-uat",
@@ -88,7 +104,10 @@ const readyPayload = (stale = false) => ({
     { id: "massive", provider: "Massive", label: "Adjusted U.S. stock daily aggregates", url: "https://massive.com/", role: "Prices" },
   ],
   warnings: [],
-});
+  };
+  payload.snapshotId = marketBreadthSnapshotId(payload);
+  return payload;
+};
 
 (async () => {
   let server;

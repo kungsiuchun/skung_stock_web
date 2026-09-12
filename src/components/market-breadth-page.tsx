@@ -2,24 +2,22 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowDown, ArrowLeft, ArrowUp, ArrowUpDown, ExternalLink, RefreshCw } from "lucide-react";
 import type {
   BreadthCell,
+  MarketBreadthFreshness,
   MarketBreadthRow,
   MarketBreadthSnapshot,
   SectorPerformanceRow,
   Sma200SlopeRow,
 } from "@/lib/market-breadth";
+import { validateMarketBreadthSnapshot } from "@/lib/market-breadth";
 
-interface MarketBreadthPageProps {
-  onBackToWork: () => void;
+interface MarketBreadthPanelProps {
+  onBackToWork?: () => void;
+  variant?: "standalone" | "embedded";
 }
 
 type ReadyPayload = MarketBreadthSnapshot & {
   status: "READY";
-  freshness: {
-    status: "FRESH" | "STALE";
-    reason: string;
-    failedAt?: string;
-    errorClass?: string;
-  };
+  freshness: MarketBreadthFreshness;
 };
 
 type SortDirection = "asc" | "desc";
@@ -74,7 +72,28 @@ const nextSort = (current: SortState, key: string): SortState => ({
   direction: current.key === key && current.direction === "desc" ? "asc" : "desc",
 });
 
-export function MarketBreadthPage({ onBackToWork }: MarketBreadthPageProps) {
+const parseReadyPayload = (value: unknown): ReadyPayload => {
+  if (!value || typeof value !== "object") throw new Error("Market breadth API returned an invalid payload.");
+  const payload = value as { status?: unknown; freshness?: Partial<MarketBreadthFreshness> };
+  if (payload.status !== "READY") throw new Error("Market breadth API did not return a ready snapshot.");
+  const freshness = payload.freshness;
+  if (
+    !freshness
+    || (freshness.status !== "FRESH" && freshness.status !== "STALE")
+    || !["CURRENT", "LATEST_REFRESH_FAILED", "SNAPSHOT_TOO_OLD"].includes(freshness.reason || "")
+    || (freshness.failedAt !== undefined && typeof freshness.failedAt !== "string")
+    || (freshness.errorClass !== undefined && typeof freshness.errorClass !== "string")
+  ) {
+    throw new Error("Market breadth API returned invalid freshness metadata.");
+  }
+  const snapshot = { ...(value as Record<string, unknown>) };
+  delete snapshot.status;
+  delete snapshot.freshness;
+  return { ...validateMarketBreadthSnapshot(snapshot), status: "READY", freshness: freshness as MarketBreadthFreshness };
+};
+
+export function MarketBreadthPanel({ onBackToWork, variant = "standalone" }: MarketBreadthPanelProps) {
+  const standalone = variant === "standalone";
   const [data, setData] = useState<ReadyPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [empty, setEmpty] = useState(false);
@@ -91,17 +110,17 @@ export function MarketBreadthPage({ onBackToWork }: MarketBreadthPageProps) {
       const response = await fetch("/api/market-breadth", { headers: { Accept: "application/json" } });
       const contentType = response.headers.get("content-type") || "";
       if (!contentType.toLowerCase().includes("json")) throw new Error("Market breadth API returned a non-JSON response.");
-      const payload = await response.json() as ReadyPayload | { status?: string; message?: string; errorCode?: string };
-      if (response.status === 404 && payload.status === "EMPTY") {
+      const payload = await response.json() as unknown;
+      if (response.status === 404 && typeof payload === "object" && payload !== null && (payload as { status?: unknown }).status === "EMPTY") {
         setData(null);
         setEmpty(true);
         return;
       }
-      if (!response.ok || payload.status !== "READY") {
-        const failure = payload as { message?: string; errorCode?: string };
-        throw new Error(failure.message || failure.errorCode || `Market breadth API returned HTTP ${response.status}.`);
+      if (!response.ok) {
+        const failure = payload && typeof payload === "object" ? payload as { message?: unknown; errorCode?: unknown } : {};
+        throw new Error(typeof failure.message === "string" ? failure.message : typeof failure.errorCode === "string" ? failure.errorCode : `Market breadth API returned HTTP ${response.status}.`);
       }
-      setData(payload as ReadyPayload);
+      setData(parseReadyPayload(payload));
     } catch (loadError) {
       setData(null);
       setError(loadError instanceof Error ? loadError.message : String(loadError));
@@ -129,22 +148,20 @@ export function MarketBreadthPage({ onBackToWork }: MarketBreadthPageProps) {
   ), [data, slopeSort]);
 
   return (
-    <section className="h-full overflow-y-auto overscroll-contain bg-[#0d0f10] px-4 py-5 font-mono text-zinc-100 sm:px-7 lg:px-10">
-      <div className="mx-auto w-full max-w-[1540px]">
-        <header className="border-b border-zinc-700 pb-5">
-          <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+    <section className={standalone ? "h-full overflow-y-auto overscroll-contain bg-[#0d0f10] px-4 py-5 font-mono text-zinc-100 sm:px-7 lg:px-10" : "siw-spx-market-breadth-content font-mono text-zinc-100"} data-spx-market-breadth>
+      <div className={standalone ? "mx-auto w-full max-w-[1540px]" : "w-full"}>
+        <header className={standalone ? "border-b border-zinc-700 pb-5" : "siw-spx-market-breadth-header"}>
+          <div className={standalone ? "flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between" : "siw-spx-market-breadth-heading"}>
             <div>
-              <button type="button" onClick={onBackToWork} className="mb-5 inline-flex items-center gap-2 text-[0.68rem] font-bold uppercase tracking-[0.16em] text-zinc-500 transition-colors hover:text-amber-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400">
-                <ArrowLeft className="h-3.5 w-3.5" /> Market Lab
-              </button>
+              {standalone && onBackToWork && <button type="button" onClick={onBackToWork} className="mb-5 inline-flex items-center gap-2 text-[0.68rem] font-bold uppercase tracking-[0.16em] text-zinc-500 transition-colors hover:text-amber-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"><ArrowLeft className="h-3.5 w-3.5" /> Market Lab</button>}
               <p className="text-[0.65rem] font-bold uppercase tracking-[0.22em] text-amber-500">Market internals / SPY universe</p>
-              <h1 className="mt-2 text-2xl font-black tracking-[-0.055em] text-zinc-100 sm:text-4xl">S&amp;P 500 MARKET BREADTH</h1>
-              <p className="mt-3 max-w-3xl text-xs leading-5 text-zinc-500">
+              <h1 className={standalone ? "mt-2 text-2xl font-black tracking-[-0.055em] text-zinc-100 sm:text-4xl" : "siw-spx-market-breadth-title"}>S&amp;P 500 MARKET BREADTH</h1>
+              <p className={standalone ? "mt-3 max-w-3xl text-xs leading-5 text-zinc-500" : "siw-spx-market-breadth-subtitle"}>
                 Daily participation, sector leadership, and long-term trend strength. Values are derived EOD metrics, not intraday signals.
               </p>
             </div>
-            <button type="button" disabled={loading} onClick={() => void load()} className="inline-flex w-fit items-center gap-2 border border-amber-500/70 bg-amber-500/10 px-3 py-2 text-[0.68rem] font-bold uppercase tracking-[0.14em] text-amber-400 hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400">
-              <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh view
+            <button type="button" disabled={loading} onClick={() => void load()} className={standalone ? "inline-flex w-fit items-center gap-2 border border-amber-500/70 bg-amber-500/10 px-3 py-2 text-[0.68rem] font-bold uppercase tracking-[0.14em] text-amber-400 hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400" : "siw-spx-market-breadth-refresh"}>
+              <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} /> {standalone ? "Refresh view" : "Refresh"}
             </button>
           </div>
 
@@ -172,7 +189,7 @@ export function MarketBreadthPage({ onBackToWork }: MarketBreadthPageProps) {
         {!loading && error && <StatusPanel tone="error" title="Market breadth unavailable" message={error} onRetry={load} />}
 
         {!loading && data && (
-          <main className="space-y-5 py-6">
+          <main className={standalone ? "space-y-5 py-6" : "siw-spx-market-breadth-body"}>
             {data.freshness.status === "STALE" && (
               <div className="border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-xs leading-5 text-amber-200" role="status">
                 <span className="font-black">STALE SNAPSHOT</span> — showing the last successful {formatDate(data.priceAsOf)} close.
@@ -257,6 +274,10 @@ export function MarketBreadthPage({ onBackToWork }: MarketBreadthPageProps) {
       </div>
     </section>
   );
+}
+
+export function MarketBreadthPage({ onBackToWork }: { onBackToWork: () => void }) {
+  return <MarketBreadthPanel variant="standalone" onBackToWork={onBackToWork} />;
 }
 
 function Meta({ label, value }: { label: string; value: string }) {

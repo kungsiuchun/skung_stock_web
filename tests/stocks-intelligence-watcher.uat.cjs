@@ -279,8 +279,63 @@ const treasuryYieldCurveFixture = () => ({
   source: { provider: "U.S. Department of the Treasury", label: "Daily Treasury Par Yield Curve Rates", url: "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/all/all?_format=csv&page=&type=daily_treasury_yield_curve", fetchedAt: "2026-09-09T20:00:00.000Z" },
 });
 
+const marketBreadthSectors = [
+  ["Communication Services", "XLC"], ["Consumer Discretionary", "XLY"], ["Consumer Staples", "XLP"], ["Energy", "XLE"], ["Financials", "XLF"], ["Health Care", "XLV"], ["Industrials", "XLI"], ["Information Technology", "XLK"], ["Materials", "XLB"], ["Real Estate", "XLRE"], ["Utilities", "XLU"],
+];
+
+const marketBreadthSnapshotId = (snapshot) => {
+  const content = { ...snapshot };
+  delete content.snapshotId;
+  delete content.generatedAt;
+  const serialized = JSON.stringify(content);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < serialized.length; index += 1) {
+    hash ^= serialized.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `market-breadth-v1-${snapshot.priceAsOf}-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+};
+
+const marketBreadthFixture = (stale = false) => {
+  const snapshot = {
+    schemaVersion: 1,
+    generatedAt: "2026-09-10T23:30:00.000Z",
+    holdingsAsOf: "2026-09-10",
+    priceAsOf: "2026-09-10",
+    universeCount: 504,
+    sectorPerformance: {
+      benchmark: { symbol: "SPY", oneDay: 0.86, oneWeek: 1.4, oneMonth: 3.2, threeMonths: 7.6, yearToDate: 14.8 },
+      rows: marketBreadthSectors.map(([sector, etf], index) => ({ sector, etf, weightPct: 36 - index * 2.1, contribution1dPctPoints: Number((0.28 - index * 0.04).toFixed(3)), oneDay: Number((1.1 - index * 0.17).toFixed(2)), oneWeek: Number((2.8 - index * 0.22).toFixed(2)), oneMonth: Number((4.7 - index * 0.31).toFixed(2)), threeMonths: Number((8.5 - index * 0.46).toFixed(2)), yearToDate: Number((17.2 - index * 0.7).toFixed(2)) })),
+      proxyContribution1dPctPoints: 0.81,
+      reconciliationGapPctPoints: 0.05,
+    },
+    breadth: {
+      rows: marketBreadthSectors.map(([sector], index) => {
+        const total = 32 + index;
+        const cell = (periodOffset) => {
+          const eligible = total - 1;
+          const above = Math.max(0, Math.min(eligible, 25 - index + periodOffset));
+          return { above, eligible, total, pct: Number(((above / eligible) * 100).toFixed(1)) };
+        };
+        return { sector, holdingCount: total, windows: { sma5: cell(3), sma20: cell(2), sma50: cell(1), sma100: cell(0), sma200: cell(-1) } };
+      }),
+    },
+    sma200Slope: {
+      rows: marketBreadthSectors.map(([sector, etf], index) => ({ sector, etf, windows: { session5: Number((0.8 - index * 0.1).toFixed(2)), session20: Number((2.4 - index * 0.2).toFixed(2)), session50: Number((5.7 - index * 0.35).toFixed(2)), session100: Number((11.4 - index * 0.5).toFixed(2)), session200: Number((22.5 - index * 0.8).toFixed(2)) } })),
+    },
+    coverage: { currentPriceCount: 504, constituent200DayCount: 503, constituent200DayPct: 99.8, totalConstituents: 504, sectorEtf400DayCount: 11, totalSectorEtfs: 11 },
+    sources: [
+      { id: "state-street", provider: "State Street Global Advisors", label: "SPY holdings", url: "https://www.ssga.com/", role: "Universe" },
+      { id: "massive", provider: "Massive", label: "Adjusted U.S. stock daily aggregates", url: "https://massive.com/", role: "Prices" },
+    ],
+    warnings: [],
+  };
+  return { ...snapshot, snapshotId: marketBreadthSnapshotId(snapshot), status: "READY", freshness: stale ? { status: "STALE", reason: "LATEST_REFRESH_FAILED", failedAt: "2026-09-11T00:10:00.000Z", errorClass: "PROVIDER_UNAVAILABLE" } : { status: "FRESH", reason: "CURRENT" } };
+};
+
 let refreshAllMode = false;
 let delayedSnapshotSymbol = null;
+let marketBreadthApiMode = "READY";
 
 const buildToolResponse = (tool, params = {}) => {
   if (tool === "get_watchlist") {
@@ -487,12 +542,29 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
     const page = await browser.newPage();
     page.on("console", (message) => {
-      if (message.type() === "error") consoleErrors.push(message.text());
+      if (message.type() === "error" && !/status of (404|503)/.test(message.text())) consoleErrors.push(message.text());
     });
     page.on("pageerror", (error) => consoleErrors.push(error.message));
     await page.setRequestInterception(true);
     page.on("request", async (request) => {
       const url = new URL(request.url());
+      if (url.pathname.includes("/api/market-breadth")) {
+        apiCalls.push({ method: "GET", endpoint: "market-breadth", mode: marketBreadthApiMode });
+        if (marketBreadthApiMode === "EMPTY") {
+          await request.respond({ status: 404, contentType: "application/json", body: JSON.stringify({ status: "EMPTY", errorCode: "INITIAL_BACKFILL_REQUIRED", message: "Market breadth initial backfill has not published a snapshot yet." }) });
+          return;
+        }
+        if (marketBreadthApiMode === "ERROR") {
+          await request.respond({ status: 503, contentType: "application/json", body: JSON.stringify({ status: "ERROR", errorCode: "MARKET_BREADTH_R2_BINDING_MISSING", message: "Market breadth storage is unavailable." }) });
+          return;
+        }
+        if (marketBreadthApiMode === "INVALID") {
+          await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "READY", freshness: { status: "FRESH", reason: "CURRENT" } }) });
+          return;
+        }
+        await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(marketBreadthFixture(marketBreadthApiMode === "STALE")) });
+        return;
+      }
       if (url.pathname.includes("/api/fear-greed")) {
         apiCalls.push({ method: "GET", endpoint: "fear-greed" });
         await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(fearGreedFixture()) });
@@ -546,6 +618,52 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(await page.$eval("body", (body) => body.innerText.includes("MARKET LAB")), false, "Watcher must hide portfolio navbar");
     assert.match(await visibleText(page), /Market Overview/i);
     assert.match(await page.$eval(".siw-main-tabs .is-active", (node) => node.textContent), /Overview/);
+    await page.waitForFunction(() => document.querySelectorAll("[data-spx-market-breadth] table[data-testid]").length === 3, { timeout: 5000 });
+    const spxBreadthLayout = await page.evaluate(() => {
+      const panel = document.querySelector("[data-overview-bottom-panel='spx-market-breadth']");
+      const tertiary = document.querySelector("[data-overview-tertiary]");
+      const panelRect = panel?.getBoundingClientRect();
+      const tertiaryRect = tertiary?.getBoundingClientRect();
+      return {
+        followsTertiary: Boolean(tertiary && panel && (tertiary.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING)),
+        panelWidth: panelRect?.width || 0,
+        tertiaryWidth: tertiaryRect?.width || 0,
+        tables: panel?.querySelectorAll("table[data-testid]").length || 0,
+        text: panel?.textContent || "",
+      };
+    });
+    assert.equal(spxBreadthLayout.followsTertiary, true, "S&P 500 breadth must be the final Overview section after the tertiary cards");
+    assert.equal(spxBreadthLayout.tables, 3, "Watcher must embed all three S&P 500 breadth tables");
+    assert.ok(spxBreadthLayout.panelWidth >= spxBreadthLayout.tertiaryWidth - 1, `S&P 500 breadth must span the full Overview width: ${JSON.stringify(spxBreadthLayout)}`);
+    assert.match(spxBreadthLayout.text, /SPY universe[\s\S]*S&P 500 Market Breadth[\s\S]*derived EOD metrics, not intraday signals/i);
+    assert.match(spxBreadthLayout.text, /Price date\s*Sep 10, 2026[\s\S]*Constituents\s*504[\s\S]*SMA200 coverage\s*99\.8%[\s\S]*Freshness\s*FRESH/i);
+    assert.ok(apiCalls.some((call) => call.endpoint === "market-breadth" && call.mode === "READY"), "Watcher must read the published market-breadth API, not a Yahoo tool fallback");
+    assert.match(await visibleText(page), /Watchlist Market Breadth \(Yahoo live quotes\)/i, "existing Yahoo watchlist breadth must remain separately labelled");
+
+    marketBreadthApiMode = "STALE";
+    await page.click("[data-spx-market-breadth] .siw-spx-market-breadth-refresh");
+    await page.waitForFunction(() => document.querySelector("[data-spx-market-breadth]")?.textContent?.includes("STALE SNAPSHOT"), { timeout: 5000 });
+    assert.match(await page.$eval("[data-spx-market-breadth]", (node) => node.textContent || ""), /last successful Sep 10, 2026 close[\s\S]*PROVIDER_UNAVAILABLE/i, "stale breadth must retain EOD date and failure provenance");
+
+    marketBreadthApiMode = "EMPTY";
+    await page.click("[data-spx-market-breadth] .siw-spx-market-breadth-refresh");
+    await page.waitForFunction(() => document.querySelector("[data-spx-market-breadth]")?.textContent?.includes("Initial backfill required"), { timeout: 5000 });
+
+    marketBreadthApiMode = "INVALID";
+    await page.click("[data-spx-market-breadth] .siw-spx-market-breadth-refresh");
+    await page.waitForFunction(() => document.querySelector("[data-spx-market-breadth]")?.textContent?.includes("Market breadth unavailable"), { timeout: 5000 });
+    assert.match(await page.$eval("[data-spx-market-breadth]", (node) => node.textContent || ""), /schema version is invalid/i, "invalid published breadth payload must fail closed");
+
+    marketBreadthApiMode = "ERROR";
+    await page.$eval("[data-spx-market-breadth] button", (button) => button.click());
+    await page.waitForFunction(() => document.querySelector("[data-spx-market-breadth]")?.textContent?.includes("storage is unavailable"), { timeout: 5000 });
+
+    marketBreadthApiMode = "READY";
+    await page.$eval("[data-spx-market-breadth] button", (button) => button.click());
+    await page.waitForFunction(() => document.querySelectorAll("[data-spx-market-breadth] table[data-testid]").length === 3, { timeout: 5000 });
+    await page.$eval("[data-spx-market-breadth]", (node) => node.scrollIntoView({ block: "start" }));
+    await wait(150);
+    await page.screenshot({ path: path.join(screenshotsDir, "01a-spx-market-breadth-desktop.png") });
     assert.deepEqual(
       await page.$$eval("[data-market-index-label]", (nodes) => nodes.map((node) => node.textContent?.trim())),
       ["S&P 500", "NASDAQ 100", "DOW JONES"],
@@ -1032,6 +1150,13 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await wait(350);
     assert.equal(await page.$("[data-fear-greed-panel]") !== null, true, "F/G Index must render the CNN sentiment surface");
     assert.match(await page.$eval("[data-fear-greed-gauge]", (node) => node.textContent || ""), /38\.9/, "F/G Index must expose the cached CNN score in its gauge");
+    assert.deepEqual(await page.$eval("[data-fear-greed-gauge]", (gauge) => Array.from(gauge.querySelectorAll(".siw-fear-greed-stage")).map((node) => ({ dasharray: node.getAttribute("stroke-dasharray"), dashoffset: node.getAttribute("stroke-dashoffset") }))), [
+      { dasharray: "25 100", dashoffset: "0" },
+      { dasharray: "20 100", dashoffset: "-25" },
+      { dasharray: "11 100", dashoffset: "-45" },
+      { dasharray: "19 100", dashoffset: "-56" },
+      { dasharray: "25 100", dashoffset: "-75" },
+    ], "F/G Index gauge must cover every score range through the Extreme Greed endpoint");
     assert.equal(await page.$("[data-fear-greed-line-chart] svg polyline") !== null, true, "F/G Index must render its one-year line chart");
     assert.equal(await page.$("[data-fear-greed-line-chart] .siw-fear-greed-last-point") === null, true, "F/G Index must not render an unexplained latest-point circle");
     assert.match(await page.$eval("[data-fear-greed-stages]", (node) => node.textContent || ""), /Extreme Fear[\s\S]*Fear[\s\S]*Neutral[\s\S]*Greed[\s\S]*Extreme Greed/, "F/G Index must show all five sentiment stages instead of only the extremes");
