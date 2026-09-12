@@ -93,6 +93,7 @@ export const getStocksWatcherTopTabToolPlan = (
   if (tab === "Earnings") return [
     { name: "earnings_vol_crush", params: { ticker } },
     { name: "historical_context", params: { ticker, event: "earnings" } },
+    { name: "get_financial_statements", params: { symbol: ticker, periods: 12 } },
   ];
   if (tab === "F/G Index") return [];
   if (tab === "Fixed Income") return [];

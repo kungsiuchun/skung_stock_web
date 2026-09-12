@@ -55,12 +55,22 @@ export interface WatcherFinancialQuarter {
   operatingCashFlow_yoy: number | null;
 }
 
+export interface WatcherFinancialSource {
+  source: string;
+  sourceType: string;
+  sourceUrl: string | null;
+  fetchedAt: string;
+  dataAsOf: string;
+  filingDate: string | null;
+}
+
 export interface WatcherFinancialStatements {
   schemaVersion: string;
   source: string;
   symbol: string;
   generatedAt: string;
   dataAsOf: string;
+  financialSource: WatcherFinancialSource;
   quarters: WatcherFinancialQuarter[];
 }
 
@@ -117,8 +127,19 @@ const parseFinancials = (value: unknown, symbol: string): WatcherFinancialStatem
   const validBody = body as Record<string, unknown>;
   const generatedAt = nullableString(validBody.generatedAt);
   const dataAsOf = nullableString(validBody.dataAsOf);
+  const source = record(validBody.financialSource);
   const rawQuarters = validBody.quarters as unknown[];
-  if (!generatedAt || !dataAsOf) throw new Error("VALUATION_DATA_INVALID: financial metadata is missing");
+  const financialSource = source && {
+    source: nullableString(source.source),
+    sourceType: nullableString(source.sourceType),
+    sourceUrl: nullableString(source.sourceUrl),
+    fetchedAt: nullableString(source.fetchedAt),
+    dataAsOf: nullableString(source.dataAsOf),
+    filingDate: nullableString(source.filingDate),
+  };
+  if (!generatedAt || !dataAsOf || !financialSource?.source || !financialSource.sourceType || !financialSource.fetchedAt || !financialSource.dataAsOf) {
+    throw new Error("VALUATION_DATA_INVALID: financial metadata or provenance is missing");
+  }
   assertFresh(generatedAt);
   const quarters = rawQuarters.map((value) => {
     const row = record(value);
@@ -128,7 +149,22 @@ const parseFinancials = (value: unknown, symbol: string): WatcherFinancialStatem
     return { date: validRow.date as string, filingDate: nullableString(validRow.filingDate), fiscalYear: nullableString(validRow.fiscalYear), period: nullableString(validRow.period), currency: nullableString(validRow.currency), revenue: key("revenue"), netIncome: key("netIncome"), eps: key("eps"), operatingCashFlow: key("operatingCashFlow"), freeCashFlow: key("freeCashFlow"), revenue_qoq: key("revenue_qoq"), revenue_yoy: key("revenue_yoy"), netIncome_qoq: key("netIncome_qoq"), netIncome_yoy: key("netIncome_yoy"), eps_qoq: key("eps_qoq"), eps_yoy: key("eps_yoy"), operatingCashFlow_qoq: key("operatingCashFlow_qoq"), operatingCashFlow_yoy: key("operatingCashFlow_yoy") };
   });
   if (!quarters.length || quarters.length > 12) fail("financial quarters must contain 1 to 12 rows");
-  return { schemaVersion: validBody.schemaVersion as string, source: nullableString(validBody.source) || "ValuationCalculation", symbol, generatedAt, dataAsOf, quarters };
+  return {
+    schemaVersion: validBody.schemaVersion as string,
+    source: nullableString(validBody.source) || "ValuationCalculation",
+    symbol,
+    generatedAt,
+    dataAsOf,
+    financialSource: {
+      source: financialSource.source,
+      sourceType: financialSource.sourceType,
+      sourceUrl: financialSource.sourceUrl,
+      fetchedAt: financialSource.fetchedAt,
+      dataAsOf: financialSource.dataAsOf,
+      filingDate: financialSource.filingDate,
+    },
+    quarters,
+  };
 };
 
 const getJson = async (bucket: R2BucketLike | undefined, key: string) => {
