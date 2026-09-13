@@ -1264,6 +1264,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       return rect.width > 0 && rect.height > 0;
     }).length);
     assert.equal(await visibleEarningsQuarterRows(), 8, "Earnings must default to an 8-quarter reported-results table");
+    assert.equal(await page.$eval(".siw-earnings-table thead th:nth-child(2)", (node) => node.textContent), "Filed", "quarter dates are SEC filing dates, not earnings announcement dates");
     const epsChartBox = await page.$eval("[data-earnings-eps-trend] .siw-sparkline-frame", (node) => {
       const rect = node.getBoundingClientRect();
       return { x: rect.left + 2, y: rect.top + rect.height / 2 };

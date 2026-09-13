@@ -4062,7 +4062,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
                   <div className="siw-earnings-table-scroll">
                     <table className="siw-earnings-table">
-                      <thead><tr><th>Quarter</th><th>Reported</th><th>Revenue</th><th>QoQ</th><th>YoY</th><th>EPS</th><th>EPS YoY</th><th>Net income</th><th>Free cash flow</th></tr></thead>
+                      <thead><tr><th>Quarter</th><th>Filed</th><th>Revenue</th><th>QoQ</th><th>YoY</th><th>EPS</th><th>EPS YoY</th><th>Net income</th><th>Free cash flow</th></tr></thead>
                       <tbody>
                         {quarterRows.map((row) => (
                           <tr key={`${row.date}-${row.period || "quarter"}`} data-earnings-quarter-row>
