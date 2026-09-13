@@ -4067,7 +4067,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                         {quarterRows.map((row) => (
                           <tr key={`${row.date}-${row.period || "quarter"}`} data-earnings-quarter-row>
                             <th>{[row.fiscalYear, row.period].filter(Boolean).join(" ") || row.date}</th>
-                            <td>{row.filingDate || row.date}</td>
+                            <td>{row.filingDate || "N/A"}</td>
                             <td>{formatFinancialAmount(row.revenue, row.currency)}</td>
                             <td className={row.revenue_qoq !== null && row.revenue_qoq < 0 ? "siw-down" : "siw-up"}>{formatSignedPercent(row.revenue_qoq)}</td>
                             <td className={row.revenue_yoy !== null && row.revenue_yoy < 0 ? "siw-down" : "siw-up"}>{formatSignedPercent(row.revenue_yoy)}</td>
