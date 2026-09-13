@@ -124,7 +124,12 @@ export function StocksWatcherFearGreedPanel({ snapshot, cache, onRefresh }: Stoc
       </div>
 
       <section className="siw-fear-greed-comparisons" aria-label="Fear and Greed comparison levels">
-        {comparisons.map(([label, value]) => <div key={label}><span>{label}</span><strong>{formatScore(value)}</strong></div>)}
+        {comparisons.map(([label, value]) => {
+          const stage = value === null ? null : FEAR_GREED_STAGES.find((candidate) => value < candidate.end) || FEAR_GREED_STAGES[FEAR_GREED_STAGES.length - 1];
+          return <div key={label} className={stage ? `is-${stage.tone}` : "is-unavailable"}>
+            <span>{label}</span><strong>{formatScore(value)}</strong>{stage && <em>{stage.label}</em>}
+          </div>;
+        })}
       </section>
 
       <footer className={`siw-fear-greed-source ${cache?.status === "stale" ? "is-stale" : ""}`} data-fear-greed-cache>

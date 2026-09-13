@@ -255,7 +255,7 @@ const fearGreedFixture = () => ({
     asOf: "2026-09-09T20:00:00.000Z",
     score: 38.9,
     rating: "fear",
-    comparisons: { previousClose: 40.2, previousWeek: 44.8, previousMonth: 52.1, previousYear: 29.7 },
+    comparisons: { previousClose: 40.2, previousWeek: 45.2, previousMonth: 60.1, previousYear: 76.4 },
     history: Array.from({ length: 60 }, (_, index) => ({
       at: new Date(Date.UTC(2026, 6, 1 + index)).toISOString(),
       score: 25 + ((index * 7) % 50),
@@ -1027,6 +1027,15 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       heroTooltipRect.bottom <= heroTooltipRect.viewportHeight,
       `hero tooltip should be inside the viewport and not clipped by the header; got ${JSON.stringify(heroTooltipRect)}`,
     );
+    const heroChartBox = await page.$eval(".siw-hero-chart .siw-sparkline-frame", (node) => {
+      const rect = node.getBoundingClientRect();
+      return { x: rect.left + 2, y: rect.top + rect.height / 2 };
+    });
+    await page.mouse.move(heroChartBox.x, heroChartBox.y);
+    await page.waitForFunction(() => /\b1\/\d+ pts\b/.test(document.querySelector(".siw-hero-chart [data-sparkline-tooltip]")?.textContent || ""));
+    assert.equal(await page.$(".siw-hero-chart [data-sparkline-change]"), null, "first hero point has no prior-point change to display");
+    assert.equal(await page.$(".siw-hero-chart [data-sparkline-active-dot]"), null, "hero hover should not draw a hollow point ring");
+    assert.equal(await page.$$eval(".siw-hero-chart .siw-sparkline line", (nodes) => nodes.length), 1, "hero hover should keep only the vertical guide, without a dashed baseline");
     for (const [symbol, source] of [["SPX", "^GSPC"], ["NDX", "^NDX"], ["DJI", "^DJI"]]) {
       await page.hover(`[data-market-index-card='${symbol}'] .siw-sparkline-frame`);
       await wait(150);
@@ -1046,10 +1055,8 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
         indexTooltipRect.bottom <= indexTooltipRect.viewportHeight,
         `${symbol} custom tooltip should be visible inside viewport; got ${JSON.stringify(indexTooltipRect)}`,
       );
-      assert.ok(
-        await page.$eval(`[data-market-index-card='${symbol}'] [data-sparkline-active-dot]`, () => true),
-        `${symbol} hover should show active point dot`,
-      );
+      assert.equal(await page.$(`[data-market-index-card='${symbol}'] [data-sparkline-active-dot]`), null, `${symbol} hover should not draw a hollow point ring`);
+      assert.equal(await page.$$eval(`[data-market-index-card='${symbol}'] .siw-sparkline line`, (nodes) => nodes.length), 1, `${symbol} hover should keep only the vertical guide`);
       assert.ok(
         await page.$eval(`[data-market-index-card='${symbol}'] [data-sparkline-crosshair]`, () => true),
         `${symbol} hover should show crosshair`,
@@ -1238,6 +1245,12 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(await page.$("[data-fear-greed-line-chart] svg polyline") !== null, true, "F/G Index must render its one-year line chart");
     assert.equal(await page.$("[data-fear-greed-line-chart] .siw-fear-greed-last-point") === null, true, "F/G Index must not render an unexplained latest-point circle");
     assert.match(await page.$eval("[data-fear-greed-stages]", (node) => node.textContent || ""), /Extreme Fear[\s\S]*Fear[\s\S]*Neutral[\s\S]*Greed[\s\S]*Extreme Greed/, "F/G Index must show all five sentiment stages instead of only the extremes");
+    assert.deepEqual(await page.$eval("[data-fear-greed-panel] .siw-fear-greed-comparisons", (panel) => Array.from(panel.children).map((node) => ({ tone: node.className, stage: node.querySelector("em")?.textContent }))), [
+      { tone: "is-fear", stage: "Fear" },
+      { tone: "is-neutral", stage: "Neutral" },
+      { tone: "is-greed", stage: "Greed" },
+      { tone: "is-extreme-greed", stage: "Extreme Greed" },
+    ], "every F/G comparison period should show its own score stage");
     assert.match(await page.$eval("[data-fear-greed-cache]", (node) => node.textContent || ""), /D1 cache refreshed[\s\S]*TTL: 15 min/, "F/G Index must disclose the shared D1 cache contract");
     assert.ok(apiCalls.some((call) => call.endpoint === "fear-greed"), "F/G Index must call only the server-side fear-greed API");
 
@@ -1251,6 +1264,15 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       return rect.width > 0 && rect.height > 0;
     }).length);
     assert.equal(await visibleEarningsQuarterRows(), 8, "Earnings must default to an 8-quarter reported-results table");
+    const epsChartBox = await page.$eval("[data-earnings-eps-trend] .siw-sparkline-frame", (node) => {
+      const rect = node.getBoundingClientRect();
+      return { x: rect.left + 2, y: rect.top + rect.height / 2 };
+    });
+    await page.mouse.move(epsChartBox.x, epsChartBox.y);
+    await page.waitForFunction(() => /\b1\/\d+ pts\b/.test(document.querySelector("[data-earnings-eps-trend] [data-sparkline-tooltip]")?.textContent || ""));
+    assert.equal(await page.$("[data-earnings-eps-trend] [data-sparkline-change]"), null, "first EPS point has no prior-point change to display");
+    assert.equal(await page.$("[data-earnings-eps-trend] [data-sparkline-active-dot]"), null, "EPS hover should not draw a hollow point ring");
+    assert.equal(await page.$$eval("[data-earnings-eps-trend] .siw-sparkline line", (nodes) => nodes.length), 1, "EPS hover should keep only the vertical guide");
     assert.ok(apiCalls.some((call) => call.tool === "earnings_vol_crush"), "Earnings must execute the Yahoo event plan");
     const earningsSymbol = await page.$eval(".siw-hero-identity h1", (node) => node.textContent || "");
     assert.ok(apiCalls.some((call) => call.tool === "get_financial_statements" && call.params?.symbol === earningsSymbol && call.params?.periods === 12), `Earnings must request 12 ValuationCalculation quarters once; got ${JSON.stringify(apiCalls.filter((call) => call.tool === "get_financial_statements"))}`);

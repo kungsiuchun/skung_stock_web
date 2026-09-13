@@ -1816,7 +1816,6 @@ const MiniSparkline = ({
           data-index-sparkline={dataRole === "index" ? "true" : undefined}
         >
           <title>{unavailableLabel}</title>
-          <line x1="0" x2="100" y1={geometry.baseline} y2={geometry.baseline} />
           <text x="50" y={geometry.emptyTextY} textAnchor="middle">N/A</text>
         </svg>
       </span>
@@ -1847,7 +1846,11 @@ const MiniSparkline = ({
   const activeChange = activeValue !== null && previousValue !== null ? activeValue - previousValue : null;
   const activeChangePercent = activeChange !== null && previousValue ? (activeChange / previousValue) * 100 : null;
   const activeX = activeIndex === null ? 0 : pointX(activeIndex);
-  const activeY = activeValue === null ? 0 : pointY(activeValue);
+  const activeChangeText = activeChange === null
+    ? null
+    : dataRole
+      ? activeChangePercent === null ? null : `${activeChangePercent >= 0 ? "+" : ""}${activeChangePercent.toFixed(2)}%`
+      : `${activeChange >= 0 ? "+" : ""}${formatValue(activeChange)}`;
   const activeRange = [activePoint?.rangeLabel, activePoint?.granularityLabel].filter(Boolean).join(" ");
   const activeHeader = activePoint
     ? [activePoint.label, activePoint.dateTimeLabel, activeRange].filter(Boolean).join(" · ")
@@ -1885,25 +1888,15 @@ const MiniSparkline = ({
         <title>{tooltipText}</title>
         <path className="siw-sparkline-fill" d={`${path} L100 ${geometry.fillBase} L0 ${geometry.fillBase} Z`} />
         <path className="siw-sparkline-line" d={path} />
-        <line x1="0" x2="100" y1={geometry.baseline} y2={geometry.baseline} />
         {activePoint && (
-          <>
-            <line
-              className="siw-sparkline-crosshair"
-              x1={activeX}
-              x2={activeX}
-              y1="0"
-              y2={geometry.fillBase}
-              data-sparkline-crosshair
-            />
-            <circle
-              className="siw-sparkline-active-dot"
-              cx={activeX}
-              cy={activeY}
-              r="2.6"
-              data-sparkline-active-dot
-            />
-          </>
+          <line
+            className="siw-sparkline-crosshair"
+            x1={activeX}
+            x2={activeX}
+            y1="0"
+            y2={geometry.fillBase}
+            data-sparkline-crosshair
+          />
         )}
       </svg>
       {activePoint && activeValue !== null && (
@@ -1917,13 +1910,9 @@ const MiniSparkline = ({
           }}
         >
           <b>{activeHeader}</b>
-          <span>
-            Value <strong>{formatValue(activeValue)}</strong>
-          </span>
-          <span className={activeChange === null ? "" : activeChange >= 0 ? "siw-up" : "siw-down"}>
-            {activeChange === null || activeChangePercent === null
-              ? "First point"
-              : `${activeChange >= 0 ? "+" : ""}${formatValue(activeChange)} (${activeChangePercent >= 0 ? "+" : ""}${activeChangePercent.toFixed(2)}%)`}
+          <span className="siw-sparkline-tooltip-main">
+            <strong>{formatValue(activeValue)}</strong>
+            {activeChangeText && <small data-sparkline-change className={activeChange !== null && activeChange >= 0 ? "siw-up" : "siw-down"}>{activeChangeText}</small>}
           </span>
           <em>{activePoint.source || sourceLabel || "Source"} · {activeIndex === null ? 0 : activeIndex + 1}/{values.length} pts</em>
         </span>
