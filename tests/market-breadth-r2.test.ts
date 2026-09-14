@@ -323,11 +323,10 @@ describe("Market Breadth R2 architecture", () => {
     assert.match(workflow, /Compute and atomically publish[\s\S]*MASSIVE_API_KEY:[\s\S]*MARKET_BREADTH_R2_SECRET_ACCESS_KEY:/);
   });
 
-  it("schedules Basic-plan EOD refreshes after the next-day publication window", () => {
+  it("schedules Basic-plan EOD refreshes on every weekday", () => {
     const workflow = readFileSync(new URL("../.github/workflows/refresh-market-breadth.yml", import.meta.url), "utf8");
-    assert.match(workflow, /cron: "17 17 \* \* 2-6"/);
-    assert.match(workflow, /cron: "47 18 \* \* 2-6"/);
-    assert.doesNotMatch(workflow, /cron: "(?:47 22|32 23) \* \* 1-5"/);
+    const schedules = [...workflow.matchAll(/^\s*- cron: "([^"]+)"$/gm)].map(([, schedule]) => schedule);
+    assert.deepEqual(schedules, ["17 17 * * 1-5", "47 18 * * 1-5"]);
   });
 });
 
