@@ -703,6 +703,8 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
         <SpxPriceActionCompass
           enabled={initialHeatmapSettled}
           refreshKey={pressureRefreshKey}
+          refreshingAllSources={manualRefreshPending}
+          onRefreshAllSources={() => void refreshLatest()}
           onInitialLoadSettled={() => setInitialCompassSettled(true)}
         />
 

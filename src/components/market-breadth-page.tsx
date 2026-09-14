@@ -157,11 +157,11 @@ export function MarketBreadthPanel({ onBackToWork, variant = "standalone" }: Mar
               <p className="text-[0.65rem] font-bold uppercase tracking-[0.22em] text-amber-500">Market internals / SPY universe</p>
               <h1 className={standalone ? "mt-2 text-2xl font-black tracking-[-0.055em] text-zinc-100 sm:text-4xl" : "siw-spx-market-breadth-title"}>S&amp;P 500 MARKET BREADTH</h1>
               <p className={standalone ? "mt-3 max-w-3xl text-xs leading-5 text-zinc-500" : "siw-spx-market-breadth-subtitle"}>
-                Daily participation, sector leadership, and long-term trend strength. Values are derived EOD metrics, not intraday signals.
+                Daily participation, sector leadership, and long-term trend strength. EOD snapshot: updates after the U.S. market close, not intraday.
               </p>
             </div>
-            <button type="button" disabled={loading} onClick={() => void load()} className={standalone ? "inline-flex w-fit items-center gap-2 border border-amber-500/70 bg-amber-500/10 px-3 py-2 text-[0.68rem] font-bold uppercase tracking-[0.14em] text-amber-400 hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400" : "siw-spx-market-breadth-refresh"}>
-              <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} /> {standalone ? "Refresh view" : "Refresh"}
+            <button type="button" disabled={loading} onClick={() => void load()} title="Reload the published EOD snapshot; this does not run the market-data job." className={standalone ? "inline-flex w-fit items-center gap-2 border border-amber-500/70 bg-amber-500/10 px-3 py-2 text-[0.68rem] font-bold uppercase tracking-[0.14em] text-amber-400 hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400" : "siw-spx-market-breadth-refresh"}>
+              <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} /> {standalone ? "Reload EOD snapshot" : "Reload EOD"}
             </button>
           </div>
 
@@ -178,7 +178,7 @@ export function MarketBreadthPanel({ onBackToWork, variant = "standalone" }: Mar
                 </div>
               </div>
               <p className="border-x border-b border-zinc-800 bg-[#111416] px-3 py-2 text-[0.6rem] leading-4 text-zinc-500">
-                Sources: {data.sources.map((source) => `${source.provider} — ${source.role}`).join(" · ")}
+                EOD as of {formatDate(data.priceAsOf)}. This control reloads the published snapshot; the scheduled market-data job runs after U.S. close. Sources: {data.sources.map((source) => `${source.provider} — ${source.role}`).join(" · ")}
               </p>
             </div>
           )}
