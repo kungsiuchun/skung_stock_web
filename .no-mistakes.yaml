@@ -1,0 +1,20 @@
+# Keep the gate deterministic, secret-free, and bounded. Feature-specific UAT
+# still runs explicitly before an authorized release pipeline.
+agent: codex
+
+commands:
+  test: npm.cmd run test:no-mistakes
+  lint: npm.cmd run lint
+  format: ""
+
+allow_repo_commands: true
+
+auto_fix:
+  rebase: 1
+  lint: 1
+  test: 1
+  review: 0
+  document: 0
+  ci: 1
+
+no_ci: false
