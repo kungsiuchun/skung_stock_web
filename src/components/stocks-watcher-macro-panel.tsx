@@ -36,12 +36,22 @@ const formatMonth = (month: string) => new Intl.DateTimeFormat("en-US", {
   timeZone: "UTC",
 }).format(new Date(`${month}-01T00:00:00Z`));
 
+const formatDateTime = (date: string) => new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  timeZoneName: "short",
+}).format(new Date(date));
+
 const formatValue = (value: number) => new Intl.NumberFormat("en-US", {
   minimumFractionDigits: value >= 1_000 ? 0 : 2,
   maximumFractionDigits: value >= 1_000 ? 0 : 2,
 }).format(value);
 
 const changeClass = (value: number | null) => value === null ? "" : value > 0 ? "siw-up" : value < 0 ? "siw-down" : "";
+const changeDirection = (value: number | null) => value === null ? "unavailable" : value > 0 ? "positive" : value < 0 ? "negative" : "unchanged";
 const formatChange = (value: number | null) => value === null ? "—" : `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
 
 const heatClass = (row: MacroInflationRow, value: number | null) => {
@@ -92,14 +102,28 @@ export function StocksWatcherMacroPanel() {
     ["YTD", "yearToDate"],
   ] as const, []);
 
+  const marketCadence = useMemo(() => {
+    const latest = (frequency: "daily" | "monthly") => {
+      const dates = data?.markets.rows
+        .filter((row) => row.frequency === frequency)
+        .map((row) => row.asOf)
+        .sort() || [];
+      return dates[dates.length - 1];
+    };
+    return { daily: latest("daily"), monthly: latest("monthly") };
+  }, [data]);
+
   return <section className="siw-macro" data-macro-panel>
     <header className="siw-macro-head">
       <div>
         <span className="siw-eyebrow">Macro dashboard</span>
         <h2>Commodities, Dollar &amp; Inflation</h2>
-        <p>Official published benchmarks · daily rows use trading-day changes; monthly rows leave 1D/1W blank.</p>
+        <p>Official published benchmarks · daily rows use trading-day changes; monthly dates name the reporting month and leave 1D/1W blank.</p>
       </div>
-      {data && <span>Latest source date {formatDate(data.asOf)}</span>}
+      {data && <div className="siw-macro-meta">
+        <span>Latest source date {formatDate(data.asOf)}</span>
+        {cache && <small data-macro-cache-status={cache.status}>{cache.status === "stale" ? "Stale snapshot" : `Retrieved ${formatDateTime(cache.cachedAt)}`}</small>}
+      </div>}
     </header>
 
     {loading && <div className="siw-macro-loading" aria-live="polite">Loading FRED macro series…</div>}
@@ -110,12 +134,18 @@ export function StocksWatcherMacroPanel() {
     </div>}
 
     {data && !loading && <>
-      {cache?.status === "stale" && <div className="siw-macro-stale" role="status">Showing stale cached macro data because the latest FRED refresh failed.</div>}
+      {cache?.status === "stale" && <div className="siw-macro-stale" role="status" data-macro-cache-status="stale">
+        Showing cached macro data from {formatDateTime(cache.cachedAt)} because the latest FRED refresh failed{cache.refreshError ? `: ${cache.refreshError}` : "."}
+      </div>}
 
       <section className="siw-macro-card" data-macro-markets>
         <div className="siw-macro-card-head">
           <div><span className="siw-eyebrow">Market benchmarks</span><h3>Commodities &amp; U.S. Dollar</h3></div>
-          <span>As of {formatDate(data.markets.asOf)}</span>
+          <span data-macro-market-cadence>
+            {marketCadence.daily && <>Daily through {formatDate(marketCadence.daily)}</>}
+            {marketCadence.daily && marketCadence.monthly && <> · </>}
+            {marketCadence.monthly && <>Monthly through {formatMonth(marketCadence.monthly.slice(0, 7))}</>}
+          </span>
         </div>
         <div className="siw-macro-table-wrap">
           <table className="siw-macro-market-table">
@@ -123,7 +153,7 @@ export function StocksWatcherMacroPanel() {
             <tbody>{data.markets.rows.map((row) => <tr key={row.id}>
               <th><span>{row.label}</span><small>{row.seriesId} · {row.frequency} · {formatDate(row.asOf)}</small></th>
               <td className="siw-macro-number"><span>{formatValue(row.value)}</span><small>{row.unit}</small></td>
-              {marketColumns.map(([label, key]) => <td key={label} className={`siw-macro-change ${changeClass(row.changes[key])}`}>{formatChange(row.changes[key])}</td>)}
+              {marketColumns.map(([label, key]) => <td key={label} className={`siw-macro-change ${changeClass(row.changes[key])}`} data-change-direction={changeDirection(row.changes[key])}>{formatChange(row.changes[key])}</td>)}
             </tr>)}</tbody>
           </table>
         </div>
@@ -132,7 +162,13 @@ export function StocksWatcherMacroPanel() {
       <section className="siw-macro-card" data-macro-inflation>
         <div className="siw-macro-card-head">
           <div><span className="siw-eyebrow">Inflation monitor</span><h3>Last 12 Monthly Releases</h3></div>
-          <span>Higher values shade red · lower values shade blue</span>
+          <div className="siw-macro-card-tools">
+            <span>Monthly through {formatMonth(data.inflation.asOf.slice(0, 7))}</span>
+            <div className="siw-macro-heat-legend" aria-label="Conditional formatting: lower values blue, higher values red">
+              <span><i className="is-cool" aria-hidden="true" /> Lower</span>
+              <span><i className="is-hot" aria-hidden="true" /> Higher</span>
+            </div>
+          </div>
         </div>
         <div className="siw-macro-table-wrap">
           <table className="siw-macro-inflation-table">

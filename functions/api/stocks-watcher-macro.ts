@@ -1,8 +1,9 @@
 import {
   buildStocksWatcherMacroSnapshot,
-  FRED_API_ROOT,
+  FRED_GRAPH_CSV_ROOT,
   MACRO_FRED_SERIES_IDS,
-  parseFredObservations,
+  MACRO_FRED_SERIES_GROUPS,
+  parseFredCsv,
 } from "../../src/lib/stocks-watcher-macro";
 import {
   MarketCacheQuotaExceededError,
@@ -13,7 +14,6 @@ import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
 import { reserveMarketCacheRefreshQuota } from "../../src/lib/stocks-watcher-refresh-quota";
 
 interface Env {
-  FRED_API_KEY?: string;
   MARKET_CACHE_DB?: D1DatabaseLike;
 }
 
@@ -35,44 +35,25 @@ const errorStatus = (error: unknown) => {
   return 502;
 };
 
-const loadFredSeries = async (seriesId: string, apiKey: string, signal: AbortSignal) => {
-  const url = new URL(FRED_API_ROOT);
-  url.searchParams.set("series_id", seriesId);
-  url.searchParams.set("api_key", apiKey);
-  url.searchParams.set("file_type", "json");
-  // Ask FRED for the newest window, then normalize it into ascending order.
-  // The oldest 500 daily observations would stop decades before today's row.
-  url.searchParams.set("sort_order", "desc");
-  url.searchParams.set("limit", "500");
+const loadFredSeriesGroup = async (seriesIds: readonly string[], signal: AbortSignal) => {
+  const url = new URL(FRED_GRAPH_CSV_ROOT);
+  url.searchParams.set("id", seriesIds.join(","));
 
   const response = await fetch(url, {
     headers: {
-      Accept: "application/json",
+      Accept: "text/csv",
       "User-Agent": "SIU-Stocks-Watcher-Macro/1.0 (+https://sius-ai-workshop.pages.dev)",
     },
     signal,
   });
-  if (!response.ok) throw new Error(`FRED ${seriesId} request returned HTTP ${response.status}.`);
-  let payload: unknown;
-  try {
-    payload = await response.json();
-  } catch {
-    throw new Error(`FRED ${seriesId} response was not valid JSON.`);
-  }
-  return parseFredObservations(payload, seriesId);
+  if (!response.ok) throw new Error(`FRED CSV request for ${seriesIds.join(", ")} returned HTTP ${response.status}.`);
+  const payload = await response.text();
+  return parseFredCsv(payload, seriesIds);
 };
 
 export async function onRequestGet(context: { request: Request; env: Env; deadlineMs?: number }) {
   const requestId = crypto.randomUUID();
   const deadlineMs = context.deadlineMs ?? MACRO_DEADLINE_MS;
-  const apiKey = context.env.FRED_API_KEY?.trim();
-  if (!apiKey) {
-    return json({
-      error: "Macro data source is unavailable because FRED_API_KEY is not configured.",
-      errorCode: "FRED_KEY_MISSING",
-      requestId,
-    }, 503, requestId);
-  }
 
   try {
     const resolved = await resolveMarketCache({
@@ -95,11 +76,9 @@ export async function onRequestGet(context: { request: Request; env: Env; deadli
         context.request.signal.addEventListener("abort", abortFromRequest, { once: true });
         const timeout = setTimeout(() => controller.abort("FRED macro deadline exceeded"), Math.min(10_000, Math.max(1, deadlineMs - 1_000)));
         try {
-          const entries = await Promise.all(MACRO_FRED_SERIES_IDS.map(async (seriesId) => [
-            seriesId,
-            await loadFredSeries(seriesId, apiKey, controller.signal),
-          ] as const));
-          return buildStocksWatcherMacroSnapshot(Object.fromEntries(entries));
+          const groups = await Promise.all(MACRO_FRED_SERIES_GROUPS.map((seriesIds) =>
+            loadFredSeriesGroup(seriesIds, controller.signal)));
+          return buildStocksWatcherMacroSnapshot(Object.assign({}, ...groups));
         } finally {
           clearTimeout(timeout);
           context.request.signal.removeEventListener("abort", abortFromRequest);
@@ -112,6 +91,7 @@ export async function onRequestGet(context: { request: Request; env: Env; deadli
       requestId,
       cacheStatus: resolved.cache.status,
       sourceAsOf: resolved.value.asOf,
+      upstreamRequests: MACRO_FRED_SERIES_GROUPS.length,
       marketRows: resolved.value.markets.rows.length,
       inflationMonths: resolved.value.inflation.months.length,
     }));

@@ -1376,6 +1376,28 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     }));
     assert.deepEqual([macroProof.marketRows, macroProof.inflationRows, macroProof.inflationMonths], [9, 7, 12]);
     assert.match(macroProof.text, /Federal Reserve Economic Data \(FRED\)/i);
+    assert.match(macroProof.text, /Daily through Sep 9, 2026[\s\S]*Monthly through Jul 26/i, "Macro must distinguish daily and monthly source dates");
+    assert.match(macroProof.text, /Retrieved Sep 10, 2026/i, "Macro must expose the cache retrieval time");
+    const macroThemeProof = await page.evaluate(() => {
+      const style = (selector) => {
+        const node = document.querySelector(selector);
+        if (!node) return null;
+        const computed = getComputedStyle(node);
+        return { color: computed.color, background: computed.backgroundColor };
+      };
+      return {
+        positive: style('.siw-macro-change[data-change-direction="positive"]'),
+        negative: style('.siw-macro-change[data-change-direction="negative"]'),
+        cool: style(".siw-macro-heat.is-cool-4"),
+        hot: style(".siw-macro-heat.is-hot-4"),
+      };
+    });
+    assert.equal(macroThemeProof.positive?.color, "rgb(22, 219, 114)", "positive macro changes must use the Watcher green token");
+    assert.match(macroThemeProof.positive?.background || "", /22, 219, 114/, "positive macro changes must have green conditional formatting");
+    assert.equal(macroThemeProof.negative?.color, "rgb(255, 62, 77)", "negative macro changes must use the Watcher red token");
+    assert.match(macroThemeProof.negative?.background || "", /255, 62, 77/, "negative macro changes must have red conditional formatting");
+    assert.match(macroThemeProof.cool?.background || "", /17, 135, 255/, "low inflation readings must use the Watcher blue scale");
+    assert.match(macroThemeProof.hot?.background || "", /255, 62, 77/, "high inflation readings must use the Watcher red scale");
     assert.ok(apiCalls.some((call) => call.endpoint === "stocks-watcher-macro"), "Macro must request its dedicated source-backed endpoint");
     const macroStatusText = await page.$eval(".siw-status-bar", (node) => node.textContent || "");
     assert.match(macroStatusText, /Federal Reserve Economic Data[\s\S]*EIA[\s\S]*IMF[\s\S]*BEA/i);

@@ -1,4 +1,4 @@
-export const FRED_API_ROOT = "https://api.stlouisfed.org/fred/series/observations";
+export const FRED_GRAPH_CSV_ROOT = "https://fred.stlouisfed.org/graph/fredgraph.csv";
 export const FRED_SOURCE_URL = "https://fred.stlouisfed.org/";
 export const FRED_TERMS_URL = "https://fred.stlouisfed.org/docs/api/terms_of_use.html";
 
@@ -92,6 +92,18 @@ export const MACRO_FRED_SERIES_IDS = Array.from(new Set([
   ...MACRO_INFLATION_SERIES_IDS,
 ]));
 
+/**
+ * FRED graph downloads support multiple same-frequency series in one CSV.
+ * Keep each group at five or fewer series so one dashboard refresh stays
+ * below Cloudflare Workers' six simultaneous outgoing-connection limit.
+ */
+export const MACRO_FRED_SERIES_GROUPS: readonly (readonly string[])[] = [
+  MACRO_MARKET_DEFINITIONS.filter((definition) => definition.frequency === "daily").map((definition) => definition.seriesId),
+  MACRO_MARKET_DEFINITIONS.filter((definition) => definition.frequency === "monthly").map((definition) => definition.seriesId),
+  ["PCEPI", "PCEPILFE", "PI", "PCE"],
+  ["PCETRIM1M158SFRBDAL", "PCETRIM6M680SFRBDAL", "PCETRIM12M159SFRBDAL"],
+] as const;
+
 export class StocksWatcherMacroError extends Error {
   constructor(message: string) {
     super(message);
@@ -123,6 +135,45 @@ export const parseFredObservations = (payload: unknown, seriesId: string): Macro
   }).sort((left, right) => left.date.localeCompare(right.date));
   if (parsed.length === 0) {
     throw new StocksWatcherMacroError(`FRED ${seriesId} returned no finite observations.`);
+  }
+  return parsed;
+};
+
+export const parseFredCsv = (
+  payload: string,
+  expectedSeriesIds: readonly string[],
+): Record<string, MacroObservation[]> => {
+  const lines = payload.replace(/^\uFEFF/, "").split(/\r?\n/).filter((line) => line.trim() !== "");
+  const columns = lines[0]?.split(",").map((value) => value.trim()) || [];
+  if (columns[0] !== "observation_date") {
+    throw new StocksWatcherMacroError("FRED CSV response did not begin with observation_date.");
+  }
+
+  const indexes = expectedSeriesIds.map((seriesId) => {
+    const index = columns.indexOf(seriesId);
+    if (index < 1) throw new StocksWatcherMacroError(`FRED CSV response did not contain series ${seriesId}.`);
+    return [seriesId, index] as const;
+  });
+  const parsed = Object.fromEntries(expectedSeriesIds.map((seriesId) => [seriesId, []])) as Record<string, MacroObservation[]>;
+
+  for (const line of lines.slice(1)) {
+    const cells = line.split(",");
+    const date = cells[0]?.trim();
+    if (!isIsoDate(date)) continue;
+    for (const [seriesId, index] of indexes) {
+      const rawValue = cells[index]?.trim();
+      if (!rawValue || rawValue === ".") continue;
+      const value = Number(rawValue);
+      if (Number.isFinite(value)) parsed[seriesId].push({ date, value });
+    }
+  }
+
+  for (const seriesId of expectedSeriesIds) {
+    parsed[seriesId].sort((left, right) => left.date.localeCompare(right.date));
+    parsed[seriesId] = parsed[seriesId].slice(-500);
+    if (parsed[seriesId].length === 0) {
+      throw new StocksWatcherMacroError(`FRED ${seriesId} returned no finite observations.`);
+    }
   }
   return parsed;
 };

@@ -5,9 +5,11 @@ import { onRequestGet } from "../functions/api/stocks-watcher-macro";
 import {
   buildStocksWatcherMacroSnapshot,
   MACRO_FRED_SERIES_IDS,
+  MACRO_FRED_SERIES_GROUPS,
   MACRO_INFLATION_SERIES_IDS,
   MACRO_MARKET_DEFINITIONS,
   parseFredObservations,
+  parseFredCsv,
   StocksWatcherMacroError,
   type MacroObservation,
 } from "../src/lib/stocks-watcher-macro";
@@ -103,40 +105,63 @@ test("rejects malformed or empty FRED observation payloads instead of inventing 
   ]);
 });
 
-test("Macro API fails closed when the server-side FRED key is missing", async () => {
-  const response = await onRequestGet({
-    request: new Request("https://example.com/api/stocks-watcher-macro"),
-    env: {},
+test("parses grouped FRED CSV while rejecting missing series and empty observations", () => {
+  assert.deepEqual(parseFredCsv([
+    "observation_date,DCOILWTICO,DTWEXBGS",
+    "2026-09-09,97.26,117.8834",
+    "2026-09-10,,118.0787",
+    "2026-09-11,.,118.2126",
+  ].join("\n"), ["DCOILWTICO", "DTWEXBGS"]), {
+    DCOILWTICO: [{ date: "2026-09-09", value: 97.26 }],
+    DTWEXBGS: [
+      { date: "2026-09-09", value: 117.8834 },
+      { date: "2026-09-10", value: 118.0787 },
+      { date: "2026-09-11", value: 118.2126 },
+    ],
   });
-  const payload = await response.json() as { errorCode: string; error: string };
-  assert.equal(response.status, 503);
-  assert.equal(payload.errorCode, "FRED_KEY_MISSING");
-  assert.match(payload.error, /FRED_API_KEY/);
+  assert.throws(() => parseFredCsv("date,PCEPI\n2026-07-01,100", ["PCEPI"]), /observation_date/);
+  assert.throws(() => parseFredCsv("observation_date,PCEPI\n2026-07-01,100", ["PI"]), /did not contain series PI/);
+  assert.throws(() => parseFredCsv("observation_date,PCEPI\n2026-07-01,.", ["PCEPI"]), /no finite observations/);
 });
 
-test("Macro API fetches each declared FRED series server-side and returns source-labelled data", async () => {
+const fredCsvFixture = (seriesIds: string[], fixtures: Record<string, MacroObservation[]>) => {
+  const dates = Array.from(new Set(seriesIds.flatMap((seriesId) => fixtures[seriesId].map((entry) => entry.date)))).sort();
+  const values = Object.fromEntries(seriesIds.map((seriesId) => [seriesId, new Map(fixtures[seriesId].map((entry) => [entry.date, entry.value]))]));
+  return [
+    ["observation_date", ...seriesIds].join(","),
+    ...dates.map((date) => [date, ...seriesIds.map((seriesId) => values[seriesId].get(date) ?? "")].join(",")),
+  ].join("\n");
+};
+
+test("Macro API stays below the Workers connection cap and returns source-labelled data without a secret", async () => {
   const originalFetch = globalThis.fetch;
   const fixtures = fixtureSeries();
-  const requestedSeries: string[] = [];
+  const requestedGroups: string[][] = [];
+  let activeRequests = 0;
+  let maxActiveRequests = 0;
   globalThis.fetch = async (input) => {
     const url = new URL(String(input));
-    const seriesId = url.searchParams.get("series_id") || "";
-    assert.equal(url.searchParams.get("sort_order"), "desc");
-    requestedSeries.push(seriesId);
-    return new Response(JSON.stringify({ observations: fixtures[seriesId].map((entry) => ({
-      date: entry.date,
-      value: String(entry.value),
-    })) }), { status: 200, headers: { "Content-Type": "application/json" } });
+    assert.equal(url.origin + url.pathname, "https://fred.stlouisfed.org/graph/fredgraph.csv");
+    const seriesIds = (url.searchParams.get("id") || "").split(",").filter(Boolean);
+    assert.ok(seriesIds.length > 0 && seriesIds.length <= 5);
+    requestedGroups.push(seriesIds);
+    activeRequests += 1;
+    maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    activeRequests -= 1;
+    return new Response(fredCsvFixture(seriesIds, fixtures), { status: 200, headers: { "Content-Type": "text/csv" } });
   };
 
   try {
     const response = await onRequestGet({
       request: new Request("https://example.com/api/stocks-watcher-macro"),
-      env: { FRED_API_KEY: "test-key" },
+      env: {},
     });
     const payload = await response.json() as { data: { markets: { rows: unknown[] }; inflation: { months: string[] }; source: { provider: string } }; cache: { status: string } };
     assert.equal(response.status, 200);
-    assert.deepEqual([...requestedSeries].sort(), [...MACRO_FRED_SERIES_IDS].sort());
+    assert.equal(requestedGroups.length, MACRO_FRED_SERIES_GROUPS.length);
+    assert.ok(maxActiveRequests <= 6);
+    assert.deepEqual(requestedGroups.flat().sort(), [...MACRO_FRED_SERIES_IDS].sort());
     assert.equal(payload.data.markets.rows.length, 9);
     assert.equal(payload.data.inflation.months.length, 12);
     assert.equal(payload.data.source.provider, "Federal Reserve Economic Data (FRED)");
