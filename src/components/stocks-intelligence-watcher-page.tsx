@@ -7,6 +7,7 @@ import {
   Building2,
   CalendarDays,
   ChevronDown,
+  Globe2,
   LineChart,
   Loader2,
   Newspaper,
@@ -16,7 +17,6 @@ import {
   Search,
   Sparkles,
   Star,
-  Users,
   X,
 } from "lucide-react";
 import { AreaSeries, BarSeries, CandlestickSeries, ColorType, HistogramSeries, LineSeries, createChart } from "lightweight-charts";
@@ -72,6 +72,7 @@ import type { MarketCacheMetadata } from "@/lib/market-data-cache";
 import type { WatcherFinancialQuarter, WatcherFinancialSource, WatcherFinancialStatements, WatcherValuationBands, WatcherValuationMetric } from "@/lib/stocks-watcher-valuation-data";
 import { StocksWatcherFearGreedPanel } from "./stocks-watcher-fear-greed-panel";
 import { StocksWatcherFixedIncomePanel } from "./stocks-watcher-fixed-income-panel";
+import { StocksWatcherMacroPanel } from "./stocks-watcher-macro-panel";
 import { MarketBreadthPanel } from "./market-breadth-page";
 
 interface StocksIntelligenceWatcherPageProps {
@@ -100,7 +101,7 @@ const TOP_TABS = [
   "Options",
   "F/G Index",
   "News",
-  "Holders",
+  "Macro",
 ] as const;
 
 const OPTIONS_SUB_TABS = [
@@ -134,7 +135,7 @@ const TOP_TAB_ICONS: Record<TopTab, typeof Sparkles> = {
   Options: Activity,
   "F/G Index": Activity,
   News: Newspaper,
-  Holders: Users,
+  Macro: Globe2,
 };
 
 interface NativeToolResult {
@@ -2614,7 +2615,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
   useEffect(() => {
     if (activeTab === "F/G Index") void loadFearGreed();
-    else if (activeTab !== "Options" && activeTab !== "Overview" && activeTab !== "Fixed Income") void loadTopTab(activeTab);
+    else if (activeTab !== "Options" && activeTab !== "Overview" && activeTab !== "Fixed Income" && activeTab !== "Macro") void loadTopTab(activeTab);
   }, [activeTab, loadFearGreed, loadTopTab]);
 
   useEffect(() => {
@@ -4804,6 +4805,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       if (activeTab === "Fixed Income") {
         return <section className="siw-panel siw-primary-panel siw-fixed-income-panel" data-primary-tab-panel="Fixed Income"><StocksWatcherFixedIncomePanel /></section>;
       }
+      if (activeTab === "Macro") {
+        return <section className="siw-panel siw-primary-panel siw-macro-panel" data-primary-tab-panel="Macro"><StocksWatcherMacroPanel /></section>;
+      }
       return (
         <section className={`siw-panel siw-primary-panel siw-${activeTab.toLowerCase().replace(/\s+/g, "-")}-panel`} data-primary-tab-panel={activeTab}>
           {renderGenericPanel(tabPanelState, () => void loadTopTab(activeTab, true))}
@@ -5226,9 +5230,15 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           </div>
 
           <footer className="siw-status-bar">
-            <span data-market-status={marketStatus.isOpen ? "open" : "closed"}><b /> Market: {marketStatus.label}</span>
-            <span>Data: Yahoo Finance <em>(Delayed 15-20 min)</em></span>
-                <span>Source: {snapshot?.optionsSnapshot ? "Robinhood MCP EOD · OI-signed GEX proxy" : isYahooOptionsFallback ? "Yahoo fallback · Robinhood EOD unavailable" : snapshot?.source === "native_yahoo" ? "Yahoo options chain + local Greek approximation" : "Unavailable"}</span>
+            {activeTab === "Macro" ? <>
+              <span data-market-status="published"><b /> Published macro data</span>
+              <span>Data: Federal Reserve Economic Data</span>
+              <span>Source: EIA · Federal Reserve · IMF · BEA · Dallas Fed</span>
+            </> : <>
+              <span data-market-status={marketStatus.isOpen ? "open" : "closed"}><b /> Market: {marketStatus.label}</span>
+              <span>Data: Yahoo Finance <em>(Delayed 15-20 min)</em></span>
+              <span>Source: {snapshot?.optionsSnapshot ? "Robinhood MCP EOD · OI-signed GEX proxy" : isYahooOptionsFallback ? "Yahoo fallback · Robinhood EOD unavailable" : snapshot?.source === "native_yahoo" ? "Yahoo options chain + local Greek approximation" : "Unavailable"}</span>
+            </>}
             <span>Not financial advice</span>
             <button type="button" onClick={() => setSettingsOpen((value) => !value)}>Help</button>
           </footer>
