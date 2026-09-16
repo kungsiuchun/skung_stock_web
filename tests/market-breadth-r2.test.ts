@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { parse as parseYaml } from "yaml";
 
 import { onRequest as getMarketBreadthApi } from "../functions/api/market-breadth";
 import {
@@ -15,6 +16,35 @@ import {
 import { buildBreadthCell, calculateMarketBreadthSnapshotId, type MarketBreadthSnapshot } from "../src/lib/market-breadth";
 import { toMassiveTicker } from "../src/lib/market-breadth-sources";
 import { pruneMarketBreadthStateForUniverse, runGitHubMarketBreadthRefresh, type PersistedMarketBreadthState } from "../scripts/refresh-market-breadth";
+
+const normalizedWorkflowSchedules = (source: string) => {
+  const workflow = parseYaml(source) as unknown;
+  assert.ok(workflow && typeof workflow === "object" && !Array.isArray(workflow));
+  const triggers = (workflow as { on?: unknown }).on;
+  assert.ok(triggers && typeof triggers === "object" && !Array.isArray(triggers));
+  const schedule = (triggers as { schedule?: unknown }).schedule;
+  assert.ok(Array.isArray(schedule));
+  return schedule.map((entry) => {
+    assert.ok(entry && typeof entry === "object" && !Array.isArray(entry));
+    const cron = (entry as { cron?: unknown }).cron;
+    assert.equal(typeof cron, "string");
+    const fields = cron.trim().split(/\s+/);
+    assert.equal(fields.length, 5);
+    const [minute, hour, dayOfMonth, month, dayOfWeek] = fields;
+    assert.equal(dayOfMonth, "*");
+    assert.equal(month, "*");
+    const [firstWeekday, lastWeekday, ...unexpectedWeekdays] = dayOfWeek.split("-").map(Number);
+    assert.equal(unexpectedWeekdays.length, 0);
+    assert.ok(Number.isInteger(firstWeekday) && Number.isInteger(lastWeekday));
+    const minuteValue = Number(minute);
+    const hourUtc = Number(hour);
+    assert.ok(Number.isInteger(minuteValue) && minuteValue >= 0 && minuteValue <= 59);
+    assert.ok(Number.isInteger(hourUtc) && hourUtc >= 0 && hourUtc <= 23);
+    assert.ok(firstWeekday >= 0 && firstWeekday <= lastWeekday && lastWeekday <= 6);
+    const weekdays = Array.from({ length: lastWeekday - firstWeekday + 1 }, (_, index) => firstWeekday + index);
+    return { minute: minuteValue, hourUtc, weekdays };
+  });
+};
 
 const snapshot = (): MarketBreadthSnapshot => {
   const value: MarketBreadthSnapshot = ({
@@ -325,9 +355,10 @@ describe("Market Breadth R2 architecture", () => {
 
   it("schedules Basic-plan EOD refreshes after the next-day publication window", () => {
     const workflow = readFileSync(new URL("../.github/workflows/refresh-market-breadth.yml", import.meta.url), "utf8");
-    assert.match(workflow, /cron: "17 17 \* \* 2-6"/);
-    assert.match(workflow, /cron: "47 18 \* \* 2-6"/);
-    assert.doesNotMatch(workflow, /cron: "(?:47 22|32 23) \* \* 1-5"/);
+    assert.deepEqual(normalizedWorkflowSchedules(workflow), [
+      { minute: 17, hourUtc: 17, weekdays: [2, 3, 4, 5, 6] },
+      { minute: 47, hourUtc: 18, weekdays: [2, 3, 4, 5, 6] },
+    ]);
   });
 });
 

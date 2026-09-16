@@ -13,7 +13,7 @@ export type StocksWatcherTopTab =
   | "Options"
   | "F/G Index"
   | "News"
-  | "Holders";
+  | "Macro";
 
 export type StocksWatcherOptionsSubTab =
   | "Overview"
@@ -97,11 +97,11 @@ export const getStocksWatcherTopTabToolPlan = (
   ];
   if (tab === "F/G Index") return [];
   if (tab === "Fixed Income") return [];
+  if (tab === "Macro") return [];
   if (tab === "News") return [
     { name: "morning_briefing", params: { ticker } },
     { name: "pre_event_brief", params: { ticker } },
   ];
-  if (tab === "Holders") return [{ name: "get_sector_top_holdings", params: { ticker } }];
   return [];
 };
 

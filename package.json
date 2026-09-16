@@ -21,7 +21,7 @@
     "test:finance-agent-tools-smoke": "node --import tsx --test tests/finance-agent-tools-smoke.test.ts",
     "test:quant-strategies": "node --import tsx --test tests/quant-strategies.test.ts",
     "quant:audit": "tsx scripts/quant-strategy-audit.ts",
-    "test:stocks-watcher": "node --import tsx --test tests/stocks-intelligence-watcher.test.ts tests/stocks-watcher-robinhood-options.test.ts",
+    "test:stocks-watcher": "node --import tsx --test tests/stocks-intelligence-watcher.test.ts tests/stocks-watcher-robinhood-options.test.ts tests/fomc-rate-probability.test.ts tests/stocks-watcher-macro.test.ts",
     "test:stocks-watcher:uat": "node tests/stocks-intelligence-watcher.uat.cjs",
     "robinhood-options:publish": "tsx scripts/publish-robinhood-options-snapshot.ts",
     "test:market-breadth": "node --import tsx --test tests/market-breadth-r2.test.ts tests/market-breadth.test.ts tests/app-routes.test.ts",
@@ -72,6 +72,7 @@
     "tsx": "^4.21.0",
     "typescript": "^5.2.2",
     "vite": "^5.2.0",
-    "wrangler": "^4.125.0"
+    "wrangler": "^4.125.0",
+    "yaml": "^2.8.1"
   }
 }

@@ -132,11 +132,17 @@ const toneClasses = (pattern: SpxPriceActionPattern | null | undefined) => {
 export function SpxPriceActionCompass({
   enabled = true,
   refreshKey = 0,
+  refreshingAllSources = false,
+  onRefreshAllSources,
   onInitialLoadSettled,
 }: {
   enabled?: boolean;
   /** Parent-owned source refresh signal shared with the GEX pressure matrix. */
   refreshKey?: number;
+  /** Parent-owned in-flight state for a board-wide SPX source refresh. */
+  refreshingAllSources?: boolean;
+  /** Refreshes the heatmap, Compass, and Pressure Matrix as one user action. */
+  onRefreshAllSources?: () => void;
   onInitialLoadSettled?: () => void;
 }) {
   const [timeframe, setTimeframe] = useState<SpxPriceActionTimeframe>("5m");
@@ -351,13 +357,13 @@ export function SpxPriceActionCompass({
             </ToolbarToggle>
             <button
               type="button"
-              onClick={() => void loadCompass(timeframe)}
-              disabled={loading}
+              onClick={() => onRefreshAllSources ? onRefreshAllSources() : void loadCompass(timeframe)}
+              disabled={loading || refreshingAllSources}
               className="inline-flex h-9 w-9 items-center justify-center border border-cyan-300/20 bg-cyan-300/10 text-cyan-100 transition-colors hover:bg-cyan-300/20 disabled:opacity-50"
-              title="Refresh"
-              aria-label="Refresh SPX Price Action Compass"
+              title={onRefreshAllSources ? "Refresh all SPX sources" : "Refresh SPX Price Action Compass"}
+              aria-label={onRefreshAllSources ? "Refresh all SPX sources" : "Refresh SPX Price Action Compass"}
             >
-              <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+              <RefreshCw className={`h-4 w-4 ${(loading || refreshingAllSources) ? "animate-spin" : ""}`} />
             </button>
           </div>
         </div>
@@ -665,6 +671,7 @@ function PriceActionChartCanvas({
   const volumeHeight = showVolume ? 58 : 0;
   const chartHeight = height - axisBottom - volumeHeight;
   const plotWidth = Math.max(240, width - axisLeft);
+  const plotRight = axisLeft + plotWidth;
   const maxStart = Math.max(0, candles.length - zoom);
 
   useEffect(() => {
@@ -736,7 +743,10 @@ function PriceActionChartCanvas({
   const low = Math.min(...visibleCandles.map((candle) => candle.low), high - 1);
   const priceRange = Math.max(1, high - low);
   const maxVolume = Math.max(...visibleCandles.map((candle) => candle.volume), 1);
-  const candleWidth = plotWidth / Math.max(1, zoom);
+  // Reserve empty future-time slots at the right edge. This preserves the full
+  // chart surface/grid while keeping the newest candle and its annotations clear.
+  const trailingSpaceSlots = Math.min(10, Math.max(5, Math.ceil(zoom * 0.1)));
+  const candleWidth = plotWidth / Math.max(1, visibleCandles.length + trailingSpaceSlots);
   const getX = (visibleIndex: number) => axisLeft + visibleIndex * candleWidth + candleWidth / 2;
   const getY = (price: number) => 12 + (chartHeight - 28) - ((price - low) / priceRange) * (chartHeight - 40);
   const getVolY = (volume: number) => chartHeight + volumeHeight - Math.max(2, (volume / maxVolume) * Math.max(10, volumeHeight - 8));
@@ -781,7 +791,7 @@ function PriceActionChartCanvas({
     const x1 = getX(first) - candleWidth / 2;
     const x2 = getX(last) + candleWidth / 2;
     const labelWidth = Math.min(170, Math.max(82, pattern.label.length * 6.2));
-    const labelX = Math.max(axisLeft, Math.min(width - labelWidth, x1));
+    const labelX = Math.max(axisLeft, Math.min(width - labelWidth - 10, x1));
     return [{
       pattern,
       x1,
@@ -802,7 +812,7 @@ function PriceActionChartCanvas({
     const rect = svgRef.current?.getBoundingClientRect();
     if (!rect || visibleCandles.length === 0) return;
     const point = projectSpxChartClientPoint({ clientX, clientY, rect, viewBoxWidth: width, viewBoxHeight: height });
-    const x = Math.max(axisLeft, Math.min(width, point.x));
+    const x = Math.max(axisLeft, Math.min(plotRight, point.x));
     const y = Math.max(0, Math.min(chartHeight + volumeHeight, point.y));
     const visibleIndex = Math.max(0, Math.min(visibleCandles.length - 1, Math.floor((x - axisLeft) / candleWidth)));
     const priceY = Math.max(24, Math.min(chartHeight - 16, y));
@@ -960,7 +970,7 @@ function PriceActionChartCanvas({
           const price = high - (index / 4) * priceRange;
           return (
             <g key={index}>
-              <line x1={axisLeft} y1={y} x2={width} y2={y} stroke="#123142" strokeDasharray="3 3" />
+              <line x1={axisLeft} y1={y} x2={plotRight} y2={y} stroke="#123142" strokeDasharray="3 3" />
               <text x={axisLeft - 6} y={y + 3} textAnchor="end" className="fill-zinc-500 font-mono text-[10px]">
                 {price.toFixed(1)}
               </text>
@@ -971,11 +981,11 @@ function PriceActionChartCanvas({
         {zoneRows.map(({ zone, y, color, fill, label, bandHeight, labelY }) => {
           const bandY = Math.max(0, Math.min(chartHeight - bandHeight, y - bandHeight / 2));
           const labelWidth = Math.min(190, Math.max(122, label.length * 6.2 + 18));
-          const labelX = Math.max(axisLeft + 8, width - labelWidth - 10);
+          const labelX = Math.max(axisLeft + 8, Math.min(width - labelWidth - 10, plotRight + 8));
           return (
             <g key={zone.id} data-pa-zone-band="true">
               <rect x={axisLeft} y={bandY} width={plotWidth} height={bandHeight} fill={fill} opacity={0.72} />
-              <line x1={axisLeft} y1={y} x2={width} y2={y} stroke={color} strokeOpacity={0.9} strokeDasharray="7 5" strokeWidth={1.25} />
+              <line x1={axisLeft} y1={y} x2={plotRight} y2={y} stroke={color} strokeOpacity={0.9} strokeDasharray="7 5" strokeWidth={1.25} />
               <g data-pa-zone-label="true" transform={`translate(${labelX} ${labelY - 9})`}>
                 <rect width={labelWidth} height={18} fill="#02070d" stroke={color} strokeOpacity={0.85} />
                 <text x={8} y={12} className="fill-zinc-100 font-mono text-[10px] font-black">
@@ -1077,7 +1087,7 @@ function PriceActionChartCanvas({
         {crosshair && (
           <g pointerEvents="none" data-pa-crosshair="true">
             <line x1={crosshair.x} y1={0} x2={crosshair.x} y2={chartHeight + volumeHeight} stroke="#d4d4d8" strokeDasharray="3 3" strokeOpacity={0.7} />
-            <line x1={axisLeft} y1={crosshair.y} x2={width} y2={crosshair.y} stroke="#d4d4d8" strokeDasharray="3 3" strokeOpacity={0.7} />
+            <line x1={axisLeft} y1={crosshair.y} x2={plotRight} y2={crosshair.y} stroke="#d4d4d8" strokeDasharray="3 3" strokeOpacity={0.7} />
             <rect x={2} y={Math.max(2, crosshair.y - 9)} width={52} height={18} fill="#f8fafc" />
             <text x={28} y={Math.max(14, crosshair.y + 3)} textAnchor="middle" className="fill-black font-mono text-[9px] font-black">{crosshair.price.toFixed(1)}</text>
             <rect x={Math.max(axisLeft, Math.min(width - 168, crosshair.x - 78))} y={height - 19} width={166} height={17} fill="#f8fafc" />
