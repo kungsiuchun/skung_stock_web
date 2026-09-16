@@ -15,6 +15,7 @@ test("selects the nearest active FOMC decision and groups Cut / Hold / Hike", ()
   assert.equal(response.meeting.date, "2026-09-16");
   assert.deepEqual(response.meeting.outcomes, [{ key: "cut", label: "Cut", probability: 12 }, { key: "hold", label: "Hold", probability: 58 }, { key: "hike", label: "Hike", probability: 30 }]);
   assert.equal(response.meeting.noHikeProbability, 70);
+  assert.equal(response.meeting.observedAt, "2026-09-14T18:02:00Z");
 });
 
 test("normalizes a small mutually-exclusive market pricing discrepancy without hiding it", () => {
@@ -32,4 +33,28 @@ test("fails closed when the market prices are stale or not a plausible probabili
   assert.throws(() => buildFomcRateProbabilityResponse({ events: stale, fetchedAt: "2026-09-14T18:03:00Z", now: new Date("2026-09-14T18:03:00Z") }), FomcRateProbabilityError);
   const invalid = [{ ...events[0], markets: events[0].markets.map((item) => ({ ...item, outcomePrices: "[\"0.60\",\"0.40\"]" })) }];
   assert.throws(() => buildFomcRateProbabilityResponse({ events: invalid, fetchedAt: "2026-09-14T18:03:00Z", now: new Date("2026-09-14T18:03:00Z") }), FomcRateProbabilityError);
+});
+
+test("fails closed when any contributing market is stale", () => {
+  const mixedFreshness = [{
+    ...events[0],
+    updatedAt: "2026-09-14T18:02:30Z",
+    markets: events[0].markets.map((item, index) => index === 0
+      ? { ...item, updatedAt: "2026-09-12T00:00:00Z" }
+      : { ...item, updatedAt: `2026-09-14T18:0${index}:00Z` }),
+  }];
+  assert.throws(
+    () => buildFomcRateProbabilityResponse({ events: mixedFreshness, fetchedAt: "2026-09-14T18:03:00Z", now: new Date("2026-09-14T18:03:00Z") }),
+    /prices are stale/,
+  );
+});
+
+test("uses the oldest contributing market update as the observation time", () => {
+  const mixedFreshness = [{
+    ...events[0],
+    updatedAt: "2026-09-14T18:02:30Z",
+    markets: events[0].markets.map((item, index) => ({ ...item, updatedAt: `2026-09-14T17:5${index}:00Z` })),
+  }];
+  const response = buildFomcRateProbabilityResponse({ events: mixedFreshness, fetchedAt: "2026-09-14T18:03:00Z", now: new Date("2026-09-14T18:03:00Z") });
+  assert.equal(response.meeting.observedAt, "2026-09-14T17:50:00Z");
 });

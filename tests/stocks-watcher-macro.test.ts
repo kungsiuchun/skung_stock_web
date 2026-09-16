@@ -8,11 +8,11 @@ import {
   MACRO_FRED_SERIES_GROUPS,
   MACRO_INFLATION_SERIES_IDS,
   MACRO_MARKET_DEFINITIONS,
-  parseFredObservations,
   parseFredCsv,
   StocksWatcherMacroError,
   type MacroObservation,
 } from "../src/lib/stocks-watcher-macro";
+import { macroHeatClass } from "../src/components/stocks-watcher-macro-heat";
 
 const monthlyObservations = (startYear = 2024, startMonth = 1, count = 31, base = 100): MacroObservation[] =>
   Array.from({ length: count }, (_, index) => {
@@ -90,21 +90,6 @@ test("clamps month-end comparison dates instead of overflowing into the next mon
   assert.ok(Math.abs((wti.changes.oneMonth ?? Number.NaN) - 32) < 1e-9);
 });
 
-test("rejects malformed or empty FRED observation payloads instead of inventing data", () => {
-  assert.throws(() => parseFredObservations({}, "PCEPI"), StocksWatcherMacroError);
-  assert.throws(() => parseFredObservations({ observations: [{ date: "2026-07-01", value: "." }] }, "PCEPI"), StocksWatcherMacroError);
-  assert.throws(() => parseFredObservations({ observations: [{ date: "2026-07-01", value: null }] }, "PCEPI"), StocksWatcherMacroError);
-  assert.throws(() => parseFredObservations({ observations: [{ date: "2026-07-01", value: "" }] }, "PCEPI"), StocksWatcherMacroError);
-  assert.deepEqual(parseFredObservations({ observations: [
-    { date: "2026-07-02", value: "2.5" },
-    { date: "bad-date", value: "9" },
-    { date: "2026-07-01", value: "2.4" },
-  ] }, "PCEPI"), [
-    { date: "2026-07-01", value: 2.4 },
-    { date: "2026-07-02", value: 2.5 },
-  ]);
-});
-
 test("parses grouped FRED CSV while rejecting missing series and empty observations", () => {
   assert.deepEqual(parseFredCsv([
     "observation_date,DCOILWTICO,DTWEXBGS",
@@ -122,6 +107,13 @@ test("parses grouped FRED CSV while rejecting missing series and empty observati
   assert.throws(() => parseFredCsv("date,PCEPI\n2026-07-01,100", ["PCEPI"]), /observation_date/);
   assert.throws(() => parseFredCsv("observation_date,PCEPI\n2026-07-01,100", ["PI"]), /did not contain series PI/);
   assert.throws(() => parseFredCsv("observation_date,PCEPI\n2026-07-01,.", ["PCEPI"]), /no finite observations/);
+});
+
+test("keeps flat inflation rows neutral", () => {
+  const values = Array.from({ length: 12 }, () => 2);
+  assert.equal(macroHeatClass(values, 2), "is-neutral");
+  assert.equal(macroHeatClass([null, 2], 2), "is-neutral");
+  assert.equal(macroHeatClass(values, null), "is-empty");
 });
 
 const fredCsvFixture = (seriesIds: string[], fixtures: Record<string, MacroObservation[]>) => {

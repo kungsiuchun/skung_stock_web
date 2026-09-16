@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { ExternalLink, RefreshCw } from "lucide-react";
 import type { MarketCacheMetadata } from "@/lib/market-data-cache";
-import type { MacroInflationRow, StocksWatcherMacroSnapshot } from "@/lib/stocks-watcher-macro";
+import type { StocksWatcherMacroSnapshot } from "@/lib/stocks-watcher-macro";
+import { macroHeatClass } from "./stocks-watcher-macro-heat";
 import "./stocks-watcher-macro-panel.css";
 
 interface MacroApiResponse {
@@ -53,18 +54,6 @@ const formatValue = (value: number) => new Intl.NumberFormat("en-US", {
 const changeClass = (value: number | null) => value === null ? "" : value > 0 ? "siw-up" : value < 0 ? "siw-down" : "";
 const changeDirection = (value: number | null) => value === null ? "unavailable" : value > 0 ? "positive" : value < 0 ? "negative" : "unchanged";
 const formatChange = (value: number | null) => value === null ? "—" : `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
-
-const heatClass = (row: MacroInflationRow, value: number | null) => {
-  if (value === null) return "is-empty";
-  const finite = row.values.filter((entry): entry is number => entry !== null && Number.isFinite(entry));
-  if (finite.length < 2) return "is-neutral";
-  const minimum = Math.min(...finite);
-  const maximum = Math.max(...finite);
-  const midpoint = (minimum + maximum) / 2;
-  const denominator = Math.max(maximum - midpoint, midpoint - minimum, Number.EPSILON);
-  const intensity = Math.max(1, Math.min(4, Math.ceil((Math.abs(value - midpoint) / denominator) * 4)));
-  return value >= midpoint ? `is-hot-${intensity}` : `is-cool-${intensity}`;
-};
 
 export function StocksWatcherMacroPanel() {
   const [data, setData] = useState<StocksWatcherMacroSnapshot | null>(null);
@@ -176,7 +165,7 @@ export function StocksWatcherMacroPanel() {
             <tbody>{data.inflation.rows.map((row) => <tr key={row.id}>
               <th><span>{row.label}</span><small>{row.seriesIds.join(" + ")}</small></th>
               <td>{row.unit}</td>
-              {row.values.map((value, index) => <td key={data.inflation.months[index]} className={`siw-macro-heat ${heatClass(row, value)}`}>{value === null ? "—" : value.toFixed(2)}</td>)}
+              {row.values.map((value, index) => <td key={data.inflation.months[index]} className={`siw-macro-heat ${macroHeatClass(row.values, value)}`}>{value === null ? "—" : value.toFixed(2)}</td>)}
             </tr>)}</tbody>
           </table>
         </div>

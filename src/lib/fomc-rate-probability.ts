@@ -102,17 +102,23 @@ export const buildFomcRateProbabilityResponse = (input: { events: PolymarketFomc
   if (!Array.isArray(next.event.markets)) throw new FomcRateProbabilityError("Polymarket FOMC decision event is missing markets.");
 
   const byOutcome = new Map<OutcomeKey, number>();
-  let observedAt = timestamp(next.event.updatedAt, "event update time");
+  let observedAt: string | undefined;
+  let observedTimestamp = Number.POSITIVE_INFINITY;
   for (const rawMarket of next.event.markets) {
     if (!rawMarket || typeof rawMarket !== "object" || Array.isArray(rawMarket)) throw new FomcRateProbabilityError("Polymarket FOMC decision market is invalid.");
     const market = rawMarket as PolymarketFomcMarket;
     if (market.active !== true || market.closed !== false) continue;
     const key = outcomeFor(requiredString(market.question, "market question"));
-    byOutcome.set(key, (byOutcome.get(key) || 0) + yesPrice(market));
     const updatedAt = timestamp(market.updatedAt, "market update time");
-    if (Date.parse(updatedAt) > Date.parse(observedAt)) observedAt = updatedAt;
+    const updatedTimestamp = Date.parse(updatedAt);
+    if (now.getTime() - updatedTimestamp > MAX_MARKET_AGE_MS) throw new FomcRateProbabilityError("Polymarket FOMC decision prices are stale.");
+    byOutcome.set(key, (byOutcome.get(key) || 0) + yesPrice(market));
+    if (updatedTimestamp < observedTimestamp) {
+      observedAt = updatedAt;
+      observedTimestamp = updatedTimestamp;
+    }
   }
-  if (now.getTime() - Date.parse(observedAt) > MAX_MARKET_AGE_MS) throw new FomcRateProbabilityError("Polymarket FOMC decision prices are stale.");
+  if (!observedAt) throw new FomcRateProbabilityError("Polymarket FOMC decision event has no active markets.");
 
   const rawValues = (Object.keys(labelFor) as OutcomeKey[]).map((key) => {
     const value = byOutcome.get(key);

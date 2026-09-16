@@ -114,31 +114,6 @@ export class StocksWatcherMacroError extends Error {
 const isIsoDate = (value: unknown): value is string =>
   typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
 
-export const parseFredObservations = (payload: unknown, seriesId: string): MacroObservation[] => {
-  if (!payload || typeof payload !== "object") {
-    throw new StocksWatcherMacroError(`FRED ${seriesId} response was not an object.`);
-  }
-  const observations = (payload as { observations?: unknown }).observations;
-  if (!Array.isArray(observations)) {
-    throw new StocksWatcherMacroError(`FRED ${seriesId} response did not contain observations.`);
-  }
-  const parsed = observations.flatMap((entry) => {
-    if (!entry || typeof entry !== "object") return [];
-    const { date, value } = entry as { date?: unknown; value?: unknown };
-    const numericValue = typeof value === "number"
-      ? value
-      : typeof value === "string" && value.trim() !== ""
-        ? Number(value)
-        : Number.NaN;
-    if (!isIsoDate(date) || !Number.isFinite(numericValue)) return [];
-    return [{ date, value: numericValue }];
-  }).sort((left, right) => left.date.localeCompare(right.date));
-  if (parsed.length === 0) {
-    throw new StocksWatcherMacroError(`FRED ${seriesId} returned no finite observations.`);
-  }
-  return parsed;
-};
-
 export const parseFredCsv = (
   payload: string,
   expectedSeriesIds: readonly string[],
