@@ -397,6 +397,7 @@ const marketBreadthFixture = (stale = false) => {
 let refreshAllMode = false;
 let delayedSnapshotSymbol = null;
 let marketBreadthApiMode = "READY";
+let macroApiMode = "FRESH";
 
 const buildToolResponse = (tool, params = {}) => {
   if (tool === "get_watchlist") {
@@ -681,7 +682,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
     const page = await browser.newPage();
     page.on("console", (message) => {
-      if (message.type() === "error" && !/status of (404|503)/.test(message.text())) consoleErrors.push(message.text());
+      if (message.type() === "error" && !/status of (404|502|503)/.test(message.text())) consoleErrors.push(message.text());
     });
     page.on("pageerror", (error) => consoleErrors.push(error.message));
     await page.setRequestInterception(true);
@@ -720,8 +721,16 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
         return;
       }
       if (url.pathname.includes("/api/stocks-watcher-macro")) {
-        apiCalls.push({ method: "GET", endpoint: "stocks-watcher-macro" });
-        await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(macroFixture()) });
+        apiCalls.push({ method: "GET", endpoint: "stocks-watcher-macro", mode: macroApiMode });
+        if (macroApiMode === "ERROR") {
+          await request.respond({ status: 502, contentType: "application/json", body: JSON.stringify({ error: "FRED refresh timed out." }) });
+          return;
+        }
+        const payload = macroFixture();
+        if (macroApiMode === "STALE") {
+          payload.cache = { ...payload.cache, status: "stale", refreshError: "FRED refresh timed out." };
+        }
+        await request.respond({ status: macroApiMode === "STALE" ? 206 : 200, contentType: "application/json", body: JSON.stringify(payload) });
         return;
       }
       if (!url.pathname.includes("/api/stocks-intelligence-watcher")) {
@@ -1402,11 +1411,40 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     const macroStatusText = await page.$eval(".siw-status-bar", (node) => node.textContent || "");
     assert.match(macroStatusText, /Federal Reserve Economic Data[\s\S]*EIA[\s\S]*IMF[\s\S]*BEA/i);
     assert.doesNotMatch(macroStatusText, /Yahoo Finance/i, "Macro footer must not claim Yahoo provenance");
+    assert.doesNotMatch(macroStatusText, /Published macro data/i, "Macro footer must not claim freshness independently of the panel state");
     await page.screenshot({ path: path.join(screenshotsDir, "09-macro-dashboard-desktop.png"), fullPage: true });
     await page.$eval(".siw-main-scroll", (node) => { node.scrollTop = node.scrollHeight; });
     await wait(100);
     await page.screenshot({ path: path.join(screenshotsDir, "10-macro-inflation-desktop.png"), fullPage: true });
     await page.$eval(".siw-main-scroll", (node) => { node.scrollTop = 0; });
+
+    macroApiMode = "STALE";
+    await clickText(page, "News", true);
+    await clickText(page, "Macro", true);
+    await page.waitForSelector('[data-macro-panel] [data-macro-cache-status="stale"]');
+    const staleMacroProof = await page.evaluate(() => ({
+      panel: document.querySelector("[data-macro-panel]")?.textContent || "",
+      footer: document.querySelector(".siw-status-bar")?.textContent || "",
+      publishedSignal: document.querySelector('.siw-status-bar [data-market-status="published"]') !== null,
+    }));
+    assert.match(staleMacroProof.panel, /Showing cached macro data[\s\S]*latest FRED refresh failed[\s\S]*FRED refresh timed out/i);
+    assert.equal(staleMacroProof.publishedSignal, false, "stale Macro data must not render a published-success signal");
+    assert.doesNotMatch(staleMacroProof.footer, /Published macro data/i);
+
+    macroApiMode = "ERROR";
+    await clickText(page, "News", true);
+    await clickText(page, "Macro", true);
+    await page.waitForSelector("[data-macro-panel] .siw-macro-error");
+    const failedMacroProof = await page.evaluate(() => ({
+      panel: document.querySelector("[data-macro-panel]")?.textContent || "",
+      footer: document.querySelector(".siw-status-bar")?.textContent || "",
+      publishedSignal: document.querySelector('.siw-status-bar [data-market-status="published"]') !== null,
+    }));
+    assert.match(failedMacroProof.panel, /Macro source unavailable[\s\S]*FRED refresh timed out/i);
+    assert.match(failedMacroProof.footer, /Federal Reserve Economic Data[\s\S]*EIA[\s\S]*IMF[\s\S]*BEA/i);
+    assert.equal(failedMacroProof.publishedSignal, false, "failed Macro data must not render a published-success signal");
+    assert.doesNotMatch(failedMacroProof.footer, /Published macro data/i);
+    macroApiMode = "FRESH";
 
     await page.type('input[name="stock-search"]', "NVDA");
     await clickText(page, "LOAD");

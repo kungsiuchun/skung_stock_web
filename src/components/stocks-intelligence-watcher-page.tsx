@@ -5231,9 +5231,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
           <footer className="siw-status-bar">
             {activeTab === "Macro" ? <>
-              <span data-market-status="published"><b /> Published macro data</span>
-              <span>Data: Federal Reserve Economic Data</span>
-              <span>Source: EIA · Federal Reserve · IMF · BEA · Dallas Fed</span>
+              <span>Data: Federal Reserve Economic Data (FRED)</span>
+              <span>Series: EIA · Federal Reserve · IMF · BEA · Dallas Fed</span>
             </> : <>
               <span data-market-status={marketStatus.isOpen ? "open" : "closed"}><b /> Market: {marketStatus.label}</span>
               <span>Data: Yahoo Finance <em>(Delayed 15-20 min)</em></span>
