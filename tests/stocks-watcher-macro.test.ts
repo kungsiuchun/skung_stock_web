@@ -9,7 +9,6 @@ import {
   MACRO_INFLATION_SERIES_IDS,
   MACRO_MARKET_DEFINITIONS,
   parseFredCsv,
-  StocksWatcherMacroError,
   type MacroObservation,
 } from "../src/lib/stocks-watcher-macro";
 import { macroHeatClass } from "../src/components/stocks-watcher-macro-heat";
