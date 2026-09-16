@@ -279,6 +279,31 @@ const treasuryYieldCurveFixture = () => ({
   source: { provider: "U.S. Department of the Treasury", label: "Daily Treasury Par Yield Curve Rates", url: "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/all/all?_format=csv&page=&type=daily_treasury_yield_curve", fetchedAt: "2026-09-09T20:00:00.000Z" },
 });
 
+const fomcRateProbabilityFixture = () => ({
+  meeting: {
+    eventSlug: "fed-decision-in-september",
+    title: "September Fed meeting",
+    date: "2026-09-16",
+    closesAt: "2026-09-16T17:59:00Z",
+    observedAt: "2026-09-14T18:02:00Z",
+    rawProbabilityTotal: 1.03,
+    outcomes: [
+      { key: "cut", label: "Cut", probability: 10.7 },
+      { key: "hold", label: "Hold", probability: 59.2 },
+      { key: "hike", label: "Hike", probability: 30.1 },
+    ],
+    noHikeProbability: 69.9,
+    volume: 12345,
+  },
+  source: {
+    provider: "Polymarket",
+    label: "Fed decision prediction markets",
+    type: "prediction-market implied",
+    url: "https://polymarket.com/event/fed-decision-in-september",
+    fetchedAt: "2026-09-14T18:03:00Z",
+  },
+});
+
 const marketBreadthSectors = [
   ["Communication Services", "XLC"], ["Consumer Discretionary", "XLY"], ["Consumer Staples", "XLP"], ["Energy", "XLE"], ["Financials", "XLF"], ["Health Care", "XLV"], ["Industrials", "XLI"], ["Information Technology", "XLK"], ["Materials", "XLB"], ["Real Estate", "XLRE"], ["Utilities", "XLU"],
 ];
@@ -653,6 +678,11 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
         await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(treasuryYieldCurveFixture()) });
         return;
       }
+      if (url.pathname.includes("/api/fomc-rate-probability")) {
+        apiCalls.push({ method: "GET", endpoint: "fomc-rate-probability" });
+        await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(fomcRateProbabilityFixture()) });
+        return;
+      }
       if (!url.pathname.includes("/api/stocks-intelligence-watcher")) {
         request.continue();
         return;
@@ -713,7 +743,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(spxBreadthLayout.followsTertiary, true, "S&P 500 breadth must be the final Overview section after the tertiary cards");
     assert.equal(spxBreadthLayout.tables, 3, "Watcher must embed all three S&P 500 breadth tables");
     assert.ok(spxBreadthLayout.panelWidth >= spxBreadthLayout.tertiaryWidth - 1, `S&P 500 breadth must span the full Overview width: ${JSON.stringify(spxBreadthLayout)}`);
-    assert.match(spxBreadthLayout.text, /SPY universe[\s\S]*S&P 500 Market Breadth[\s\S]*derived EOD metrics, not intraday signals/i);
+    assert.match(spxBreadthLayout.text, /SPY universe[\s\S]*S&P 500 Market Breadth[\s\S]*EOD snapshot publishes after the provider's next-day window, not intraday/i);
     assert.match(spxBreadthLayout.text, /Price date\s*Sep 10, 2026[\s\S]*Constituents\s*504[\s\S]*SMA200 coverage\s*99\.8%[\s\S]*Freshness\s*FRESH/i);
     assert.ok(apiCalls.some((call) => call.endpoint === "market-breadth" && call.mode === "READY"), "Watcher must read the published market-breadth API, not a Yahoo tool fallback");
     assert.match(await visibleText(page), /Watchlist Market Breadth \(Yahoo live quotes\)/i, "existing Yahoo watchlist breadth must remain separately labelled");
@@ -1227,9 +1257,13 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await clickText(page, "Fixed Income", true);
     await wait(500);
     assert.equal(await page.$("[data-fixed-income-panel]") !== null, true, "Fixed Income must render the Treasury curve surface");
+    assert.equal(await page.$("[data-fomc-probability-panel]") !== null, true, "Fixed Income must render the FOMC probability surface");
+    assert.match(await page.$eval("[data-fomc-probability-panel]", (node) => node.textContent || ""), /Polymarket prediction-market implied/, "FOMC probabilities must disclose the prediction-market source");
+    assert.deepEqual(await page.$$eval("[data-fomc-probability-outcome]", (nodes) => [...new Set(nodes.map((node) => node.getAttribute("data-fomc-probability-outcome")))].sort()), ["cut", "hike", "hold"], "FOMC probability surface must show Cut, Hold, and Hike");
     assert.equal(await page.$("[data-fixed-income-chart] .recharts-line") !== null, true, "Fixed Income must render the existing yield curve chart");
     assert.match(await page.$eval("[data-fixed-income-table]", (node) => node.textContent || ""), /10Y - 2Y/, "Fixed Income must render the Treasury yield and spread table");
-    assert.ok(apiCalls.some((call) => call.endpoint === "treasury-yield-curve"), "Fixed Income must request only the existing server-side Treasury API");
+    assert.ok(apiCalls.some((call) => call.endpoint === "treasury-yield-curve"), "Fixed Income must request the server-side Treasury API");
+    assert.ok(apiCalls.some((call) => call.endpoint === "fomc-rate-probability"), "Fixed Income must request the server-side FOMC probability API");
 
     await clickText(page, "F/G Index", true);
     await wait(350);
