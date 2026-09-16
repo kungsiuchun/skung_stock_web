@@ -443,8 +443,9 @@ test("watcher session plans native tool calls and cache keys without UI state", 
     { name: "historical_context", params: { ticker: "NVDA", event: "earnings" } },
     { name: "get_financial_statements", params: { symbol: "NVDA", periods: 12 } },
   ]);
-  assert.deepEqual(getStocksWatcherTopTabToolPlan("Fixed Income", "nvda"), []);
-  assert.deepEqual(getStocksWatcherTopTabToolPlan("Chart", "nvda", "1mo"), [
+assert.deepEqual(getStocksWatcherTopTabToolPlan("Fixed Income", "nvda"), []);
+assert.deepEqual(getStocksWatcherTopTabToolPlan("Macro", "nvda"), []);
+assert.deepEqual(getStocksWatcherTopTabToolPlan("Chart", "nvda", "1mo"), [
     { name: "get_stock_history", params: { ticker: "NVDA", range: "1mo", interval: "1d" } },
   ]);
   assert.deepEqual(getStocksWatcherTopTabToolPlan("Chart", "nvda", "3mo"), [

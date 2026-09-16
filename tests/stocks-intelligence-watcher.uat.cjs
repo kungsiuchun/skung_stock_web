@@ -279,6 +279,42 @@ const treasuryYieldCurveFixture = () => ({
   source: { provider: "U.S. Department of the Treasury", label: "Daily Treasury Par Yield Curve Rates", url: "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/all/all?_format=csv&page=&type=daily_treasury_yield_curve", fetchedAt: "2026-09-09T20:00:00.000Z" },
 });
 
+const macroFixture = () => {
+  const months = ["2025-08", "2025-09", "2025-10", "2025-11", "2025-12", "2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06", "2026-07"];
+  const marketRows = [
+    ["wti", "WTI Crude Oil", "DCOILWTICO", "daily", "USD / bbl", 91.4],
+    ["brent", "Brent Crude Oil", "DCOILBRENTEU", "daily", "USD / bbl", 94.8],
+    ["natural-gas", "Natural Gas · Henry Hub", "DHHNGSP", "daily", "USD / MMBtu", 3.42],
+    ["copper", "Copper · Global", "PCOPPUSDM", "monthly", "USD / metric ton", 10342],
+    ["uranium", "Uranium · Global", "PURANUSDM", "monthly", "USD / lb", 82.1],
+    ["usd", "U.S. Dollar · Broad Index", "DTWEXBGS", "daily", "Index 2006=100", 119.2],
+    ["all-commodities", "All Commodities", "PALLFNFINDEXM", "monthly", "Index 2016=100", 126.4],
+    ["energy-index", "Energy Basket", "PNRGINDEXM", "monthly", "Index 2016=100", 138.6],
+    ["metals-index", "Metals Basket", "PMETAINDEXM", "monthly", "Index 2016=100", 121.7],
+  ].map(([id, label, seriesId, frequency, unit, value], index) => ({
+    id, label, seriesId, frequency, unit, value, asOf: frequency === "daily" ? "2026-09-09" : "2026-07-01",
+    changes: { oneDay: frequency === "daily" ? 0.4 + index / 10 : null, oneWeek: frequency === "daily" ? 1.2 - index / 10 : null, oneMonth: 2.1 + index / 10, threeMonth: -1.4 + index / 5, yearToDate: 8.2 - index / 3 },
+  }));
+  const inflationRows = [
+    ["headline-pce", "Headline PCE", "YoY %", ["PCEPI"], 2.7],
+    ["core-pce", "Core PCE · ex food & energy", "YoY %", ["PCEPILFE"], 2.9],
+    ["trimmed-pce-1m", "Trimmed Mean PCE · 1M annualized", "Ann. %", ["PCETRIM1M158SFRBDAL"], 2.2],
+    ["trimmed-pce-6m", "Trimmed Mean PCE · 6M annualized", "Ann. %", ["PCETRIM6M680SFRBDAL"], 2.35],
+    ["trimmed-pce-12m", "Trimmed Mean PCE · 12M", "YoY %", ["PCETRIM12M159SFRBDAL"], 2.28],
+    ["personal-income", "Personal Income", "MoM %", ["PI"], 0.43],
+    ["personal-spending", "Personal Spending", "MoM %", ["PCE"], 0.16],
+  ].map(([id, label, unit, seriesIds, base], rowIndex) => ({ id, label, unit, seriesIds, values: months.map((_, index) => Number((base + Math.sin(index + rowIndex) * 0.35).toFixed(2))) }));
+  return {
+    data: {
+      generatedAt: "2026-09-10T20:00:00.000Z", asOf: "2026-09-09",
+      markets: { asOf: "2026-09-09", rows: marketRows },
+      inflation: { asOf: "2026-07-01", months, rows: inflationRows },
+      source: { provider: "Federal Reserve Economic Data (FRED)", url: "https://fred.stlouisfed.org/", termsUrl: "https://fred.stlouisfed.org/docs/api/terms_of_use.html", series: [], note: "Daily EIA/Federal Reserve and monthly IMF/BEA/Dallas Fed series retrieved through FRED. Values may be revised." },
+    },
+    cache: { status: "refreshed", dataset: "history", cachedAt: "2026-09-10T20:00:00.000Z", expiresAt: "2026-09-10T21:00:00.000Z", ageSeconds: 0, ttlMs: 3600000, ageRatio: 0, guard: "fresh", rowRead: true, rowWritten: true },
+  };
+};
+
 const marketBreadthSectors = [
   ["Communication Services", "XLC"], ["Consumer Discretionary", "XLY"], ["Consumer Staples", "XLP"], ["Energy", "XLE"], ["Financials", "XLF"], ["Health Care", "XLV"], ["Industrials", "XLI"], ["Information Technology", "XLK"], ["Materials", "XLB"], ["Real Estate", "XLRE"], ["Utilities", "XLU"],
 ];
@@ -653,6 +689,11 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
         await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(treasuryYieldCurveFixture()) });
         return;
       }
+      if (url.pathname.includes("/api/stocks-watcher-macro")) {
+        apiCalls.push({ method: "GET", endpoint: "stocks-watcher-macro" });
+        await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(macroFixture()) });
+        return;
+      }
       if (!url.pathname.includes("/api/stocks-intelligence-watcher")) {
         request.continue();
         return;
@@ -713,7 +754,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(spxBreadthLayout.followsTertiary, true, "S&P 500 breadth must be the final Overview section after the tertiary cards");
     assert.equal(spxBreadthLayout.tables, 3, "Watcher must embed all three S&P 500 breadth tables");
     assert.ok(spxBreadthLayout.panelWidth >= spxBreadthLayout.tertiaryWidth - 1, `S&P 500 breadth must span the full Overview width: ${JSON.stringify(spxBreadthLayout)}`);
-    assert.match(spxBreadthLayout.text, /SPY universe[\s\S]*S&P 500 Market Breadth[\s\S]*derived EOD metrics, not intraday signals/i);
+    assert.match(spxBreadthLayout.text, /SPY universe[\s\S]*S&P 500 Market Breadth[\s\S]*EOD snapshot publishes after the provider's next-day window, not intraday/i);
     assert.match(spxBreadthLayout.text, /Price date\s*Sep 10, 2026[\s\S]*Constituents\s*504[\s\S]*SMA200 coverage\s*99\.8%[\s\S]*Freshness\s*FRESH/i);
     assert.ok(apiCalls.some((call) => call.endpoint === "market-breadth" && call.mode === "READY"), "Watcher must read the published market-breadth API, not a Yahoo tool fallback");
     assert.match(await visibleText(page), /Watchlist Market Breadth \(Yahoo live quotes\)/i, "existing Yahoo watchlist breadth must remain separately labelled");
@@ -1283,13 +1324,33 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(await visibleEarningsQuarterRows(), 12, "Earnings quarter selector must reveal the cached 12-quarter report");
     assert.equal(apiCalls.filter((call) => call.tool === "get_financial_statements").length, financialCallsBeforeQuarterChange, "Earnings quarter selector must not refetch the report");
 
-    for (const [topTab, expectedTool] of [["News", "morning_briefing"], ["Holders", "get_sector_top_holdings"]]) {
+    for (const [topTab, expectedTool] of [["News", "morning_briefing"]]) {
       await clickText(page, topTab, true);
       await wait(350);
       const panelText = await page.$eval(`[data-primary-tab-panel='${topTab}']`, (node) => node.textContent || "");
       assert.match(panelText, new RegExp(expectedTool), `${topTab} must render its source-backed tool result instead of a dead placeholder`);
       assert.ok(apiCalls.some((call) => call.tool === expectedTool), `${topTab} must execute its declared native tool plan`);
     }
+
+    await clickText(page, "Macro", true);
+    await page.waitForSelector("[data-macro-panel] [data-macro-markets]");
+    const macroProof = await page.evaluate(() => ({
+      marketRows: document.querySelectorAll("[data-macro-markets] tbody tr").length,
+      inflationRows: document.querySelectorAll("[data-macro-inflation] tbody tr").length,
+      inflationMonths: document.querySelectorAll("[data-macro-inflation] thead th").length - 2,
+      text: document.querySelector("[data-macro-panel]")?.textContent || "",
+    }));
+    assert.deepEqual([macroProof.marketRows, macroProof.inflationRows, macroProof.inflationMonths], [9, 7, 12]);
+    assert.match(macroProof.text, /Federal Reserve Economic Data \(FRED\)/i);
+    assert.ok(apiCalls.some((call) => call.endpoint === "stocks-watcher-macro"), "Macro must request its dedicated source-backed endpoint");
+    const macroStatusText = await page.$eval(".siw-status-bar", (node) => node.textContent || "");
+    assert.match(macroStatusText, /Federal Reserve Economic Data[\s\S]*EIA[\s\S]*IMF[\s\S]*BEA/i);
+    assert.doesNotMatch(macroStatusText, /Yahoo Finance/i, "Macro footer must not claim Yahoo provenance");
+    await page.screenshot({ path: path.join(screenshotsDir, "09-macro-dashboard-desktop.png"), fullPage: true });
+    await page.$eval(".siw-main-scroll", (node) => { node.scrollTop = node.scrollHeight; });
+    await wait(100);
+    await page.screenshot({ path: path.join(screenshotsDir, "10-macro-inflation-desktop.png"), fullPage: true });
+    await page.$eval(".siw-main-scroll", (node) => { node.scrollTop = 0; });
 
     await page.type('input[name="stock-search"]', "NVDA");
     await clickText(page, "LOAD");
@@ -1633,7 +1694,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await page.setViewport({ width: 1600, height: 1000, deviceScaleFactor: 1 });
     await page.goto(`${baseUrl}/#/work/stocks-intelligence-watcher?symbol=NVDA`, { waitUntil: "domcontentloaded" });
     await page.waitForSelector("[data-watcher-replica]");
-    for (const topTab of ["Overview", "Chart", "Fundamentals", "Fixed Income", "Earnings", "Options", "F/G Index", "News", "Holders"]) {
+    for (const topTab of ["Overview", "Chart", "Fundamentals", "Fixed Income", "Earnings", "Options", "F/G Index", "News", "Macro"]) {
       await clickText(page, topTab, true);
       await wait(topTab === "Options" ? 900 : 450);
       const tabLayout = await page.evaluate((tab) => {
@@ -1681,7 +1742,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.match(await page.$eval("[data-options-robinhood-provenance]", (node) => node.textContent || ""), /Robinhood MCP EOD/i, "mobile proof must use the Robinhood-backed NVDA snapshot");
     await page.screenshot({ path: path.join(screenshotsDir, "uat-mobile.png"), fullPage: true });
     await page.screenshot({ path: path.join(screenshotsDir, "08-responsive-mobile.png"), fullPage: true });
-    for (const topTab of ["Overview", "Chart", "Fundamentals", "Fixed Income", "Earnings", "Options", "F/G Index", "News", "Holders"]) {
+    for (const topTab of ["Overview", "Chart", "Fundamentals", "Fixed Income", "Earnings", "Options", "F/G Index", "News", "Macro"]) {
       await clickText(page, topTab, true);
       await wait(topTab === "Options" ? 500 : 250);
       const mobileOverflow = await page.evaluate(() => ({
