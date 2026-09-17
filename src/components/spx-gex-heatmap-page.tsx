@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowLeft, CalendarDays, Gauge, Pause, Play, RefreshCw, Waves } from "lucide-react";
+import { AlertTriangle, ArrowLeft, CalendarDays, Gauge, Pause, Play, Waves } from "lucide-react";
 import { buildSpxGexHeatmapReadingContext, formatSpxGexCompactExposure, type SpxGexHeatmapCell, type SpxGexHeatmapModel, type SpxGexHeatmapReadingRule, type SpxGexSessionSummary, type SpxGexStrikeProfile } from "@/lib/spx-gex-heatmap";
 import type { SpxDecisionCockpitProjection } from "@/lib/spx-decision-ledger";
 import type { SpxGexCollectionRecord } from "@/lib/spx-gex-collection-lifecycle";
@@ -62,6 +62,9 @@ interface FailedPlaybackSnapshot {
   date: string;
   snapshotMinuteEt: number;
 }
+
+type SpxGexBoardNavigationMode = "latest" | "pinned";
+type SpxGexBoardLoadMode = SpxGexBoardNavigationMode | "legacy";
 
 interface ActiveGexAuditCell {
   key: string;
@@ -209,14 +212,47 @@ export const parseSpxGexBoardSelection = (hash: string) => {
   const params = new URLSearchParams(query);
   const rawSnapshot = params.get("snapshot");
   const snapshot = rawSnapshot === null || rawSnapshot.trim() === "" ? Number.NaN : Number(rawSnapshot);
+  const requestedMode = params.get("mode");
+  const date = params.get("date") || "";
+  const mode: SpxGexBoardLoadMode = requestedMode === "latest" || requestedMode === "pinned"
+    ? requestedMode
+    : date || Number.isInteger(snapshot) ? "legacy" : "latest";
   return {
-    date: params.get("date") || "",
+    date,
     snapshot: Number.isInteger(snapshot) ? snapshot : null,
+    mode,
   };
 };
 
+export const resolveSpxGexBoardNavigationMode = (
+  requestedMode: SpxGexBoardLoadMode,
+  payload: Pick<SpxGexHeatmapResponse, "availableDates" | "selectedDate" | "selectedSnapshot" | "sessions">,
+): SpxGexBoardNavigationMode => {
+  if (requestedMode !== "legacy") return requestedMode;
+  const latestDate = payload.availableDates.reduce<string | null>(
+    (latest, date) => latest === null || date > latest ? date : latest,
+    null,
+  );
+  const latestSnapshotMinute = payload.sessions.reduce<number | null>(
+    (latest, session) => latest === null || session.snapshotMinuteEt > latest ? session.snapshotMinuteEt : latest,
+    null,
+  );
+  return latestDate !== null
+    && payload.selectedDate === latestDate
+    && latestSnapshotMinute !== null
+    && payload.selectedSnapshot?.snapshotMinuteEt === latestSnapshotMinute
+    ? "latest"
+    : "pinned";
+};
+
+const spxGexBoardHash = (mode: SpxGexBoardNavigationMode, date: string, snapshotMinuteEt: number) => mode === "latest"
+  ? "#/work/spx-gex-heatmap?mode=latest"
+  : `#/work/spx-gex-heatmap?mode=pinned&date=${encodeURIComponent(date)}&snapshot=${snapshotMinuteEt}`;
+
 const initialBoardSelection = () => {
-  if (typeof window === "undefined") return { date: "", snapshot: null as number | null };
+  if (typeof window === "undefined") {
+    return { date: "", snapshot: null as number | null, mode: "latest" as const };
+  }
   return parseSpxGexBoardSelection(window.location.hash);
 };
 
@@ -234,7 +270,6 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const [selectedDate, setSelectedDate] = useState(initialSelection.date);
   const [selectedMinute, setSelectedMinute] = useState<number | null>(initialSelection.snapshot);
   const [loading, setLoading] = useState(true);
-  const [manualRefreshPending, setManualRefreshPending] = useState(false);
   const [requestState, setRequestState] = useState<BoardRequestState>({
     phase: "LOADING",
     requestUrl: "/api/spx-gex-heatmap",
@@ -253,16 +288,19 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const activeAuditCellRef = useRef(activeAuditCell);
   const auditHoverSuppressedAfterScrollRef = useRef(false);
   activeAuditCellRef.current = activeAuditCell;
-    const [pressureRefreshKey, setPressureRefreshKey] = useState(0);
-    const [initialHeatmapSettled, setInitialHeatmapSettled] = useState(false);
-    const [initialCompassSettled, setInitialCompassSettled] = useState(false);
-    const [reconnecting, setReconnecting] = useState(false);
-  const [isFollowingLatest, setIsFollowingLatest] = useState(initialSelection.snapshot === null);
+  const [pressureRefreshKey, setPressureRefreshKey] = useState(0);
+  const [zeroDteRefreshKey, setZeroDteRefreshKey] = useState(0);
+  const [initialHeatmapSettled, setInitialHeatmapSettled] = useState(false);
+  const [initialCompassSettled, setInitialCompassSettled] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
+  const [navigationMode, setNavigationMode] = useState<SpxGexBoardNavigationMode | "resolving">(
+    initialSelection.mode === "legacy" ? "resolving" : initialSelection.mode,
+  );
   const [failedPlayback, setFailedPlayback] = useState<FailedPlaybackSnapshot | null>(null);
   const activeRequestRef = useRef<AbortController | null>(null);
   const requestVersionRef = useRef(0);
-  const refreshInFlightRef = useRef(false);
-  const postCloseRevalidationDateRef = useRef<string | null>(null);
+  const navigationModeRef = useRef<SpxGexBoardLoadMode>(initialSelection.mode);
+  const postCloseGexRevalidationDateRef = useRef<string | null>(null);
   const playbackRunRef = useRef(0);
   const playbackStateRef = useRef({
     sessions: data.sessions,
@@ -277,11 +315,17 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     speedMs,
   };
 
+  const commitNavigationMode = useCallback((mode: SpxGexBoardNavigationMode) => {
+    navigationModeRef.current = mode;
+    setNavigationMode(mode);
+  }, []);
+
   const loadHeatmap = useCallback(async (
     date?: string,
     snapshotMinute?: number | null,
-    options: { playback?: boolean } = {},
+    options: { playback?: boolean; navigationMode?: SpxGexBoardLoadMode } = {},
   ) => {
+    const requestedNavigationMode = options.navigationMode || navigationModeRef.current;
     activeRequestRef.current?.abort();
     const controller = new AbortController();
     activeRequestRef.current = controller;
@@ -342,10 +386,12 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
       setSelectedDate(payload.selectedDate || "");
       setSelectedMinute(payload.selectedSnapshot?.snapshotMinuteEt ?? null);
       if (payload.selectedDate && payload.selectedSnapshot?.snapshotMinuteEt !== undefined) {
+        const resolvedNavigationMode = resolveSpxGexBoardNavigationMode(requestedNavigationMode, payload);
+        commitNavigationMode(resolvedNavigationMode);
         window.history.replaceState(
           null,
           "",
-          `#/work/spx-gex-heatmap?date=${encodeURIComponent(payload.selectedDate)}&snapshot=${payload.selectedSnapshot.snapshotMinuteEt}`,
+          spxGexBoardHash(resolvedNavigationMode, payload.selectedDate, payload.selectedSnapshot.snapshotMinuteEt),
         );
       }
       return "READY";
@@ -370,42 +416,58 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
         setReconnecting(false);
       }
     }
-  }, []);
-
-  const refreshLatest = useCallback(async () => {
-    if (refreshInFlightRef.current) return;
-    refreshInFlightRef.current = true;
-    setManualRefreshPending(true);
-    setPlaying(false);
-    setIsFollowingLatest(true);
-    try {
-      await loadHeatmap(undefined, null);
-    } finally {
-      // The GEX request and the 0DTESPX requests are independent. A manual
-      // refresh must retry both surfaces even when the heatmap request failed.
-      setPressureRefreshKey((current) => current + 1);
-      refreshInFlightRef.current = false;
-      setManualRefreshPending(false);
-    }
-  }, [loadHeatmap]);
+  }, [commitNavigationMode]);
 
   useEffect(() => {
-    void loadHeatmap(initialSelection.date || undefined, initialSelection.snapshot).finally(() => setInitialHeatmapSettled(true));
+    const loadLatest = initialSelection.mode === "latest";
+    void loadHeatmap(
+      loadLatest ? undefined : initialSelection.date || undefined,
+      loadLatest ? null : initialSelection.snapshot,
+      { navigationMode: initialSelection.mode },
+    ).finally(() => setInitialHeatmapSettled(true));
     return () => activeRequestRef.current?.abort();
-  }, [initialSelection.date, initialSelection.snapshot, loadHeatmap]);
+  }, [initialSelection.date, initialSelection.mode, initialSelection.snapshot, loadHeatmap]);
 
   useEffect(() => {
-    if (!initialHeatmapSettled || !isFollowingLatest || playing || !selectedDate) return undefined;
+    if (!initialCompassSettled) return undefined;
+    const refreshVisibleCurrentSessionSources = () => {
+      const clock = currentEtClock();
+      if (document.visibilityState !== "visible") return;
+      // Keep retrying through the ET day. FINALIZING and transient provider
+      // failures must recover without bringing back a manual refresh button.
+      // Compass follows the current session even while the latest GEX date is
+      // waiting for its first canonical snapshot of a new trading day.
+      if (clock.minuteEt < 570) return;
+      setZeroDteRefreshKey((current) => current + 1);
+    };
+    // Revalidate once after the initial render so a URL-selected GEX snapshot
+    // cannot leave current-session 0DTESPX context stuck behind browser cache.
+    const initialTimer = window.setTimeout(refreshVisibleCurrentSessionSources, 1_000);
+    const interval = window.setInterval(refreshVisibleCurrentSessionSources, 60_000);
+    document.addEventListener("visibilitychange", refreshVisibleCurrentSessionSources);
+    return () => {
+      window.clearTimeout(initialTimer);
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshVisibleCurrentSessionSources);
+    };
+  }, [initialCompassSettled, selectedDate]);
+
+  useEffect(() => {
+    if (!initialHeatmapSettled || navigationMode !== "latest" || playing) return undefined;
     const refreshVisibleCurrentSession = () => {
       const clock = currentEtClock();
-      if (document.visibilityState !== "visible" || selectedDate !== clock.tradingDate) return;
+      if (document.visibilityState !== "visible") return;
       const isLiveSession = clock.minuteEt >= 570 && clock.minuteEt <= 975;
-      const needsPostCloseRevalidation = clock.minuteEt > 975 && postCloseRevalidationDateRef.current !== selectedDate;
+      const needsPostCloseRevalidation = clock.minuteEt > 975 && postCloseGexRevalidationDateRef.current !== clock.tradingDate;
       if (!isLiveSession && !needsPostCloseRevalidation) return;
-      if (needsPostCloseRevalidation) postCloseRevalidationDateRef.current = selectedDate;
-      void loadHeatmap(selectedDate, null).then((result) => {
-        // Refresh the 0DTESPX Compass and overlay independently of a GEX
-        // response, so a stale client state cannot survive the close.
+      // An undated read is required here: a dated read can never discover the
+      // first canonical GEX snapshot after an ET trading-date rollover.
+      void loadHeatmap(undefined, null, { navigationMode: "latest" }).then((result) => {
+        if (needsPostCloseRevalidation && result === "READY" && selectedDate === clock.tradingDate) {
+          postCloseGexRevalidationDateRef.current = clock.tradingDate;
+        }
+        // Pressure is canonical D1 GEX and follows only the latest-GEX path.
+        // Current-session 0DTESPX revalidation is deliberately independent.
         if (result !== "STALE") setPressureRefreshKey((current) => current + 1);
       });
     };
@@ -418,7 +480,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", refreshVisibleCurrentSession);
     };
-  }, [initialHeatmapSettled, isFollowingLatest, loadHeatmap, playing, selectedDate]);
+  }, [initialHeatmapSettled, loadHeatmap, navigationMode, playing, selectedDate]);
 
   useEffect(() => {
     if (!playing) return undefined;
@@ -441,7 +503,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
           setPlaying(false);
           return;
         }
-        const result = await loadHeatmap(state.selectedDate, next.snapshotMinuteEt, { playback: true });
+        const result = await loadHeatmap(state.selectedDate, next.snapshotMinuteEt, { playback: true, navigationMode: "pinned" });
         if (result !== "READY" || playbackRunRef.current !== runId) return;
       }
     };
@@ -609,8 +671,13 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
           value={selectedDate}
           onChange={(event) => {
             setPlaying(false);
-            setIsFollowingLatest(event.target.value === currentEtClock().tradingDate);
-            void loadHeatmap(event.target.value, null);
+            const nextNavigationMode: SpxGexBoardNavigationMode = event.target.value === currentEtClock().tradingDate ? "latest" : "pinned";
+            commitNavigationMode(nextNavigationMode);
+            void loadHeatmap(
+              nextNavigationMode === "latest" ? undefined : event.target.value,
+              null,
+              { navigationMode: nextNavigationMode },
+            );
           }}
           className="bg-[#06111a] text-sm font-bold text-white outline-none focus-visible:ring-2 focus-visible:ring-cyan-200"
         >
@@ -625,25 +692,11 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
           )}
         </select>
       </label>
-      <button
-        onClick={() => {
-          setPlaying(false);
-          setIsFollowingLatest(true);
-          void refreshLatest();
-        }}
-        disabled={loading || manualRefreshPending}
-        aria-busy={loading || manualRefreshPending}
-        className="inline-flex h-10 w-10 items-center justify-center border border-cyan-300/20 bg-cyan-300/10 text-cyan-100 transition-colors hover:bg-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-50"
-        title="Refresh latest SPX and GEX sources"
-        aria-label="Refresh latest SPX and GEX sources"
-      >
-        <RefreshCw aria-hidden="true" className={`h-4 w-4 ${(loading || manualRefreshPending) ? "animate-spin motion-reduce:animate-none" : ""}`} />
-      </button>
     </div>
   );
 
   return (
-    <section className="h-full w-full overflow-y-auto bg-[#02070d] px-3 pb-8 pt-4 text-white sm:px-5 lg:px-7">
+    <section className="h-full w-full overflow-y-auto bg-[#02070d] px-3 pb-8 pt-4 text-white sm:px-5 lg:px-7" data-spx-gex-navigation-mode={navigationMode}>
       <div className="mx-auto flex w-full max-w-[1800px] flex-col gap-4">
         <header className="flex flex-col gap-4 border-b border-cyan-400/20 pb-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
@@ -681,7 +734,8 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
             <button
               onClick={() => {
                 setPlaying(false);
-                void loadHeatmap(failedPlayback.date, failedPlayback.snapshotMinuteEt);
+                commitNavigationMode("pinned");
+                void loadHeatmap(failedPlayback.date, failedPlayback.snapshotMinuteEt, { navigationMode: "pinned" });
               }}
               className="border border-red-200/40 bg-red-200/10 px-3 py-1 font-mono text-xs font-black uppercase tracking-[0.08em] text-red-50 transition-colors hover:bg-red-200/20"
             >
@@ -702,16 +756,15 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
 
         <SpxPriceActionCompass
           enabled={initialHeatmapSettled}
-          refreshKey={pressureRefreshKey}
-          refreshingAllSources={manualRefreshPending}
-          onRefreshAllSources={() => void refreshLatest()}
+          refreshKey={zeroDteRefreshKey}
           onInitialLoadSettled={() => setInitialCompassSettled(true)}
         />
 
         <SpxGexPressureMatrix
           selectedDate={selectedDate}
           selectedMinute={selectedMinute}
-          refreshKey={pressureRefreshKey}
+          pressureRefreshKey={pressureRefreshKey}
+          priceOverlayRefreshKey={zeroDteRefreshKey}
           enabled={initialCompassSettled}
           controls={snapshotControls}
           onLiveSpotChange={onLiveSpotChange}
@@ -830,7 +883,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                       activeRequestRef.current?.abort();
                       return;
                     }
-                    setIsFollowingLatest(false);
+                    commitNavigationMode("pinned");
                     setPlaying(true);
                   }}
                   disabled={!playing && (loading || data.sessions.length <= 1)}
@@ -850,8 +903,8 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                     onChange={(event) => {
                       const next = data.sessions[Number(event.target.value)];
                       setPlaying(false);
-                      setIsFollowingLatest(false);
-                      if (next) void loadHeatmap(selectedDate, next.snapshotMinuteEt);
+                      commitNavigationMode("pinned");
+                      if (next) void loadHeatmap(selectedDate, next.snapshotMinuteEt, { navigationMode: "pinned" });
                     }}
                     className="w-full accent-cyan-300"
                   />
@@ -861,8 +914,8 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                         key={session.snapshotMinuteEt}
                         onClick={() => {
                           setPlaying(false);
-                          setIsFollowingLatest(false);
-                          void loadHeatmap(selectedDate, session.snapshotMinuteEt);
+                          commitNavigationMode("pinned");
+                          void loadHeatmap(selectedDate, session.snapshotMinuteEt, { navigationMode: "pinned" });
                         }}
                         className={session.snapshotMinuteEt === selectedMinute ? "text-yellow-300" : "text-cyan-200/55"}
                       >

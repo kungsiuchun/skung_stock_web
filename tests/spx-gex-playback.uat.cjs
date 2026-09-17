@@ -4,7 +4,9 @@ const path = require("node:path");
 const puppeteer = require("puppeteer");
 
 const APP_URL = process.env.SPX_UAT_APP_URL || "http://localhost:5173";
-const API_URL = `${process.env.SPX_UAT_API_ORIGIN || "http://127.0.0.1:8788"}/api/spx-gex-heatmap`;
+const API_ORIGIN = process.env.SPX_UAT_API_ORIGIN || "http://127.0.0.1:8788";
+const API_URL = `${API_ORIGIN}/api/spx-gex-heatmap`;
+const PRESSURE_API_URL = `${API_ORIGIN}/api/spx-gex-pressure`;
 const SCREENSHOT_DIR = path.resolve(process.cwd(), ".tmp");
 
 const formatMinute = (minute) => {
@@ -17,6 +19,10 @@ const jsonResponse = (payload) => ({
   status: 200,
   contentType: "application/json; charset=utf-8",
   body: JSON.stringify(payload),
+});
+
+const triggerVisibleCurrentSessionRefresh = (page) => page.evaluate(() => {
+  document.dispatchEvent(new Event("visibilitychange"));
 });
 
 const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, async (element) => {
@@ -40,9 +46,16 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
   const fixture = await fixtureResponse.json();
   assert.equal(fixture.status, "READY", "local GEX fixture must be READY");
   assert.ok(fixture.heatmap && fixture.selectedSnapshot, "local GEX fixture must contain a board and selected snapshot");
+  const pressureFixtureResponse = await fetch(`${PRESSURE_API_URL}?date=${fixture.selectedDate}`);
+  assert.equal(pressureFixtureResponse.status, 200, "local pressure fixture must be available before this UAT");
+  const pressureFixture = await pressureFixtureResponse.json();
+  assert.equal(pressureFixture.status, "READY", "local pressure fixture must be READY");
+  assert.ok(pressureFixture.pressure, "local pressure fixture must contain a pressure matrix");
 
   const firstMinute = fixture.selectedSnapshot.snapshotMinuteEt;
   const secondMinute = firstMinute + 15;
+  const nextTradingDate = new Date(Date.parse(`${fixture.selectedDate}T12:00:00.000Z`) + 86_400_000).toISOString().slice(0, 10);
+  const nextTradingDateOffsetMs = Date.parse(`${nextTradingDate}T00:00:00.000Z`) - Date.parse(`${fixture.selectedDate}T00:00:00.000Z`);
   const firstSession = { ...fixture.selectedSnapshot, snapshotMinuteEt: firstMinute, snapshotTimeEt: formatMinute(firstMinute) };
   const secondSession = { ...fixture.selectedSnapshot, snapshotMinuteEt: secondMinute, snapshotTimeEt: formatMinute(secondMinute) };
   const firstPayload = {
@@ -56,6 +69,28 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     sessions: [firstSession, secondSession],
     selectedSnapshot: secondSession,
     heatmap: { ...fixture.heatmap, session: secondSession },
+  };
+  const rolloverSessions = [firstSession, secondSession].map((session) => ({
+    ...session,
+    tradingDate: nextTradingDate,
+  }));
+  const rolloverHeatmapPayload = {
+    ...firstPayload,
+    availableDates: [nextTradingDate, ...fixture.availableDates.filter((date) => date !== nextTradingDate)],
+    selectedDate: nextTradingDate,
+    sessions: rolloverSessions,
+    selectedSnapshot: rolloverSessions[0],
+    heatmap: { ...firstPayload.heatmap, session: rolloverSessions[0] },
+  };
+  const rolloverPressurePayload = {
+    ...pressureFixture,
+    selectedDate: nextTradingDate,
+    pressure: {
+      ...pressureFixture.pressure,
+      tradingDate: nextTradingDate,
+      baseline: { ...pressureFixture.pressure.baseline, tradingDate: nextTradingDate },
+      timeline: pressureFixture.pressure.timeline.map((frame) => ({ ...frame, tradingDate: nextTradingDate })),
+    },
   };
   const oneMinuteCandles = Array.from({ length: 301 }, (_, index) => {
     const close = fixture.heatmap.quote.last + Math.sin(index / 11) * 9 + index * 0.015;
@@ -204,6 +239,27 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
       },
     },
   };
+  const rolloverExpectedMovePayload = {
+    ...liveExpectedMovePayload,
+    candles: liveExpectedMovePayload.candles.map((candle) => ({
+      ...candle,
+      time: candle.time + nextTradingDateOffsetMs,
+      date_iso: nextTradingDate,
+    })),
+    source: {
+      ...liveExpectedMovePayload.source,
+      latestSampleAt: `${nextTradingDate}T20:15:00.000Z`,
+      sessionDate: nextTradingDate,
+      expectedMove: {
+        ...liveExpectedMovePayload.source.expectedMove,
+        sampleAt: `${nextTradingDate}T20:15:00.000Z`,
+      },
+      sharedCache: {
+        ...liveExpectedMovePayload.source.sharedCache,
+        cachedAt: `${nextTradingDate}T20:15:00.000Z`,
+      },
+    },
+  };
   const missingExpectedMovePayload = {
     ...liveExpectedMovePayload,
     source: {
@@ -243,7 +299,9 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
   let forceCompassTextFailure = false;
   let compassMode = "live";
   let overlayMode = "live";
+  let latestHeatmapPayload = firstPayload;
   let recoveredExpectedMoveRequests = 0;
+  let injectedServiceUnavailableResponses = 0;
   const overlayDates = [];
   const overlayQueries = [];
   const initialSpqRequestOrder = [];
@@ -258,11 +316,13 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
   await page.setViewport({ width: 1466, height: 986 });
   await page.evaluateOnNewDocument((fixedNow) => {
     const RealDate = Date;
+    let currentNow = fixedNow;
+    globalThis.__setSpxUatNow = (nextNow) => { currentNow = nextNow; };
     globalThis.Date = class extends RealDate {
       constructor(...args) {
-        super(...(args.length > 0 ? args : [fixedNow]));
+        super(...(args.length > 0 ? args : [currentNow]));
       }
-      static now() { return fixedNow; }
+      static now() { return currentNow; }
     };
   }, Date.parse(`${fixture.selectedDate}T20:15:00.000Z`));
   await page.setRequestInterception(true);
@@ -270,9 +330,13 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     const url = new URL(request.url());
     if (url.pathname === "/api/spx-gex-heatmap") initialSpqRequestOrder.push("heatmap");
     if (url.pathname === "/api/spx-price-action-compass" && url.searchParams.get("view") !== "price-overlay") initialSpqRequestOrder.push("compass");
-    if (url.pathname === "/api/spx-gex-pressure") initialSpqRequestOrder.push("pressure");
+    if (url.pathname === "/api/spx-gex-pressure") {
+      initialSpqRequestOrder.push("pressure");
+      if (url.searchParams.get("date") === nextTradingDate) return request.respond(jsonResponse(rolloverPressurePayload));
+    }
     if (url.pathname === "/api/spx-price-action-compass" && url.searchParams.get("view") === "price-overlay") initialSpqRequestOrder.push("overlay");
     if (url.pathname === "/api/spx-price-action-compass" && forceCompassTextFailure) {
+      injectedServiceUnavailableResponses += 1;
       return request.respond({
         status: 503,
         contentType: "text/html; charset=utf-8",
@@ -288,6 +352,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
       }
       if (overlayMode === "stale-em") return request.respond(jsonResponse(staleExpectedMovePayload));
       if (overlayMode === "closed") return request.respond(jsonResponse(closedOneMinutePayload));
+      if (overlayMode === "rollover") return request.respond(jsonResponse(rolloverExpectedMovePayload));
       if (overlayMode === "closed-failure") return request.respond({
         status: 502,
         contentType: "application/json; charset=utf-8",
@@ -310,6 +375,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     }
     if (url.pathname !== "/api/spx-gex-heatmap") return request.continue();
 
+    if (!url.searchParams.has("snapshot")) return request.respond(jsonResponse(latestHeatmapPayload));
     const requestedMinute = Number(url.searchParams.get("snapshot"));
     if (!Number.isFinite(requestedMinute) || requestedMinute === firstMinute) {
       return request.respond(jsonResponse(firstPayload));
@@ -317,6 +383,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     if (requestedMinute === secondMinute) {
       secondSnapshotAttempts += 1;
       if (secondSnapshotAttempts <= 3) {
+        injectedServiceUnavailableResponses += 1;
         return request.respond({
           status: 503,
           contentType: "text/html; charset=utf-8",
@@ -350,14 +417,29 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.deepEqual(monitorOrder.map((row) => row.index), [280, 280, 240, 120], "Signal Monitor must be latest-first");
     assert.match(monitorOrder[0].text, /Latest A/, "signal ties must use the deterministic id tie-break");
     assert.match(await page.$eval('[data-spx-price-action-compass="true"]', (node) => node.textContent || ""), /LATEST FIRST/i);
+    assert.equal(await page.$('button[aria-label="Refresh latest SPX and GEX sources"]'), null, "the duplicate Board refresh button must be removed");
+    assert.equal(await page.$('button[aria-label="Refresh all SPX sources"]'), null, "the duplicate Compass refresh button must be removed");
+    assert.equal(await page.$eval('[data-spx-gex-navigation-mode]', (node) => node.getAttribute("data-spx-gex-navigation-mode")), "pinned", "a legacy earlier-frame URL must remain explicitly pinned");
+    assert.match(page.url(), /\?mode=pinned&date=.*&snapshot=/, "a migrated pinned URL must preserve its exact GEX date and frame");
+    const snapshotUrlBeforeAutoRefresh = page.url();
+    const snapshotLabelBeforeAutoRefresh = await page.$eval('button[class*="text-yellow-300"]', (node) => node.textContent || "");
     forceCompassTextFailure = true;
-    await page.click('button[title="Refresh"]');
+    await triggerVisibleCurrentSessionRefresh(page);
     await page.waitForFunction(() => document.querySelector('[data-spx-price-action-compass="true"]')?.textContent?.includes("Refresh failed; showing the last verified Price Action Compass."));
     const compassFailure = await page.$eval('[data-spx-price-action-compass="true"]', (element) => element.textContent || "");
     assert.match(compassFailure, /HTTP 503/);
     assert.ok(!compassFailure.includes("Unexpected token"), "Compass must not expose a JSON syntax error for HTML failures");
     assert.ok(await page.$('[data-pa-chart-surface="true"]'), "Compass must retain its last verified chart after refresh failure");
+    assert.equal(page.url(), snapshotUrlBeforeAutoRefresh, "current-session source refresh must not rewrite the GEX snapshot URL");
+    assert.equal(await page.$eval('button[class*="text-yellow-300"]', (node) => node.textContent || ""), snapshotLabelBeforeAutoRefresh, "current-session source refresh must not move the selected GEX frame");
     forceCompassTextFailure = false;
+
+    const latestHeatmapResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === "/api/spx-gex-heatmap" && !url.searchParams.has("snapshot");
+    });
+    await page.select('select[name="spx-gex-snapshot-date"]', fixture.selectedDate);
+    await latestHeatmapResponse;
 
     await page.evaluate(() => {
       const nativeFetch = window.fetch.bind(window);
@@ -366,7 +448,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
         ? new Promise(() => {})
         : nativeFetch(input, init);
     });
-    await page.click('button[title="Refresh latest SPX and GEX sources"]');
+    await triggerVisibleCurrentSessionRefresh(page);
     await page.waitForSelector('[data-spx-gex-pressure-refresh-stale="true"]', { timeout: 20_000 });
     const pressureAfterTimeout = await page.evaluate(() => ({
       busy: document.querySelector('[data-spx-gex-pressure-matrix="true"]')?.getAttribute("aria-busy"),
@@ -534,10 +616,9 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.equal(pressureLayout.unifiedBoardShell, true, "Board header, cockpit, playback, and exposure table must share one shell");
     assert.equal(pressureLayout.cellsMeetMinimumSize, true, "pressure cells must remain at least 34 by 25 CSS pixels");
     assert.equal(pressureLayout.betweenCompassAndBoard, true, "pressure matrix must sit between Compass and GEX Board");
-    await page.waitForFunction(() => !document.querySelector('button[title="Refresh latest SPX and GEX sources"]')?.hasAttribute("disabled"));
     overlayMode = "recover-expected-move";
     const pageUrlBeforeExpectedMoveRecovery = page.url();
-    await page.click('button[title="Refresh latest SPX and GEX sources"]');
+    await triggerVisibleCurrentSessionRefresh(page);
     await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-expected-move-warning="true"]')?.textContent?.includes("Expected Move unavailable"));
     const missingExpectedMove = await page.evaluate(() => ({
       corridorLines: document.querySelectorAll('[data-spx-gex-pressure-expected-move-upper="true"], [data-spx-gex-pressure-expected-move-lower="true"]').length,
@@ -558,9 +639,8 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     const reducedMotionAnimation = await page.$eval('[data-spx-gex-pressure-spot-marker="true"]', (element) => getComputedStyle(element).animationName);
     assert.equal(reducedMotionAnimation, "none", "reduced motion must disable the current-spot pulse");
     await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "no-preference" }]);
-    await page.waitForFunction(() => !document.querySelector('button[title="Refresh latest SPX and GEX sources"]')?.hasAttribute("disabled"));
     overlayMode = "stale-em";
-    await page.click('button[title="Refresh latest SPX and GEX sources"]');
+    await triggerVisibleCurrentSessionRefresh(page);
     await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-expected-move-status="STALE"]'));
     const staleExpectedMove = await page.evaluate(() => ({
       label: document.querySelector('[data-spx-gex-pressure-expected-move-status="STALE"]')?.textContent || "",
@@ -577,7 +657,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
 
     overlayMode = "closed";
     compassMode = "closed";
-    await page.click('button[title="Refresh latest SPX and GEX sources"]');
+    await triggerVisibleCurrentSessionRefresh(page);
     try {
       await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-spot-source="true"]')?.textContent?.includes("0DTESPX CLOSED"));
       await page.waitForFunction(() => document.querySelector('[data-spx-price-action-compass="true"]')?.textContent?.includes("0DTESPX CLOSED"));
@@ -740,10 +820,17 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     const spotOverlayAfterPlayback = await page.$eval('[data-spx-gex-pressure-spot-line="true"] polyline', (element) => element.getAttribute("points") || "");
     assert.equal(spotOverlayAfterPlayback, spotOverlayBeforePlayback, "GEX playback must not replay or reshape the current SPX context line");
     assert.equal(overlayQueries.length, overlayRequestsBeforePlayback, "GEX playback must not make one SPX overlay request per snapshot frame");
-    assert.equal(consoleErrors.length, 5, `only deliberately injected Compass and playback 503 responses may reach console: ${consoleErrors.join(" | ")}`);
+    const spxBrowserStorage = await page.evaluate(async () => ({
+      local: Object.keys(localStorage).filter((key) => /spx|gex/i.test(key)),
+      session: Object.keys(sessionStorage).filter((key) => /spx|gex/i.test(key)),
+      cacheStorage: typeof caches === "undefined" ? [] : (await caches.keys()).filter((key) => /spx|gex/i.test(key)),
+    }));
+    assert.deepEqual(spxBrowserStorage, { local: [], session: [], cacheStorage: [] }, "SPX playback must not create a second browser-local data cache beside D1/edge cache");
+    assert.equal(consoleErrors.length, injectedServiceUnavailableResponses, `only deliberately injected Compass and playback 503 responses may reach console: ${consoleErrors.join(" | ")}`);
     assert.ok(consoleErrors.every((error) => /503 \(Service Unavailable\)/.test(error)));
+    await page.evaluate((nextNow) => globalThis.__setSpxUatNow?.(nextNow), Date.parse(`${fixture.selectedDate}T20:16:00.000Z`));
     overlayMode = "closed-failure";
-    await page.click('button[title="Refresh latest SPX and GEX sources"]');
+    await triggerVisibleCurrentSessionRefresh(page);
     await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-spot-warning="true"]')?.textContent?.includes("showing the last verified 1-minute SPX and stale Expected Move context"));
     const retainedClosedOverlay = await page.evaluate(() => ({
       source: document.querySelector('[data-spx-gex-pressure-spot-source="true"]')?.textContent || "",
@@ -759,6 +846,60 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.ok(retainedClosedOverlay.pointCount >= 250, "post-close failure must retain the last verified 1-minute overlay");
     assert.match(retainedClosedOverlay.warning, /ZERO_DTE_SPX_UPSTREAM_UNAVAILABLE/);
     assert.equal(retainedClosedOverlay.pulseCount, 0, "retained CLOSED overlay must remain non-live");
+    overlayMode = "closed";
+    await triggerVisibleCurrentSessionRefresh(page);
+    await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-spot-source="true"]')?.textContent?.includes("0DTESPX CLOSED")
+      && !document.querySelector('[data-spx-gex-pressure-spot-warning="true"]'));
+    assert.match(await page.$eval('[data-spx-gex-pressure-spot-source="true"]', (element) => element.textContent || ""), /0DTESPX CLOSED/, "post-close source must recover on the next automatic visibility revalidation");
+
+    const latestModeResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === "/api/spx-gex-heatmap" && !url.searchParams.has("date") && !url.searchParams.has("snapshot");
+    });
+    await page.select('select[name="spx-gex-snapshot-date"]', fixture.selectedDate);
+    await latestModeResponse;
+    await page.waitForFunction(() => document.querySelector('[data-spx-gex-navigation-mode="latest"]'));
+    assert.match(page.url(), /\?mode=latest$/, "follow-latest mode must use a stable URL that does not pin one GEX date or frame");
+
+    latestHeatmapPayload = rolloverHeatmapPayload;
+    overlayMode = "rollover";
+    await page.evaluate((nextNow) => globalThis.__setSpxUatNow?.(nextNow), Date.parse(`${nextTradingDate}T20:15:00.000Z`));
+    const rolloverHeatmapResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === "/api/spx-gex-heatmap" && !url.searchParams.has("date") && !url.searchParams.has("snapshot");
+    });
+    await triggerVisibleCurrentSessionRefresh(page);
+    await rolloverHeatmapResponse;
+    await page.waitForFunction((date) => document.querySelector('select[name="spx-gex-snapshot-date"]')?.value === date, {}, nextTradingDate);
+    try {
+      await page.waitForFunction(() => document.querySelectorAll('[data-spx-gex-pressure-expected-move-upper="true"], [data-spx-gex-pressure-expected-move-lower="true"]').length === 2);
+    } catch (error) {
+      const rolloverDebug = await page.evaluate(() => ({
+        source: document.querySelector('[data-spx-gex-pressure-spot-source="true"]')?.textContent || null,
+        expectedMove: document.querySelector('[data-spx-gex-pressure-expected-move="true"]')?.textContent || null,
+        expectedMoveWarning: document.querySelector('[data-spx-gex-pressure-expected-move-warning="true"]')?.textContent || null,
+        spotWarning: document.querySelector('[data-spx-gex-pressure-spot-warning="true"]')?.textContent || null,
+        pressureState: document.querySelector('[data-spx-gex-pressure-matrix="true"]')?.getAttribute("aria-busy"),
+        selectedDate: document.querySelector('select[name="spx-gex-snapshot-date"]')?.value || null,
+      }));
+      throw new Error(`Rollover EM did not render. DOM=${JSON.stringify(rolloverDebug)} overlays=${JSON.stringify(overlayDates.slice(-5))} queries=${JSON.stringify(overlayQueries.slice(-5))}`, { cause: error });
+    }
+    const rolloverState = await page.evaluate(() => ({
+      navigationMode: document.querySelector('[data-spx-gex-navigation-mode]')?.getAttribute("data-spx-gex-navigation-mode"),
+      selectedDate: document.querySelector('select[name="spx-gex-snapshot-date"]')?.value,
+      source: document.querySelector('[data-spx-gex-pressure-spot-source="true"]')?.textContent || "",
+      expectedMove: document.querySelector('[data-spx-gex-pressure-expected-move="true"]')?.textContent || "",
+      corridorLines: document.querySelectorAll('[data-spx-gex-pressure-expected-move-upper="true"], [data-spx-gex-pressure-expected-move-lower="true"]').length,
+    }));
+    assert.deepEqual(rolloverState, {
+      navigationMode: "latest",
+      selectedDate: nextTradingDate,
+      source: "SPX 1M / 0DTESPX LIVE",
+      expectedMove: "EM ±25.00 · 16:15 ET",
+      corridorLines: 2,
+    }, "follow-latest mode must cross the ET trading date and restore current-session Expected Move without a reload");
+    assert.equal(overlayDates.at(-1), nextTradingDate, "the rollover overlay request must follow the new selected GEX date");
+    assert.match(page.url(), /\?mode=latest$/, "automatic rollover must not rewrite latest mode into a pinned snapshot URL");
     console.log("SPX GEX pressure + playback UAT passed: matrix renders with aligned spot/tape, and failed replay retries deterministically.");
   } finally {
     await browser.close();

@@ -49,7 +49,7 @@ import {
   getSpxGexPressureTooltipPosition,
   toSpxGexPressureFrame,
 } from "../src/lib/spx-gex-pressure-matrix";
-import { parseSpxGexBoardSelection } from "../src/components/spx-gex-heatmap-page";
+import { parseSpxGexBoardSelection, resolveSpxGexBoardNavigationMode } from "../src/components/spx-gex-heatmap-page";
 import { getSpxGexTooltipPosition } from "../src/lib/spx-gex-tooltip";
 import { parseJsonResponse, SafeJsonResponseError } from "../src/lib/safe-json-response";
 import { getSpxSpotLivePulseKey } from "../src/lib/spx-spot-live-pulse";
@@ -241,11 +241,43 @@ it("does not turn a missing snapshot hash parameter into snapshot minute zero", 
   assert.deepEqual(parseSpxGexBoardSelection("#/work/spx-gex-heatmap"), {
     date: "",
     snapshot: null,
+    mode: "latest",
   });
   assert.deepEqual(parseSpxGexBoardSelection("#/work/spx-gex-heatmap?date=2026-07-13&snapshot=870"), {
     date: "2026-07-13",
     snapshot: 870,
+    mode: "legacy",
   });
+  assert.deepEqual(parseSpxGexBoardSelection("#/work/spx-gex-heatmap?mode=latest&date=2026-07-13&snapshot=870"), {
+    date: "2026-07-13",
+    snapshot: 870,
+    mode: "latest",
+  });
+  assert.deepEqual(parseSpxGexBoardSelection("#/work/spx-gex-heatmap?mode=pinned&date=2026-07-13&snapshot=870"), {
+    date: "2026-07-13",
+    snapshot: 870,
+    mode: "pinned",
+  });
+});
+
+it("migrates only a legacy latest-frame URL into follow-latest mode", () => {
+  const payload = {
+    availableDates: ["2026-07-14", "2026-07-13"],
+    selectedDate: "2026-07-14",
+    selectedSnapshot: { snapshotMinuteEt: 960 },
+    sessions: [{ snapshotMinuteEt: 945 }, { snapshotMinuteEt: 960 }],
+  } as Parameters<typeof resolveSpxGexBoardNavigationMode>[1];
+
+  assert.equal(resolveSpxGexBoardNavigationMode("legacy", payload), "latest");
+  assert.equal(resolveSpxGexBoardNavigationMode("legacy", {
+    ...payload,
+    selectedSnapshot: { snapshotMinuteEt: 945 },
+  } as Parameters<typeof resolveSpxGexBoardNavigationMode>[1]), "pinned");
+  assert.equal(resolveSpxGexBoardNavigationMode("legacy", {
+    ...payload,
+    selectedDate: "2026-07-13",
+  }), "pinned");
+  assert.equal(resolveSpxGexBoardNavigationMode("pinned", payload), "pinned");
 });
 
 it("isolated UAT fixture pins the 2026-07-13 14:30 represented / 14:45 collected canonical board", () => {

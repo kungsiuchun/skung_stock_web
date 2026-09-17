@@ -46,7 +46,8 @@ interface PressureResponse {
 interface SpxGexPressureMatrixProps {
   selectedDate: string;
   selectedMinute: number | null;
-  refreshKey: number;
+  pressureRefreshKey: number;
+  priceOverlayRefreshKey: number;
   enabled?: boolean;
   controls: ReactNode;
   onLiveSpotChange?: (spot: { price: number; timeEt: string; provider: "0dtespx" } | null) => void;
@@ -268,7 +269,7 @@ const MoverRow = ({ mover }: { mover: SpxGexPressureMover }) => {
   );
 };
 
-export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey, controls, enabled = true, onLiveSpotChange }: SpxGexPressureMatrixProps) {
+export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRefreshKey, priceOverlayRefreshKey, controls, enabled = true, onLiveSpotChange }: SpxGexPressureMatrixProps) {
   const [data, setData] = useState<PressureResponse | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
@@ -311,7 +312,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
     };
   }, []);
 
-  useEffect(() => setActiveCell(null), [refreshKey, selectedDate]);
+  useEffect(() => setActiveCell(null), [pressureRefreshKey, selectedDate]);
 
   useEffect(() => {
     if (!enabled) return undefined;
@@ -406,7 +407,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
     };
     void load();
     return () => controller.abort();
-  }, [enabled, refreshKey, selectedDate]);
+  }, [enabled, pressureRefreshKey, selectedDate]);
 
   useEffect(() => {
     if (!selectedDate || !enabled) return undefined;
@@ -459,12 +460,18 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
           ? { ...current, error: message }
           : { selectedDate, data: null, error: message });
       } finally {
-        if (canCommit()) setReconnecting(false);
+        if (canCommit()) {
+          // Re-evaluate freshness against the clock that completed this read.
+          // Without this, an ET date rollover can leave the overlay comparing a
+          // new-session sample against yesterday's memoized clock.
+          setOverlayNowMs(Date.now());
+          setReconnecting(false);
+        }
       }
     };
     void load();
     return () => controller.abort();
-  }, [enabled, overlayRefreshKey, refreshKey, selectedDate]);
+  }, [enabled, overlayRefreshKey, priceOverlayRefreshKey, selectedDate]);
 
   const pressure = data?.selectedDate === selectedDate ? data.pressure : null;
   const openingAttempts = data?.selectedDate === selectedDate
@@ -474,7 +481,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, refreshKey,
   const latestSpotPoint = useMemo(() => pressure && priceOverlay?.data
     ? getLatestSpxGexSpotPoint(priceOverlay.data.candles, pressure.tradingDate)
     : null, [pressure, priceOverlay?.data]);
-  const displayPressure = useMemo(() => pressure ? extendSpxGexPressureForSession(pressure, etClock()) : null, [pressure, refreshKey]);
+  const displayPressure = useMemo(() => pressure ? extendSpxGexPressureForSession(pressure, etClock()) : null, [pressure, pressureRefreshKey]);
   const overlayClock = useMemo(() => etClock(new Date(overlayNowMs)), [overlayNowMs]);
   const effectivePriceSource = useMemo(() => priceOverlay?.data?.source
     ? (() => {

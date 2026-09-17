@@ -8,7 +8,6 @@ import {
   GraduationCap,
   Grid3X3,
   Maximize2,
-  RefreshCw,
   Search,
   Target,
   X,
@@ -132,17 +131,11 @@ const toneClasses = (pattern: SpxPriceActionPattern | null | undefined) => {
 export function SpxPriceActionCompass({
   enabled = true,
   refreshKey = 0,
-  refreshingAllSources = false,
-  onRefreshAllSources,
   onInitialLoadSettled,
 }: {
   enabled?: boolean;
-  /** Parent-owned source refresh signal shared with the GEX pressure matrix. */
+  /** Parent-owned current-session refresh signal shared with the price overlay. */
   refreshKey?: number;
-  /** Parent-owned in-flight state for a board-wide SPX source refresh. */
-  refreshingAllSources?: boolean;
-  /** Refreshes the heatmap, Compass, and Pressure Matrix as one user action. */
-  onRefreshAllSources?: () => void;
   onInitialLoadSettled?: () => void;
 }) {
   const [timeframe, setTimeframe] = useState<SpxPriceActionTimeframe>("5m");
@@ -355,16 +348,6 @@ export function SpxPriceActionCompass({
             <ToolbarToggle active={showVolume} onClick={() => setShowVolume((value) => !value)} title="Volume">
               <BarChart3 className="h-4 w-4" />
             </ToolbarToggle>
-            <button
-              type="button"
-              onClick={() => onRefreshAllSources ? onRefreshAllSources() : void loadCompass(timeframe)}
-              disabled={loading || refreshingAllSources}
-              className="inline-flex h-9 w-9 items-center justify-center border border-cyan-300/20 bg-cyan-300/10 text-cyan-100 transition-colors hover:bg-cyan-300/20 disabled:opacity-50"
-              title={onRefreshAllSources ? "Refresh all SPX sources" : "Refresh SPX Price Action Compass"}
-              aria-label={onRefreshAllSources ? "Refresh all SPX sources" : "Refresh SPX Price Action Compass"}
-            >
-              <RefreshCw className={`h-4 w-4 ${(loading || refreshingAllSources) ? "animate-spin" : ""}`} />
-            </button>
           </div>
         </div>
 
