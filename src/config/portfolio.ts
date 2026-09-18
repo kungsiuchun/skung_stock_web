@@ -94,7 +94,7 @@ export const portfolioConfig = {
     },
     {
       id: 24,
-      alt: "Uploaded photo 0053",
+      alt: "Portrait beside a wooden train carriage",
       src: "/image/DSC_0053.JPG",
     },
     {
@@ -104,7 +104,7 @@ export const portfolioConfig = {
     },
     {
       id: 20,
-      alt: "Uploaded photo 0154",
+      alt: "Temple roof framed by green leaves",
       src: "/image/DSC_0154.JPG",
     },
     {
@@ -124,7 +124,7 @@ export const portfolioConfig = {
     },
     {
       id: 25,
-      alt: "Uploaded photo 0060",
+      alt: "Portrait at a railway station in the mountains",
       src: "/image/DSC_0060.JPG",
     },
     {
@@ -139,17 +139,17 @@ export const portfolioConfig = {
     },
     {
       id: 22,
-      alt: "Uploaded photo 0276",
+      alt: "Portrait beneath a timber pavilion",
       src: "/image/DSC_0276.JPG",
     },
     {
       id: 36,
-      alt: "Chicago skyline portrait with umbrella removed",
+      alt: "Chicago skyline portrait",
       src: "/image/DSC_0335.JPG",
     },
     {
       id: 27,
-      alt: "Uploaded photo 0146",
+      alt: "Walking across a wooden bridge into the trees",
       src: "/image/DSC_0146.JPG",
     },
     {
@@ -159,7 +159,7 @@ export const portfolioConfig = {
     },
     {
       id: 23,
-      alt: "Uploaded photo 0280",
+      alt: "Portrait in a sunlit wooden corridor",
       src: "/image/DSC_0280.JPG",
     },
     {
@@ -169,7 +169,7 @@ export const portfolioConfig = {
     },
     {
       id: 21,
-      alt: "Uploaded photo 0171",
+      alt: "A walk along a quiet city street",
       src: "/image/DSC_0171.JPG",
     },
     {
@@ -179,7 +179,7 @@ export const portfolioConfig = {
     },
     {
       id: 26,
-      alt: "Uploaded photo 0103",
+      alt: "A pause on a shaded woodland boardwalk",
       src: "/image/DSC_0103.JPG",
     },
     {
@@ -189,7 +189,7 @@ export const portfolioConfig = {
     },
     {
       id: 19,
-      alt: "Uploaded photo 0132",
+      alt: "Portrait among tall forest trees",
       src: "/image/DSC_0132.JPG",
     },
   ]

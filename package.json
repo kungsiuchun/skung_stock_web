@@ -11,7 +11,7 @@
     "dev:spx-uat": "npm run spx:uat:seed && concurrently --kill-others-on-fail \"vite --mode spx-uat --port 5173 --strictPort\" \"npx wrangler pages dev . --port 8788 --compatibility-date=2024-04-01 --persist-to .wrangler/spx-uat\"",
     "dev:spx-live": "concurrently --kill-others-on-fail \"vite --mode spx-live --port 5173 --strictPort\" \"npx wrangler pages dev . --port 8788 --compatibility-date=2024-04-01\"",
     "build": "tsc && vite build",
-    "test:no-mistakes": "npm run test:spx-gex && npm run test:spx-pa && npm run test:quant-strategies && npm run test:stocks-watcher && npm run test:market-breadth && npm run test:deploy-scope && npm run build",
+    "test:no-mistakes": "npm run test:spx-gex && npm run test:spx-pa && npm run test:quant-strategies && npm run test:stocks-watcher && npm run test:market-breadth && npm run test:deploy-scope && npm run test:portfolio-ui && npm run build",
     "d1:migrate:local": "wrangler d1 migrations apply spx-recap-db --local",
     "d1:migrate:remote": "wrangler d1 migrations apply spx-recap-db --remote",
     "spx:backfill:dry": "tsx scripts/backfill-spx-recap.ts --dry-run",
@@ -39,7 +39,8 @@
     "deploy:all": "npm run deploy:production -- --sync-secrets",
     "test:deploy-scope": "node --test tests/deploy-scope.test.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:portfolio-ui": "node --import tsx --test tests/app-routes.test.ts tests/portfolio-experience.test.ts"
   },
   "dependencies": {
     "clsx": "^2.1.1",

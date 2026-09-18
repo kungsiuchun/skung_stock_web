@@ -1,69 +1,256 @@
-import { ArrowRight } from "lucide-react";
-import { ParticlePortraitCanvas } from "@/components/particle-portrait-canvas";
+import { useState } from "react";
+import { ArrowDown, ArrowUpRight, Pause, Play } from "lucide-react";
+import { ParticlePortraitCanvas } from "./particle-portrait-canvas";
+import { PortfolioFooter } from "./portfolio-footer";
+import { useReducedMotion } from "@/lib/use-reduced-motion";
 
-type HomeLandingPageProps = {
-  onOpenMarketLab: () => void;
-  onOpenPhotography: () => void;
-};
-
-const HERO_IMAGE = "/image/siu-hero-particle-source-v2.png";
-
-export function HomeLandingPage({ onOpenMarketLab, onOpenPhotography }: HomeLandingPageProps) {
+export function HomeLandingPage() {
+  const reducedMotion = useReducedMotion();
+  const [paused, setPaused] = useState(false);
   return (
-    <section className="relative min-h-dvh overflow-x-hidden bg-[#f4efe6] text-[#1a1714] lg:h-full lg:overflow-hidden">
-      <div className="pointer-events-none absolute inset-3 border border-[#c9c0b2]/80 sm:inset-5" />
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(rgba(26,23,20,0.045)_1px,transparent_1px)] [background-size:4px_4px]" />
-      <div className="pointer-events-none absolute left-[4.4rem] top-28 hidden h-[calc(100%-10rem)] w-px bg-[#c9c0b2]/60 md:block" />
-
-      <div className="relative z-10 grid min-h-[100dvh] grid-cols-1 px-8 pb-10 pt-28 sm:px-12 sm:pt-24 lg:grid-cols-[48%_52%] lg:px-20 lg:pb-7 lg:pt-20">
-        <div className="flex flex-col justify-center lg:min-h-0 lg:pb-[4vh]">
-          <h1 className="font-serif text-[clamp(5.5rem,17vw,16rem)] font-semibold leading-[0.8] tracking-[-0.035em] text-[#16130f]">
-            Siu
+    <div className="portfolio-home">
+      <section
+        className="portfolio-hero portfolio-wrap"
+        aria-labelledby="home-title"
+      >
+        <div className="hero-copy">
+          <p className="eyebrow">
+            <span className="accent-dot" /> DATA ANALYST · CREATIVE DEVELOPER
+          </p>
+          <h1 id="home-title">
+            Finding signal.
+            <br />
+            <em>Framing stories.</em>
           </h1>
-
-          <div className="mt-8 max-w-[38rem] lg:ml-2 lg:mt-7">
-            <p className="flex items-center gap-4 font-mono text-xs uppercase tracking-[0.36em] text-[#d65e2d] sm:text-sm">
-              <span className="h-3 w-3 rounded-full bg-[#e2632f]" />
-              AI media <span aria-hidden="true">x</span> Build in public
-            </p>
-
-            <div className="mt-7 h-px w-10 bg-[#1a1714]/50 lg:mt-6" />
-
-            <p className="mt-7 max-w-[34rem] text-[clamp(2rem,2.72vw,3.05rem)] font-light leading-[1.16] tracking-[-0.02em] text-[#1d1a17] lg:mt-5">
-              Exploring wealth, work,
-              <br />
-              and creative technology.
-            </p>
-
-            <div className="mt-10 flex max-w-[34rem] flex-col gap-4 sm:flex-row lg:mt-8">
+          <p className="hero-intro">
+            I’m Siu. I build stock research tools with AI agents, make sense of
+            data, and take the scenic route with my camera.
+          </p>
+          <div className="hero-actions">
+            <a className="portfolio-button" href="#/market-lab">
+              Explore my work <ArrowUpRight size={18} />
+            </a>
+            <a className="text-link" href="#/about">
+              About & résumé <ArrowUpRight size={17} />
+            </a>
+          </div>
+          <p className="hero-signature">用 code 做工具，用鏡頭記錄世界。</p>
+        </div>
+        <figure className="hero-portrait">
+          <span className="portrait-index eyebrow" aria-hidden="true">
+            FIG. 01 / THE PERSON BEHIND THE PIXELS
+          </span>
+          <ParticlePortraitCanvas
+            src="/image/siu-hero.webp"
+            alt="Siu, rendered as an ink and burnt-orange particle portrait"
+            animate={!paused && !reducedMotion}
+            className="portrait-canvas"
+          />
+          <figcaption className="portrait-caption">
+            <span>
+              SIUCHUN WILSON KUNG <span className="muted">/ SIU</span>
+            </span>
+            {!reducedMotion && (
               <button
                 type="button"
-                onClick={onOpenMarketLab}
-                className="group flex h-16 flex-1 items-center justify-center gap-3 whitespace-nowrap border border-[#1a1714]/80 bg-transparent px-5 font-mono text-[0.7rem] font-semibold uppercase tracking-[0.12em] text-[#1a1714] transition-colors hover:bg-[#1a1714] hover:text-[#f4efe6] focus:outline-none focus:ring-2 focus:ring-[#e2632f] sm:text-[0.74rem] lg:h-14"
+                onClick={() => setPaused(!paused)}
+                aria-label={
+                  paused
+                    ? "Play portrait animation"
+                    : "Pause portrait animation"
+                }
               >
-                Explore work
-                <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+                {paused ? <Play size={14} /> : <Pause size={14} />}
+                <span>{paused ? "Play motion" : "Pause motion"}</span>
               </button>
-              <button
-                type="button"
-                onClick={onOpenPhotography}
-                className="group flex h-16 flex-1 items-center justify-center gap-3 whitespace-nowrap border border-[#1a1714]/80 bg-transparent px-5 font-mono text-[0.7rem] font-semibold uppercase tracking-[0.12em] text-[#1a1714] transition-colors hover:bg-[#1a1714] hover:text-[#f4efe6] focus:outline-none focus:ring-2 focus:ring-[#e2632f] sm:text-[0.74rem] lg:h-14"
-              >
-                View photography
-                <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
-              </button>
+            )}
+          </figcaption>
+        </figure>
+      </section>
+      <nav
+        className="home-paths portfolio-wrap"
+        aria-label="Explore the portfolio"
+      >
+        {[
+          [
+            "01",
+            "Market Lab",
+            "AI-built tools, ready to explore.",
+            "#/market-lab",
+          ],
+          [
+            "02",
+            "Photography",
+            "People, places & the in-between.",
+            "#/photography",
+          ],
+          [
+            "03",
+            "About & résumé",
+            "The experience behind the work.",
+            "#/about",
+          ],
+        ].map(([number, title, subtitle, href]) => (
+          <a href={href} key={number}>
+            <span className="eyebrow path-number">{number}</span>
+            <div>
+              <h2>{title}</h2>
+              <p>{subtitle}</p>
             </div>
+            <ArrowUpRight size={23} />
+          </a>
+        ))}
+      </nav>
+      <section className="portfolio-section portfolio-wrap">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">01 / CODE & CURIOSITY</p>
+            <h2>
+              Ideas you can <em>use.</em>
+            </h2>
+          </div>
+          <a className="text-link" href="#/market-lab">
+            All tools <ArrowUpRight size={18} />
+          </a>
+        </div>
+        <div className="selected-work">
+          <a
+            className="selected-work-lead"
+            href="#/work/stocks-intelligence-watcher"
+          >
+            <div className="work-cover">
+              <span className="eyebrow">STOCKS INTELLIGENCE</span>
+              <span className="cover-word">
+                Watcher<span>↗</span>
+              </span>
+              <div className="cover-topics">
+                <span>Watchlist</span>
+                <span>Financials</span>
+                <span>Options</span>
+              </div>
+              <span className="cover-note">
+                A research workspace. Built with AI.
+              </span>
+            </div>
+            <div className="selected-work-caption">
+              <div>
+                <h3>Stocks Intelligence Watcher</h3>
+                <p>
+                  Quotes, company financials and options in one research
+                  workflow.
+                </p>
+              </div>
+              <ArrowUpRight />
+            </div>
+          </a>
+          <div className="selected-work-list">
+            <a href="#/work/market-breadth">
+              <span className="eyebrow">MARKET INTERNALS</span>
+              <h3>
+                See beyond
+                <br />
+                the index.
+              </h3>
+              <p>
+                S&P 500 Market Breadth — explore sector leadership and
+                participation.
+              </p>
+              <span className="text-link">
+                Explore breadth <ArrowUpRight size={18} />
+              </span>
+            </a>
+            <a href="#/work/portfolio-backtest">
+              <span className="eyebrow">PORTFOLIO RESEARCH</span>
+              <h3>
+                Put an allocation
+                <br />
+                in perspective.
+              </h3>
+              <p>
+                Portfolio vs SPY — compare historical ETF allocations with
+                explicit assumptions.
+              </p>
+              <span className="text-link">
+                Open backtester <ArrowUpRight size={18} />
+              </span>
+            </a>
           </div>
         </div>
-
-        <div className="relative -mx-8 mt-12 min-h-[29rem] sm:-mx-12 sm:mt-4 sm:min-h-[48vh] lg:mx-0 lg:mt-0 lg:min-h-0">
-          <ParticlePortraitCanvas
-            src={HERO_IMAGE}
-            alt="Siu editorial duotone portrait"
-            className="relative ml-auto h-[29rem] w-[140%] translate-x-[10%] sm:absolute sm:right-[-8%] sm:top-[-2%] sm:h-[108%] sm:w-[114%] sm:translate-x-0 lg:right-0 lg:top-[-4%] lg:h-[108%] lg:w-full xl:h-[110%]"
-          />
+      </section>
+      <section className="home-photography">
+        <div className="portfolio-wrap portfolio-section">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">02 / AWAY FROM THE SCREEN</p>
+              <h2>
+                A different kind
+                <br />
+                of <em>attention.</em>
+              </h2>
+            </div>
+            <div>
+              <p className="section-description">
+                Travel photographs. Small details.
+                <br />A reason to look a little longer.
+              </p>
+              <a className="text-link" href="#/photography">
+                Enter the photo journal <ArrowUpRight size={18} />
+              </a>
+            </div>
+          </div>
+          <a
+            className="photo-pair"
+            href="#/photography"
+            aria-label="Explore Siu’s travel photography"
+          >
+            <figure>
+              <img
+                src="/image/DSC_0395.JPG"
+                alt="Chicago skyline reflected on the river at dusk"
+                width="1920"
+                height="1280"
+                loading="lazy"
+              />
+              <figcaption>CHICAGO / AFTER THE LIGHT CHANGES</figcaption>
+            </figure>
+            <figure>
+              <img
+                src="/image/DSC_0990.JPG"
+                alt="Garden portrait with a straw hat"
+                width="1280"
+                height="1920"
+                loading="lazy"
+              />
+              <figcaption>TRAVEL JOURNAL / A MOMENT BETWEEN PLACES</figcaption>
+            </figure>
+          </a>
         </div>
-      </div>
-    </section>
+      </section>
+      <section className="home-about portfolio-wrap portfolio-section">
+        <p className="eyebrow">03 / THE THROUGH LINE</p>
+        <div>
+          <h2>
+            Analytical by training.
+            <br />
+            <em>Curious by nature.</em>
+          </h2>
+          <p>
+            Data Analyst at Canvas Worldwide. A computer science background, a
+            hands-on approach to AI, and a habit of turning questions into
+            working tools.
+          </p>
+          <a href="#/about" className="text-link">
+            Get to know me <ArrowUpRight size={18} />
+          </a>
+        </div>
+        <ArrowDown
+          className="home-about-arrow"
+          size={50}
+          strokeWidth={1}
+          aria-hidden="true"
+        />
+      </section>
+      <PortfolioFooter />
+    </div>
   );
 }

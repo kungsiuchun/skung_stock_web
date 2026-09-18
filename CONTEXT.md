@@ -6,27 +6,27 @@ Stock Watcher reads valuation bands and quarterly financials from private R2 thr
 
 Coverage writes are owner-only and API-only: GitHub OAuth establishes a signed HttpOnly session for the `request_valuation_coverage` admin route, while the Watcher dashboard deliberately exposes no Coverage request panel. The canonical `pages.dev` host cannot take a Cloudflare Access self-hosted application in this setup, so OAuth is the explicit replacement gate; a future custom host may add Access defense in depth. The existing bearer token is retained only for trusted server-to-server automation. Queued tickers are picked up by the next daily batch; public visitors never trigger calculation or Yahoo fallback data.
 
+## Personal Portfolio
+
+The public portfolio uses the “Siu — Code & Camera” identity: warm paper, ink, and burnt orange; serif headlines with readable sans-serif body text. The homepage introduces Siu as a data analyst and creative developer, then offers three paths: Market Lab, Photography, and About & résumé.
+
+Portfolio styles are scoped to the portfolio shell. Trading tools retain their existing layouts, routes, API contracts, source labels, and data behavior. Tool modules load on demand rather than with the homepage.
+
+The landing page retains Siu's particle portrait. Canvas enhances an always-present portrait image; a pause control, reduced-motion preference, and offscreen/hidden-page suspension bound its motion. No Three.js or WebGL dependency is required.
+
 ## About Page
 
-The About Page presents SIU as the subject. The Nikon D3500 is supporting evidence for SIU's visual practice, not the main product being showcased.
+The About Page presents SIU as the subject. Professional facts are transcribed from the owner-supplied `docs/SiuChunKung_Resume.pdf` into `src/config/profile.ts`. The identical downloadable copy is served at `public/docs/SiuChunKung_Resume.pdf`; update both copies together when the owner supplies a replacement.
 
-The About Page uses a lightweight 2D faux-3D camera presentation so the experience feels interactive without turning into a heavy 3D product page.
+Experience, skills, education, and certifications are readable without waiting for an animation or entering terminal commands. The recognizable résumé-build terminal plays once, offers pause/show-all/replay, and immediately shows its complete state for reduced-motion visitors.
 
-The camera visual should represent the real Nikon D3500 rather than a generic illustrated camera.
+The Nikon D3500 remains supporting evidence for Siu's visual practice, with a compact static image and a direct link to photography. It does not gate the résumé behind a camera scan or a long scroll sequence.
 
-The preferred camera image source is SIU's own photo of the Nikon D3500. A temporary placeholder can be used during implementation, but the final portfolio should avoid unlicensed product imagery.
+The About Page remains an independent view. English is the primary portfolio language, with small Traditional Chinese or Cantonese accents for personal texture.
 
-The About Page copy uses English as the primary portfolio language with small Traditional Chinese or Cantonese accents for personal texture.
+## Photography
 
-The About Page should leave visitors remembering three identity points: SIU is a creative developer, a visual thinker, and a systems experimenter.
-
-The About Page may include a compact proof strip of three to five existing photographs to support SIU's visual identity without turning the page into a gallery.
-
-The About Page scroll interaction should be moderate: camera motion and spec reveals should add depth without making the page feel like an animation demo.
-
-The About Page should be an independent portfolio view rather than a section inside the home page.
-
-Nikon D3500 specifications on the About Page should be curated around SIU's creative practice rather than presented as a full hardware spec sheet.
+The photo journal presents only the owner's local photographs from `public/image`; external stock images are not represented as Siu's photography. A finite, scrollable gallery and category filters replace the drag-only canvas. Native modal viewing preserves image proportions, supports previous/next buttons and arrow keys, and restores focus on close. Descriptions should reflect observed image contents; do not infer unverified locations or dates.
 
 ## Creative Developer
 

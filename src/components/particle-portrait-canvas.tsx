@@ -4,6 +4,7 @@ type ParticlePortraitCanvasProps = {
   src: string;
   alt: string;
   className?: string;
+  animate?: boolean;
 };
 
 type Particle = {
@@ -62,7 +63,12 @@ const colorForPixel = (r: number, g: number, b: number) => {
 
 const easeOutCubic = (value: number) => 1 - Math.pow(1 - value, 3);
 
-export function ParticlePortraitCanvas({ src, alt, className = "" }: ParticlePortraitCanvasProps) {
+export function ParticlePortraitCanvas({
+  src,
+  alt,
+  className = "",
+  animate = true,
+}: ParticlePortraitCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const frameRef = useRef<number>();
   const particlesRef = useRef<Particle[]>([]);
@@ -81,12 +87,14 @@ export function ParticlePortraitCanvas({ src, alt, className = "" }: ParticlePor
       return;
     }
 
-    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const reduceMotion =
+      !animate || window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const image = new Image();
     image.decoding = "async";
     image.src = src;
 
     let disposed = false;
+    let inViewport = true;
     let cssWidth = 0;
     let cssHeight = 0;
     let imageLeft = 0;
@@ -136,7 +144,9 @@ export function ParticlePortraitCanvas({ src, alt, className = "" }: ParticlePor
       const offscreen = document.createElement("canvas");
       offscreen.width = sampleWidth;
       offscreen.height = sampleHeight;
-      const offscreenCtx = offscreen.getContext("2d", { willReadFrequently: true });
+      const offscreenCtx = offscreen.getContext("2d", {
+        willReadFrequently: true,
+      });
 
       if (!offscreenCtx) {
         return;
@@ -144,17 +154,32 @@ export function ParticlePortraitCanvas({ src, alt, className = "" }: ParticlePor
 
       offscreenCtx.drawImage(image, 0, 0, sampleWidth, sampleHeight);
 
-      const pixels = offscreenCtx.getImageData(0, 0, sampleWidth, sampleHeight).data;
+      const pixels = offscreenCtx.getImageData(
+        0,
+        0,
+        sampleWidth,
+        sampleHeight,
+      ).data;
       let subjectPixels = 0;
 
       for (let index = 0; index < pixels.length; index += 4) {
-        if (!isPaperPixel(pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3])) {
+        if (
+          !isPaperPixel(
+            pixels[index],
+            pixels[index + 1],
+            pixels[index + 2],
+            pixels[index + 3],
+          )
+        ) {
           subjectPixels += 1;
         }
       }
 
       const targetCount = window.innerWidth < 720 ? 9000 : 26000;
-      const step = Math.max(2, Math.round(Math.sqrt(subjectPixels / targetCount)));
+      const step = Math.max(
+        2,
+        Math.round(Math.sqrt(subjectPixels / targetCount)),
+      );
       const nextParticles: Particle[] = [];
       const entryOffset = imageWidth * 0.52;
 
@@ -215,12 +240,21 @@ export function ParticlePortraitCanvas({ src, alt, className = "" }: ParticlePor
 
         if (!reduceMotion && elapsed < settleMs) {
           const localProgress = (elapsed - particle.delay) / particle.duration;
-          const progress = localProgress <= 0 ? 0 : localProgress >= 1 ? 1 : easeOutCubic(localProgress);
+          const progress =
+            localProgress <= 0
+              ? 0
+              : localProgress >= 1
+                ? 1
+                : easeOutCubic(localProgress);
           x = particle.sx + (particle.tx - particle.sx) * progress;
           y = particle.sy + (particle.ty - particle.sy) * progress;
           alpha = Math.max(0, Math.min(1, localProgress + 0.16));
         } else if (!reduceMotion) {
-          x = particle.tx - 12 * particle.drift * (0.5 + Math.sin(time * 0.7 + particle.phase) * 0.5);
+          x =
+            particle.tx -
+            12 *
+              particle.drift *
+              (0.5 + Math.sin(time * 0.7 + particle.phase) * 0.5);
           y = particle.ty + Math.cos(time * 0.86 + particle.phase) * 0.7;
 
           if (mouse.active) {
@@ -234,8 +268,12 @@ export function ParticlePortraitCanvas({ src, alt, className = "" }: ParticlePor
               const force = 1 - distance / radius;
               const push = force * 34;
               hoverBoost = force;
-              x += (dx / distance) * push + Math.sin(time * 8 + particle.phase) * force * 5;
-              y += (dy / distance) * push + Math.cos(time * 7 + particle.phase) * force * 5;
+              x +=
+                (dx / distance) * push +
+                Math.sin(time * 8 + particle.phase) * force * 5;
+              y +=
+                (dy / distance) * push +
+                Math.cos(time * 7 + particle.phase) * force * 5;
             }
           }
         }
@@ -254,12 +292,14 @@ export function ParticlePortraitCanvas({ src, alt, className = "" }: ParticlePor
 
       ctx.globalAlpha = 1;
 
-      if (!reduceMotion && !disposed) {
+      if (!reduceMotion && !disposed && inViewport && !document.hidden) {
         frameRef.current = requestAnimationFrame(drawFrame);
       }
     };
 
     const start = () => {
+      if (disposed || !image.naturalWidth) return;
+      if (frameRef.current) cancelAnimationFrame(frameRef.current);
       buildParticles();
       frameRef.current = requestAnimationFrame(drawFrame);
     };
@@ -267,25 +307,40 @@ export function ParticlePortraitCanvas({ src, alt, className = "" }: ParticlePor
     const handleResize = () => {
       window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
-        buildParticles();
+        start();
       }, 140) as unknown as number;
     };
 
     const handleVisibility = () => {
       if (document.hidden && frameRef.current) {
         cancelAnimationFrame(frameRef.current);
-      } else if (!reduceMotion) {
+      } else if (!reduceMotion && inViewport) {
+        if (frameRef.current) cancelAnimationFrame(frameRef.current);
         startRef.current = performance.now() - 1600;
         frameRef.current = requestAnimationFrame(drawFrame);
       }
     };
 
-    image.addEventListener("load", start, { once: true });
     if (image.complete) {
       start();
+    } else {
+      image.addEventListener("load", start, { once: true });
     }
 
-    const resizeObserver = "ResizeObserver" in window ? new ResizeObserver(handleResize) : null;
+    const intersection =
+      "IntersectionObserver" in window
+        ? new IntersectionObserver(([entry]) => {
+            inViewport = entry.isIntersecting;
+            if (frameRef.current) cancelAnimationFrame(frameRef.current);
+            if (inViewport && image.naturalWidth && !document.hidden) {
+              frameRef.current = requestAnimationFrame(drawFrame);
+            }
+          })
+        : null;
+    intersection?.observe(parent);
+
+    const resizeObserver =
+      "ResizeObserver" in window ? new ResizeObserver(handleResize) : null;
     resizeObserver?.observe(parent);
     window.addEventListener("resize", handleResize);
     document.addEventListener("visibilitychange", handleVisibility);
@@ -297,10 +352,12 @@ export function ParticlePortraitCanvas({ src, alt, className = "" }: ParticlePor
         cancelAnimationFrame(frameRef.current);
       }
       resizeObserver?.disconnect();
+      intersection?.disconnect();
+      image.removeEventListener("load", start);
       window.removeEventListener("resize", handleResize);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [src]);
+  }, [src, animate]);
 
   return (
     <div
@@ -323,7 +380,11 @@ export function ParticlePortraitCanvas({ src, alt, className = "" }: ParticlePor
         className="absolute inset-0 h-full w-full object-contain opacity-[0.68] mix-blend-multiply contrast-[1.18] saturate-[1.08]"
         draggable={false}
       />
-      <canvas ref={canvasRef} className="absolute inset-0 z-10" aria-hidden="true" />
+      <canvas
+        ref={canvasRef}
+        className="absolute inset-0 z-10"
+        aria-hidden="true"
+      />
     </div>
   );
 }

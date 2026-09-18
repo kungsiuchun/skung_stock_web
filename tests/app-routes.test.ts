@@ -18,6 +18,8 @@ test("round trips every page-level view to a hash route", () => {
   const expected: Array<[ViewState, string]> = [
     ["home", "#/"],
     ["about", "#/about"],
+    ["contact", "#/contact"],
+    ["photography", "#/photography"],
     ["work-gallery", "#/market-lab"],
     ["settle-up", "#/work/settle-up"],
     ["finance-dashboard", "#/work/finance-analyzer"],

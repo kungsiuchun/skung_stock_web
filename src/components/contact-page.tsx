@@ -1,52 +1,74 @@
-import { Linkedin, Mail, MapPin } from "lucide-react";
+import { useState } from "react";
+import { ArrowUpRight, Copy, Download } from "lucide-react";
+import { profile } from "@/config/profile";
+import { PortfolioFooter } from "./portfolio-footer";
 
 export function ContactPage() {
+  const [copyStatus, setCopyStatus] = useState("");
+  const copyEmail = async () => {
+    try {
+      await navigator.clipboard.writeText(profile.email);
+      setCopyStatus("Email copied.");
+    } catch {
+      setCopyStatus(
+        "Copy unavailable. Select the email address above to copy it.",
+      );
+    }
+  };
   return (
-    <section className="relative h-full min-h-screen overflow-hidden bg-[#f4efe6] px-8 pb-12 pt-28 text-[#1a1714] sm:px-12 lg:px-20">
-      <div className="pointer-events-none absolute inset-3 border border-[#c9c0b2]/80 sm:inset-5" />
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(rgba(26,23,20,0.04)_1px,transparent_1px)] [background-size:4px_4px]" />
-      <div className="relative z-10 mx-auto grid h-full max-w-7xl grid-cols-1 gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:items-end">
-        <div className="self-start pt-10">
-          <p className="font-mono text-xs uppercase tracking-[0.36em] text-[#d65e2d]">
-            Contact / Open loop
-          </p>
-          <h1 className="mt-8 max-w-3xl font-serif text-[clamp(5rem,14vw,14rem)] font-semibold leading-[0.84] tracking-[-0.025em]">
-            Let's
+    <>
+      <section className="contact-page portfolio-wrap">
+        <div>
+          <p className="eyebrow">04 / START A CONVERSATION</p>
+          <h1>
+            Have something
             <br />
-            build.
+            <em>in mind?</em>
           </h1>
-        </div>
-
-        <div className="mb-4 max-w-3xl border-t border-[#1a1714]/30 pt-8 lg:mb-16">
-          <p className="text-[clamp(1.8rem,3.8vw,4.5rem)] font-light leading-[1.08] tracking-[-0.03em]">
-            AI products, market tools, photography, and sharp ideas that deserve a working prototype.
+          <p className="contact-intro">
+            A role in data, a tool worth building, or a conversation about
+            photography. I’d love to hear what you’re working on.
           </p>
-
-          <div className="mt-10 grid gap-4 sm:grid-cols-3">
-            <div className="border border-[#1a1714]/50 p-5">
-              <Mail className="h-5 w-5" />
-              <span className="mt-8 block font-mono text-[0.68rem] uppercase tracking-[0.24em] text-[#1a1714]/70">
-                Email
-              </span>
-              <span className="mt-2 block text-sm">Ready to wire</span>
-            </div>
-            <div className="border border-[#1a1714]/50 p-5">
-              <Linkedin className="h-5 w-5" />
-              <span className="mt-8 block font-mono text-[0.68rem] uppercase tracking-[0.24em] text-[#1a1714]/70">
-                LinkedIn
-              </span>
-              <span className="mt-2 block text-sm">Profile link</span>
-            </div>
-            <div className="border border-[#1a1714]/50 p-5">
-              <MapPin className="h-5 w-5" />
-              <span className="mt-8 block font-mono text-[0.68rem] uppercase tracking-[0.24em] text-[#1a1714]/70">
-                Base
-              </span>
-              <span className="mt-2 block text-sm">United States / Hong Kong lens</span>
-            </div>
+        </div>
+        <div>
+          <div className="contact-actions">
+            <a className="contact-action" href={`mailto:${profile.email}`}>
+              <div>
+                <p>01 / EMAIL</p>
+                <span>{profile.email}</span>
+              </div>
+              <ArrowUpRight size={22} />
+            </a>
+            <a
+              className="contact-action"
+              href={profile.linkedin}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <div>
+                <p>02 / LINKEDIN</p>
+                <span>Siu Chun Kung</span>
+              </div>
+              <ArrowUpRight size={22} />
+            </a>
+            <a className="contact-action" href={profile.resume} download>
+              <div>
+                <p>03 / RÉSUMÉ</p>
+                <span>The professional profile · PDF</span>
+              </div>
+              <Download size={21} />
+            </a>
+          </div>
+          <div className="contact-copy">
+            <button type="button" onClick={copyEmail}>
+              <Copy size={13} />
+              Copy email address
+            </button>
+            <span role="status">{copyStatus}</span>
           </div>
         </div>
-      </div>
-    </section>
+      </section>
+      <PortfolioFooter />
+    </>
   );
 }
