@@ -783,7 +783,10 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     { name: "get_options", description: "Get option chain with calls and puts around spot.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" }, strikesAroundAtm: { type: "integer" } }, required: ["ticker"] } },
     async ({ ticker, expiry, params }) => {
       const chain = await fetchOptions(ticker, expiry);
-      return toolResult(markdownOptionChain(chain, toNumber(params.strikesAroundAtm, 12)), { chain });
+      return toolResult(markdownOptionChain(chain, toNumber(params.strikesAroundAtm, 12)), {
+        chain,
+        exposures: optionRowsNearSpot(chain, 24),
+      });
     },
   ),
   tool(

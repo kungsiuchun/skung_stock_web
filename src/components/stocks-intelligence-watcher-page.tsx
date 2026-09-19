@@ -973,10 +973,16 @@ const chartGexRowsFromResult = (data: Record<string, NativeToolResult> | null): 
     chainRaw: data.get_options?.raw,
     exposureRaw: data.get_options_gex?.raw,
   });
+  if (!visual.capabilities.gex) return [];
+  const exposureStrikes = new Set(
+    (visual.strikeRows as unknown as RawOptionExposure[])
+      .filter((row) => [row.netGex, row.callGex, row.putGex].some((value) => typeof value === "number" && Number.isFinite(value)))
+      .map((row) => optionLegNumber(row.strike)),
+  );
   return buildStrikeRowsFromOptionRaw(
     visual.chain as unknown as RawOptionChain | null,
     visual.strikeRows as unknown as RawOptionExposure[],
-  ).filter((row) => Number.isFinite(row.netGex));
+  ).filter((row) => exposureStrikes.has(row.strike) && Number.isFinite(row.netGex));
 };
 
 const aggregateChartGexRows = (
@@ -1002,7 +1008,10 @@ const aggregateChartGexRows = (
     .sort((a, b) => b.strike - a.strike);
 };
 
-const summaryFromLoadedOptionChain = (chain: RawOptionChain | null): ExpirySelectorRow | null => {
+const summaryFromLoadedOptionChain = (
+  chain: RawOptionChain | null,
+  exposures: RawOptionExposure[] = [],
+): ExpirySelectorRow | null => {
   if (!chain?.selectedExpiry) return null;
   const legs = [
     ...(chain.calls || []).map((leg) => ({ ...leg, type: "C" as const })),
@@ -1015,6 +1024,12 @@ const summaryFromLoadedOptionChain = (chain: RawOptionChain | null): ExpirySelec
   const callOi = total("openInterest", "C");
   const putOi = total("openInterest", "P");
   const primary = legs.reduce((best, leg) => optionLegNumber(leg.openInterest) + optionLegNumber(leg.volume) > optionLegNumber(best.openInterest) + optionLegNumber(best.volume) ? leg : best);
+  const sumFiniteExposure = (key: "netGex" | "netDex") => {
+    const values = exposures
+      .map((row) => row[key])
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : undefined;
+  };
   return {
     expiry: normalizeExpiryDate(chain.selectedExpiry),
     loaded: true,
@@ -1022,8 +1037,13 @@ const summaryFromLoadedOptionChain = (chain: RawOptionChain | null): ExpirySelec
     primaryStrike: optionLegNumber(primary.strike),
     volume: total("volume"),
     dominantType: callOi >= putOi ? "C" : "P",
+    netGex: sumFiniteExposure("netGex"),
+    netDex: sumFiniteExposure("netDex"),
   };
 };
+
+const yahooExpiryExposureCacheKey = (symbol: string, expiry: string) =>
+  `${normalizeSymbol(symbol)}:${normalizeExpiryDate(expiry)}:YahooOptionsExposure`;
 
 const getRunColor = (status: ToolStatus) => {
   if (status === "ok") return "border-emerald-400/40 bg-emerald-500/15 text-emerald-200";
@@ -1155,6 +1175,86 @@ const OptionsUnsupportedState = ({ title, reason, source }: { title: string; rea
     {source && <p className="mt-3 text-[0.7rem] font-bold uppercase tracking-wide text-slate-500">Source: {source}</p>}
   </div>
 );
+
+const PutCallRatioChart = ({
+  raw,
+  hasOpenInterest,
+}: {
+  raw: Record<string, unknown>;
+  hasOpenInterest: boolean;
+}) => {
+  const metrics = [
+    {
+      key: "open-interest",
+      label: "Open Interest",
+      ratio: hasOpenInterest ? optionLegDisplayNumber(raw.putCallOpenInterest) : null,
+      calls: optionLegDisplayNumber(raw.callOi),
+      puts: optionLegDisplayNumber(raw.putOi),
+    },
+    {
+      key: "volume",
+      label: "Volume",
+      ratio: optionLegDisplayNumber(raw.putCallVolume),
+      calls: optionLegDisplayNumber(raw.callVol),
+      puts: optionLegDisplayNumber(raw.putVol),
+    },
+  ];
+
+  return (
+    <figure className="rounded-md border border-slate-800 bg-slate-950/60 p-4" data-options-pcr-chart>
+      <div className="mb-4 flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <p className="text-xs font-black uppercase tracking-[0.12em] text-blue-200">Put / Call Pressure</p>
+          <p className="mt-1 text-[0.68rem] text-slate-500">Selected expiry · 1.00 parity · 2.00+ capped on chart</p>
+        </div>
+        <div className="flex gap-3 text-[0.65rem] font-bold text-slate-400" aria-hidden="true">
+          <span><i className="mr-1 inline-block h-2 w-2 rounded-full bg-cyan-400" />Call-heavy</span>
+          <span><i className="mr-1 inline-block h-2 w-2 rounded-full bg-amber-400" />Put-heavy</span>
+        </div>
+      </div>
+      <div className="space-y-5">
+        {metrics.map((metric) => {
+          const ratio = metric.ratio;
+          const available = typeof ratio === "number" && Number.isFinite(ratio);
+          const width = available ? Math.max(0, Math.min(100, ratio / 2 * 100)) : 0;
+          const putHeavy = available && ratio > 1;
+          return (
+            <div key={metric.key} data-options-pcr-metric={metric.key}>
+              <div className="mb-2 flex items-baseline justify-between gap-3">
+                <div>
+                  <p className="text-xs font-black uppercase text-slate-400">P/C {metric.label}</p>
+                  {metric.calls !== null && metric.puts !== null && (
+                    <p className="mt-0.5 text-[0.65rem] tabular-nums text-slate-500">Puts {formatNumber(metric.puts)} · Calls {formatNumber(metric.calls)}</p>
+                  )}
+                </div>
+                <strong className={`text-2xl font-black tabular-nums ${putHeavy ? "text-amber-200" : "text-cyan-200"}`}>
+                  {available ? ratio.toFixed(2) : "n/a"}
+                </strong>
+              </div>
+              <div
+                className="relative h-4 overflow-hidden rounded-full border border-slate-700 bg-slate-900"
+                role="img"
+                aria-label={available ? `${metric.label} put-call ratio ${ratio.toFixed(2)}; parity is 1.00` : `${metric.label} put-call ratio unavailable`}
+              >
+                <span
+                  className={`absolute inset-y-0 left-0 rounded-full ${putHeavy ? "bg-amber-400/80" : "bg-cyan-400/80"}`}
+                  style={{ width: `${width}%` }}
+                />
+                <span className="absolute inset-y-0 left-1/2 w-px bg-white/80" aria-hidden="true" />
+              </div>
+              <div className="mt-1 grid grid-cols-3 text-[0.62rem] font-bold tabular-nums text-slate-600" aria-hidden="true">
+                <span>0</span><span className="text-center">1.00 parity</span><span className="text-right">2.00+</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <figcaption className="mt-4 border-t border-slate-800 pt-3 text-[0.68rem] leading-5 text-slate-500">
+        Below 1.00 means more calls than puts; above 1.00 means more puts than calls. This is positioning context, not a directional forecast.
+      </figcaption>
+    </figure>
+  );
+};
 
 const OptionsResultProvenance = ({ result }: { result: NativeToolResult | undefined }) => {
   const raw = rawRecord(result?.raw);
@@ -1932,7 +2032,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const [query, setQuery] = useState("");
   const [searchError, setSearchError] = useState<string | null>(null);
   const [mode, setMode] = useState<StocksWatcherChartMode>("volume");
-  const [strikeZoom, setStrikeZoom] = useState(1);
+  const [strikeZoom, setStrikeZoom] = useState(3);
   const [watchlistCollapsed, setWatchlistCollapsed] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1994,6 +2094,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const yahooExpiryChainCacheRef = useRef<Map<string, NativeToolResult>>(new Map());
   const yahooExpiryChainInflightRef = useRef<Map<string, Promise<NativeToolResult>>>(new Map());
   const yahooExpiryChainFailuresRef = useRef<Map<string, string>>(new Map());
+  const yahooExpiryExposureCacheRef = useRef<Map<string, NativeToolResult>>(new Map());
+  const yahooExpiryExposureInflightRef = useRef<Map<string, Promise<NativeToolResult>>>(new Map());
+  const yahooExpiryExposureFailuresRef = useRef<Map<string, string>>(new Map());
   const yahooExpiryPreloadRunRef = useRef(0);
   const [, setYahooExpiryCacheVersion] = useState(0);
   const [yahooExpiryPreload, setYahooExpiryPreload] = useState<YahooExpiryPreloadState>({
@@ -2349,6 +2452,41 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     return request;
   }, [callNativeTool]);
 
+  const loadYahooExpiryExposure = useCallback(async (symbol: string, expiry: string) => {
+    const cacheKey = yahooExpiryExposureCacheKey(symbol, expiry);
+    const cached = yahooExpiryExposureCacheRef.current.get(cacheKey);
+    if (cached) return cached;
+
+    const inflight = yahooExpiryExposureInflightRef.current.get(cacheKey);
+    if (inflight) return inflight;
+
+    const request = loadYahooExpiryChain(symbol, expiry)
+      .then(async (chainResult) => {
+        if (optionExposuresFromResult(chainResult).length > 0) {
+          return { ...chainResult, tool: "get_options_gex" };
+        }
+        const plan = getStocksWatcherExpiryOverviewToolPlan(symbol, expiry)[1];
+        return callNativeTool(plan.name, plan.params);
+      })
+      .then((result) => {
+        yahooExpiryExposureCacheRef.current.set(cacheKey, result);
+        yahooExpiryExposureFailuresRef.current.delete(cacheKey);
+        setYahooExpiryCacheVersion((version) => version + 1);
+        return result;
+      })
+      .catch((requestError) => {
+        const message = requestError instanceof Error ? requestError.message : String(requestError);
+        yahooExpiryExposureFailuresRef.current.set(cacheKey, message);
+        setYahooExpiryCacheVersion((version) => version + 1);
+        throw requestError;
+      })
+      .finally(() => {
+        yahooExpiryExposureInflightRef.current.delete(cacheKey);
+      });
+    yahooExpiryExposureInflightRef.current.set(cacheKey, request);
+    return request;
+  }, [callNativeTool, loadYahooExpiryChain]);
+
   const loadTopTab = useCallback(async (tab: TopTab, force = false) => {
     if (tab === "Options" || tab === "Overview" || tab === "F/G Index") return;
     const symbol = normalizeSymbol(selectedSymbol);
@@ -2464,7 +2602,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       const data = usesNativeYahooOptions
         ? Object.fromEntries(await Promise.all([
             loadYahooExpiryChain(symbol, expiry).then((result) => ["get_options", result] as const),
-            callNativeTool(plan[1].name, plan[1].params).then((result) => ["get_options_gex", result] as const),
+            loadYahooExpiryExposure(symbol, expiry).then((result) => ["get_options_gex", result] as const),
             callNativeTool(plan[2].name, plan[2].params).then((result) => ["get_options_pcr", result] as const),
           ]))
         : await runToolBundle(plan);
@@ -2491,11 +2629,11 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         });
       }
     }
-  }, [callNativeTool, loadYahooExpiryChain, runToolBundle, selectedSymbol, usesNativeYahooOptions]);
+  }, [callNativeTool, loadYahooExpiryChain, loadYahooExpiryExposure, runToolBundle, selectedSymbol, usesNativeYahooOptions]);
 
   const loadChartGexExpiry = useCallback(async (expiry: string | null | undefined, force = false) => {
     const normalizedExpiry = normalizeExpiryDate(expiry);
-    if (!normalizedExpiry || snapshot?.optionsSnapshot?.provider !== "robinhood_mcp") return;
+    if (!normalizedExpiry || (snapshot?.optionsSnapshot?.provider !== "robinhood_mcp" && !usesNativeYahooOptions)) return;
     const symbol = normalizeSymbol(selectedSymbol);
     const cacheKey = `${symbol}:${normalizedExpiry}`;
     const cached = force ? null : chartGexCacheRef.current.get(cacheKey);
@@ -2516,7 +2654,15 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       ...current,
       [normalizedExpiry]: { loading: true, error: null, data: current[normalizedExpiry]?.data || null },
     }));
-    const request = runToolBundle(getStocksWatcherExpiryOverviewToolPlan(symbol, normalizedExpiry));
+    const request: Promise<Record<string, NativeToolResult>> = usesNativeYahooOptions
+      ? Promise.all([
+          loadYahooExpiryChain(symbol, normalizedExpiry),
+          loadYahooExpiryExposure(symbol, normalizedExpiry),
+        ]).then(([chainResult, exposureResult]) => ({
+          get_options: chainResult,
+          get_options_gex: exposureResult,
+        }))
+      : runToolBundle(getStocksWatcherExpiryOverviewToolPlan(symbol, normalizedExpiry));
     chartGexInflightRef.current.set(cacheKey, request);
     try {
       const data = await request;
@@ -2541,7 +2687,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     } finally {
       chartGexInflightRef.current.delete(cacheKey);
     }
-  }, [runToolBundle, selectedSymbol, snapshot?.optionsSnapshot?.provider]);
+  }, [loadYahooExpiryChain, loadYahooExpiryExposure, runToolBundle, selectedSymbol, snapshot?.optionsSnapshot?.provider, usesNativeYahooOptions]);
 
   const selectOptionsExpiry = useCallback((expiry: string | null | undefined) => {
     const normalizedExpiry = normalizeExpiryDate(expiry);
@@ -2573,7 +2719,17 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         const expiry = expiries[cursor];
         cursor += 1;
         try {
-          await loadYahooExpiryChain(symbol, expiry);
+          const [chainResult, exposureResult] = await Promise.all([
+            loadYahooExpiryChain(symbol, expiry),
+            loadYahooExpiryExposure(symbol, expiry),
+          ]);
+          const data = { get_options: chainResult, get_options_gex: exposureResult };
+          const normalizedExpiry = normalizeExpiryDate(expiry);
+          chartGexCacheRef.current.set(`${symbol}:${normalizedExpiry}`, data);
+          setChartGexByExpiry((current) => ({
+            ...current,
+            [normalizedExpiry]: { loading: false, error: null, data },
+          }));
           setYahooExpiryPreload((current) => current.runId === runId
             ? { ...current, loaded: current.loaded + 1 }
             : current);
@@ -2587,7 +2743,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
 
     await Promise.all([loadNext(), loadNext()]);
     setYahooExpiryPreload((current) => current.runId === runId ? { ...current, complete: true } : current);
-  }, [loadYahooExpiryChain, snapshot, usesNativeYahooOptions]);
+  }, [loadYahooExpiryChain, loadYahooExpiryExposure, snapshot, usesNativeYahooOptions]);
 
   const loadOptionsSubTab = useCallback(async (subTab: OptionsSubTab, force = false) => {
     if (subTab === "Overview") return;
@@ -2629,7 +2785,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   }, [activeSubTab, activeTab, currentExpiry, loadExpiryOverview]);
 
   useEffect(() => {
-    if (activeTab !== "Chart" || snapshot?.optionsSnapshot?.provider !== "robinhood_mcp") return;
+    if (activeTab !== "Chart" || (snapshot?.optionsSnapshot?.provider !== "robinhood_mcp" && !usesNativeYahooOptions)) return;
     const normalized = chartSelectedExpiries
       .map((expiry) => normalizeExpiryDate(expiry))
       .filter((expiry): expiry is string => Boolean(expiry));
@@ -2638,7 +2794,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       : currentExpiry ? [normalizeExpiryDate(currentExpiry)].filter((expiry): expiry is string => Boolean(expiry)) : [];
     if (normalized.length === 0 && expiries.length > 0) setChartSelectedExpiries(expiries);
     for (const expiry of expiries) void loadChartGexExpiry(expiry);
-  }, [activeTab, chartSelectedExpiries, currentExpiry, loadChartGexExpiry, snapshot?.optionsSnapshot?.provider]);
+  }, [activeTab, chartSelectedExpiries, currentExpiry, loadChartGexExpiry, snapshot?.optionsSnapshot?.provider, usesNativeYahooOptions]);
 
   useEffect(() => {
     if (activeTab === "Options" && activeSubTab === "Overview") void preloadYahooExpirySummaries();
@@ -2977,6 +3133,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           optionChainFromResult(
             yahooExpiryChainCacheRef.current.get(getStocksWatcherYahooExpiryChainCacheKey(snapshot?.symbol || selectedSymbol, row.expiry)),
           ),
+          optionExposuresFromResult(
+            yahooExpiryExposureCacheRef.current.get(yahooExpiryExposureCacheKey(snapshot?.symbol || selectedSymbol, row.expiry)),
+          ),
         )
       : null;
     if (preloaded) return preloaded;
@@ -2984,9 +3143,11 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   });
   const getExpirySelectorLoadState = (row: ExpirySelectorRow) => {
     if (row.loaded || !usesNativeYahooOptions) return "unloaded";
-    const cacheKey = getStocksWatcherYahooExpiryChainCacheKey(snapshot?.symbol || selectedSymbol, row.expiry);
-    if (yahooExpiryChainInflightRef.current.has(cacheKey)) return "loading";
-    if (yahooExpiryChainFailuresRef.current.has(cacheKey)) return "retry";
+    const symbol = snapshot?.symbol || selectedSymbol;
+    const chainCacheKey = getStocksWatcherYahooExpiryChainCacheKey(symbol, row.expiry);
+    const exposureCacheKey = yahooExpiryExposureCacheKey(symbol, row.expiry);
+    if (yahooExpiryChainInflightRef.current.has(chainCacheKey) || yahooExpiryExposureInflightRef.current.has(exposureCacheKey)) return "loading";
+    if (yahooExpiryChainFailuresRef.current.has(chainCacheKey) || yahooExpiryExposureFailuresRef.current.has(exposureCacheKey)) return "retry";
     return yahooExpiryPreloadTargets.includes(toYahooExpiry(row.expiry) || "") && !yahooExpiryPreload.complete
       ? "loading"
       : "unloaded";
@@ -3000,9 +3161,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const optionsSourceLabel = snapshot?.optionsSnapshot
     ? `Robinhood MCP EOD · ${formatOptionsSourceTime(snapshot.optionsSnapshot.capturedAt)}`
     : isYahooOptionsFallback
-      ? "Yahoo fallback · Robinhood EOD unavailable"
+      ? "Yahoo fallback · Robinhood EOD unavailable · locally estimated GEX/DEX proxy"
       : snapshot?.source === "native_yahoo"
-        ? "Native Yahoo"
+        ? "Native Yahoo · locally estimated GEX/DEX proxy"
         : "Source unavailable";
   const modeAvailable = mode === "volume" ? optionsVisualModel.capabilities.volume : mode === "oi" ? hasOptionsOpenInterest : hasOptionsGex;
   const chartRows = rows.sort((a, b) => a.strike - b.strike);
@@ -3172,16 +3333,15 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   const renderChartPanel = () => {
     const priceResult = tabPanelState.data?.get_stock_history;
     const isRobinhoodGex = snapshot?.optionsSnapshot?.provider === "robinhood_mcp";
-    // Yahoo's chain can contain calculated Greeks, but that is not a verified
-    // positioning/GEX feed. The Chart-side exposure surface is deliberately
-    // limited to the curated Robinhood EOD OI-signed proxy.
+    const isYahooProxyGex = usesNativeYahooOptions;
+    const supportsProxyGex = isRobinhoodGex || isYahooProxyGex;
     const normalizedSelectedExpiries = chartSelectedExpiries
       .map((expiry) => normalizeExpiryDate(expiry))
       .filter((expiry): expiry is string => Boolean(expiry));
     const gexExpiries = normalizedSelectedExpiries.length > 0
       ? [...new Set(normalizedSelectedExpiries)]
       : currentExpiry ? [normalizeExpiryDate(currentExpiry)].filter((expiry): expiry is string => Boolean(expiry)) : [];
-    const gexRows = isRobinhoodGex ? aggregateChartGexRows(gexExpiries, chartGexByExpiry) : [];
+    const gexRows = supportsProxyGex ? aggregateChartGexRows(gexExpiries, chartGexByExpiry) : [];
     const hasChartGex = gexRows.length > 0;
     // A shared-axis profile cannot safely scroll internally: rows outside its
     // fixed viewport were both clipped and visually undiscoverable. Give each
@@ -3279,7 +3439,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           <span className="siw-chart-gex-source" data-chart-gex-provenance>
             {isRobinhoodGex
               ? "Robinhood MCP EOD · OI-signed proxy, not dealer GEX"
-              : "Yahoo / unverified option source · Net GEX unavailable"}
+              : isYahooProxyGex
+                ? "Yahoo delayed · locally estimated OI/IV proxy · not dealer GEX"
+                : "Option exposure source unavailable"}
           </span>
         </div>
 
@@ -3309,7 +3471,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             <aside ref={gexPanelRef} className={`siw-chart-gex-panel ${hasSharedGexAxis ? "is-axis-aligned" : ""}`} data-chart-gex-by-strike data-chart-gex-profile={hasSharedGexAxis ? "aligned" : "stacked"}>
               <div className="siw-chart-gex-head">
                 <div>
-                  <strong>{gexExpiries.length > 1 ? "Average Net GEX by Strike" : "Net GEX by Strike"}</strong>
+                  <strong>{gexExpiries.length > 1
+                    ? isYahooProxyGex ? "Average Net GEX Proxy by Strike" : "Average Net GEX by Strike"
+                    : isYahooProxyGex ? "Net GEX Proxy by Strike" : "Net GEX by Strike"}</strong>
                   <span>{gexExpiries.length > 1 ? `${gexExpiries.length} selected expiries` : formatExpiryDate(currentExpiry, "short")}</span>
                 </div>
                 <div className="siw-chart-gex-meta">
@@ -3323,14 +3487,17 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                   Unavailable: {unavailableGexExpiries.map((expiry) => formatExpiryDate(expiry, "short")).join(", ")}. Not included in the average.
                 </div>
               )}
-              {!loadingGexExpiryCount && (!isRobinhoodGex || !hasChartGex) && (
-                <div className="siw-data-empty"><strong>Net GEX unavailable</strong><span>The active source is not a curated Robinhood EOD OI-signed proxy for this expiry.</span></div>
+              {!loadingGexExpiryCount && (!supportsProxyGex || !hasChartGex) && (
+                <div className="siw-data-empty">
+                  <strong>Net GEX proxy unavailable</strong>
+                  <span>{isYahooProxyGex ? "Yahoo did not return enough open-interest and implied-volatility inputs to estimate this expiry." : "The active source does not provide auditable exposure inputs for this expiry."}</span>
+                </div>
               )}
               {hasChartGex && (
                 <div
                   className={`siw-chart-gex-list ${hasSharedGexAxis ? "is-axis-aligned" : ""}`}
                   role="list"
-                  aria-label="Net GEX by strike"
+                  aria-label={isYahooProxyGex ? "Net GEX proxy by strike" : "Net GEX by strike"}
                   data-chart-gex-axis={hasSharedGexAxis ? "shared" : "stacked"}
                   data-chart-gex-axis-range={sharedPriceAxisRange ? `${sharedPriceAxisRange.min}:${sharedPriceAxisRange.max}` : undefined}
                   data-chart-gex-axis-coordinate-count={gexAxisCoordinates ? Object.keys(gexAxisCoordinates).length : 0}
@@ -3672,6 +3839,11 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             Robinhood MCP EOD · {formatOptionsSourceTime(snapshot.optionsSnapshot.capturedAt)} · {snapshot.optionsSnapshot.completedSymbols}/{snapshot.optionsSnapshot.expectedSymbols} · OI-signed proxy, not dealer GEX
           </span>
         )}
+        {usesNativeYahooOptions && (
+          <span data-options-yahoo-proxy-provenance>
+            Yahoo delayed · GEX/DEX locally estimated from near-spot chain OI, IV and delta · not dealer positioning
+          </span>
+        )}
       </div>
       </>
       )}
@@ -3918,18 +4090,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       );
     }
     if (raw && ("putCallOpenInterest" in raw || "putCallVolume" in raw)) {
-      return (
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="rounded-md border border-slate-800 bg-slate-950/60 p-4">
-            <p className="text-xs uppercase text-slate-500">P/C Open Interest</p>
-            <p className="mt-1 text-2xl font-black text-emerald-200">{hasOptionsOpenInterest ? optionLegNumber(raw.putCallOpenInterest).toFixed(2) : "n/a"}</p>
-          </div>
-          <div className="rounded-md border border-slate-800 bg-slate-950/60 p-4">
-            <p className="text-xs uppercase text-slate-500">P/C Volume</p>
-            <p className="mt-1 text-2xl font-black text-blue-200">{optionLegNumber(raw.putCallVolume).toFixed(2)}</p>
-          </div>
-        </div>
-      );
+      return <PutCallRatioChart raw={raw} hasOpenInterest={hasOptionsOpenInterest} />;
     }
     if (chain) return renderChainPanel(result);
     return <ToolResultBlock result={result} />;
@@ -4821,8 +4982,12 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           <div className="siw-expiry-head">
             <span>Expiry</span>
             <span>OI</span>
-            <span>Net GEX</span>
-            <span>Net DEX</span>
+            <span title={usesNativeYahooOptions ? "Yahoo delayed · locally estimated from near-spot open interest and implied volatility" : undefined}>
+              {usesNativeYahooOptions ? "Proxy GEX" : "Net GEX"}
+            </span>
+            <span title={usesNativeYahooOptions ? "Yahoo delayed · locally estimated from near-spot open interest and delta" : undefined}>
+              {usesNativeYahooOptions ? "Proxy DEX" : "Net DEX"}
+            </span>
           </div>
           <div className="siw-expiry-list">
             {selectorExpiryRows.map((row) => {
@@ -4839,8 +5004,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 >
                   <span>{formatExpiryDate(row.expiry, "compact")}</span>
                   <span>{row.loaded ? formatNumber(row.openInterest || 0) : loadState === "loading" ? "Loading" : loadState === "retry" ? "Retry" : "Load"}</span>
-                  <span className={exposureToneClassName(row.netGex, row.loaded)}>{row.loaded ? formatOptionalSignedExposure(row.netGex) : "n/a"}</span>
-                  <span className={exposureToneClassName(row.netDex, row.loaded)}>{row.loaded ? formatOptionalSignedExposure(row.netDex) : "n/a"}</span>
+                  <span className={exposureToneClassName(row.netGex, row.loaded)} title={usesNativeYahooOptions ? "Locally estimated Yahoo proxy; not dealer positioning" : undefined}>{row.loaded ? formatOptionalSignedExposure(row.netGex) : "n/a"}</span>
+                  <span className={exposureToneClassName(row.netDex, row.loaded)} title={usesNativeYahooOptions ? "Locally estimated Yahoo proxy; not dealer positioning" : undefined}>{row.loaded ? formatOptionalSignedExposure(row.netDex) : "n/a"}</span>
                 </button>
               );
             })}

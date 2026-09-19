@@ -592,7 +592,7 @@ const buildToolResponse = (tool, params = {}) => {
     const provenance = params.ticker === "NVDA"
       ? { provider: "robinhood_mcp", runId: "rh-eod-uat", capturedAt: "2026-07-09T20:59:27.540Z", methodology: "OI-signed GEX proxy" }
       : { provider: "native_yahoo", capturedAt: "2026-07-09T20:59:27.540Z", methodology: "Yahoo option chain" };
-    return { ok: true, tool, params, text: `${provenance.provider} options chain`, raw: { source: provenance.provider, chain, provenance }, calledAt: "2026-07-09T21:00:00.000Z" };
+    return { ok: true, tool, params, text: `${provenance.provider} options chain`, raw: { source: provenance.provider, chain, exposures: zeroOi ? [] : rows, provenance }, calledAt: "2026-07-09T21:00:00.000Z" };
   }
 
   if (tool === "get_stock_stats") {
@@ -1742,6 +1742,43 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await clickText(page, "Options", true);
     await wait(180);
 
+    const yahooProxyCallsBefore = apiCalls.length;
+    await page.goto("about:blank");
+    await page.goto(`${baseUrl}/#/work/stocks-intelligence-watcher?symbol=GOOG`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("[data-watcher-replica]");
+    await page.waitForFunction(() => document.querySelector(".siw-hero-identity h1")?.textContent === "GOOG", { timeout: 5000 });
+    await clickText(page, "Options", true);
+    await page.waitForFunction(() => /8\/8/.test(document.querySelector("[data-yahoo-expiry-preload]")?.textContent || ""), { timeout: 5000 });
+    assert.match(await page.$eval(".siw-expiry-head", (node) => node.textContent || ""), /Proxy GEX[\s\S]*Proxy DEX/i, "Yahoo fallback expiry rail must label estimated GEX and DEX as proxies");
+    assert.equal(await page.$eval("input[aria-label='Strike zoom']", (node) => node.value), "3", "Strike zoom must default to the maximum level");
+    assert.equal(
+      await page.$$eval(".siw-expiry-list [data-expiry-row]", (nodes) => nodes.slice(0, 8).every((node) => !/n\/a/i.test(node.textContent || ""))),
+      true,
+      "preloaded Yahoo expiries must show estimated GEX and DEX instead of n/a",
+    );
+    assert.equal(
+      apiCalls.slice(yahooProxyCallsBefore).filter((call) => call.tool === "get_options_gex" && call.params?.ticker === "GOOG").length,
+      0,
+      "Yahoo preload must reuse exposure rows from get_options instead of doubling upstream chain requests",
+    );
+    await clickText(page, "P/C", true);
+    await page.waitForSelector("[data-options-pcr-chart]");
+    assert.deepEqual(
+      await page.$$eval("[data-options-pcr-metric]", (nodes) => [...new Set(nodes.filter((node) => node.getClientRects().length > 0).map((node) => node.getAttribute("data-options-pcr-metric")))].sort()),
+      ["open-interest", "volume"],
+      "P/C must visualize both open-interest and volume ratios",
+    );
+    assert.match(await page.$eval("[data-options-pcr-chart]", (node) => node.textContent || ""), /1\.00 parity[\s\S]*directional forecast/i, "P/C chart must explain parity and avoid directional claims");
+    await page.screenshot({ path: path.join(screenshotsDir, "09-yahoo-proxy-pcr-desktop.png") });
+    await clickText(page, "Chart", true);
+    await page.waitForFunction(() => document.querySelectorAll("[data-chart-gex-bar]").length > 5, { timeout: 5000 });
+    assert.match(await page.$eval("[data-chart-gex-provenance]", (node) => node.textContent || ""), /Yahoo delayed[\s\S]*locally estimated[\s\S]*not dealer GEX/i, "Chart must disclose Yahoo proxy methodology");
+    assert.match(await page.$eval("[data-chart-gex-by-strike]", (node) => node.textContent || ""), /Net GEX Proxy by Strike/i, "Chart must render Yahoo estimated GEX by strike");
+    await page.screenshot({ path: path.join(screenshotsDir, "09-yahoo-proxy-chart-desktop.png") });
+    await clickText(page, "Options", true);
+    await clickText(page, "Vol", true);
+    await wait(180);
+
     delayedSnapshotSymbol = "QQQI";
     await page.click("[data-watcher-replica] [data-watchlist-row='AAPL']");
     await page.click("[data-watcher-replica] [data-watchlist-row='MSFT']");
@@ -1831,8 +1868,8 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await page.goto(`${baseUrl}/#/work/stocks-intelligence-watcher?symbol=NVDA`, { waitUntil: "domcontentloaded" });
     await page.waitForSelector("[data-watcher-replica]");
     await page.waitForFunction(() => document.querySelector(".siw-hero-identity h1")?.textContent === "NVDA", { timeout: 5000 });
-    await clickText(page, "Options");
-    await wait(300);
+    await clickText(page, "Options", true);
+    await page.waitForSelector("[data-options-robinhood-provenance]", { timeout: 5000 });
     assert.match(await page.$eval("[data-options-robinhood-provenance]", (node) => node.textContent || ""), /Robinhood MCP EOD/i, "mobile proof must use the Robinhood-backed NVDA snapshot");
     await page.screenshot({ path: path.join(screenshotsDir, "uat-mobile.png"), fullPage: true });
     await page.screenshot({ path: path.join(screenshotsDir, "08-responsive-mobile.png"), fullPage: true });
