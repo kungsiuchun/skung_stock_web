@@ -16,9 +16,7 @@ export function AboutPage() {
               <em>Curiosity is the habit.</em>
             </h1>
             <p className="intro-body">
-              I’m {profile.name} — Siu for short. A data analyst and creative
-              developer connecting analytics, AI-built tools, and visual
-              storytelling.
+              I’m {profile.name} — Siu for short. {profile.summary}
             </p>
             <p className="intro-body" style={{ marginTop: 16 }}>
               My professional work is in data models, dashboards, and marketing
@@ -67,6 +65,16 @@ export function AboutPage() {
                 </div>
               </article>
             ))}
+            <div className="resume-details">
+              <h3>Selected projects</h3>
+              <ul>
+                {profile.selectedProjects.map((project) => (
+                  <li key={project.name}>
+                    <strong>{project.name}:</strong> {project.description}
+                  </li>
+                ))}
+              </ul>
+            </div>
             <div className="resume-details">
               <h3>Education</h3>
               <p>

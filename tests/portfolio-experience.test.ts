@@ -27,6 +27,15 @@ test("professional information and the unchanged PDF are available without termi
   ]) {
     assert.ok(html.includes(company));
   }
+  for (const project of [
+    "Stocks Intelligence Watcher",
+    "S&amp;P 500 Market Breadth",
+    "Portfolio vs SPY",
+  ]) {
+    assert.ok(html.includes(project));
+  }
+  assert.match(html, /Jan 2022 — Present/);
+  assert.match(html, /Software Development Lifecycle/);
   assert.match(html, /href="\/docs\/SiuChunKung_Resume.pdf"/);
   assert.deepEqual(
     readFileSync("public/docs/SiuChunKung_Resume.pdf"),
