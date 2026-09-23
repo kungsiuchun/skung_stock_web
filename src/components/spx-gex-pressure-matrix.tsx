@@ -278,6 +278,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
   const [priceOverlay, setPriceOverlay] = useState<PriceOverlayState | null>(null);
   const [loading, setLoading] = useState(false);
   const [activeCell, setActiveCell] = useState<ActiveCell | null>(null);
+  const [strikePanSteps, setStrikePanSteps] = useState(0);
   const [matrixRailWidth, setMatrixRailWidth] = useState(0);
   const [overlayNowMs, setOverlayNowMs] = useState(() => Date.now());
   const [overlayRefreshKey, setOverlayRefreshKey] = useState(0);
@@ -315,6 +316,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
   }, []);
 
   useEffect(() => setActiveCell(null), [pressureRefreshKey, selectedDate]);
+  useEffect(() => setStrikePanSteps(0), [selectedDate]);
 
   useEffect(() => {
     if (!enabled) return undefined;
@@ -524,8 +526,8 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
     return buildSpxGexOneMinuteSpotSegments(priceOverlay.data.candles, sessionPressure.tradingDate, startMinute, latestSpotPoint.minuteEt);
   }, [sessionPressure, latestSpotPoint, priceOverlay, selectedDate]);
   const displayPressure = useMemo(() => sessionPressure
-    ? focusSpxGexPressureOnPrice(sessionPressure, oneMinuteSpotSegments, expectedMoveOverlay.expectedMove)
-    : null, [sessionPressure, oneMinuteSpotSegments, expectedMoveOverlay.expectedMove]);
+    ? focusSpxGexPressureOnPrice(sessionPressure, oneMinuteSpotSegments, strikePanSteps)
+    : null, [sessionPressure, oneMinuteSpotSegments, strikePanSteps]);
   const outsideGexCoverage = displayPressure?.rows.some((row) => row.cells[0]?.state === "OUTSIDE_COVERAGE") || false;
   const axisTicks = useMemo(() => displayPressure ? buildSpxGexPressureAxisTicks(displayPressure.timeline) : [], [displayPressure]);
   const timelineLength = displayPressure?.timeline.length || 0;
@@ -551,6 +553,8 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
   const matrixWidth = timelineLength * effectiveCellWidth;
   const matrixHeight = (displayPressure?.rows.length || 0) * ROW_HEIGHT;
   const matrixGridHeight = MATRIX_HEADER_HEIGHT + matrixHeight;
+  const pricePathOutsideView = chartGeometry?.segments.some((segment) => segment.some((point) => point.y < 0 || point.y > matrixHeight)) || false;
+  const spotOutsideView = chartGeometry?.spotGuide ? chartGeometry.spotGuide.y < 0 || chartGeometry.spotGuide.y > matrixHeight : false;
   const oneMinuteOverlayPending = priceOverlay?.selectedDate !== selectedDate;
   const usingOneMinuteSpot = chartGeometry?.resolution === "1m";
   const overlaySessionState = effectivePriceSource?.sessionState;
@@ -651,8 +655,16 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
             {reconnecting && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status">Reconnecting SPX source…</div>}
             {refreshError && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-refresh-stale="true">Refresh failed; showing the last verified GEX matrix. {refreshError}</div>}
            {priceOverlayWarning && <div className="border-b border-cyan-300/20 bg-cyan-300/5 px-3 py-2 text-xs text-cyan-100" role="status" data-spx-gex-pressure-spot-warning="true">{priceOverlayWarning}</div>}
-           {outsideGexCoverage && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-coverage-warning="true">SPX price extends beyond the available 0DTE GEX strike range. Empty rows show price context only, not GEX data.</div>}
-           {expectedMoveWarning && <div className={`${expectedMoveIsStale ? "border-amber-300/20 bg-amber-300/10 text-amber-100" : "border-violet-300/20 bg-violet-300/5 text-violet-100"} border-b px-3 py-2 text-xs`} role="status" data-spx-gex-pressure-expected-move-warning="true">{expectedMoveWarning}</div>}
+            {outsideGexCoverage && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-coverage-warning="true">Displayed strikes extend beyond available 0DTE GEX coverage. Empty rows show price context only, not GEX data.</div>}
+            {expectedMoveWarning && <div className={`${expectedMoveIsStale ? "border-amber-300/20 bg-amber-300/10 text-amber-100" : "border-violet-300/20 bg-violet-300/5 text-violet-100"} border-b px-3 py-2 text-xs`} role="status" data-spx-gex-pressure-expected-move-warning="true">{expectedMoveWarning}</div>}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#123142] bg-[#07141e] px-3 py-2 font-mono text-[10px] text-cyan-100">
+              <span data-spx-gex-pressure-view-range="true">STRIKES {strikeFormatter.format(displayPressure!.strikeRange.lower)}–{strikeFormatter.format(displayPressure!.strikeRange.upper)} · 21 ROWS{strikePanSteps === 0 ? " · FOLLOWING SPOT" : " · MANUAL VIEW"}{spotOutsideView ? " · SPOT OUTSIDE VIEW" : pricePathOutsideView ? " · PRICE PATH CLIPPED TO VIEW" : ""}</span>
+              <div className="flex flex-wrap items-center gap-1.5" aria-label="Pressure matrix strike range controls">
+                <button type="button" className="border border-cyan-300/40 px-2 py-1 hover:bg-cyan-300/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-200" onClick={() => { setActiveCell(null); setStrikePanSteps((current) => current + 1); }}>HIGHER +50</button>
+                <button type="button" className="border border-cyan-300/40 px-2 py-1 hover:bg-cyan-300/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-200 disabled:cursor-default disabled:opacity-40" onClick={() => { setActiveCell(null); setStrikePanSteps(0); }} disabled={strikePanSteps === 0}>CENTER SPOT</button>
+                <button type="button" className="border border-cyan-300/40 px-2 py-1 hover:bg-cyan-300/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-200" onClick={() => { setActiveCell(null); setStrikePanSteps((current) => current - 1); }}>LOWER −50</button>
+              </div>
+            </div>
 
           <div className="grid 2xl:grid-cols-[minmax(0,1fr)_320px] 2xl:items-start">
             <div
@@ -701,7 +713,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
                           {strikeFormatter.format(row.strike)}
                         </div>
                       ))}
-                      {chartGeometry?.spotGuide && (
+                      {chartGeometry?.spotGuide && chartGeometry.spotGuide.y >= 0 && chartGeometry.spotGuide.y <= matrixHeight && (
                         <div
                           key={spotPulseKey || "spot-guide"}
                           className={`${isLivePriceOverlay ? "spx-spot-live-pulse " : ""}pointer-events-none absolute left-0 z-40 flex w-full -translate-y-1/2 items-center justify-between border-y border-cyan-300/70 bg-[#04222c] px-1.5 py-0.5 text-[9px] font-black text-cyan-100 shadow-[0_0_14px_rgba(34,211,238,.18)]`}
@@ -713,20 +725,20 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
                       )}
                       {chartGeometry?.expectedMoveRange && (
                         <>
-                          <div
+                          {chartGeometry.expectedMoveRange.upper.y >= 0 && chartGeometry.expectedMoveRange.upper.y <= matrixHeight && <div
                             className={`${expectedMoveIsStale ? "border-amber-300/70 bg-[#2a1b0a] text-amber-100" : "border-violet-300/70 bg-[#181235] text-violet-100"} pointer-events-none absolute left-0 z-40 flex w-full -translate-y-1/2 items-center justify-between border-y px-1.5 py-0.5 text-[9px] font-black shadow-[0_0_14px_rgba(196,181,253,.16)]`}
                             style={{ top: chartGeometry.expectedMoveRange.upper.y }}
                             data-spx-gex-pressure-expected-move-upper-marker="true"
                           >
                             <span>{expectedMoveIsStale ? "STALE EM +" : "EM +"}</span><span>{spotFormatter.format(chartGeometry.expectedMoveRange.upper.price)}</span>
-                          </div>
-                          <div
+                          </div>}
+                          {chartGeometry.expectedMoveRange.lower.y >= 0 && chartGeometry.expectedMoveRange.lower.y <= matrixHeight && <div
                             className={`${expectedMoveIsStale ? "border-amber-300/70 bg-[#2a1b0a] text-amber-100" : "border-violet-300/70 bg-[#181235] text-violet-100"} pointer-events-none absolute left-0 z-40 flex w-full -translate-y-1/2 items-center justify-between border-y px-1.5 py-0.5 text-[9px] font-black shadow-[0_0_14px_rgba(196,181,253,.16)]`}
                             style={{ top: chartGeometry.expectedMoveRange.lower.y }}
                             data-spx-gex-pressure-expected-move-lower-marker="true"
                           >
                             <span>{expectedMoveIsStale ? "STALE EM −" : "EM −"}</span><span>{spotFormatter.format(chartGeometry.expectedMoveRange.lower.price)}</span>
-                          </div>
+                          </div>}
                         </>
                       )}
                     </div>
@@ -776,7 +788,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
                     ))}
 
                     <svg
-                      className="pointer-events-none absolute inset-0 z-20 overflow-visible"
+                      className="pointer-events-none absolute inset-0 z-20 overflow-hidden"
                       width={matrixWidth}
                       height={matrixHeight}
                       aria-hidden="true"

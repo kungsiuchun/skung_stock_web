@@ -2393,17 +2393,28 @@ describe("SPX 0DTE pressure matrix", () => {
     ]];
     const focused = focusSpxGexPressureOnPrice(complete, oneMinute);
     const geometry = buildSpxGexPressureChartGeometry(focused, oneMinute, 34, 25);
+    assert.equal(focused.rows.length, 21, "the default matrix must stay compact after a large selloff");
+    assert.deepEqual(focused.strikeRange, { lower: 5850, upper: 5950, step: 5 });
     assert.equal(focused.rows.find((row) => row.strike === 5900)?.currentGex, -400);
     assert.equal(focused.rows.find((row) => row.strike === 5900)?.cells[1].state, "NEGATIVE_DEEPER");
+    assert.equal(focused.rows.some((row) => row.strike === 6000), false);
     assert.ok(geometry.latestPoint);
     assert.ok(geometry.latestPoint.y < focused.rows.length * 25 - 12.5, "live SPX must not stick to the bottom edge");
+    assert.ok(geometry.segments[0][0].y < 0, "earlier price outside the window must be clipped, not pinned to its edge");
+
+    const higher = focusSpxGexPressureOnPrice(complete, oneMinute, 2);
+    assert.deepEqual(higher.strikeRange, { lower: 5950, upper: 6050, step: 5 });
+    assert.equal(higher.rows.find((row) => row.strike === 6000)?.currentGex, currentValues[6000]);
+
+    const snapshotFallback = focusSpxGexPressureOnPrice(complete, []);
+    assert.deepEqual(snapshotFallback.strikeRange, { lower: 5950, upper: 6050, step: 5 });
 
     const beyondChain = focusSpxGexPressureOnPrice(complete, [[
       { time: 1, minuteEt: 570, timeEt: "09:30", price: 6000 },
       { time: 2, minuteEt: 585, timeEt: "09:45", price: 5750 },
-    ]], 20);
+    ]]);
     assert.equal(beyondChain.rows.find((row) => row.strike === 5750)?.cells[0].state, "OUTSIDE_COVERAGE");
-    assert.equal(beyondChain.rows.find((row) => row.strike === 5900)?.currentGex, -400);
+    assert.equal(beyondChain.rows.length, 21);
   });
 
   it("ranks latest movers by absolute delta with deterministic ties", () => {
@@ -2495,7 +2506,7 @@ describe("SPX 0DTE pressure matrix", () => {
     assert.equal(ticks.find((tick) => tick.snapshotTimeEt === "10:00")?.status, "MISSING");
   });
 
-  it("maps 1-minute price geometry and clamps the spot guide without drawing an in-chart price card", () => {
+  it("maps 1-minute price geometry without pinning off-window points to an edge", () => {
     const pressure = buildSpxGexPressureMatrix([
       buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, baselineValues),
       buildPressureSnapshot("2026-05-27T14:00:00.000Z", 6005, currentValues),
@@ -2508,7 +2519,7 @@ describe("SPX 0DTE pressure matrix", () => {
     assert.equal(geometry.resolution, "1m");
     assert.equal(geometry.pointCount, 2);
     assert.equal(geometry.latestPoint?.timeEt, "09:45");
-    assert.equal(geometry.segments[0][0].y, 12.5);
+    assert.ok(geometry.segments[0][0].y < 0);
     assert.equal("callout" in geometry, false);
     assert.equal(geometry.spotGuide?.price, 6005);
     const withExpectedMove = buildSpxGexPressureChartGeometry(pressure, [[

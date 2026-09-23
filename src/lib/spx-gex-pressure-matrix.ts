@@ -6,6 +6,9 @@ const CLOSE_MINUTE_ET = 16 * 60;
 const SLOT_MINUTES = 15;
 const STRIKE_STEP = 5;
 const STRIKE_BUFFER = 50;
+const PRICE_VIEW_HALF_RANGE = 50;
+const PRICE_VIEW_CENTER_STEP = 25;
+const PRICE_VIEW_PAN_STEP = 50;
 const MOVER_LIMIT = 10;
 
 export type SpxGexPressureState =
@@ -330,24 +333,19 @@ export const buildSpxGexPressureAxisTicks = (
   }));
 };
 
-/** Keep the price path and risk corridor on the same strike scale as the GEX cells. */
+/** Show a bounded, spot-following strike window; retain full canonical data for panning. */
 export const focusSpxGexPressureOnPrice = (
   pressure: SpxGexPressureMatrixModel,
   oneMinuteSegments: SpxGexPressureSpotPoint[][],
-  expectedMove: number | null = null,
+  panSteps = 0,
 ): SpxGexPressureMatrixModel => {
   const pricePoints = oneMinuteSegments.flat();
-  const prices = [
-    ...pressure.timeline.map((slot) => slot.spot).filter(finite),
-    ...pricePoints.map((point) => point.price).filter(finite),
-  ];
-  const latestPrice = pricePoints[pricePoints.length - 1]?.price;
-  if (finite(latestPrice) && finite(expectedMove) && expectedMove > 0) {
-    prices.push(latestPrice - expectedMove, latestPrice + expectedMove);
-  }
-  if (prices.length === 0) return pressure;
-  const lower = Math.floor((Math.min(...prices) - STRIKE_BUFFER) / STRIKE_STEP) * STRIKE_STEP;
-  const upper = Math.ceil((Math.max(...prices) + STRIKE_BUFFER) / STRIKE_STEP) * STRIKE_STEP;
+  const latestPrice = pricePoints[pricePoints.length - 1]?.price ?? pressure.latest.spot;
+  if (!finite(latestPrice)) return pressure;
+  const center = Math.round(latestPrice / PRICE_VIEW_CENTER_STEP) * PRICE_VIEW_CENTER_STEP
+    + panSteps * PRICE_VIEW_PAN_STEP;
+  const lower = center - PRICE_VIEW_HALF_RANGE;
+  const upper = center + PRICE_VIEW_HALF_RANGE;
   const rowsByStrike = new Map(pressure.rows.map((row) => [row.strike, row]));
   const rows: SpxGexPressureRow[] = [];
   for (let strike = upper; strike >= lower; strike -= STRIKE_STEP) {
@@ -386,7 +384,7 @@ export const buildSpxGexPressureChartGeometry = (
   const firstMinute = pressure.timeline[0]?.snapshotMinuteEt ?? pressure.baseline.snapshotMinuteEt;
   const toPoint = (point: Pick<SpxGexPressureSpotPoint, "minuteEt" | "timeEt" | "price">): SpxGexPressureChartPoint => ({
     x: clamp(cellWidth / 2 + ((point.minuteEt - firstMinute) / SLOT_MINUTES) * cellWidth, cellWidth / 2, Math.max(cellWidth / 2, width - cellWidth / 2)),
-    y: clamp(((pressure.strikeRange.upper - point.price) / priceRange) * usableHeight + rowHeight / 2, rowHeight / 2, Math.max(rowHeight / 2, height - rowHeight / 2)),
+    y: ((pressure.strikeRange.upper - point.price) / priceRange) * usableHeight + rowHeight / 2,
     minuteEt: point.minuteEt,
     timeEt: point.timeEt,
     price: point.price,
