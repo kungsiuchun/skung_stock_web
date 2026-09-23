@@ -5,6 +5,7 @@ import type { SpxDecisionCockpitProjection } from "@/lib/spx-decision-ledger";
 import type { SpxGexCollectionRecord } from "@/lib/spx-gex-collection-lifecycle";
 import { parseJsonResponse, SafeJsonResponseError } from "@/lib/safe-json-response";
 import { getSpxSpotLivePulseKey } from "@/lib/spx-spot-live-pulse";
+import type { SpxGexZeroDteSpotContext } from "@/lib/spx-gex-pressure-matrix";
 import { runSpxRequest } from "@/lib/spx-request-lane";
 import { SpxPriceActionCompass } from "./spx-price-action-compass";
 import { SpxGexPressureMatrix } from "./spx-gex-pressure-matrix";
@@ -284,7 +285,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
   const [auditDetail, setAuditDetail] = useState<SpxGexHeatmapCell | null>(null);
   const [auditDetailKey, setAuditDetailKey] = useState<string | null>(null);
   const [auditDetailError, setAuditDetailError] = useState<string | null>(null);
-  const [liveZeroDteSpot, setLiveZeroDteSpot] = useState<{ price: number; timeEt: string; tradingDate: string; provider: "0dtespx" } | null>(null);
+  const [zeroDteSpotContext, setZeroDteSpotContext] = useState<SpxGexZeroDteSpotContext | null>(null);
   const activeAuditCellRef = useRef(activeAuditCell);
   const auditHoverSuppressedAfterScrollRef = useRef(false);
   activeAuditCellRef.current = activeAuditCell;
@@ -604,8 +605,8 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     vex: profiles.some((row) => Math.abs(row.netVex) > 0),
     cex: profiles.some((row) => Math.abs(row.netCex) > 0),
   }), [profiles]);
-  const currentLiveSpot = liveZeroDteSpot?.tradingDate === selectedDate ? liveZeroDteSpot : null;
-  const activeSpot = currentLiveSpot?.price ?? heatmap?.quote.last ?? null;
+  const currentSpotContext = zeroDteSpotContext?.tradingDate === selectedDate ? zeroDteSpotContext : null;
+  const activeSpot = currentSpotContext?.price ?? heatmap?.quote.last ?? null;
   const visibleStrikes = useMemo(() => {
     if (!heatmap || rowRangeMode === "all") return heatmap?.strikes || [];
     const center = nearestStrike(heatmap.strikes, activeSpot);
@@ -631,13 +632,19 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
     timeEt: selectedSession?.snapshotTimeEt,
     resolution: "15m-canonical",
   }), [heatmap?.quote.last, selectedSession?.snapshotTimeEt]);
-  const headerSpot = currentLiveSpot
-    ? { label: `0DTE spot · ${currentLiveSpot.timeEt} ET`, price: currentLiveSpot.price, source: "0dtespx" as const }
+  const displayedSpotPulseKey = currentSpotContext
+    ? getSpxSpotLivePulseKey({ price: currentSpotContext.price, timeEt: currentSpotContext.timeEt, resolution: "1m" })
+    : heatmapSpotPulseKey;
+  const pulseSpot = currentSpotContext?.sessionState !== "CLOSED" && currentSpotContext?.sessionState !== "FINALIZING";
+  const spotContextLabel = currentSpotContext?.sessionState === "CLOSED" ? "0DTE close"
+    : currentSpotContext?.sessionState === "FINALIZING" ? "0DTE last" : "0DTE spot";
+  const headerSpot = currentSpotContext
+    ? { label: `${spotContextLabel} · ${currentSpotContext.timeEt} ET`, price: currentSpotContext.price, source: "0dtespx" as const }
     : heatmap
       ? { label: "Snapshot spot", price: heatmap.quote.last, source: "canonical" as const }
       : null;
-  const onLiveSpotChange = useCallback((spot: { price: number; timeEt: string; tradingDate: string; provider: "0dtespx" } | null) => {
-    setLiveZeroDteSpot((current) => current?.price === spot?.price && current?.timeEt === spot?.timeEt && current?.tradingDate === spot?.tradingDate ? current : spot);
+  const onSpotContextChange = useCallback((spot: SpxGexZeroDteSpotContext | null) => {
+    setZeroDteSpotContext((current) => current?.price === spot?.price && current?.timeEt === spot?.timeEt && current?.tradingDate === spot?.tradingDate && current?.sessionState === spot?.sessionState ? current : spot);
   }, []);
   const isDelayedSnapshot = Boolean(
     selectedSession &&
@@ -714,7 +721,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                 {sourceModeLabel()}
               </span>
               {headerSpot && (
-                <span key={headerSpot.source === "0dtespx" ? `${headerSpot.price}:${currentLiveSpot?.timeEt}` : heatmapSpotPulseKey || "heatmap-spot"} className="spx-spot-live-pulse inline-flex items-center gap-1.5 border border-cyan-300/25 bg-cyan-300/10 px-2 py-1 font-mono text-xs font-black text-cyan-100" data-spx-gex-heatmap-spot-badge="true" data-spx-gex-heatmap-spot-source={headerSpot.source}>
+                <span key={displayedSpotPulseKey || "heatmap-spot"} className={`${pulseSpot ? "spx-spot-live-pulse " : ""}inline-flex items-center gap-1.5 border border-cyan-300/25 bg-cyan-300/10 px-2 py-1 font-mono text-xs font-black text-cyan-100`} data-spx-gex-heatmap-spot-badge="true" data-spx-gex-heatmap-spot-source={headerSpot.source} data-spx-gex-heatmap-spot-session-state={currentSpotContext?.sessionState}>
                   <span className="h-1.5 w-1.5 rounded-full bg-cyan-200 shadow-[0_0_7px_rgba(34,211,238,.9)]" aria-hidden="true" />
                   {headerSpot.label} ${headerSpot.price.toFixed(2)}
                 </span>
@@ -768,7 +775,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
           priceOverlayRefreshKey={zeroDteRefreshKey}
           enabled={initialCompassSettled}
           controls={snapshotControls}
-          onLiveSpotChange={onLiveSpotChange}
+          onSpotContextChange={onSpotContextChange}
         />
 
         {loading && !heatmap ? (
@@ -980,7 +987,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                     const profile = profileByStrike.get(strike);
                     const isSpotStrike = strike === spotStrike;
                     return (
-                      <tr key={isSpotStrike ? `${strike}:${heatmapSpotPulseKey || "spot"}` : strike} className={isSpotStrike ? "bg-yellow-400/10 spx-spot-live-row" : ""} data-spx-gex-heatmap-spot-row={isSpotStrike || undefined}>
+                      <tr key={isSpotStrike ? `${strike}:${displayedSpotPulseKey || "spot"}` : strike} className={isSpotStrike ? `bg-yellow-400/10${pulseSpot ? " spx-spot-live-row" : ""}` : ""} data-spx-gex-heatmap-spot-row={isSpotStrike || undefined}>
                         <StrikeCell strike={strike} isSpotStrike={isSpotStrike} />
                         {heatmap.selectedExpiries.map((expiry) => {
                           const cell = cellByKey.get(`${strike}:${expiry}`);
@@ -1038,13 +1045,13 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
                             <span className="text-right font-black text-cyan-100">{formatSignedCompact(profile?.netGex)}</span>
                             <span className="flex min-h-4 flex-wrap items-center gap-1 overflow-hidden">
                               {isSpotStrike && (
-                                <span key={heatmapSpotPulseKey || "heatmap-spot-pill"} className="spx-spot-live-pulse border border-yellow-300/45 bg-yellow-300/15 px-1 py-0 text-[9px] font-black text-yellow-100" data-spx-gex-heatmap-spot-pill="true">
-                                  {currentLiveSpot ? "0DTE spot" : "Snapshot spot"} ${activeSpot?.toFixed(2)}{currentLiveSpot ? ` · ${currentLiveSpot.timeEt} ET` : ""}
+                                <span key={displayedSpotPulseKey || "heatmap-spot-pill"} className={`${pulseSpot ? "spx-spot-live-pulse " : ""}border border-yellow-300/45 bg-yellow-300/15 px-1 py-0 text-[9px] font-black text-yellow-100`} data-spx-gex-heatmap-spot-pill="true">
+                                  {currentSpotContext ? spotContextLabel : "Snapshot spot"} ${activeSpot?.toFixed(2)}{currentSpotContext ? ` · ${currentSpotContext.timeEt} ET` : ""}
                                 </span>
                               )}
                               {(profile?.tags || []).map((tag) => (
-                                <span key={tag.type} className={`px-1 py-0 text-[9px] font-black ${tagClass(tag.severity)}`}>
-                                  {tag.label}
+                                <span key={tag.type} className={`px-1 py-0 text-[9px] font-black ${tagClass(tag.severity)}`} title={tag.type === "now" && currentSpotContext ? `GEX snapshot reference $${heatmap.quote.last.toFixed(2)}; independent of ${spotContextLabel.toLowerCase()}` : tag.source}>
+                                  {tag.type === "now" && currentSpotContext && !isSpotStrike ? "GEX snapshot ref" : tag.label}
                                 </span>
                               ))}
                             </span>

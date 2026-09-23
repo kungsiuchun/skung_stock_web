@@ -46,6 +46,7 @@ import {
   extendSpxGexPressureForSession,
   focusSpxGexPressureOnPrice,
   getLatestSpxGexSpotPoint,
+  resolveSpxGexZeroDteSpotContext,
   resolveSpxGexExpectedMoveOverlay,
   getSpxGexPressureTooltipPosition,
   toSpxGexPressureFrame,
@@ -2339,6 +2340,19 @@ const buildPressureSnapshot = (generatedAt: string, spot: number, values: Record
 };
 
 describe("SPX 0DTE pressure matrix", () => {
+  it("keeps a verified same-session 0DTESPX close as spot context without claiming it is live", () => {
+    const finalPoint = { time: Date.parse("2026-05-27T20:00:00.000Z"), minuteEt: 16 * 60, timeEt: "16:00", price: 5908.55 };
+    const source = { provider: "0dtespx", status: "READY" as const, sessionDate: "2026-05-27", sessionState: "CLOSED" as const };
+    assert.deepEqual(resolveSpxGexZeroDteSpotContext(source, "2026-05-27", finalPoint), {
+      price: 5908.55, timeEt: "16:00", tradingDate: "2026-05-27", provider: "0dtespx", sessionState: "CLOSED",
+    });
+    assert.equal(resolveSpxGexZeroDteSpotContext({ ...source, sessionState: "LIVE" }, "2026-05-27", finalPoint)?.sessionState, "LIVE");
+    assert.equal(resolveSpxGexZeroDteSpotContext({ ...source, sessionState: "FINALIZING" }, "2026-05-27", finalPoint)?.sessionState, "FINALIZING");
+    assert.equal(resolveSpxGexZeroDteSpotContext({ ...source, status: "STALE" }, "2026-05-27", finalPoint), null);
+    assert.equal(resolveSpxGexZeroDteSpotContext({ ...source, sessionDate: "2026-05-26" }, "2026-05-27", finalPoint), null);
+    assert.equal(resolveSpxGexZeroDteSpotContext({ ...source, provider: "yahoo" }, "2026-05-27", finalPoint), null);
+    assert.equal(resolveSpxGexZeroDteSpotContext(source, "2026-05-27", null), null);
+  });
   const baselineValues = { 5970: 100, 5975: 100, 5980: -100, 5985: -100, 5990: 100, 5995: -100, 6000: 0 };
   const currentValues = { 5970: 150, 5975: 50, 5980: -150, 5985: -50, 5990: -25, 5995: 25, 6000: 50, 6005: 75 };
 

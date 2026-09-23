@@ -12,11 +12,13 @@ import {
   extendSpxGexPressureForSession,
   focusSpxGexPressureOnPrice,
   getLatestSpxGexSpotPoint,
+  resolveSpxGexZeroDteSpotContext,
   resolveSpxGexExpectedMoveOverlay,
   type SpxGexPressureCell,
   type SpxGexPressureMatrixModel,
   type SpxGexPressureMover,
   type SpxGexPressureState,
+  type SpxGexZeroDteSpotContext,
 } from "@/lib/spx-gex-pressure-matrix";
 import { SpxGexInlineTooltip, SpxGexTooltip } from "./spx-gex-tooltip";
 
@@ -51,7 +53,7 @@ interface SpxGexPressureMatrixProps {
   priceOverlayRefreshKey: number;
   enabled?: boolean;
   controls: ReactNode;
-  onLiveSpotChange?: (spot: { price: number; timeEt: string; tradingDate: string; provider: "0dtespx" } | null) => void;
+  onSpotContextChange?: (spot: SpxGexZeroDteSpotContext | null) => void;
 }
 
 interface ActiveCell {
@@ -271,7 +273,7 @@ const MoverRow = ({ mover }: { mover: SpxGexPressureMover }) => {
   );
 };
 
-export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRefreshKey, priceOverlayRefreshKey, controls, enabled = true, onLiveSpotChange }: SpxGexPressureMatrixProps) {
+export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRefreshKey, priceOverlayRefreshKey, controls, enabled = true, onSpotContextChange }: SpxGexPressureMatrixProps) {
   const [data, setData] = useState<PressureResponse | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
@@ -567,12 +569,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
   const spotLiveLabel = chartGeometry?.latestPoint
     ? `SPX ${spotFormatter.format(chartGeometry.latestPoint.price)} · ${chartGeometry.latestPoint.timeEt} ET`
     : null;
-  const liveZeroDteSpot = effectivePriceSource?.provider === "0dtespx"
-    && effectivePriceSource.status === "READY"
-    && overlaySessionState === "LIVE"
-    && latestSpotPoint
-    ? { price: latestSpotPoint.price, timeEt: latestSpotPoint.timeEt, tradingDate: selectedDate, provider: "0dtespx" as const }
-    : null;
+  const zeroDteSpotContext = resolveSpxGexZeroDteSpotContext(effectivePriceSource, selectedDate, latestSpotPoint);
   const priceOverlayWarning = priceOverlay?.error
     ? `0DTESPX refresh unavailable; showing the last verified ${usingOneMinuteSpot ? "1-minute SPX and stale Expected Move context" : "canonical 15-minute snapshot line"}. Current SPX is not live. ${priceOverlay.error}`
     : effectivePriceSource?.status === "STALE"
@@ -587,9 +584,9 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
     : null;
 
   useEffect(() => {
-    onLiveSpotChange?.(liveZeroDteSpot);
-    return () => onLiveSpotChange?.(null);
-  }, [liveZeroDteSpot?.price, liveZeroDteSpot?.timeEt, onLiveSpotChange]);
+    onSpotContextChange?.(zeroDteSpotContext);
+  }, [zeroDteSpotContext?.price, zeroDteSpotContext?.timeEt, zeroDteSpotContext?.tradingDate, zeroDteSpotContext?.sessionState, onSpotContextChange]);
+  useEffect(() => () => onSpotContextChange?.(null), [onSpotContextChange]);
   const activateCell = useCallback((element: HTMLElement, strike: number, cell: SpxGexPressureCell, locked: boolean) => {
     if (locked) hoverSuppressedAfterScrollRef.current = false;
     const key = `${strike}-${cell.snapshotMinuteEt}`;

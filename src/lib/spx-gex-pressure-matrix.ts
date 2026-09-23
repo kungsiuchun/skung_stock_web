@@ -104,6 +104,34 @@ export interface SpxGexPressureSpotPoint {
   price: number;
 }
 
+export interface SpxGexZeroDteSpotContext {
+  price: number;
+  timeEt: string;
+  tradingDate: string;
+  provider: "0dtespx";
+  sessionState: "LIVE" | "FINALIZING" | "CLOSED";
+}
+
+/** A verified same-session close remains the displayed SPX price after RTH. */
+export const resolveSpxGexZeroDteSpotContext = (
+  source: {
+    provider?: string | null;
+    status?: "READY" | "STALE" | "UNAVAILABLE";
+    sessionState?: "UPCOMING" | "LIVE" | "FINALIZING" | "CLOSED" | "UNAVAILABLE";
+    sessionDate?: string | null;
+  } | null | undefined,
+  tradingDate: string,
+  latestPoint: SpxGexPressureSpotPoint | null,
+): SpxGexZeroDteSpotContext | null => {
+  const sessionState = source?.sessionState;
+  if (source?.provider !== "0dtespx"
+    || source.status !== "READY"
+    || source.sessionDate !== tradingDate
+    || !latestPoint
+    || (sessionState !== "LIVE" && sessionState !== "FINALIZING" && sessionState !== "CLOSED")) return null;
+  return { price: latestPoint.price, timeEt: latestPoint.timeEt, tradingDate, provider: "0dtespx", sessionState };
+};
+
 export interface SpxGexPressureAxisTick extends SpxGexPressureTimelineSlot {
   isMajor: boolean;
   isLatest: boolean;
