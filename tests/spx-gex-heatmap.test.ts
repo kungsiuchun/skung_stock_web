@@ -44,6 +44,7 @@ import {
   buildSpxGexPressureMatrixFromFrames,
   buildSpxGexPressureMatrix,
   extendSpxGexPressureForSession,
+  focusSpxGexPressureOnPrice,
   getLatestSpxGexSpotPoint,
   resolveSpxGexExpectedMoveOverlay,
   getSpxGexPressureTooltipPosition,
@@ -2377,6 +2378,34 @@ describe("SPX 0DTE pressure matrix", () => {
     assert.equal(pressure.rows.find((row) => row.strike === 6005)?.cells.at(-1)?.state, "NO_BASELINE");
   });
 
+  it("keeps canonical GEX cells visible when live SPX falls below the snapshot-centered range", () => {
+    const baseline = buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, { ...baselineValues, 5900: -200 });
+    const current = buildPressureSnapshot("2026-05-27T14:00:00.000Z", 6005, { ...currentValues, 5900: -400 });
+    const frames = [baseline, current].map(toSpxGexPressureFrame);
+    const narrow = buildSpxGexPressureMatrixFromFrames(frames);
+    const complete = buildSpxGexPressureMatrixFromFrames(frames, { includeAvailableStrikes: true });
+    assert.equal(narrow.rows.some((row) => row.strike === 5900), false);
+    assert.equal(complete.rows.find((row) => row.strike === 5900)?.currentGex, -400);
+
+    const oneMinute = [[
+      { time: 1, minuteEt: 570, timeEt: "09:30", price: 6000 },
+      { time: 2, minuteEt: 585, timeEt: "09:45", price: 5900 },
+    ]];
+    const focused = focusSpxGexPressureOnPrice(complete, oneMinute);
+    const geometry = buildSpxGexPressureChartGeometry(focused, oneMinute, 34, 25);
+    assert.equal(focused.rows.find((row) => row.strike === 5900)?.currentGex, -400);
+    assert.equal(focused.rows.find((row) => row.strike === 5900)?.cells[1].state, "NEGATIVE_DEEPER");
+    assert.ok(geometry.latestPoint);
+    assert.ok(geometry.latestPoint.y < focused.rows.length * 25 - 12.5, "live SPX must not stick to the bottom edge");
+
+    const beyondChain = focusSpxGexPressureOnPrice(complete, [[
+      { time: 1, minuteEt: 570, timeEt: "09:30", price: 6000 },
+      { time: 2, minuteEt: 585, timeEt: "09:45", price: 5750 },
+    ]], 20);
+    assert.equal(beyondChain.rows.find((row) => row.strike === 5750)?.cells[0].state, "OUTSIDE_COVERAGE");
+    assert.equal(beyondChain.rows.find((row) => row.strike === 5900)?.currentGex, -400);
+  });
+
   it("ranks latest movers by absolute delta with deterministic ties", () => {
     const pressure = buildSpxGexPressureMatrix([
       buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, baselineValues),
@@ -2654,21 +2683,22 @@ describe("SPX GEX pressure API", () => {
 
   it("returns one compact READY response from one whole-day snapshot query", async () => {
     const db = new CountingD1();
-    await upsertSpxGexHeatmap(db, "2026-05-27", buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, { 5995: -100, 6000: 100 }));
-    await upsertSpxGexHeatmap(db, "2026-05-27", buildPressureSnapshot("2026-05-27T14:00:00.000Z", 6005, { 5995: -200, 6000: 150 }));
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, { 5900: -200, 5995: -100, 6000: 100 }));
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildPressureSnapshot("2026-05-27T14:00:00.000Z", 6005, { 5900: -400, 5995: -200, 6000: 150 }));
 
     const response = await getSpxGexPressureApi({
       request: new Request("https://example.com/api/spx-gex-pressure?date=2026-05-27"),
       env: { SPX_RECAP_DB: db },
     });
     const text = await response.text();
-    const payload = JSON.parse(text) as { status: string; pressure: { timeline: unknown[]; movers: unknown[] } };
+    const payload = JSON.parse(text) as { status: string; pressure: { timeline: unknown[]; movers: unknown[]; rows: Array<{ strike: number; currentGex: number | null }> } };
 
     assert.equal(response.status, 200, text);
     assert.equal(response.headers.get("cache-control"), "public, max-age=60");
     assert.equal(payload.status, "READY");
     assert.equal(payload.pressure.timeline.length, 2);
     assert.equal(payload.pressure.movers.length > 0, true);
+    assert.equal(payload.pressure.rows.find((row) => row.strike === 5900)?.currentGex, -400);
     assert.equal(db.pressureProjectionQueries, 1);
     assert.equal(db.fullSnapshotListQueries, 0);
     assert.equal(response.headers.get("x-spx-frame-count"), "2");

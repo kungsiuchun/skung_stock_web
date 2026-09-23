@@ -17,7 +17,8 @@ export type SpxGexPressureState =
   | "FLIP_TO_NEGATIVE"
   | "UNCHANGED"
   | "NO_BASELINE"
-  | "NO_DATA";
+  | "NO_DATA"
+  | "OUTSIDE_COVERAGE";
 
 export interface SpxGexPressureTimelineSlot {
   snapshotMinuteEt: number;
@@ -329,6 +330,46 @@ export const buildSpxGexPressureAxisTicks = (
   }));
 };
 
+/** Keep the price path and risk corridor on the same strike scale as the GEX cells. */
+export const focusSpxGexPressureOnPrice = (
+  pressure: SpxGexPressureMatrixModel,
+  oneMinuteSegments: SpxGexPressureSpotPoint[][],
+  expectedMove: number | null = null,
+): SpxGexPressureMatrixModel => {
+  const pricePoints = oneMinuteSegments.flat();
+  const prices = [
+    ...pressure.timeline.map((slot) => slot.spot).filter(finite),
+    ...pricePoints.map((point) => point.price).filter(finite),
+  ];
+  const latestPrice = pricePoints[pricePoints.length - 1]?.price;
+  if (finite(latestPrice) && finite(expectedMove) && expectedMove > 0) {
+    prices.push(latestPrice - expectedMove, latestPrice + expectedMove);
+  }
+  if (prices.length === 0) return pressure;
+  const lower = Math.floor((Math.min(...prices) - STRIKE_BUFFER) / STRIKE_STEP) * STRIKE_STEP;
+  const upper = Math.ceil((Math.max(...prices) + STRIKE_BUFFER) / STRIKE_STEP) * STRIKE_STEP;
+  const rowsByStrike = new Map(pressure.rows.map((row) => [row.strike, row]));
+  const rows: SpxGexPressureRow[] = [];
+  for (let strike = upper; strike >= lower; strike -= STRIKE_STEP) {
+    const existing = rowsByStrike.get(strike);
+    rows.push(existing || {
+      strike,
+      currentGex: null,
+      cells: pressure.timeline.map((slot) => ({
+        snapshotMinuteEt: slot.snapshotMinuteEt,
+        state: "OUTSIDE_COVERAGE",
+        baselineGex: null,
+        currentGex: null,
+        deltaGex: null,
+        strengthPct: null,
+        intensityPct: 0,
+        spot: slot.spot,
+      })),
+    });
+  }
+  return { ...pressure, strikeRange: { lower, upper, step: STRIKE_STEP }, rows };
+};
+
 const clamp = (value: number, lower: number, upper: number) => Math.min(Math.max(value, lower), upper);
 
 export const buildSpxGexPressureChartGeometry = (
@@ -460,7 +501,10 @@ export const toSpxGexPressureFrame = (snapshot: SpxGexHeatmapModel): SpxGexPress
   };
 };
 
-export const buildSpxGexPressureMatrixFromFrames = (input: SpxGexPressureFrame[]): SpxGexPressureMatrixModel => {
+export const buildSpxGexPressureMatrixFromFrames = (
+  input: SpxGexPressureFrame[],
+  options: { includeAvailableStrikes?: boolean } = {},
+): SpxGexPressureMatrixModel => {
   if (input.length === 0) throw new Error("SPX GEX pressure matrix requires at least one snapshot.");
   const sortedSnapshots = [...input].sort((a, b) => a.snapshotMinuteEt - b.snapshotMinuteEt);
   const latestEngineVersion = sortedSnapshots[sortedSnapshots.length - 1].calculationEngineVersion;
@@ -502,8 +546,19 @@ export const buildSpxGexPressureMatrixFromFrames = (input: SpxGexPressureFrame[]
 
   const spots = snapshots.map((snapshot) => snapshot.spot).filter(finite);
   if (spots.length !== snapshots.length) throw new Error("SPX GEX pressure snapshot is missing a finite spot.");
-  const lower = Math.floor((Math.min(...spots) - STRIKE_BUFFER) / STRIKE_STEP) * STRIKE_STEP;
-  const upper = Math.ceil((Math.max(...spots) + STRIKE_BUFFER) / STRIKE_STEP) * STRIKE_STEP;
+  let lowest = Math.min(...spots);
+  let highest = Math.max(...spots);
+  if (options.includeAvailableStrikes) {
+    for (const snapshot of snapshots) {
+      for (const { strike } of snapshot.gexByStrike) {
+        if (!finite(strike)) continue;
+        lowest = Math.min(lowest, strike);
+        highest = Math.max(highest, strike);
+      }
+    }
+  }
+  const lower = Math.floor((lowest - STRIKE_BUFFER) / STRIKE_STEP) * STRIKE_STEP;
+  const upper = Math.ceil((highest + STRIKE_BUFFER) / STRIKE_STEP) * STRIKE_STEP;
   const strikes: number[] = [];
   for (let strike = upper; strike >= lower; strike -= STRIKE_STEP) strikes.push(strike);
 

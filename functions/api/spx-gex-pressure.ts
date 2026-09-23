@@ -116,7 +116,7 @@ async function onRequestUncached(context: Context) {
       return json({ status: "EMPTY", errorCode: null, selectedDate, pressure: null, invalidSnapshots: [], collectionAttempts, warnings: [] });
     }
 
-    const builtPressure = buildSpxGexPressureMatrixFromFrames(audit.frames);
+    const builtPressure = buildSpxGexPressureMatrixFromFrames(audit.frames, { includeAvailableStrikes: true });
     const invalidWarnings = invalidSnapshots.map((snapshot) =>
       `${snapshot.snapshotTimeEt} snapshot did not pass the pressure data contract and was excluded.`);
     const pressure = { ...builtPressure, warnings: [...builtPressure.warnings, ...invalidWarnings] };

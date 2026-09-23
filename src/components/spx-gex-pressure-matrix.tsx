@@ -10,6 +10,7 @@ import {
   buildSpxGexPressureAxisTicks,
   buildSpxGexPressureChartGeometry,
   extendSpxGexPressureForSession,
+  focusSpxGexPressureOnPrice,
   getLatestSpxGexSpotPoint,
   resolveSpxGexExpectedMoveOverlay,
   type SpxGexPressureCell,
@@ -50,7 +51,7 @@ interface SpxGexPressureMatrixProps {
   priceOverlayRefreshKey: number;
   enabled?: boolean;
   controls: ReactNode;
-  onLiveSpotChange?: (spot: { price: number; timeEt: string; provider: "0dtespx" } | null) => void;
+  onLiveSpotChange?: (spot: { price: number; timeEt: string; tradingDate: string; provider: "0dtespx" } | null) => void;
 }
 
 interface ActiveCell {
@@ -148,6 +149,7 @@ const stateLabel: Record<SpxGexPressureState, string> = {
   UNCHANGED: "UNCHANGED",
   NO_BASELINE: "NO BASELINE",
   NO_DATA: "NO DATA",
+  OUTSIDE_COVERAGE: "OUTSIDE GEX COVERAGE",
 };
 
 const stateGlyph = (state: SpxGexPressureState) => {
@@ -160,7 +162,7 @@ const stateGlyph = (state: SpxGexPressureState) => {
 
 const stateColor = (state: SpxGexPressureState, currentGex?: number | null) => {
   if (state === "FLIP_TO_POSITIVE" || state === "FLIP_TO_NEGATIVE") return "#fbbf24";
-  if (state === "NO_DATA" || state === "NO_BASELINE") return "#475569";
+  if (state === "NO_DATA" || state === "NO_BASELINE" || state === "OUTSIDE_COVERAGE") return "#475569";
   if ((currentGex || 0) > 0) return "#4ade80";
   if ((currentGex || 0) < 0) return "#f472b6";
   return "#64748b";
@@ -170,7 +172,7 @@ const cellBackground = (cell: SpxGexPressureCell, missingSlot: boolean) => {
   if (missingSlot) {
     return "repeating-linear-gradient(135deg, rgba(71,85,105,.16) 0 4px, rgba(15,23,42,.55) 4px 8px)";
   }
-  if (cell.state === "NO_DATA") return "rgba(15, 28, 42, 0.72)";
+  if (cell.state === "NO_DATA" || cell.state === "OUTSIDE_COVERAGE") return "rgba(15, 28, 42, 0.72)";
   if (cell.state === "NO_BASELINE") return "rgba(51, 65, 85, 0.38)";
   const alpha = 0.18 + (cell.intensityPct / 100) * 0.68;
   if (cell.state === "FLIP_TO_POSITIVE" || cell.state === "FLIP_TO_NEGATIVE") return `rgba(245, 158, 11, ${alpha})`;
@@ -481,7 +483,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
   const latestSpotPoint = useMemo(() => pressure && priceOverlay?.data
     ? getLatestSpxGexSpotPoint(priceOverlay.data.candles, pressure.tradingDate)
     : null, [pressure, priceOverlay?.data]);
-  const displayPressure = useMemo(() => pressure ? extendSpxGexPressureForSession(pressure, etClock()) : null, [pressure, pressureRefreshKey]);
+  const sessionPressure = useMemo(() => pressure ? extendSpxGexPressureForSession(pressure, etClock()) : null, [pressure, pressureRefreshKey]);
   const overlayClock = useMemo(() => etClock(new Date(overlayNowMs)), [overlayNowMs]);
   const effectivePriceSource = useMemo(() => priceOverlay?.data?.source
     ? (() => {
@@ -517,10 +519,14 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
     nowMs: overlayNowMs,
   }), [effectivePriceSource, overlayClock.tradingDate, overlayNowMs, selectedDate]);
   const oneMinuteSpotSegments = useMemo(() => {
-    if (!displayPressure || priceOverlay?.selectedDate !== selectedDate || !priceOverlay.data || !latestSpotPoint) return [];
-    const startMinute = displayPressure.timeline[0]?.snapshotMinuteEt ?? displayPressure.baseline.snapshotMinuteEt;
-    return buildSpxGexOneMinuteSpotSegments(priceOverlay.data.candles, displayPressure.tradingDate, startMinute, latestSpotPoint.minuteEt);
-  }, [displayPressure, latestSpotPoint, priceOverlay, selectedDate]);
+    if (!sessionPressure || priceOverlay?.selectedDate !== selectedDate || !priceOverlay.data || !latestSpotPoint) return [];
+    const startMinute = sessionPressure.timeline[0]?.snapshotMinuteEt ?? sessionPressure.baseline.snapshotMinuteEt;
+    return buildSpxGexOneMinuteSpotSegments(priceOverlay.data.candles, sessionPressure.tradingDate, startMinute, latestSpotPoint.minuteEt);
+  }, [sessionPressure, latestSpotPoint, priceOverlay, selectedDate]);
+  const displayPressure = useMemo(() => sessionPressure
+    ? focusSpxGexPressureOnPrice(sessionPressure, oneMinuteSpotSegments, expectedMoveOverlay.expectedMove)
+    : null, [sessionPressure, oneMinuteSpotSegments, expectedMoveOverlay.expectedMove]);
+  const outsideGexCoverage = displayPressure?.rows.some((row) => row.cells[0]?.state === "OUTSIDE_COVERAGE") || false;
   const axisTicks = useMemo(() => displayPressure ? buildSpxGexPressureAxisTicks(displayPressure.timeline) : [], [displayPressure]);
   const timelineLength = displayPressure?.timeline.length || 0;
   const availableTimelineWidth = Math.max(0, matrixRailWidth - STRIKE_WIDTH - CURRENT_GEX_WIDTH);
@@ -561,7 +567,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
     && effectivePriceSource.status === "READY"
     && overlaySessionState === "LIVE"
     && latestSpotPoint
-    ? { price: latestSpotPoint.price, timeEt: latestSpotPoint.timeEt, provider: "0dtespx" as const }
+    ? { price: latestSpotPoint.price, timeEt: latestSpotPoint.timeEt, tradingDate: selectedDate, provider: "0dtespx" as const }
     : null;
   const priceOverlayWarning = priceOverlay?.error
     ? `0DTESPX refresh unavailable; showing the last verified ${usingOneMinuteSpot ? "1-minute SPX and stale Expected Move context" : "canonical 15-minute snapshot line"}. Current SPX is not live. ${priceOverlay.error}`
@@ -645,6 +651,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
             {reconnecting && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status">Reconnecting SPX source…</div>}
             {refreshError && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-refresh-stale="true">Refresh failed; showing the last verified GEX matrix. {refreshError}</div>}
            {priceOverlayWarning && <div className="border-b border-cyan-300/20 bg-cyan-300/5 px-3 py-2 text-xs text-cyan-100" role="status" data-spx-gex-pressure-spot-warning="true">{priceOverlayWarning}</div>}
+           {outsideGexCoverage && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-coverage-warning="true">SPX price extends beyond the available 0DTE GEX strike range. Empty rows show price context only, not GEX data.</div>}
            {expectedMoveWarning && <div className={`${expectedMoveIsStale ? "border-amber-300/20 bg-amber-300/10 text-amber-100" : "border-violet-300/20 bg-violet-300/5 text-violet-100"} border-b px-3 py-2 text-xs`} role="status" data-spx-gex-pressure-expected-move-warning="true">{expectedMoveWarning}</div>}
 
           <div className="grid 2xl:grid-cols-[minmax(0,1fr)_320px] 2xl:items-start">
@@ -690,7 +697,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
                   <div className="sticky left-0 z-30 shrink-0 bg-[#050c14]" style={{ width: STRIKE_WIDTH }}>
                     <div className="relative" style={{ height: matrixHeight }}>
                       {displayPressure!.rows.map((row) => (
-                        <div key={row.strike} className="flex items-center border-b border-[#102433] px-2 font-black tabular-nums text-cyan-300" style={{ height: ROW_HEIGHT }}>
+                        <div key={row.strike} className="flex items-center border-b border-[#102433] px-2 font-black tabular-nums text-cyan-300" style={{ height: ROW_HEIGHT }} data-spx-gex-pressure-strike={row.strike}>
                           {strikeFormatter.format(row.strike)}
                         </div>
                       ))}
