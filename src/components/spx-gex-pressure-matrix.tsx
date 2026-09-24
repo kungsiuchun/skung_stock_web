@@ -279,6 +279,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
   const [reconnecting, setReconnecting] = useState(false);
   const [priceOverlay, setPriceOverlay] = useState<PriceOverlayState | null>(null);
   const [loading, setLoading] = useState(false);
+  const [pressureRecoveryTick, setPressureRecoveryTick] = useState(0);
   const [activeCell, setActiveCell] = useState<ActiveCell | null>(null);
   const [strikePanSteps, setStrikePanSteps] = useState(0);
   const [matrixRailWidth, setMatrixRailWidth] = useState(0);
@@ -289,6 +290,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
   const activeCellRef = useRef(activeCell);
   const overlayRequestVersionRef = useRef(0);
   const overlayAutoRefreshRef = useRef({ identity: "", attempts: 0 });
+  const pressureRecoveryRef = useRef({ date: "", attempts: 0 });
   const hoverSuppressedAfterScrollRef = useRef(false);
   activeCellRef.current = activeCell;
   dataRef.current = data;
@@ -413,7 +415,37 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
     };
     void load();
     return () => controller.abort();
-  }, [enabled, pressureRefreshKey, selectedDate]);
+  }, [enabled, pressureRecoveryTick, pressureRefreshKey, selectedDate]);
+
+  useEffect(() => {
+    if (pressureRecoveryRef.current.date !== selectedDate) {
+      pressureRecoveryRef.current = { date: selectedDate, attempts: 0 };
+    }
+    if (!enabled || loading || !data || data.selectedDate !== selectedDate) return undefined;
+    if (data.pressure) {
+      pressureRecoveryRef.current.attempts = 0;
+      return undefined;
+    }
+    // Historical gaps are stable; only today's incomplete/failed read needs
+    // independent recovery after the Board's post-close refresh stops.
+    if (selectedDate !== etClock().tradingDate) return undefined;
+    const delays = [3_000, 15_000, 60_000];
+    const delay = delays[pressureRecoveryRef.current.attempts] ?? 120_000;
+    const dueAt = Date.now() + delay;
+    let triggered = false;
+    const retry = () => {
+      if (triggered || document.visibilityState !== "visible" || Date.now() < dueAt) return;
+      triggered = true;
+      pressureRecoveryRef.current.attempts += 1;
+      setPressureRecoveryTick((current) => current + 1);
+    };
+    const timer = window.setTimeout(retry, delay);
+    document.addEventListener("visibilitychange", retry);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", retry);
+    };
+  }, [data, enabled, loading, selectedDate]);
 
   useEffect(() => {
     if (!selectedDate || !enabled) return undefined;
@@ -612,7 +644,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
       className="border border-[#123142] bg-[#030910]"
       style={{ colorScheme: "dark" }}
       data-spx-gex-pressure-matrix="true"
-      aria-busy={loading}
+      aria-busy={loading || Boolean(enabled && selectedDate && (!data || data.selectedDate !== selectedDate))}
     >
       <div className="flex flex-col gap-3 border-b border-[#123142] bg-[#06111a] p-3 xl:flex-row xl:items-end xl:justify-between">
         <div>
@@ -631,12 +663,13 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
         </div>
       </div>
 
-      {loading && !pressure ? (
-        <div className="flex h-64 items-center justify-center font-mono text-xs uppercase tracking-[0.16em] text-zinc-500" role="status" aria-live="polite">Loading pressure matrix…</div>
+      {(!enabled || loading || !data || data.selectedDate !== selectedDate) && !pressure ? (
+        <div className="flex h-64 items-center justify-center font-mono text-xs uppercase tracking-[0.16em] text-zinc-500" role="status" aria-live="polite">{enabled ? "Loading pressure matrix…" : "Waiting for SPX snapshot…"}</div>
       ) : !pressure ? (
         <div className="flex h-64 flex-col items-center justify-center gap-3 px-4 text-center text-zinc-400" role="alert" aria-live="assertive">
           <AlertTriangle aria-hidden="true" className="h-6 w-6 text-amber-300/70" />
-          <span className="text-sm">{data?.error || "No retained 0DTE pressure snapshots for this date."}</span>
+          <span className="text-sm">{data?.error || data?.warnings[0] || "No retained 0DTE pressure snapshots for this date."}</span>
+          {selectedDate === etClock().tradingDate && <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-amber-200">Rechecking automatically</span>}
         </div>
       ) : (
         <>

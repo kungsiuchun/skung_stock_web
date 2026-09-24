@@ -2706,6 +2706,54 @@ describe("SPX GEX pressure API", () => {
     }
   }
 
+  it("serves canonical pressure when the optional edge cache read throws", async () => {
+    const db = new CountingD1();
+    await upsertSpxGexHeatmap(db, "2026-05-27", buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, { 5995: -100, 6000: 100 }));
+    const priorCache = Object.getOwnPropertyDescriptor(globalThis, "caches");
+    const priorConsoleError = console.error;
+    const logged: unknown[] = [];
+    Object.defineProperty(globalThis, "caches", { configurable: true, value: { default: { match: async () => { throw new Error("edge cache unavailable"); }, put: async () => undefined } } });
+    console.error = (...args: unknown[]) => { logged.push(args); };
+    try {
+      const response = await getSpxGexPressureApi({
+        request: new Request("https://example.com/api/spx-gex-pressure?date=2026-05-27"),
+        env: { SPX_RECAP_DB: db },
+      });
+      const payload = await response.json() as { status: string; pressure: unknown };
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("x-spx-cache"), "MISS");
+      assert.equal(payload.status, "READY");
+      assert.ok(payload.pressure);
+      assert.equal(logged.length, 1);
+    } finally {
+      console.error = priorConsoleError;
+      if (priorCache) Object.defineProperty(globalThis, "caches", priorCache);
+      else Reflect.deleteProperty(globalThis, "caches");
+    }
+  });
+
+  it("returns retryable JSON if the pressure response fails outside the D1 handler", async () => {
+    const priorClone = Response.prototype.clone;
+    const priorConsoleError = console.error;
+    const logged: unknown[] = [];
+    Response.prototype.clone = function () { throw new Error("edge response clone failed"); };
+    console.error = (...args: unknown[]) => { logged.push(args); };
+    try {
+      const response = await getSpxGexPressureApi({
+        request: new Request("https://example.com/api/spx-gex-pressure?date=2026-05-27"),
+        env: {},
+      });
+      const payload = await response.json() as { status: string; errorCode: string };
+      assert.equal(response.status, 503);
+      assert.equal(payload.status, "ERROR");
+      assert.equal(payload.errorCode, "SPX_GEX_PRESSURE_EDGE_FAILED");
+      assert.equal(logged.length, 1);
+    } finally {
+      Response.prototype.clone = priorClone;
+      console.error = priorConsoleError;
+    }
+  });
+
   it("returns one compact READY response from one whole-day snapshot query", async () => {
     const db = new CountingD1();
     await upsertSpxGexHeatmap(db, "2026-05-27", buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, { 5900: -200, 5995: -100, 6000: 100 }));

@@ -154,7 +154,23 @@ async function onRequestUncached(context: Context) {
 }
 
 export async function onRequest(context: Context) {
-  const cached = await readSpxEdgeCache(context.request);
-  if (cached) return cached;
-  return coalesceSpxEdgeRequest(context.request, () => onRequestUncached(context));
+  try {
+    const cached = await readSpxEdgeCache(context.request);
+    if (cached) return cached;
+    return await coalesceSpxEdgeRequest(context.request, () => onRequestUncached(context));
+  } catch (error) {
+    // Keep unexpected edge/coalescing failures observable as JSON, not an
+    // unhandled Cloudflare 1101 HTML page that leaves the matrix stranded.
+    console.error("SPX pressure edge response failed.", error);
+    return json({
+      status: "ERROR",
+      errorCode: "SPX_GEX_PRESSURE_EDGE_FAILED",
+      error: "SPX GEX pressure edge response failed. Retrying is safe.",
+      selectedDate: new URL(context.request.url).searchParams.get("date"),
+      pressure: null,
+      invalidSnapshots: [],
+      collectionAttempts: [],
+      warnings: ["SPX GEX pressure edge response failed."],
+    }, { status: 503 });
+  }
 }

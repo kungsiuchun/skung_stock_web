@@ -58,13 +58,20 @@ export const canonicalSpxCacheRequest = (request: Request) => {
 export const getSpxEdgeCache = () => typeof caches === "undefined" ? null : caches.default;
 
 export const readSpxEdgeCache = async (request: Request) => {
-  const cache = getSpxEdgeCache();
-  if (!cache || request.method !== "GET") return null;
-  const cached = await cache.match(canonicalSpxCacheRequest(request));
-  if (!cached) return null;
-  const headers = new Headers(cached.headers);
-  headers.set("X-SPX-Cache", "HIT");
-  return new Response(cached.body, { status: cached.status, statusText: cached.statusText, headers });
+  if (request.method !== "GET") return null;
+  try {
+    const cache = getSpxEdgeCache();
+    if (!cache) return null;
+    const cached = await cache.match(canonicalSpxCacheRequest(request));
+    if (!cached) return null;
+    const headers = new Headers(cached.headers);
+    headers.set("X-SPX-Cache", "HIT");
+    return new Response(cached.body, { status: cached.status, statusText: cached.statusText, headers });
+  } catch (error) {
+    // Cache API reads are optional. An edge failure must not hide valid D1 data.
+    console.error("SPX edge cache read failed; falling back to origin.", error);
+    return null;
+  }
 };
 
 export const writeSpxEdgeCache = async (context: SpxCacheContext, response: Response) => {

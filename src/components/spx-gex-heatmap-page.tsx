@@ -773,7 +773,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
           selectedMinute={selectedMinute}
           pressureRefreshKey={pressureRefreshKey}
           priceOverlayRefreshKey={zeroDteRefreshKey}
-          enabled={initialCompassSettled}
+          enabled={initialHeatmapSettled}
           controls={snapshotControls}
           onSpotContextChange={onSpotContextChange}
         />
