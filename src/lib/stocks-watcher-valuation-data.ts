@@ -118,7 +118,9 @@ const parseValuation = (value: unknown, symbol: string, metric: WatcherValuation
   assertFresh(generatedAt);
   const points = rawPoints.map(parsePoint);
   if (!points.length) fail("valuation points are empty");
-  return { schemaVersion: validBody.schemaVersion as string, source: nullableString(validBody.source) || "ValuationCalculation", symbol, generatedAt, dataAsOf, metric, window, latest: parsePoint(validBody.latest), points };
+  const latest = parsePoint(validBody.latest);
+  if (latest.price === null || latest.price <= 0) fail("latest valuation price is missing or invalid");
+  return { schemaVersion: validBody.schemaVersion as string, source: nullableString(validBody.source) || "ValuationCalculation", symbol, generatedAt, dataAsOf, metric, window, latest, points };
 };
 
 const parseFinancials = (value: unknown, symbol: string): WatcherFinancialStatements => {

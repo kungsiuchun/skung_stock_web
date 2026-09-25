@@ -50,6 +50,7 @@ import {
   onRequest as stocksWatcherApi,
 } from "../functions/api/stocks-intelligence-watcher";
 import {
+  loadWatcherValuationBands,
   loadWatcherFinancialStatements,
   type R2BucketLike,
   type WatcherValuationRelease,
@@ -523,6 +524,36 @@ test("published quarterly financial statements fail closed when source provenanc
   await assert.rejects(
     () => loadWatcherFinancialStatements(bucket, { symbol: "NVDA", release }),
     /financial metadata or provenance is missing/,
+  );
+});
+
+test("published valuation bands fail closed when the latest price is missing", async () => {
+  const generatedAt = new Date().toISOString();
+  const release: WatcherValuationRelease = { schemaVersion: "1.0", releaseId: "uat-release", generatedAt };
+  const point = {
+    date: "2026-09-23",
+    price: null,
+    bands: { mean: 100, up1: 110, up2: 120, down1: 90, down2: 80 },
+  };
+  const bucket: R2BucketLike = {
+    get: async (key) => key === "releases/uat-release/valuation/NVDA/pe/3Y.json"
+      ? { json: async () => ({
+        schemaVersion: "1.0",
+        source: "ValuationCalculation hybrid valuation model",
+        symbol: "NVDA",
+        generatedAt,
+        dataAsOf: point.date,
+        metric: "pe",
+        window: "3Y",
+        latest: point,
+        points: [point],
+      }) }
+      : null,
+  };
+
+  await assert.rejects(
+    () => loadWatcherValuationBands(bucket, { symbol: "NVDA", metric: "pe", window: "3Y", release }),
+    /latest valuation price is missing or invalid/,
   );
 });
 

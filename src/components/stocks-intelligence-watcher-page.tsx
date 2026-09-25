@@ -84,7 +84,6 @@ const FAVORITES_STORAGE_KEY = "stocks-intelligence-favorites";
 const FAVORITES_MEMORY_KEY = "stocks-intelligence-favorites";
 const CUSTOM_STOCKS_STORAGE_KEY = "stocks-intelligence-custom-stocks";
 const ROW_QUOTE_REFRESH_CHUNK_SIZE = 20;
-const CURATED_VALUATION_TICKER_COUNT = 20;
 const VALUATION_METRICS: readonly WatcherValuationMetric[] = ["pe", "fcf", "ps"];
 const VALUATION_METRIC_LABEL: Record<WatcherValuationMetric, string> = {
   pe: "P/E",
@@ -2361,16 +2360,12 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
   }, [loadFavoritesFromLocal, loadNativeWatchlist]);
 
   const curatedValuationTickers = useMemo(
-    () => nativeWatchlist.length === CURATED_VALUATION_TICKER_COUNT ? nativeWatchlist : [],
+    () => nativeWatchlist,
     [nativeWatchlist],
   );
 
   useEffect(() => {
     if (nativeWatchlist.length === 0) return;
-    if (curatedValuationTickers.length === 0) {
-      setValuationPanel({ loading: false, error: "The admin curated valuation universe is unavailable.", data: null });
-      return;
-    }
     if (!curatedValuationTickers.some((stock) => stock.symbol === valuationTicker)) {
       setValuationTicker(curatedValuationTickers[0].symbol);
       return;
@@ -4705,6 +4700,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     const valuation = valuationPanel.data;
     const valuationBands = valuation?.latest.bands;
     const valuationPrice = valuation?.latest.price ?? null;
+    const valuationBandsComplete = valuationBands
+      ? [valuationBands.down2, valuationBands.down1, valuationBands.mean, valuationBands.up1, valuationBands.up2]
+        .every((value) => typeof value === "number" && Number.isFinite(value) && value > 0)
+      : false;
     const valuationGap = valuationBands?.mean && valuationPrice !== null
       ? ((valuationPrice - valuationBands.mean) / valuationBands.mean) * 100
       : null;
@@ -4874,26 +4873,26 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 </select>
               </label>
             </div>
-            {valuationPanel.loading ? <div className="siw-data-empty"><strong>Loading valuation</strong><span>Reading published ValuationCalculation bands.</span></div> : valuation && valuationBands ? (
+            {valuationPanel.loading ? <div className="siw-data-empty"><strong>Loading valuation</strong><span>Reading published ValuationCalculation bands.</span></div> : valuation && valuationBands && valuationPrice !== null && valuationBandsComplete ? (
               <div className="siw-earnings-summary">
                 <div>
                   <span>Current vs mean</span>
                   <strong className={(valuationGap || 0) <= 0 ? "siw-up" : "siw-down"}>{formatSignedPercent(valuationGap)}</strong>
-                  <em>Price {currency(valuation.latest.price || 0)} · Mean {currency(valuationBands.mean || 0)}</em>
+                  <em>Price {currency(valuationPrice)} · Mean {currency(valuationBands.mean!)}</em>
                 </div>
                 <ValuationRainbowChart valuation={valuation} />
                 <div>
                   <span>Upside band</span>
-                  <strong>{currency(valuationBands.up1 || 0)}</strong>
-                  <em>+2σ {currency(valuationBands.up2 || 0)}</em>
+                  <strong>{currency(valuationBands.up1!)}</strong>
+                  <em>+2σ {currency(valuationBands.up2!)}</em>
                 </div>
                 <div>
                   <span>Downside band</span>
-                  <strong>{currency(valuationBands.down1 || 0)}</strong>
-                  <em>-2σ {currency(valuationBands.down2 || 0)} · {valuation.source}</em>
+                  <strong>{currency(valuationBands.down1!)}</strong>
+                  <em>-2σ {currency(valuationBands.down2!)} · {valuation.source}</em>
                 </div>
               </div>
-            ) : <div className="siw-data-empty"><strong>{valuationPanel.error || (valuationCoverage === "queued" ? "Coverage queued" : "Needs checking")}</strong><span>{valuationCoverage === "queued" ? "This ticker is queued for the next daily ValuationCalculation batch. Yahoo data is not used as a substitute." : "Published ValuationCalculation data is unavailable, invalid, or stale. Yahoo data is not used as a substitute."}</span></div>}
+            ) : <div className="siw-data-empty"><strong>{valuationPanel.error || (valuationCoverage === "queued" ? "Coverage queued" : valuation ? `${VALUATION_METRIC_LABEL[valuationMetric]} band unavailable` : "Needs checking")}</strong><span>{valuationCoverage === "queued" ? "This ticker is queued for the next daily ValuationCalculation batch. Yahoo data is not used as a substitute." : valuation ? "The selected metric does not have a complete positive valuation band. Choose another metric." : "Published ValuationCalculation data is unavailable, invalid, or stale. Yahoo data is not used as a substitute."}</span></div>}
           </div>
 
           <div className="siw-panel siw-financials-panel" data-overview-tertiary-panel="financials">
