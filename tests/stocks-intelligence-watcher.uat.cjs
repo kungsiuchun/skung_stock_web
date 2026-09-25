@@ -166,7 +166,7 @@ const buildSnapshot = (symbol, overrides = {}) => {
       dataAsOf: "2026-07-09",
       metric: "pe",
       window: "3Y",
-      latest: { date: "2026-07-09", price, bands: { mean: price - 15, up1: price + 20, up2: price + 40, down1: price - 35, down2: price - 55 } },
+      latest: { date: "2026-07-09", price, bands: { mean: price - 15, up1: price + 20, up2: price + 40, down1: price - 35, down2: 0 } },
       points: [],
     },
     financials: {

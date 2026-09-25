@@ -4701,8 +4701,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     const valuationBands = valuation?.latest.bands;
     const valuationPrice = valuation?.latest.price ?? null;
     const valuationBandsComplete = valuationBands
-      ? [valuationBands.down2, valuationBands.down1, valuationBands.mean, valuationBands.up1, valuationBands.up2]
-        .every((value) => typeof value === "number" && Number.isFinite(value) && value > 0)
+      ? [valuationBands.down2, valuationBands.down1]
+        .every((value) => typeof value === "number" && Number.isFinite(value) && value >= 0)
+        && [valuationBands.mean, valuationBands.up1, valuationBands.up2]
+          .every((value) => typeof value === "number" && Number.isFinite(value) && value > 0)
       : false;
     const valuationGap = valuationBands?.mean && valuationPrice !== null
       ? ((valuationPrice - valuationBands.mean) / valuationBands.mean) * 100
