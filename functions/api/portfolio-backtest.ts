@@ -210,10 +210,19 @@ export const normalizeYahooPortfolioHistory = (input: { ticker: string; payload:
     if (date === nowDate && (!regularSessionEnd || now.getTime() < regularSessionEnd * 1_000)) continue;
     const close = numeric(closes[index]);
     const adjustedClose = numeric(adjustedCloses[index]);
-    if (close === null || close <= 0 || adjustedClose === null || adjustedClose <= 0 || dates.has(date)) {
+    if (dates.has(date)) {
       throw new PortfolioBacktestApiError("MALFORMED_PAYLOAD", `Market history for ${ticker} contains incomplete or duplicate completed EOD data.`);
     }
     dates.add(date);
+    if (close === null || close <= 0 || adjustedClose === null || adjustedClose <= 0) {
+      const hasLaterCompletePoint = timestamps.slice(index + 1).some((_, laterIndex) => {
+        const laterClose = numeric(closes[index + laterIndex + 1]);
+        const laterAdjustedClose = numeric(adjustedCloses[index + laterIndex + 1]);
+        return laterClose !== null && laterClose > 0 && laterAdjustedClose !== null && laterAdjustedClose > 0;
+      });
+      if (!hasLaterCompletePoint) continue;
+      throw new PortfolioBacktestApiError("MALFORMED_PAYLOAD", `Market history for ${ticker} contains incomplete or duplicate completed EOD data.`);
+    }
     rawPoints.push({ date, close, adjustedClose });
   }
   if (rawPoints.length < 2) throw new PortfolioBacktestApiError("MALFORMED_PAYLOAD", `Market history for ${ticker} has fewer than two completed EOD sessions.`);

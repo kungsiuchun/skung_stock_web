@@ -72,14 +72,16 @@ const backtestResult = (input) => ({
 
     await page.goto(`${baseUrl}/#/market-lab`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => document.body.innerText.includes("Portfolio vs SPY"));
-    const clicked = await page.$$eval("button", (buttons) => {
-      const card = buttons.find((button) => (button.textContent || "").includes("Portfolio vs SPY"));
-      if (!card) return false;
-      card.click();
+    const clicked = await page.$$eval("article", (cards) => {
+      const card = cards.find((candidate) => candidate.querySelector("h2")?.textContent?.trim() === "Portfolio vs SPY");
+      const action = card?.querySelector("button[aria-label='Run backtest: Portfolio vs SPY']");
+      if (!(action instanceof HTMLButtonElement)) return false;
+      action.click();
       return true;
     });
     assert.equal(clicked, true, "Portfolio vs SPY card should be clickable from Market Lab");
     await page.waitForFunction(() => window.location.hash === "#/work/portfolio-backtest");
+    await page.waitForFunction(() => document.body.innerText.includes("PORTFOLIO VS SPY"));
     assert.match(await page.$eval("body", (body) => body.innerText), /PORTFOLIO VS SPY/);
 
      const tickerInputs = await page.$$("input[aria-label='ETF ticker']");

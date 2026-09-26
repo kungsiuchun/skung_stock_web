@@ -15,20 +15,26 @@ const MAX_POSITIONS = 10;
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 const percent = (value: number | null, digits = 2) => value === null ? "Unavailable" : `${value >= 0 ? "+" : ""}${(value * 100).toFixed(digits)}%`;
 const dateLabel = (value: string) => new Intl.DateTimeFormat("en-US", { month: "short", year: "2-digit", timeZone: "UTC" }).format(new Date(`${value}T00:00:00Z`));
-const initialEnd = () => new Date().toISOString().slice(0, 10);
-const initialStart = () => {
-  const date = new Date();
+const marketDate = (date: Date) => {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+  const value = (type: string) => parts.find((part) => part.type === type)?.value || "";
+  return `${value("year")}-${value("month")}-${value("day")}`;
+};
+export const portfolioBacktestInitialRange = (now = new Date()) => {
+  const end = marketDate(now);
+  const date = new Date(`${end}T00:00:00.000Z`);
   date.setUTCFullYear(date.getUTCFullYear() - 5);
-  return date.toISOString().slice(0, 10);
+  return { start: date.toISOString().slice(0, 10), end };
 };
 const hasBasisPointPrecision = (value: string) => /^\d+(?:\.\d{1,2})?$/.test(value.trim());
 const basisPointsFor = (value: string) => hasBasisPointPrecision(value) ? Number(value) * 100 : Number.NaN;
 
 export function PortfolioBacktestPage({ onBackToWork }: PortfolioBacktestPageProps) {
+  const initialRange = useMemo(portfolioBacktestInitialRange, []);
   const [positions, setPositions] = useState<PositionDraft[]>([{ id: 1, ticker: "", weight: "" }]);
   const [startingCapital, setStartingCapital] = useState("10000");
-  const [startDate, setStartDate] = useState(initialStart);
-  const [endDate, setEndDate] = useState(initialEnd);
+  const [startDate, setStartDate] = useState(initialRange.start);
+  const [endDate, setEndDate] = useState(initialRange.end);
   const [rebalancePolicy, setRebalancePolicy] = useState<PortfolioRebalancePolicy>("none");
   const [dividendPolicy, setDividendPolicy] = useState<PortfolioDividendPolicy>("reinvest");
   const [result, setResult] = useState<BacktestResponse | null>(null);

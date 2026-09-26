@@ -6,7 +6,15 @@ import test from "node:test";
 import { HomeLandingPage } from "../src/components/home-landing-page";
 import { AboutPage } from "../src/components/about-page";
 import { AboutResumeTerminal } from "../src/components/about-resume-terminal";
+import { portfolioBacktestInitialRange } from "../src/components/portfolio-backtest-page";
 import PhotographyPage from "../src/components/photography-page";
+
+test("portfolio defaults follow the New York market date instead of UTC", () => {
+  assert.deepEqual(
+    portfolioBacktestInitialRange(new Date("2026-09-26T00:30:00.000Z")),
+    { start: "2021-09-25", end: "2026-09-25" },
+  );
+});
 
 test("homepage retains an image and all three destinations before browser effects run", () => {
   const html = renderToStaticMarkup(createElement(HomeLandingPage));

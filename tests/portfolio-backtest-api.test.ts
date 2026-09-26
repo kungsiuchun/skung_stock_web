@@ -53,7 +53,31 @@ class PortfolioCacheD1 implements D1DatabaseLike {
         values = next;
         return statement;
       },
-      first: async <T>() => query.includes("SELECT") ? (this.rows.get(String(values[0])) || null) as T | null : null,
+      first: async <T>() => {
+        if (query.includes("INSERT INTO market_cache_entries") && query.includes("'market-cache-quota'")) {
+          const [cacheKey, initialPayload, cachedAt, expiresAt, , dayUtc, rowsReadReserve, readThreshold, rowsWrittenReserve, writeThreshold] = values;
+          const existing = this.rows.get(String(cacheKey));
+          const previous = existing ? JSON.parse(existing.payload_json) as { dayUtc: string; rowsRead: number; rowsWritten: number } : null;
+          const next = previous?.dayUtc === dayUtc
+            ? {
+              dayUtc,
+              rowsRead: Math.min(previous.rowsRead + Number(rowsReadReserve), Number(readThreshold)),
+              rowsWritten: Math.min(previous.rowsWritten + Number(rowsWrittenReserve), Number(writeThreshold)),
+            }
+            : JSON.parse(String(initialPayload)) as { dayUtc: string; rowsRead: number; rowsWritten: number };
+          const payloadJson = JSON.stringify(next);
+          this.rows.set(String(cacheKey), {
+            cache_key: String(cacheKey),
+            payload_json: payloadJson,
+            source_as_of: null,
+            cached_at: String(cachedAt),
+            expires_at: String(expiresAt),
+            last_refresh_error: null,
+          });
+          return { payload_json: payloadJson } as T;
+        }
+        return query.includes("SELECT") ? (this.rows.get(String(values[0])) || null) as T | null : null;
+      },
       all: async <T>() => ({ results: [] as T[] }),
       run: async () => {
         if (query.includes("UPDATE market_cache_entries")) {
@@ -163,6 +187,32 @@ test("returns normalized US ETF portfolio and SPY results without raw Yahoo payl
   assert.equal(body.cache.status, "bypassed");
   assert.match(body.requestId, /^[\w-]+$/);
   assert.equal("chart" in body, false);
+});
+
+test("ignores only trailing Yahoo sessions whose completed EOD prices are not ready", () => {
+  const payload = chartPayload("GPIX");
+  const result = payload.chart.result[0];
+  result.timestamp.push(Date.parse("2025-01-07T14:30:00.000Z") / 1_000);
+  result.indicators.quote[0].close.push(null as unknown as number);
+  result.indicators.adjclose[0].adjclose.push(null as unknown as number);
+
+  const normalized = normalizeYahooPortfolioHistory({
+    ticker: "GPIX",
+    payload,
+    now: new Date("2025-01-07T22:00:00.000Z"),
+  });
+
+  assert.deepEqual(normalized.points.map((point) => point.date), ["2025-01-02", "2025-01-03", "2025-01-06"]);
+});
+
+test("still fails closed when Yahoo has an incomplete EOD row before a later complete session", () => {
+  const payload = chartPayload("GPIX");
+  payload.chart.result[0].indicators.quote[0].close[1] = null as unknown as number;
+
+  assert.throws(
+    () => normalizeYahooPortfolioHistory({ ticker: "GPIX", payload, now: new Date("2025-01-07T22:00:00.000Z") }),
+    /incomplete or duplicate completed EOD data/,
+  );
 });
 
 test("retries Yahoo chart history through its second origin when the first origin is unavailable", async () => {
