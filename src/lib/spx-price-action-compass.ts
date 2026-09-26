@@ -1,5 +1,14 @@
 export type SpxPriceActionTimeframe = "1m" | "5m" | "15m" | "4h" | "1d";
 
+export const buildSpxPriceActionCompassRequestUrl = (
+  timeframe: SpxPriceActionTimeframe,
+  selectedDate?: string | null,
+) => {
+  const params = new URLSearchParams({ timeframe });
+  if (selectedDate) params.set("date", selectedDate);
+  return `/api/spx-price-action-compass?${params.toString()}`;
+};
+
 export const SPX_0DTE_STALE_AFTER_MS = 10 * 60 * 1_000;
 export const SPX_0DTE_FUTURE_SKEW_TOLERANCE_MS = 5_000;
 

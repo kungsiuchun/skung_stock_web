@@ -1,4 +1,5 @@
 import { fetchNativeYahooHistory } from "../../src/lib/stocks-native-yahoo";
+import { isNyseTradingDay } from "../../src/lib/nyse-calendar";
 import {
   aggregateSpxOneMinutePriceActionCandles,
   aggregateSpxPriceActionCandles,
@@ -72,8 +73,8 @@ export const isStrictIsoDate = (value: string | null) => {
   return new Date(Date.UTC(year, month - 1, day)).toISOString().slice(0, 10) === value;
 };
 
-const invalidOverlayDateResponse = () => json(
-  { errorCode: "SPX_PRICE_ACTION_DATE_INVALID", error: "A valid date in YYYY-MM-DD format is required for price-overlay." },
+const invalidRequestedDateResponse = () => json(
+  { errorCode: "SPX_PRICE_ACTION_DATE_INVALID", error: "A valid date in YYYY-MM-DD format is required when date is supplied." },
   { status: 400, headers: { "Cache-Control": "no-store" } },
 );
 
@@ -85,8 +86,8 @@ async function onRequestUncached(context: Context) {
   const startedAt = Date.now();
   const url = new URL(context.request.url);
   const isPriceOverlay = url.searchParams.get("view") === "price-overlay";
-  const requestedDate = isPriceOverlay ? url.searchParams.get("date") : null;
-  if (isPriceOverlay && !isStrictIsoDate(requestedDate)) return invalidOverlayDateResponse();
+  const requestedDate = url.searchParams.get("date");
+  if ((isPriceOverlay || requestedDate !== null) && !isStrictIsoDate(requestedDate)) return invalidRequestedDateResponse();
   const timeframe = isPriceOverlay ? "1m" : normalizeSpxPriceActionTimeframe(url.searchParams.get("timeframe"));
   const config = getSpxPriceActionFetchConfig(timeframe);
   const nowMs = typeof context.env.SPX_PRICE_ACTION_TEST_NOW_MS === "number"
@@ -95,6 +96,7 @@ async function onRequestUncached(context: Context) {
   const fetchedAt = new Date(nowMs).toISOString();
   const currentEtDate = etTradingDate(new Date(nowMs));
   const selectedDate = requestedDate || currentEtDate;
+  const currentEtDateIsTradingDay = isNyseTradingDay(currentEtDate);
   const targetTimeframe = isPriceOverlay ? "1m" : timeframe;
   const zeroDteToken = context.env.ZERO_DTE_SPX_API_TOKEN
     || (context.env.CF_PAGES === "1" ? context.env.spx_0dte_token : undefined);
@@ -127,7 +129,7 @@ async function onRequestUncached(context: Context) {
       };
     } else if (targetTimeframe === "1m" || targetTimeframe === "5m" || targetTimeframe === "15m") {
       let shared: SpxZeroDteSharedCacheResolution | null = null;
-      if (selectedDate === currentEtDate) {
+      if (selectedDate === currentEtDate && currentEtDateIsTradingDay) {
         zeroDteAttempted = true;
         routingReason = "CURRENT_ET_DATE_SESSION_METADATA";
         shared = await resolveSpxZeroDteSharedCache({
@@ -221,6 +223,8 @@ async function onRequestUncached(context: Context) {
         zeroDteAttempted = false;
         routingReason = selectedDate !== currentEtDate
           ? "OLDER_SELECTED_DATE_USES_YAHOO"
+          : !currentEtDateIsTradingDay
+            ? "NON_TRADING_DAY_USES_YAHOO"
           : routeSession?.state === "UPCOMING"
             ? "UPCOMING_SESSION_USES_YAHOO"
             : "NO_PROVIDER_SESSION_FOR_CURRENT_ET_DATE";
@@ -367,8 +371,9 @@ async function onRequestUncached(context: Context) {
 
 export async function onRequest(context: Context) {
   const url = new URL(context.request.url);
-  if (url.searchParams.get("view") === "price-overlay" && !isStrictIsoDate(url.searchParams.get("date"))) {
-    return invalidOverlayDateResponse();
+  const requestedDate = url.searchParams.get("date");
+  if ((url.searchParams.get("view") === "price-overlay" || requestedDate !== null) && !isStrictIsoDate(requestedDate)) {
+    return invalidRequestedDateResponse();
   }
   const allowCache = !Array.isArray(context.env.SPX_PRICE_ACTION_TEST_CANDLES)
     && typeof context.env.SPX_PRICE_ACTION_TEST_NOW_MS !== "number";

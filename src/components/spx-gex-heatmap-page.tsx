@@ -765,6 +765,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
         <SpxPriceActionCompass
           enabled={initialHeatmapSettled}
           refreshKey={zeroDteRefreshKey}
+          selectedDate={selectedDate}
           onInitialLoadSettled={() => setInitialCompassSettled(true)}
         />
 

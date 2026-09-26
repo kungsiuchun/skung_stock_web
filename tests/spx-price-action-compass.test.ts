@@ -18,6 +18,7 @@ import {
 import type { D1DatabaseLike } from "../src/lib/spx-recap-d1";
 import {
   aggregateSpxOneMinutePriceActionCandles,
+  buildSpxPriceActionCompassRequestUrl,
   buildSpxPriceActionCompassResponse,
   deriveSpxSupportResistanceZones,
   detectSpxPriceActionPatterns,
@@ -76,13 +77,6 @@ const buildZoneFixture = () => [
   candle(7, 100, 103, 97.9, 101),
   candle(8, 101, 102, 99, 100),
 ];
-
-const etTradingDate = () => {
-  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
-  }).formatToParts(new Date()).map((part) => [part.type, part.value]));
-  return `${parts.year}-${parts.month}-${parts.day}`;
-};
 
 const sessionMetadata = (startMs: number, endMs: number, flags: { current?: boolean; upcoming?: boolean } = {}) => ({
   "start-time": new Date(startMs).toISOString(),
@@ -419,7 +413,18 @@ describe("SPX Price Action Compass detector", () => {
 });
 
 describe("SPX Price Action Compass API", () => {
-  it("requires a real YYYY-MM-DD date for price-overlay before any upstream or cache lookup", async () => {
+  it("builds a Compass request for the Board-selected session date", () => {
+    assert.equal(
+      buildSpxPriceActionCompassRequestUrl("5m", "2026-09-25"),
+      "/api/spx-price-action-compass?timeframe=5m&date=2026-09-25",
+    );
+    assert.equal(
+      buildSpxPriceActionCompassRequestUrl("15m", null),
+      "/api/spx-price-action-compass?timeframe=15m",
+    );
+  });
+
+  it("requires a real YYYY-MM-DD selected date before any upstream or cache lookup", async () => {
     assert.equal(isStrictIsoDate("2026-02-28"), true);
     assert.equal(isStrictIsoDate("2026-02-30"), false);
     assert.equal(isStrictIsoDate("2026-2-08"), false);
@@ -430,7 +435,7 @@ describe("SPX Price Action Compass API", () => {
       throw new Error("must not fetch");
     }) as typeof fetch;
     try {
-      for (const query of ["view=price-overlay", "view=price-overlay&date=2026-02-30"]) {
+      for (const query of ["view=price-overlay", "view=price-overlay&date=2026-02-30", "timeframe=5m&date=2026-02-30"]) {
         const response = await getSpxPriceActionCompassApi({
           request: new Request(`https://example.com/api/spx-price-action-compass?${query}`),
           env: { ZERO_DTE_SPX_API_TOKEN: "secret-token" },
@@ -530,12 +535,11 @@ describe("SPX Price Action Compass API", () => {
 
   it("uses 0DTESPX during an active session when its upcoming marker is stale", async () => {
     const originalFetch = globalThis.fetch;
-    // Keep all three fixture seconds inside one completed minute. Date.now()
-    // near a minute boundary would otherwise create two candles and make this
-    // source-contract test flaky.
-    const now = Math.floor((Date.now() - 60_000) / 60_000) * 60_000 + 50_000;
+    // Pin a real trading day and keep all fixture seconds inside one completed
+    // minute so this source-contract test is independent of wall-clock date.
+    const now = Date.parse("2026-09-09T15:00:50.000Z");
     const datetime = new Date(now).toISOString();
-    const sessionDate = etTradingDate();
+    const sessionDate = "2026-09-09";
     const calls: Array<{ url: string; authorization: string | null }> = [];
     globalThis.fetch = (async (input, init) => {
       const url = String(input);
@@ -550,7 +554,7 @@ describe("SPX Price Action Compass API", () => {
     try {
       const response = await getSpxPriceActionCompassApi({
         request: new Request(`https://example.com/api/spx-price-action-compass?view=price-overlay&date=${sessionDate}`),
-        env: { ZERO_DTE_SPX_API_TOKEN: "secret-token" },
+        env: { ZERO_DTE_SPX_API_TOKEN: "secret-token", SPX_PRICE_ACTION_TEST_NOW_MS: now },
       });
       const payload = await response.json() as { source: { provider: string; interval: string; latestSampleAt: string; status: string; sessionState: string; sessionStartAt: string; expectedMove: { status: string; value: number; sampleAt: string; ageMs: number; lagMs: number; errorCode: string | null } }; candles: SpxPriceActionCandle[] };
 
@@ -583,8 +587,8 @@ describe("SPX Price Action Compass API", () => {
   it("shares both 0DTESPX session metadata and intraday history across visitors", async () => {
     const originalFetch = globalThis.fetch;
     const db = new SharedCacheMemoryD1();
-    const now = Math.floor((Date.now() - 60_000) / 60_000) * 60_000 + 50_000;
-    const sessionDate = etTradingDate();
+    const now = Date.parse("2026-09-09T15:00:50.000Z");
+    const sessionDate = "2026-09-09";
     let sessionLoads = 0;
     let historyLoads = 0;
     globalThis.fetch = (async (input) => {
@@ -627,8 +631,8 @@ describe("SPX Price Action Compass API", () => {
   it("serves an existing shared snapshot as explicit stale pressure-map context when provider refresh is stale", async () => {
     const originalFetch = globalThis.fetch;
     const db = new SharedCacheMemoryD1();
-    const sampleMs = Math.floor((Date.now() - 60_000) / 60_000) * 60_000;
-    const sessionDate = etTradingDate();
+    const sampleMs = Date.parse("2026-09-09T15:00:00.000Z");
+    const sessionDate = "2026-09-09";
     const session = sessionMetadata(sampleMs - 3_600_000, sampleMs + 3_600_000, { current: true });
     globalThis.fetch = (async (input) => String(input).endsWith("/market-data/sessions")
       ? Response.json({ [sessionDate]: session })
@@ -668,9 +672,9 @@ describe("SPX Price Action Compass API", () => {
   it("keeps a cold stale 0DTESPX response fail-closed when no verified shared snapshot exists", async () => {
     const originalFetch = globalThis.fetch;
     const db = new SharedCacheMemoryD1();
-    const nowMs = Date.now();
+    const nowMs = Date.parse("2026-09-09T15:00:00.000Z");
     const sampleMs = nowMs - 11 * 60_000;
-    const sessionDate = etTradingDate();
+    const sessionDate = "2026-09-09";
     globalThis.fetch = (async (input) => String(input).endsWith("/market-data/sessions")
       ? Response.json({ [sessionDate]: sessionMetadata(nowMs - 3_600_000, nowMs + 3_600_000, { current: true }) })
       : Response.json([{ datetimeUnix: Math.floor(sampleMs / 1_000), spx: "6000", spx_expected_move: "25" }])) as typeof fetch;
@@ -692,8 +696,8 @@ describe("SPX Price Action Compass API", () => {
 
   it("still edge-caches current SPX prices when Expected Move is unavailable", async () => {
     const originalFetch = globalThis.fetch;
-    const now = Math.floor((Date.now() - 60_000) / 60_000) * 60_000 + 50_000;
-    const sessionDate = etTradingDate();
+    const now = Date.parse("2026-09-09T15:00:50.000Z");
+    const sessionDate = "2026-09-09";
     globalThis.fetch = (async (input) => String(input).endsWith("/market-data/sessions")
       ? Response.json({ [sessionDate]: sessionMetadata(now - 3_600_000, now + 3_600_000, { current: true }) })
       : Response.json([
@@ -703,7 +707,7 @@ describe("SPX Price Action Compass API", () => {
     try {
       const response = await getSpxPriceActionCompassApi({
         request: new Request(`https://example.com/api/spx-price-action-compass?view=price-overlay&date=${sessionDate}`),
-        env: { ZERO_DTE_SPX_API_TOKEN: "secret-token" },
+        env: { ZERO_DTE_SPX_API_TOKEN: "secret-token", SPX_PRICE_ACTION_TEST_NOW_MS: now },
       });
       const payload = await response.json() as { source: { provider: "0dtespx"; expectedMove: { status: "UNAVAILABLE"; value: null } } };
 
@@ -718,15 +722,15 @@ describe("SPX Price Action Compass API", () => {
 
   it("fails closed with a safe 0DTESPX error when the current-session source is rate limited", async () => {
     const originalFetch = globalThis.fetch;
-    const sessionDate = etTradingDate();
-    const now = Date.now();
+    const sessionDate = "2026-09-09";
+    const now = Date.parse("2026-09-09T15:00:00.000Z");
     globalThis.fetch = (async (input) => String(input).endsWith("/market-data/sessions")
       ? Response.json({ [sessionDate]: sessionMetadata(now - 3_600_000, now + 3_600_000, { current: true }) })
       : Response.json({ error: "rate_limit_exceeded" }, { status: 429 })) as typeof fetch;
     try {
       const response = await getSpxPriceActionCompassApi({
         request: new Request("https://example.com/api/spx-price-action-compass?timeframe=1m"),
-        env: { ZERO_DTE_SPX_API_TOKEN: "secret-token" },
+        env: { ZERO_DTE_SPX_API_TOKEN: "secret-token", SPX_PRICE_ACTION_TEST_NOW_MS: now },
       });
       const payload = await response.json() as { source: { provider: string; status: string; range: string; interval: string }; warnings: string[] };
       assert.equal(response.status, 502);
@@ -854,6 +858,37 @@ describe("SPX Price Action Compass API", () => {
     }
   });
 
+  it("routes a non-trading current ET date to Yahoo without calling 0DTESPX", async () => {
+    const originalFetch = globalThis.fetch;
+    const nowMs = Date.parse("2026-09-26T16:00:00.000Z");
+    const yahooPayload = { chart: { result: [{
+      timestamp: [Math.floor(Date.parse("2026-09-25T20:00:00.000Z") / 1_000)],
+      indicators: { quote: [{ open: [6660], high: [6670], low: [6650], close: [6665], volume: [10] }] },
+    }] } };
+    const urls: string[] = [];
+    globalThis.fetch = (async (input) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.includes("query1.finance.yahoo.com")) return Response.json(yahooPayload);
+      throw new Error(`unexpected non-trading-day route: ${url}`);
+    }) as typeof fetch;
+    try {
+      const response = await getSpxPriceActionCompassApi({
+        request: new Request("https://example.com/api/spx-price-action-compass?timeframe=5m"),
+        env: { ZERO_DTE_SPX_API_TOKEN: "secret-token", SPX_PRICE_ACTION_TEST_NOW_MS: nowMs },
+      });
+      const payload = await response.json() as { source: { provider: string; routingReason: string }; candles: SpxPriceActionCandle[] };
+      assert.equal(response.status, 200);
+      assert.equal(payload.source.provider, "yahoo");
+      assert.equal(payload.source.routingReason, "NON_TRADING_DAY_USES_YAHOO");
+      assert.equal(payload.candles.length, 1);
+      assert.equal(urls.filter((url) => url.endsWith("/market-data/sessions")).length, 0);
+      assert.equal(urls.filter((url) => url.includes("query1.finance.yahoo.com")).length, 1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("marks the post-close provider race FINALIZING and refuses an incomplete final sample", async () => {
     const originalFetch = globalThis.fetch;
     const date = "2026-07-13";
@@ -903,6 +938,7 @@ describe("SPX Price Action Compass API", () => {
       const requests = [
         `view=price-overlay&date=${date}`,
         `view=price-overlay&date=${olderDate}`,
+        `timeframe=5m&date=${olderDate}`,
         "timeframe=4h",
         "timeframe=1d",
       ];
@@ -917,7 +953,7 @@ describe("SPX Price Action Compass API", () => {
       }
       assert.equal(urls.filter((url) => url.endsWith("/market-data/sessions")).length, 1);
       assert.equal(urls.filter((url) => url.includes("/market-data/historical/")).length, 0);
-      assert.equal(urls.filter((url) => url.includes("query1.finance.yahoo.com")).length, 4);
+      assert.equal(urls.filter((url) => url.includes("query1.finance.yahoo.com")).length, 5);
     } finally {
       globalThis.fetch = originalFetch;
     }

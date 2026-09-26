@@ -15,6 +15,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import {
+  buildSpxPriceActionCompassRequestUrl,
   projectSpxChartClientPoint,
   selectActionablePatterns,
   sortSpxPriceActionPatternsLatestFirst,
@@ -131,11 +132,14 @@ const toneClasses = (pattern: SpxPriceActionPattern | null | undefined) => {
 export function SpxPriceActionCompass({
   enabled = true,
   refreshKey = 0,
+  selectedDate = null,
   onInitialLoadSettled,
 }: {
   enabled?: boolean;
   /** Parent-owned current-session refresh signal shared with the price overlay. */
   refreshKey?: number;
+  /** Board-selected session date; historical sessions must use Yahoo OHLCV. */
+  selectedDate?: string | null;
   onInitialLoadSettled?: () => void;
 }) {
   const [timeframe, setTimeframe] = useState<SpxPriceActionTimeframe>("5m");
@@ -162,7 +166,7 @@ export function SpxPriceActionCompass({
     setLoading(true);
     setError(null);
     try {
-      const requestUrl = `/api/spx-price-action-compass?timeframe=${nextTimeframe}`;
+      const requestUrl = buildSpxPriceActionCompassRequestUrl(nextTimeframe, selectedDate);
       const response = await runSpxRequest((attemptSignal) => fetch(requestUrl, { signal: attemptSignal }), { onRetry: () => setReconnecting(true) });
       const payload = await parseJsonResponse<SpxPriceActionCompassResponse & { warnings?: string[] }>(response, requestUrl);
       if (!response.ok) {
@@ -192,7 +196,7 @@ export function SpxPriceActionCompass({
   useEffect(() => {
     if (!enabled) return;
     void loadCompass(timeframe).finally(onInitialLoadSettled);
-  }, [enabled, refreshKey, timeframe]);
+  }, [enabled, refreshKey, selectedDate, timeframe]);
 
   const availablePatternTypes = useMemo(() => {
     return Array.from(new Set(data.patterns.map((pattern) => pattern.type))).sort();
