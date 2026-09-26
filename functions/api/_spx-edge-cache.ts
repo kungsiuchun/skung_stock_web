@@ -49,7 +49,11 @@ export const canonicalSpxCacheRequest = (request: Request) => {
       const date = url.searchParams.get("date");
       if (/^\d{4}-\d{2}-\d{2}$/.test(date || "")) canonical.set("date", date!);
     }
-    else canonical.set("timeframe", normalizeSpxPriceActionTimeframe(url.searchParams.get("timeframe")));
+    else {
+      canonical.set("timeframe", normalizeSpxPriceActionTimeframe(url.searchParams.get("timeframe")));
+      const date = url.searchParams.get("date");
+      if (/^\d{4}-\d{2}-\d{2}$/.test(date || "")) canonical.set("date", date!);
+    }
   }
   url.search = canonical.toString();
   return new Request(url.toString(), { method: "GET" });

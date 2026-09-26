@@ -69,10 +69,14 @@ it("normalizes volatile refresh keys into one SPX edge-cache key", () => {
   it("keeps price-action view and timeframe selections in distinct SPX edge-cache keys", () => {
     const overlay = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay&date=2026-07-13"));
     const fourHour = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?timeframe=4h"));
+    const historicalFiveMinute = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?timeframe=5m&date=2026-07-13"));
+    const currentFiveMinute = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?timeframe=5m"));
     const sameOverlay = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay&date=2026-07-13&cacheBust=1"));
     const differentDate = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay&date=2026-07-14"));
     const expectedMoveRetry = canonicalSpxCacheRequest(new Request("https://example.com/api/spx-price-action-compass?view=price-overlay&date=2026-07-13&em_retry=1&cacheBust=1"));
     assert.notEqual(overlay.url, fourHour.url);
+    assert.notEqual(historicalFiveMinute.url, currentFiveMinute.url);
+    assert.equal(historicalFiveMinute.url, "https://example.com/api/spx-price-action-compass?timeframe=5m&date=2026-07-13");
     assert.equal(overlay.url, sameOverlay.url);
     assert.notEqual(overlay.url, differentDate.url);
     assert.equal(overlay.url, "https://example.com/api/spx-price-action-compass?view=price-overlay&date=2026-07-13");
