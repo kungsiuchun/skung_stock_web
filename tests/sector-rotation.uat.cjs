@@ -49,6 +49,20 @@ async function clickButton(page, text) {
   assert.equal(found, true, `Missing button: ${text}`);
 }
 
+async function assertRelativeSectors(page, payload, windowKey, windowLabel) {
+  await page.waitForFunction(label => document.querySelector('[aria-label="Return window"] button[aria-pressed="true"]').textContent.trim() === label, {}, windowLabel);
+  const available = payload.sectors.filter(row => row.performance[windowKey].length > 0);
+  const rendered = await page.$eval('[data-testid="relative-performance-chart"]', chart => ({
+    lines: Array.from(chart.querySelectorAll('polyline')).map(line => ({
+      sector: line.querySelector('title').textContent.split(': ')[0],
+      points: line.getAttribute('points').trim().split(/\s+/).length,
+    })),
+    labels: Array.from(chart.parentElement.querySelectorAll('[aria-label="Relative strength plotted sectors"] button')).map(button => button.textContent.trim()),
+  }));
+  assert.deepEqual(rendered.lines, available.map(row => ({ sector: row.sector, points: row.performance[windowKey].length })), `${windowLabel} must plot every available sector's full relative line`);
+  assert.deepEqual(rendered.labels, available.map(row => row.etf), `${windowLabel} legend must include every plotted sector`);
+}
+
 (async () => {
   let server;
   let browser;
@@ -82,6 +96,7 @@ async function clickButton(page, text) {
     assert.equal(await page.$$eval('[data-testid="sector-ranking"] tbody tr', rows => rows.length), 11);
     await page.waitForSelector('[data-testid="rotation-chart"]');
     await page.waitForSelector('[data-testid="relative-performance-chart"]');
+    await assertRelativeSectors(page, payload, 'oneMonth', '1M');
     await clickButton(page, 'RS 1M');
     const ranking = await page.$$eval('[data-testid="sector-ranking"] tbody tr', rows => rows.map(row => row.getAttribute('data-sector-etf')));
     const expectedRanking = [...payload.sectors].sort((a, b) => a.relativeToSpy.oneMonth === null ? 1 : b.relativeToSpy.oneMonth === null ? -1 : a.relativeToSpy.oneMonth - b.relativeToSpy.oneMonth).map(row => row.etf);
@@ -91,11 +106,13 @@ async function clickButton(page, text) {
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => document.querySelector('[data-testid="selected-sector"]').textContent.includes('Utilities'));
     assert.equal(await page.$eval('[data-testid="rotation-chart"] circle[data-etf="XLU"]', circle => circle.getAttribute('aria-pressed')), 'true');
+    await assertRelativeSectors(page, payload, 'oneMonth', '1M');
     await page.screenshot({ path: path.join(screenshotDir, 'desktop.png'), fullPage: true });
 
     const sector = payload.sectors.find(row => row.etf === 'XLK');
     await page.click('[data-testid="sector-ranking"] tr[data-sector-etf="XLK"] button');
     await page.waitForFunction(name => document.querySelector('[data-testid="selected-sector"]').textContent.includes(name), {}, sector.sector);
+    await assertRelativeSectors(page, payload, 'oneMonth', '1M');
     const selectedHoldings = payload.holdings.filter(row => row.sector === sector.sector);
     const search = await page.$('input[aria-label="Search stocks"]');
     assert.ok(search, 'Stock search must have an accessible label');
@@ -109,6 +126,7 @@ async function clickButton(page, text) {
     const stockOrder = await page.$$eval('[data-testid="stock-table"] tbody tr th strong', rows => rows.map(row => row.textContent));
     assert.deepEqual(stockOrder, selectedHoldings.map(row => row.ticker).sort((a, b) => a.localeCompare(b)), 'Stock sorting must change ticker order');
     await clickButton(page, '12M');
+    await assertRelativeSectors(page, payload, 'twelveMonths', '12M');
     await clickButton(page, '4w');
     await page.screenshot({ path: path.join(screenshotDir, 'selected-sector.png'), fullPage: true });
     await page.$eval('.sr-drilldown', section => section.scrollIntoView({ block: 'start' }));

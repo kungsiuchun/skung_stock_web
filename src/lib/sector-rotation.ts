@@ -74,7 +74,6 @@ export const SECTOR_ROTATION_MODEL = {
   contributionPolicy: "Current sector-normalized SPY weight × stock price return; percentage-point proxy",
   relativeReturnPolicy: "100 × ((1 + asset return / 100) / (1 + benchmark return / 100) − 1)",
   defaultTrailWeeks: 12,
-  maxTrailWeeks: 52,
   proprietaryJdkModel: false,
 } as const;
 
@@ -185,7 +184,7 @@ const makeRotation = (series: Map<string, number>, spy: Map<string, number>, pri
   const earliest = [...spy.keys()].sort()[0];
   const weeks: string[] = [];
   let cursor = lastWeek;
-  while (earliest && cursor >= earliest && weeks.length < 65) {
+  while (earliest && cursor >= earliest && weeks.length < SECTOR_ROTATION_MODEL.defaultTrailWeeks + 12) {
     weeks.unshift(cursor);
     cursor = previousCompletedWeek(cursor);
   }
@@ -209,7 +208,7 @@ const makeRotation = (series: Map<string, number>, spy: Map<string, number>, pri
   });
   // Keep only the contiguous covered tail: never join across an unavailable week.
   const trail: RotationPoint[] = [];
-  for (let index = points.length - 1; index >= 0 && trail.length < 52; index -= 1) {
+  for (let index = points.length - 1; index >= 0 && trail.length < SECTOR_ROTATION_MODEL.defaultTrailWeeks; index -= 1) {
     const point = points[index];
     if (!point) break;
     trail.unshift(point);
@@ -371,7 +370,7 @@ export const validateSectorRotationSnapshot = (value: unknown): SectorRotationSn
   const expectedWindowDates = recordWindows((sessions) => sessionDatesEnding(snapshot.priceAsOf, sessions + 1));
   const completedWeek = completedNyseWeekCloseDate(snapshot.priceAsOf);
   const expectedWeekDates: string[] = [];
-  for (let cursor = completedWeek; expectedWeekDates.length < 52; cursor = previousCompletedWeek(cursor)) expectedWeekDates.unshift(cursor);
+  for (let cursor = completedWeek; expectedWeekDates.length < SECTOR_ROTATION_MODEL.defaultTrailWeeks; cursor = previousCompletedWeek(cursor)) expectedWeekDates.unshift(cursor);
   const expected = new Map(MARKET_BREADTH_SECTORS.map((row) => [row.sector as string, row.etf as string]));
   const tickers = new Set<string>();
   for (const holding of snapshot.holdings) {
@@ -433,7 +432,7 @@ export const validateSectorRotationSnapshot = (value: unknown): SectorRotationSn
         || !closeEnough(points[points.length - 1].relativeValue - 100, sector.relativeToSpy[key]!))) fail("performance endpoint mismatch");
     }
     const rotation = sector.rotation;
-    if (!numberOrNull(rotation.rsRatio) || !numberOrNull(rotation.rsMomentum) || !Array.isArray(rotation.trail) || rotation.trail.length > 52
+    if (!numberOrNull(rotation.rsRatio) || !numberOrNull(rotation.rsMomentum) || !Array.isArray(rotation.trail) || rotation.trail.length > SECTOR_ROTATION_MODEL.defaultTrailWeeks
       || rotation.quadrant !== classifySectorRotationQuadrant(rotation.rsRatio, rotation.rsMomentum)) fail("invalid rotation state");
     if (rotation.quadrant === "Unavailable") {
       if (rotation.asOf !== null || rotation.rsRatio !== null || rotation.rsMomentum !== null || rotation.trail.length) fail("unavailable rotation has coordinates");
@@ -444,7 +443,7 @@ export const validateSectorRotationSnapshot = (value: unknown): SectorRotationSn
     }
     for (let index = 0; index < rotation.trail.length; index += 1) {
       const point = rotation.trail[index];
-      if (!isObject(point) || point.date !== expectedWeekDates[52 - rotation.trail.length + index]
+      if (!isObject(point) || point.date !== expectedWeekDates[expectedWeekDates.length - rotation.trail.length + index]
         || !Number.isFinite(point.rsRatio) || !Number.isFinite(point.rsMomentum)
         || point.quadrant !== classifySectorRotationQuadrant(point.rsRatio, point.rsMomentum)) fail("invalid rotation trail");
     }

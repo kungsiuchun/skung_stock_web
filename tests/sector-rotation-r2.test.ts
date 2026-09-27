@@ -17,6 +17,7 @@ import {
 import { buildSectorRotationSnapshot } from "../src/lib/sector-rotation";
 import { SECTOR_ROTATION_SNAPSHOT_KEYS, publishSectorRotationForCurrentRelease } from "../src/lib/sector-rotation-r2";
 import { isNyseTradingDay } from "../src/lib/nyse-calendar";
+import { MarketBreadthSourceError } from "../src/lib/market-breadth-sources";
 
 class MemoryObjectStore implements MarketBreadthObjectStore {
   objects = new Map<string, string>();
@@ -185,6 +186,68 @@ describe("Sector rotation API", () => {
 });
 
 describe("Sector rotation production bootstrap", () => {
+  it("recovers paired AUTO publication after both daily attempts miss a SPY session", async () => {
+    const store = new MemoryObjectStore();
+    const oldData = fixture("2026-08-10", "2026-08-10T23:30:00.000Z");
+    const previous = await publishMarketBreadthRelease(store, { previousStatus: null, releaseId: "release-old", snapshot: oldData.snapshot, rotationSnapshot: oldData.rotation, stateJson: JSON.stringify(oldData.state), attempt: oldData.attempt });
+    const missingDate = "2026-08-11";
+    const requestedDate = "2026-08-12";
+    const customCalls: string[] = [];
+    const client = {
+      fetchUniverse: async () => ({ ...oldData.universe, holdingsAsOf: missingDate }),
+      fetchDailySummary: async (date: string) => {
+        if (date === missingDate) throw new MarketBreadthSourceError("PROVIDER_UNAVAILABLE", "Missed daily summary");
+        return new Map([...oldData.priceSeries].map(([symbol, bars]) => [symbol, date === oldData.snapshot.priceAsOf ? bars.at(-1)! : { date, close: bars.at(-1)!.close * 1.02 }]));
+      },
+      fetchCustomBars: async (symbol: string) => {
+        customCalls.push(symbol);
+        const history = oldData.priceSeries.get(symbol)!;
+        return [...history, { date: missingDate, close: history.at(-1)!.close * 1.01 }, { date: requestedDate, close: history.at(-1)!.close * 1.02 }];
+      },
+    };
+    for (const hour of ["17:17", "18:47"]) {
+      const result = await runGitHubMarketBreadthRefresh({ store, mode: "AUTO", now: new Date(`2026-08-12T${hour}:00.000Z`), client });
+      assert.equal(result.status, "FAILED");
+      assert.equal(result.reason, "PROVIDER_UNAVAILABLE");
+    }
+    assert.deepEqual(customCalls, []);
+    const failedStatus = validateMarketBreadthStatus(JSON.parse(store.objects.get(MARKET_BREADTH_STATUS_KEY)!));
+    assert.deepEqual(failedStatus.current, previous.current);
+    const recovered = await runGitHubMarketBreadthRefresh({ store, mode: "AUTO", now: new Date("2026-08-13T17:17:00.000Z"), client });
+    assert.equal(recovered.status, "READY");
+    assert.deepEqual(customCalls, ["SPY"]);
+    const published = validateMarketBreadthStatus(JSON.parse(store.objects.get(MARKET_BREADTH_STATUS_KEY)!));
+    assert.equal(published.current?.priceAsOf, requestedDate);
+    assert.equal(published.unresolvedFailure, null);
+    const state = JSON.parse(store.objects.get(published.state.key)!) as PersistedMarketBreadthState;
+    assert.equal(state.series.SPY.length, 420);
+    assert.ok(state.series.SPY.some((bar) => bar.date === missingDate));
+    const body = await (await api(store)).json() as { priceAsOf: string; freshness: { status: string } };
+    assert.equal(body.priceAsOf, requestedDate);
+    assert.equal(body.freshness.status, "FRESH");
+    assert.equal((await getMarketBreadthApi({ request: new Request("https://example.com/api/market-breadth"), env: { MARKET_BREADTH_DATA: store } })).status, 200);
+  });
+
+  it("keeps last-good paired snapshots when custom SPY history still has a session gap", async () => {
+    const store = new MemoryObjectStore();
+    const oldData = fixture("2026-08-10", "2026-08-10T23:30:00.000Z");
+    const previous = await publishMarketBreadthRelease(store, { previousStatus: null, releaseId: "release-old", snapshot: oldData.snapshot, rotationSnapshot: oldData.rotation, stateJson: JSON.stringify(oldData.state), attempt: oldData.attempt });
+    const result = await runGitHubMarketBreadthRefresh({
+      store, mode: "AUTO", now: new Date("2026-08-13T17:17:00.000Z"), client: {
+        fetchUniverse: async () => oldData.universe,
+        fetchDailySummary: async (date) => new Map([...oldData.priceSeries].map(([symbol, bars]) => [symbol, { date, close: bars.at(-1)!.close }])),
+        fetchCustomBars: async (symbol) => [...oldData.priceSeries.get(symbol)!, { date: "2026-08-12", close: oldData.priceSeries.get(symbol)!.at(-1)!.close }],
+      },
+    });
+    assert.equal(result.status, "FAILED");
+    assert.equal(result.reason, "ADJUSTMENT_HISTORY_INVALID");
+    const published = validateMarketBreadthStatus(JSON.parse(store.objects.get(MARKET_BREADTH_STATUS_KEY)!));
+    assert.deepEqual(published.current, previous.current);
+    const body = await (await api(store)).json() as { snapshotId: string; freshness: { status: string } };
+    assert.equal(body.snapshotId, oldData.rotation.snapshotId);
+    assert.equal(body.freshness.status, "STALE");
+  });
+
   it("materializes a duplicate READY source without provider calls or advancing its publication time", async () => {
     const store = new MemoryObjectStore();
     const { status, rotation, state } = await publishFixture(store, false);

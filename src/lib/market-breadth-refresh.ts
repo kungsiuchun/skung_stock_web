@@ -89,6 +89,18 @@ const previousNyseTradingDay = (date: string) => {
   return cursor.toISOString().slice(0, 10);
 };
 
+const hasNyseSessionGap = (history: PriceBar[], requestedDate: string) => {
+  const dates = new Set(history.map((bar) => bar.date));
+  const firstDate = [...dates].sort()[0];
+  if (!firstDate) return false;
+  const cursor = new Date(`${firstDate}T12:00:00.000Z`);
+  for (let date = firstDate; date < requestedDate; date = cursor.toISOString().slice(0, 10)) {
+    if (isNyseTradingDay(date) && !dates.has(date)) return true;
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return false;
+};
+
 // Recheck the last published close on the provider's current split basis before
 // appending a new session. A changed reference close requires replacing, rather
 // than merging, its entire adjusted history so a split cannot manufacture a loss.
@@ -108,13 +120,15 @@ export const reconcileMarketBreadthAdjustments = async (input: {
     if (current.date !== input.requestedDate || !Number.isFinite(current.close) || current.close <= 0) {
       throw new MarketBreadthSourceError("ADJUSTMENT_HISTORY_INVALID", "Current adjusted summary has an invalid date or close.");
     }
-    const stored = input.series.get(symbol)?.find((bar) => bar.date === input.referenceDate);
-    if (!stored) return false;
+    const history = input.series.get(symbol) || [];
+    if (!history.length) return false;
+    const stored = history.find((bar) => bar.date === input.referenceDate);
     const fresh = reference.get(symbol);
     if (fresh && (fresh.date !== input.referenceDate || !Number.isFinite(fresh.close) || fresh.close <= 0)) {
       throw new MarketBreadthSourceError("ADJUSTMENT_HISTORY_INVALID", "Reference adjusted summary has an invalid date or close.");
     }
-    return !fresh || Math.abs(fresh.close - stored.close) > Math.max(1, stored.close) * 1e-8;
+    return !stored || !fresh || Math.abs(fresh.close - stored.close) > Math.max(1, stored.close) * 1e-8
+      || symbol === "SPY" && hasNyseSessionGap(history, input.requestedDate);
   });
   if (changed.length > 50) {
     throw new MarketBreadthSourceError("ADJUSTMENT_REPAIR_LIMIT", "More than 50 histories need adjustment repair; a bounded backfill is required.");
@@ -125,9 +139,10 @@ export const reconcileMarketBreadthAdjustments = async (input: {
     const referenceBar = fetched.find((bar) => bar.date === input.referenceDate);
     const expectedReference = reference.get(symbol);
     const expectedCurrent = input.currentSummary.get(symbol)!;
-    if (latest?.date !== input.requestedDate || !referenceBar
+    if (latest?.date !== input.requestedDate
       || Math.abs(latest.close - expectedCurrent.close) > Math.max(1, expectedCurrent.close) * 1e-8 ||
-      (expectedReference && Math.abs(referenceBar.close - expectedReference.close) > Math.max(1, expectedReference.close) * 1e-8)) {
+      (expectedReference && (!referenceBar || Math.abs(referenceBar.close - expectedReference.close) > Math.max(1, expectedReference.close) * 1e-8))
+      || symbol === "SPY" && (fetched.length < input.series.get(symbol)!.length || hasNyseSessionGap(fetched, input.requestedDate))) {
       throw new MarketBreadthSourceError("ADJUSTMENT_HISTORY_INVALID", "Repaired adjusted history does not agree with the provider's reference date.");
     }
     input.series.set(symbol, fetched);

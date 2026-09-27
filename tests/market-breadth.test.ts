@@ -420,6 +420,48 @@ describe("S&P 500 Market Breadth calculations", () => {
 });
 
 describe("Market Breadth refresh producer", () => {
+  it("replaces split history after a missing constituent summary still publishes READY", async () => {
+    for (const missingReference of [false, true]) {
+      const repository = new MemoryMarketBreadthRefreshRepository();
+      const splitTicker = repository.universe.holdings[0].ticker;
+      const symbols = ["SPY", ...MARKET_TEST_SECTORS.map((row) => row.etf), ...repository.universe.holdings.map((row) => row.ticker)];
+      for (const symbol of symbols) repository.series.set(symbol, barsEnding("2026-08-07").map((bar) => ({ ...bar, close: symbol === splitTicker ? 200 : 100 })));
+      repository.latestSnapshot = buildMarketBreadthSnapshot({ generatedAt: "2026-08-07T23:30:00.000Z", priceAsOf: "2026-08-07", universe: repository.universe, priceSeries: repository.series });
+      const customCalls: string[] = [];
+      const dailySummary = (date: string) => new Map(symbols.map((symbol) => [symbol, { date, close: symbol === splitTicker ? date === "2026-08-07" ? 200 : date === "2026-08-10" ? 100 : 101 : 100 }]));
+      const client = {
+        fetchUniverse: async () => repository.universe,
+        fetchDailySummary: async (date: string) => {
+          const summary = dailySummary(date);
+          if (date === "2026-08-10") summary.delete(splitTicker);
+          return summary;
+        },
+        fetchCustomBars: async (symbol: string) => {
+          customCalls.push(symbol);
+          return barsEnding("2026-08-11").filter((bar) => !missingReference || bar.date !== "2026-08-10").map((bar) => ({ ...bar, close: bar.date === "2026-08-11" ? 101 : 100 }));
+        },
+      };
+      const omitted = await runMarketBreadthRefresh({ mode: "DAILY", now: new Date("2026-08-11T17:17:00.000Z"), repository, client });
+      assert.equal(omitted.status, "READY");
+      assert.equal(repository.latestSnapshot.coverage.constituent200DayPct, 98.2);
+      assert.equal(repository.series.get(splitTicker)!.at(-1)!.date, "2026-08-07");
+      assert.deepEqual(customCalls, []);
+      client.fetchDailySummary = async (date) => {
+        const summary = dailySummary(date);
+        if (missingReference && date === "2026-08-10") summary.delete(splitTicker);
+        return summary;
+      };
+      const recovered = await runMarketBreadthRefresh({ mode: "DAILY", now: new Date("2026-08-12T17:17:00.000Z"), repository, client });
+      assert.equal(recovered.status, "READY");
+      assert.deepEqual(customCalls, [splitTicker]);
+      const repaired = repository.series.get(splitTicker)!;
+      assert.equal(repaired.at(-1)!.close, 101);
+      assert.ok(repaired.slice(0, -1).every((bar) => bar.close === 100));
+      assert.equal(repaired.some((bar) => bar.date === "2026-08-10"), !missingReference);
+      assert.deepEqual(repository.latestSnapshot.breadth.rows[0].windows.sma200, { above: 1, eligible: 5, total: 5, pct: 20 });
+    }
+  });
+
   it("replaces the entire split-adjusted history before appending a session", async () => {
     const series = new Map([["TEST", bars([["2026-08-07", 200], ["2026-08-10", 202]])]]);
     const requested: string[] = [];

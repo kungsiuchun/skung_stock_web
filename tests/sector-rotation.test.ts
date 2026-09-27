@@ -55,7 +55,7 @@ describe("SPY sector rotation calculations", () => {
       assert.equal(sector.rotation.quadrant, "Neutral");
       assert.equal(sector.rotation.rsRatio, 100);
       assert.equal(sector.rotation.rsMomentum, 100);
-      assert.equal(sector.rotation.trail.length, 52);
+      assert.equal(sector.rotation.trail.length, 12);
       assert.deepEqual(Object.values(sector.relativeToSpy), [0, 0, 0, 0]);
       assert.equal(sector.performance.twelveMonths.length, 253);
       assert.equal(sector.performance.twelveMonths[0].relativeValue, 100);
@@ -206,8 +206,8 @@ describe("SPY sector rotation calculations", () => {
       { values: Array.from({ length: 13 }, (_, index) => 13 - index), quadrant: "Lagging" },
       { values: [...Array(10).fill(1), 0.5, 0.6, 0.8], quadrant: "Improving" },
     ];
-    const { input, build } = fixture();
-    const completedDates = build().sectors[0].rotation.trail.slice(-13).map((point) => point.date);
+    const { input, build, dates } = fixture();
+    const completedDates = dates.filter((date) => completedNyseWeekCloseDate(date) === date).slice(-13);
     for (let sector = 0; sector < paths.length; sector += 1) {
       const history = input.priceSeries.get(MARKET_BREADTH_SECTORS[sector].etf)!;
       paths[sector].values.forEach((value, index) => { history.find((bar) => bar.date === completedDates[index])!.close = 100 * value; });
@@ -249,6 +249,20 @@ describe("SPY sector rotation calculations", () => {
 });
 
 describe("sector rotation executable validation", () => {
+  it("publishes only the latest twelve completed weeks and rejects longer public trails", () => {
+    const { build, dates } = fixture();
+    const snapshot = build();
+    const completedDates = dates.filter((date) => completedNyseWeekCloseDate(date) === date);
+    for (const sector of snapshot.sectors) {
+      assert.deepEqual(sector.rotation.trail.map((point) => point.date), completedDates.slice(-12));
+    }
+    const oversized = structuredClone(snapshot);
+    oversized.sectors[0].rotation.trail.unshift({
+      date: completedDates[completedDates.length - 13], rsRatio: 100, rsMomentum: 100, quadrant: "Neutral",
+    });
+    assert.throws(() => validateSectorRotationSnapshot(withValidIdentity(oversized)), /invalid rotation state/);
+  });
+
   it("rejects malformed values even with a freshly calculated content identity", () => {
     const snapshot = fixture().build();
     const mutations: Array<(copy: SectorRotationSnapshot) => void> = [
