@@ -11,7 +11,7 @@ const screenshotsDir = path.join(rootDir, "uat_screenshots", "market-breadth");
 
 const clickButtonText = async (page, text, scope = "body") => {
   const clicked = await page.$$eval(`${scope} button`, (buttons, expected) => {
-    const button = buttons.find((node) => (node.textContent || "").includes(expected));
+    const button = buttons.find((node) => `${node.getAttribute("aria-label") || ""} ${node.textContent || ""}`.includes(expected));
     if (!button) return false;
     button.click();
     return true;

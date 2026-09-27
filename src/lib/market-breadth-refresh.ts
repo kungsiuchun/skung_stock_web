@@ -89,6 +89,52 @@ const previousNyseTradingDay = (date: string) => {
   return cursor.toISOString().slice(0, 10);
 };
 
+// Recheck the last published close on the provider's current split basis before
+// appending a new session. A changed reference close requires replacing, rather
+// than merging, its entire adjusted history so a split cannot manufacture a loss.
+export const reconcileMarketBreadthAdjustments = async (input: {
+  series: Map<string, PriceBar[]>;
+  symbols: string[];
+  referenceDate: string;
+  requestedDate: string;
+  fromDate: string;
+  currentSummary: Map<string, PriceBar>;
+  client: MarketBreadthDataClient;
+}) => {
+  const reference = await input.client.fetchDailySummary(input.referenceDate);
+  const changed = input.symbols.filter((symbol) => {
+    const current = input.currentSummary.get(symbol);
+    if (!current) return false;
+    if (current.date !== input.requestedDate || !Number.isFinite(current.close) || current.close <= 0) {
+      throw new MarketBreadthSourceError("ADJUSTMENT_HISTORY_INVALID", "Current adjusted summary has an invalid date or close.");
+    }
+    const stored = input.series.get(symbol)?.find((bar) => bar.date === input.referenceDate);
+    if (!stored) return false;
+    const fresh = reference.get(symbol);
+    if (fresh && (fresh.date !== input.referenceDate || !Number.isFinite(fresh.close) || fresh.close <= 0)) {
+      throw new MarketBreadthSourceError("ADJUSTMENT_HISTORY_INVALID", "Reference adjusted summary has an invalid date or close.");
+    }
+    return !fresh || Math.abs(fresh.close - stored.close) > Math.max(1, stored.close) * 1e-8;
+  });
+  if (changed.length > 50) {
+    throw new MarketBreadthSourceError("ADJUSTMENT_REPAIR_LIMIT", "More than 50 histories need adjustment repair; a bounded backfill is required.");
+  }
+  for (const symbol of changed) {
+    const fetched = mergeMarketBreadthPriceBars([], await input.client.fetchCustomBars(symbol, input.fromDate, input.requestedDate));
+    const latest = fetched[fetched.length - 1];
+    const referenceBar = fetched.find((bar) => bar.date === input.referenceDate);
+    const expectedReference = reference.get(symbol);
+    const expectedCurrent = input.currentSummary.get(symbol)!;
+    if (latest?.date !== input.requestedDate || !referenceBar
+      || Math.abs(latest.close - expectedCurrent.close) > Math.max(1, expectedCurrent.close) * 1e-8 ||
+      (expectedReference && Math.abs(referenceBar.close - expectedReference.close) > Math.max(1, expectedReference.close) * 1e-8)) {
+      throw new MarketBreadthSourceError("ADJUSTMENT_HISTORY_INVALID", "Repaired adjusted history does not agree with the provider's reference date.");
+    }
+    input.series.set(symbol, fetched);
+  }
+  return changed;
+};
+
 export const runMarketBreadthRefresh = async (input: {
   mode: RefreshMode;
   repository: MarketBreadthRefreshRepository;
@@ -120,7 +166,7 @@ export const runMarketBreadthRefresh = async (input: {
       const series = await input.repository.readSeries(symbols);
       const attempted = await input.repository.readBackfillAttempts(backfillScope);
       const sectorEtfs = new Set(universe.sectorWeights.map((row) => normalizeMarketBreadthTicker(row.etf)));
-      const requiredSessions = (symbol: string) => symbol === "SPY" ? 64 : sectorEtfs.has(symbol) ? 400 : 200;
+      const requiredSessions = (symbol: string) => symbol === "SPY" || sectorEtfs.has(symbol) ? 400 : 200;
       const incomplete = symbols.filter((symbol) =>
         (series.get(symbol) || []).length < requiredSessions(symbol) && !attempted.has(symbol),
       );
@@ -184,6 +230,11 @@ export const runMarketBreadthRefresh = async (input: {
     }
 
     const series = await input.repository.readSeries(symbols);
+    const fromDate = new Date(now.getTime() - 800 * 86_400_000).toISOString().slice(0, 10);
+    const repairedSymbols = latestSnapshot ? await reconcileMarketBreadthAdjustments({
+      series, symbols, referenceDate: latestSnapshot.priceAsOf, requestedDate,
+      fromDate, currentSummary: dailySummary, client: input.client,
+    }) : [];
     for (const symbol of symbols) {
       const dailyBar = dailySummary.get(symbol);
       if (dailyBar) series.set(symbol, mergeMarketBreadthPriceBars(series.get(symbol) || [], [dailyBar]));
@@ -203,9 +254,8 @@ export const runMarketBreadthRefresh = async (input: {
 
     const attempted = await input.repository.readBackfillAttempts(backfillScope);
     const sectorEtfs = new Set(universe.sectorWeights.map((row) => normalizeMarketBreadthTicker(row.etf)));
-    const requiredSessions = (symbol: string) => symbol === "SPY" ? 64 : sectorEtfs.has(symbol) ? 400 : 200;
+    const requiredSessions = (symbol: string) => symbol === "SPY" || sectorEtfs.has(symbol) ? 400 : 200;
     const newSymbols = symbols.filter((symbol) => (series.get(symbol) || []).length < requiredSessions(symbol) && !attempted.has(symbol));
-    const fromDate = new Date(now.getTime() - 800 * 86_400_000).toISOString().slice(0, 10);
     for (const symbol of newSymbols) {
       const fetched = await input.client.fetchCustomBars(symbol, fromDate, requestedDate);
       series.set(symbol, mergeMarketBreadthPriceBars(series.get(symbol) || [], fetched));
@@ -220,7 +270,7 @@ export const runMarketBreadthRefresh = async (input: {
       priceSeries: series,
     });
     await input.repository.publish(snapshot);
-    await finish(input.repository, { runId, status: "READY", priceAsOf: requestedDate, detail: { newSymbolsBackfilled: newSymbols.length } });
+    await finish(input.repository, { runId, status: "READY", priceAsOf: requestedDate, detail: { newSymbolsBackfilled: newSymbols.length, adjustedHistoriesRepaired: repairedSymbols.length } });
     return { status: "READY", runId, priceAsOf: requestedDate };
   } catch (error) {
     const errorClass = errorClassFor(error);

@@ -22,6 +22,7 @@ interface WorkGalleryProps {
   onOpenStocksWatcher: () => void;
   onOpenFixedIncome: () => void;
   onOpenMarketBreadth: () => void;
+  onOpenSectorRotation: () => void;
   onOpenPortfolioBacktest: () => void;
 }
 
@@ -46,6 +47,7 @@ export function WorkGallery({
   onOpenStocksWatcher,
   onOpenFixedIncome,
   onOpenMarketBreadth,
+  onOpenSectorRotation,
   onOpenPortfolioBacktest,
 }: WorkGalleryProps) {
   const [filter, setFilter] = useState("All work");
@@ -142,6 +144,18 @@ export function WorkGallery({
       onClick: onOpenMarketBreadth,
     },
     {
+      title: "SPY Sector Rotation",
+      category: "Market Internals",
+      description:
+        "Follow leadership across 11 sectors and explore the stocks supporting or dragging each current SPY sector basket.",
+      buildNote:
+        "Combines weekly relative-strength trails, multi-window rankings, breadth, and clearly labelled current-weight driver estimates.",
+      action: "Explore rotation",
+      icon: <Activity className="h-5 w-5" />,
+      featured: true,
+      onClick: onOpenSectorRotation,
+    },
+    {
       title: "Portfolio vs SPY",
       category: "Portfolio Lab",
       description:
@@ -170,6 +184,7 @@ export function WorkGallery({
     "Stocks Intelligence Watcher",
     "SPX GEX Heatmap",
     "S&P 500 Market Breadth",
+    "SPY Sector Rotation",
     "Portfolio vs SPY",
   ];
   const ordered = [...workItems].sort((a, b) => {
@@ -199,7 +214,7 @@ export function WorkGallery({
               Tools I build and iterate on with AI agents. Mostly for exploring
               the stock market; sometimes for making everyday life simpler.
             </p>
-            <span className="photo-count">10 TOOLS / OPEN & EXPLORE</span>
+            <span className="photo-count">{workItems.length} TOOLS / OPEN & EXPLORE</span>
           </div>
         </header>
         <div className="filter-bar" role="group" aria-label="Filter projects">

@@ -25,6 +25,7 @@ import {
 } from "../src/lib/market-breadth-sources";
 import {
   isNyseTradingDay,
+  reconcileMarketBreadthAdjustments,
   runMarketBreadthRefresh,
   type MarketBreadthRefreshRepository,
 } from "../src/lib/market-breadth-refresh";
@@ -419,6 +420,46 @@ describe("S&P 500 Market Breadth calculations", () => {
 });
 
 describe("Market Breadth refresh producer", () => {
+  it("replaces the entire split-adjusted history before appending a session", async () => {
+    const series = new Map([["TEST", bars([["2026-08-07", 200], ["2026-08-10", 202]])]]);
+    const requested: string[] = [];
+    const repaired = await reconcileMarketBreadthAdjustments({
+      series, symbols: ["TEST"], referenceDate: "2026-08-10", requestedDate: "2026-08-11", fromDate: "2024-06-01",
+      currentSummary: new Map([["TEST", { date: "2026-08-11", close: 103 }]]),
+      client: {
+        fetchUniverse: async () => productionLikeUniverse(),
+        fetchDailySummary: async () => new Map([["TEST", { date: "2026-08-10", close: 101 }]]),
+        fetchCustomBars: async (symbol) => { requested.push(symbol); return bars([["2026-08-07", 100], ["2026-08-10", 101], ["2026-08-11", 103]]); },
+      },
+    });
+    assert.deepEqual(repaired, ["TEST"]);
+    assert.deepEqual(requested, ["TEST"]);
+    assert.deepEqual(series.get("TEST"), bars([["2026-08-07", 100], ["2026-08-10", 101], ["2026-08-11", 103]]));
+    assert.ok(Math.abs(calculateSessionReturn(series.get("TEST")!, 1)! - (103 / 101 - 1) * 100) < 0.0001);
+  });
+
+  it("does not re-fetch unchanged histories and rejects an inconsistent adjustment repair", async () => {
+    const series = new Map([["TEST", bars([["2026-08-10", 202]])]]);
+    let customCalls = 0;
+    const input = {
+      series, symbols: ["TEST"], referenceDate: "2026-08-10", requestedDate: "2026-08-11", fromDate: "2024-06-01",
+      currentSummary: new Map([["TEST", { date: "2026-08-11", close: 203 }]]),
+      client: {
+        fetchUniverse: async () => productionLikeUniverse(),
+        fetchDailySummary: async () => new Map([["TEST", { date: "2026-08-10", close: 202 }]]),
+        fetchCustomBars: async () => { customCalls += 1; return bars([["2026-08-10", 77], ["2026-08-11", 78]]); },
+      },
+    };
+    assert.deepEqual(await reconcileMarketBreadthAdjustments(input), []);
+    assert.equal(customCalls, 0);
+    input.client.fetchDailySummary = async () => new Map([["TEST", { date: "2026-08-10", close: 101 }]]);
+    await assert.rejects(() => reconcileMarketBreadthAdjustments(input), (error: unknown) => error instanceof MarketBreadthSourceError && error.errorClass === "ADJUSTMENT_HISTORY_INVALID");
+    assert.equal(series.get("TEST")![0].close, 202);
+    input.client.fetchCustomBars = async () => bars([["2026-08-10", 101], ["2026-08-11", 110]]);
+    await assert.rejects(() => reconcileMarketBreadthAdjustments(input), (error: unknown) => error instanceof MarketBreadthSourceError && error.errorClass === "ADJUSTMENT_HISTORY_INVALID");
+    assert.equal(series.get("TEST")![0].close, 202, "A latest-close mismatch must not overwrite the stored history");
+  });
+
   it("recognizes NYSE holidays but not an ordinary weekday", () => {
     assert.equal(isNyseTradingDay("2026-12-25"), false);
     assert.equal(isNyseTradingDay("2026-08-11"), true);

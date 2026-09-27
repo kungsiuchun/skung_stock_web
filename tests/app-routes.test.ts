@@ -29,6 +29,7 @@ test("round trips every page-level view to a hash route", () => {
     ["stocks-intelligence-watcher", "#/work/stocks-intelligence-watcher"],
     ["fixed-income", "#/work/fixed-income"],
     ["market-breadth", "#/work/market-breadth"],
+    ["sector-rotation", "#/work/sector-rotation"],
     ["portfolio-backtest", "#/work/portfolio-backtest"],
   ];
 

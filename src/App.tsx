@@ -39,6 +39,11 @@ const MarketBreadthPage = lazy(() =>
     default: module.MarketBreadthPage,
   })),
 );
+const SectorRotationPage = lazy(() =>
+  import("./components/sector-rotation-page").then((module) => ({
+    default: module.SectorRotationPage,
+  })),
+);
 const PortfolioBacktestPage = lazy(() =>
   import("./components/portfolio-backtest-page").then((module) => ({
     default: module.PortfolioBacktestPage,
@@ -109,6 +114,7 @@ function App() {
     "stocks-intelligence-watcher",
     "fixed-income",
     "market-breadth",
+    "sector-rotation",
     "portfolio-backtest",
   ].includes(currentView);
 
@@ -224,6 +230,7 @@ function App() {
                   }
                   onOpenFixedIncome={() => navigateToView("fixed-income")}
                   onOpenMarketBreadth={() => navigateToView("market-breadth")}
+                  onOpenSectorRotation={() => navigateToView("sector-rotation")}
                   onOpenPortfolioBacktest={() =>
                     navigateToView("portfolio-backtest")
                   }
@@ -255,6 +262,10 @@ function App() {
                 />
               ) : currentView === "market-breadth" ? (
                 <MarketBreadthPage
+                  onBackToWork={() => navigateToView("work-gallery")}
+                />
+              ) : currentView === "sector-rotation" ? (
+                <SectorRotationPage
                   onBackToWork={() => navigateToView("work-gallery")}
                 />
               ) : currentView === "portfolio-backtest" ? (

@@ -12,7 +12,9 @@ import {
   type MarketBreadthObjectStore,
   type MarketBreadthStatus,
 } from "../src/lib/market-breadth-r2";
-import { validateMarketBreadthSnapshot, type MarketBreadthSnapshot, type PriceBar, type SectorUniverse } from "../src/lib/market-breadth";
+import { buildMarketBreadthSnapshot, validateMarketBreadthSnapshot, type MarketBreadthSnapshot, type PriceBar, type SectorUniverse } from "../src/lib/market-breadth";
+import { buildSectorRotationSnapshot } from "../src/lib/sector-rotation";
+import { publishSectorRotationForCurrentRelease } from "../src/lib/sector-rotation-r2";
 import {
   marketBreadthBackfillScope,
   marketBreadthRequiredSymbols,
@@ -36,6 +38,35 @@ export const pruneMarketBreadthStateForUniverse = (state: PersistedMarketBreadth
   state.attempts = state.attempts[scope] ? { [scope]: state.attempts[scope] } : {};
   state.universe = universe;
   return state;
+};
+
+export const buildSectorRotationForBreadthState = (state: PersistedMarketBreadthState, source: MarketBreadthSnapshot) => {
+  const snapshot = validateMarketBreadthSnapshot(source);
+  const universe = state.universe;
+  if (!universe || !state.latestSnapshot || state.latestSnapshot.snapshotId !== snapshot.snapshotId
+    || state.latestSnapshot.priceAsOf !== snapshot.priceAsOf || state.latestSnapshot.holdingsAsOf !== snapshot.holdingsAsOf
+    || state.latestSnapshot.generatedAt !== snapshot.generatedAt || universe.holdingsAsOf !== snapshot.holdingsAsOf
+    || universe.universeCount !== snapshot.universeCount) {
+    throw new Error("SECTOR_ROTATION_SOURCE_STATE_MISMATCH");
+  }
+  const allowed = marketBreadthRequiredSymbols(universe);
+  const priceSeries = new Map(allowed.map((symbol) => [symbol, (state.series[symbol] || []).filter((bar) => bar.date <= snapshot.priceAsOf)]));
+  // A partial refresh can advance the persisted universe and prices while the
+  // READY pointer remains old. Require the state to reproduce that exact source.
+  const reproduced = buildMarketBreadthSnapshot({
+    generatedAt: snapshot.generatedAt,
+    priceAsOf: snapshot.priceAsOf,
+    universe,
+    priceSeries,
+  });
+  if (reproduced.snapshotId !== snapshot.snapshotId) throw new Error("SECTOR_ROTATION_SOURCE_STATE_MISMATCH");
+  return buildSectorRotationSnapshot({
+    generatedAt: snapshot.generatedAt,
+    priceAsOf: snapshot.priceAsOf,
+    sourceSnapshotId: snapshot.snapshotId,
+    universe,
+    priceSeries,
+  });
 };
 
 const emptyState = (): PersistedMarketBreadthState => ({
@@ -147,11 +178,39 @@ export const runGitHubMarketBreadthRefresh = async (input?: {
   });
   const attempt = repository.lastAttempt;
   if (!attempt) throw new Error("MARKET_BREADTH_ATTEMPT_MISSING");
-  if (result.status === "READY" && repository.state.latestSnapshot) {
-    const releaseId = `${repository.state.latestSnapshot.priceAsOf}-${attempt.runId.slice(-12)}`;
-    await publishMarketBreadthRelease(store, { previousStatus, releaseId, snapshot: repository.state.latestSnapshot, stateJson: repository.serialize(), attempt });
-  } else {
-    await publishMarketBreadthAttempt(store, { previousStatus, attempt, stateJson: repository.serialize() });
+  let publicationErrorClass = "PAIRED_PUBLICATION_FAILED";
+  try {
+    if (result.status === "READY" && repository.state.latestSnapshot) {
+      publicationErrorClass = "SECTOR_ROTATION_BUILD_FAILED";
+      const rotationSnapshot = buildSectorRotationForBreadthState(repository.state, repository.state.latestSnapshot);
+      const releaseId = `${repository.state.latestSnapshot.priceAsOf}-${attempt.runId.slice(-12)}`;
+      publicationErrorClass = "PAIRED_PUBLICATION_FAILED";
+      await publishMarketBreadthRelease(store, { previousStatus, releaseId, snapshot: repository.state.latestSnapshot, rotationSnapshot, stateJson: repository.serialize(), attempt });
+    } else if (result.status === "SKIPPED" && result.reason === "DUPLICATE_PRICE_DATE"
+      && previousStatus?.current && !previousStatus.current.rotationKey) {
+      publicationErrorClass = "SECTOR_ROTATION_BOOTSTRAP_SOURCE_MISMATCH";
+      const source = repository.state.latestSnapshot;
+      if (!source || source.snapshotId !== previousStatus.current.snapshotId || source.priceAsOf !== previousStatus.current.priceAsOf
+        || source.holdingsAsOf !== previousStatus.current.holdingsAsOf || source.generatedAt !== previousStatus.current.publishedAt) {
+        throw new Error("SECTOR_ROTATION_SOURCE_POINTER_MISMATCH");
+      }
+      const rotationSnapshot = buildSectorRotationForBreadthState(repository.state, source);
+      publicationErrorClass = "PAIRED_PUBLICATION_FAILED";
+      await publishSectorRotationForCurrentRelease(store, { previousStatus, snapshot: rotationSnapshot, attempt });
+    } else {
+      await publishMarketBreadthAttempt(store, { previousStatus, attempt, stateJson: repository.serialize() });
+    }
+  } catch {
+    const failedAttempt: MarketBreadthAttempt = {
+      ...attempt,
+      status: "FAILED",
+      finishedAt: new Date().toISOString(),
+      errorClass: publicationErrorClass,
+    };
+    // Do not replace the last persisted state with an unpublished candidate.
+    // If storage also rejects this failure marker, let that error reach CI.
+    await publishMarketBreadthAttempt(store, { previousStatus, attempt: failedAttempt });
+    return { status: "FAILED" as const, runId: result.runId, priceAsOf: result.priceAsOf, reason: publicationErrorClass };
   }
   return result;
 };

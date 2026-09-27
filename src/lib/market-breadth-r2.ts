@@ -1,8 +1,10 @@
 import { validateMarketBreadthSnapshot, type MarketBreadthSnapshot } from "./market-breadth";
+import { validateSectorRotationSnapshot, type SectorRotationSnapshot } from "./sector-rotation";
 
 export const MARKET_BREADTH_STATUS_KEY = "market-breadth/status.json";
 export const MARKET_BREADTH_STATE_KEYS = ["market-breadth/state/prices-a.json", "market-breadth/state/prices-b.json"] as const;
 export const MARKET_BREADTH_SNAPSHOT_KEYS = ["market-breadth/snapshots/snapshot-a.json", "market-breadth/snapshots/snapshot-b.json"] as const;
+export const SECTOR_ROTATION_SNAPSHOT_KEYS = ["sector-rotation/snapshots/snapshot-a.json", "sector-rotation/snapshots/snapshot-b.json"] as const;
 export const MARKET_BREADTH_RUN_SLOTS = 64;
 
 export type MarketBreadthAttemptStatus = "READY" | "PARTIAL" | "FAILED" | "SKIPPED";
@@ -27,6 +29,8 @@ export interface MarketBreadthStatus {
     priceAsOf: string;
     holdingsAsOf: string;
     publishedAt: string;
+    rotationKey?: typeof SECTOR_ROTATION_SNAPSHOT_KEYS[number];
+    rotationSnapshotId?: string;
   };
   lastAttempt: MarketBreadthAttempt;
   unresolvedFailure?: MarketBreadthAttempt | null;
@@ -77,6 +81,11 @@ export const validateMarketBreadthStatus = (value: unknown): MarketBreadthStatus
       || !isDate(current.priceAsOf) || !isDate(current.holdingsAsOf) || !isIso(current.publishedAt)) {
       throw new Error("Market breadth current release is invalid.");
     }
+    if (current.rotationKey !== undefined || current.rotationSnapshotId !== undefined) {
+      if (!SECTOR_ROTATION_SNAPSHOT_KEYS.includes(current.rotationKey as typeof SECTOR_ROTATION_SNAPSHOT_KEYS[number]) || !isString(current.rotationSnapshotId)) {
+        throw new Error("Sector rotation current release pointer is invalid.");
+      }
+    }
   }
   return {
     ...status,
@@ -112,15 +121,24 @@ export const publishMarketBreadthRelease = async (store: Pick<MarketBreadthObjec
   previousStatus: MarketBreadthStatus | null;
   releaseId: string;
   snapshot: MarketBreadthSnapshot;
+  rotationSnapshot?: SectorRotationSnapshot;
   stateJson: string;
   attempt: MarketBreadthAttempt;
 }) => {
   const snapshot = validateMarketBreadthSnapshot(input.snapshot);
+  const rotation = input.rotationSnapshot ? validateSectorRotationSnapshot(input.rotationSnapshot) : null;
+  if (rotation && (rotation.sourceSnapshotId !== snapshot.snapshotId || rotation.priceAsOf !== snapshot.priceAsOf
+    || rotation.holdingsAsOf !== snapshot.holdingsAsOf || rotation.generatedAt !== snapshot.generatedAt || rotation.universeCount !== snapshot.universeCount)) {
+    throw new Error("SECTOR_ROTATION_SOURCE_POINTER_MISMATCH");
+  }
   const stateKey = input.previousStatus?.state.key === MARKET_BREADTH_STATE_KEYS[0] ? MARKET_BREADTH_STATE_KEYS[1] : MARKET_BREADTH_STATE_KEYS[0];
   const snapshotKey = input.previousStatus?.current?.snapshotKey === MARKET_BREADTH_SNAPSHOT_KEYS[0]
     ? MARKET_BREADTH_SNAPSHOT_KEYS[1]
     : MARKET_BREADTH_SNAPSHOT_KEYS[0];
   const runKey = marketBreadthRunKey(input.attempt.runId);
+  const rotationKey = input.previousStatus?.current?.rotationKey === SECTOR_ROTATION_SNAPSHOT_KEYS[0]
+    ? SECTOR_ROTATION_SNAPSHOT_KEYS[1]
+    : SECTOR_ROTATION_SNAPSHOT_KEYS[0];
   const metadata = { httpMetadata: { contentType: "application/json; charset=utf-8" } };
   const status: MarketBreadthStatus = {
     schemaVersion: 1,
@@ -133,12 +151,14 @@ export const publishMarketBreadthRelease = async (store: Pick<MarketBreadthObjec
       priceAsOf: snapshot.priceAsOf,
       holdingsAsOf: snapshot.holdingsAsOf,
       publishedAt: snapshot.generatedAt,
+      ...(rotation ? { rotationKey, rotationSnapshotId: rotation.snapshotId } : {}),
     },
     lastAttempt: input.attempt,
     unresolvedFailure: null,
   };
   await store.put(stateKey, input.stateJson, metadata);
   await store.put(snapshotKey, JSON.stringify(snapshot), metadata);
+  if (rotation) await store.put(rotationKey, JSON.stringify(rotation), metadata);
   await store.put(runKey, JSON.stringify(input.attempt), metadata);
   await store.put(MARKET_BREADTH_STATUS_KEY, JSON.stringify(status), metadata);
   return status;

@@ -55,6 +55,7 @@ Before changing a feature, read only its matching guide:
 - Finance Analyzer UI/agent: `docs/agents/finance-dashboard.md`
 - Shared D1 market cache: `docs/agents/market-data-cache.md`
 - S&P 500 market breadth: `docs/agents/market-breadth.md`
+- SPY L1 sector rotation: `docs/agents/sector-rotation.md`
 - Watcher valuation publication: `docs/agents/watcher-valuation.md`
 - SPX decision/GEX/Worker/Telegram: `docs/agents/spx-decision-pipeline.md`
 - Domain trackers: `docs/agents/domain.md`
