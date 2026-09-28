@@ -25,6 +25,7 @@ import {
 } from "../src/lib/market-breadth-sources";
 import {
   isNyseTradingDay,
+  marketBreadthBackfillScope,
   reconcileMarketBreadthAdjustments,
   runMarketBreadthRefresh,
   type MarketBreadthRefreshRepository,
@@ -420,6 +421,51 @@ describe("S&P 500 Market Breadth calculations", () => {
 });
 
 describe("Market Breadth refresh producer", () => {
+  it("refetches a 419/420 SPY history with a missing NYSE session before BACKFILL READY", async () => {
+    const repository = new MemoryMarketBreadthRefreshRepository();
+    const dates: string[] = [];
+    const cursor = new Date("2026-08-17T12:00:00.000Z");
+    while (dates.length < 420) {
+      const date = cursor.toISOString().slice(0, 10);
+      if (isNyseTradingDay(date)) dates.unshift(date);
+      cursor.setUTCDate(cursor.getUTCDate() - 1);
+    }
+    const fullHistory = dates.map((date, index) => ({ date, close: 100 + index }));
+    const missingHistory = fullHistory.filter((bar) => bar.date !== "2026-08-14");
+    assert.equal(missingHistory.length, 419);
+    const symbols = ["SPY", ...MARKET_TEST_SECTORS.map((row) => row.etf), ...repository.universe.holdings.map((row) => row.ticker)];
+    for (const symbol of symbols) repository.series.set(symbol, symbol === "SPY" ? missingHistory : fullHistory);
+    // A past successful SPY fetch must not prevent retrying a calendar gap.
+    repository.attempts.set(marketBreadthBackfillScope(repository.universe), new Set(["SPY"]));
+    const fetched: string[] = [];
+    let providerHasGap = true;
+    const client = {
+      fetchUniverse: async () => repository.universe,
+      fetchDailySummary: async () => new Map<string, PriceBar>(),
+      fetchCustomBars: async (symbol: string) => {
+        fetched.push(symbol);
+        return providerHasGap ? missingHistory : fullHistory;
+      },
+    };
+    const incomplete = await runMarketBreadthRefresh({
+      mode: "BACKFILL", now: new Date("2026-08-17T22:00:00.000Z"), repository, client, backfillBatchSize: 1,
+    });
+    assert.equal(incomplete.status, "FAILED");
+    assert.equal(incomplete.reason, "SPY_PRICE_HISTORY_GAP");
+    assert.equal(repository.published.length, 0);
+    assert.deepEqual(fetched, ["SPY"]);
+
+    providerHasGap = false;
+    const repaired = await runMarketBreadthRefresh({
+      mode: "BACKFILL", now: new Date("2026-08-17T22:05:00.000Z"), repository, client, backfillBatchSize: 1,
+    });
+    assert.equal(repaired.status, "READY");
+    assert.deepEqual(fetched, ["SPY", "SPY"]);
+    assert.equal(repository.series.get("SPY")?.length, 420);
+    assert.ok(repository.series.get("SPY")?.some((bar) => bar.date === "2026-08-14"));
+    assert.equal(repository.published.length, 1);
+  });
+
   it("replaces split history after a missing constituent summary still publishes READY", async () => {
     for (const missingReference of [false, true]) {
       const repository = new MemoryMarketBreadthRefreshRepository();

@@ -182,15 +182,20 @@ export const runMarketBreadthRefresh = async (input: {
       const attempted = await input.repository.readBackfillAttempts(backfillScope);
       const sectorEtfs = new Set(universe.sectorWeights.map((row) => normalizeMarketBreadthTicker(row.etf)));
       const requiredSessions = (symbol: string) => symbol === "SPY" || sectorEtfs.has(symbol) ? 400 : 200;
+      const existingSpy = series.get("SPY") || [];
+      const existingSpyAsOf = existingSpy[existingSpy.length - 1]?.date;
+      const repairSpyGap = !!existingSpyAsOf && hasNyseSessionGap(existingSpy, existingSpyAsOf);
       const incomplete = symbols.filter((symbol) =>
-        (series.get(symbol) || []).length < requiredSessions(symbol) && !attempted.has(symbol),
+        (symbol === "SPY" && repairSpyGap) || ((series.get(symbol) || []).length < requiredSessions(symbol) && !attempted.has(symbol)),
       );
       const batchSize = Math.max(1, Math.min(50, input.backfillBatchSize || 25));
       const batch = incomplete.slice(0, batchSize);
       const fromDate = new Date(now.getTime() - 800 * 86_400_000).toISOString().slice(0, 10);
       for (const symbol of batch) {
         const fetched = await input.client.fetchCustomBars(symbol, fromDate, requestedDate);
-        series.set(symbol, mergeMarketBreadthPriceBars(series.get(symbol) || [], fetched));
+        // An incomplete SPY calendar cannot be completed safely by retaining
+        // older closes that may use a different split-adjustment basis.
+        series.set(symbol, mergeMarketBreadthPriceBars(symbol === "SPY" && repairSpyGap ? [] : series.get(symbol) || [], fetched));
         await input.repository.saveSeries(new Map([[symbol, series.get(symbol) || []]]), startedAt);
         await input.repository.recordBackfillAttempt({
           backfillScope,
@@ -202,6 +207,9 @@ export const runMarketBreadthRefresh = async (input: {
       }
       const spyBackfillSeries = series.get("SPY") || [];
       const priceAsOf = spyBackfillSeries[spyBackfillSeries.length - 1]?.date;
+      if (priceAsOf && hasNyseSessionGap(spyBackfillSeries, priceAsOf)) {
+        throw new MarketBreadthSourceError("SPY_PRICE_HISTORY_GAP", "SPY history still has a missing NYSE session after full refetch.");
+      }
       let publicationErrorClass: string | null = null;
       if (priceAsOf) {
         try {

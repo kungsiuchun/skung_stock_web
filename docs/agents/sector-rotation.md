@@ -24,8 +24,10 @@
   membership and weights are not historical point-in-time holdings or exact
   ETF attribution. These distinctions must remain visible.
 - Before a new daily append, check the provider's adjusted close on the previous
-  READY date. Replace affected complete histories before publication; reference
-  mismatch or more than 50 repairs fails explicitly and preserves last-good.
+  READY date. Replace histories with valid adjusted-close changes before
+  publication. An unreconciled mismatch or more than 50 repairs fails explicitly
+  and preserves last-good. Backfill retries an incomplete SPY trading calendar;
+  persistent gaps fail before READY.
 - Required checks: `npm run test:sector-rotation`,
   `npm run test:sector-rotation:uat`, `npm run test:market-breadth`,
   `npm run test:market-breadth:uat`, `npm run build`, Pages Functions bundle,
