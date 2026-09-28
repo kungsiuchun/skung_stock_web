@@ -19,9 +19,9 @@ export function AboutPage() {
               I’m {profile.name} — Siu for short. {profile.summary}
             </p>
             <p className="intro-body" style={{ marginTop: 16 }}>
-              My professional work is in data models, dashboards, and marketing
-              analytics. Outside of that, I build stock research tools with AI
-              agents and explore the world through photography.
+              I care about how data earns trust, not just how it looks on a
+              screen. Outside my professional work, I build stock research
+              tools and explore the world through photography.
             </p>
             <div className="hero-actions">
               <a

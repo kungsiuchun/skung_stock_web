@@ -6,7 +6,7 @@ export const profile = {
   linkedin: "https://www.linkedin.com/in/siu-chun-kung-75255916a/",
   resume: "/docs/SiuChunKung_Resume.pdf",
   summary:
-    "Data analyst with 4+ years of experience automating marketing reporting, building Power BI and Tableau dashboards, and analyzing paid search, paid social, and YouTube performance. Proficient in SQL, Python, Power BI, Excel, and Power Query, with experience translating KPI trends into clear business insights.",
+    "For the past four years, I have worked across paid search, social, and YouTube, helping marketing teams make sense of performance when the answer is not obvious. I build the reporting and analysis that shows what is working, what needs a closer look, and what the next conversation should be about. SQL, Python, and BI tools are how I get there. The real work is making the data useful enough to act on.",
   skills: [
     "SQL",
     "Python",
