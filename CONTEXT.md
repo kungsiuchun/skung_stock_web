@@ -142,6 +142,26 @@ GitHub Actions owns the batch computation and writes bounded normalized objects 
 
 A failed refresh preserves the last READY snapshot and makes the public API report `STALE` with a safe error class. No source failure may create demo data or overwrite the last-good snapshot.
 
+## SPY Sector Rotation
+
+SPY Sector Rotation is a standalone L1 Market Lab Work Item at
+`#/work/sector-rotation`. It compares eleven Select Sector SPDR ETFs with SPY
+using a transparent completed-week relative-strength trend/momentum model,
+trails, 1/3/6/12-month rankings, and current-SPY-constituent drilldown.
+
+ETF returns and constituent sector-basket driver proxies are separate measures.
+Stock proxies use current SPY weights and membership; they are neither historical
+point-in-time attribution nor exact ETF attribution. Prices are split-adjusted
+price returns excluding cash dividends. Insufficient common-date history is
+unavailable and excluded from eligible participation denominators.
+
+The existing Market Breadth Actions producer precomputes bounded sibling R2
+rotation objects before the shared release pointer. Its existing breadth endpoint
+keeps the two-read contract. The new read-only rotation API verifies the same
+release identity and carries unresolved source-refresh failures into its visible
+freshness state. No additional data provider, bucket, D1 database, or Worker is
+required.
+
 ## US ETF Portfolio Backtester
 
 US ETF Portfolio Backtester is a standalone Market Lab Work Item at `#/work/portfolio-backtest`.

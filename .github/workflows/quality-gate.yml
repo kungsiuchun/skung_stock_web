@@ -24,5 +24,7 @@ jobs:
 
       - run: npm ci
       - run: npm run test:deploy-scope
+      - run: npm run test:market-breadth
+      - run: npm run test:sector-rotation
       - run: npm run lint
       - run: npm run build

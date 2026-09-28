@@ -36,7 +36,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Contract tests
-        run: node --import tsx --test tests/market-breadth-r2.test.ts tests/market-breadth.test.ts
+        run: node --import tsx --test tests/market-breadth-r2.test.ts tests/market-breadth.test.ts tests/sector-rotation.test.ts tests/sector-rotation-r2.test.ts
       - name: Compute and atomically publish
         run: npx tsx scripts/refresh-market-breadth.ts
         env:

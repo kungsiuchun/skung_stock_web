@@ -12,6 +12,7 @@ export type ViewState =
   | "stocks-intelligence-watcher"
   | "fixed-income"
   | "market-breadth"
+  | "sector-rotation"
   | "portfolio-backtest";
 
 const VIEW_HASHES: Record<ViewState, string> = {
@@ -28,6 +29,7 @@ const VIEW_HASHES: Record<ViewState, string> = {
   "stocks-intelligence-watcher": "#/work/stocks-intelligence-watcher",
   "fixed-income": "#/work/fixed-income",
   "market-breadth": "#/work/market-breadth",
+  "sector-rotation": "#/work/sector-rotation",
   "portfolio-backtest": "#/work/portfolio-backtest",
 };
 
@@ -80,6 +82,10 @@ export const getViewFromHash = (hash: string): ViewState => {
 
   if (hash.startsWith("#/work/market-breadth")) {
     return "market-breadth";
+  }
+
+  if (hash.startsWith("#/work/sector-rotation")) {
+    return "sector-rotation";
   }
 
   if (hash.startsWith("#/work/portfolio-backtest")) {

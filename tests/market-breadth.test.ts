@@ -25,6 +25,8 @@ import {
 } from "../src/lib/market-breadth-sources";
 import {
   isNyseTradingDay,
+  marketBreadthBackfillScope,
+  reconcileMarketBreadthAdjustments,
   runMarketBreadthRefresh,
   type MarketBreadthRefreshRepository,
 } from "../src/lib/market-breadth-refresh";
@@ -419,6 +421,133 @@ describe("S&P 500 Market Breadth calculations", () => {
 });
 
 describe("Market Breadth refresh producer", () => {
+  it("refetches a 419/420 SPY history with a missing NYSE session before BACKFILL READY", async () => {
+    const repository = new MemoryMarketBreadthRefreshRepository();
+    const dates: string[] = [];
+    const cursor = new Date("2026-08-17T12:00:00.000Z");
+    while (dates.length < 420) {
+      const date = cursor.toISOString().slice(0, 10);
+      if (isNyseTradingDay(date)) dates.unshift(date);
+      cursor.setUTCDate(cursor.getUTCDate() - 1);
+    }
+    const fullHistory = dates.map((date, index) => ({ date, close: 100 + index }));
+    const missingHistory = fullHistory.filter((bar) => bar.date !== "2026-08-14");
+    assert.equal(missingHistory.length, 419);
+    const symbols = ["SPY", ...MARKET_TEST_SECTORS.map((row) => row.etf), ...repository.universe.holdings.map((row) => row.ticker)];
+    for (const symbol of symbols) repository.series.set(symbol, symbol === "SPY" ? missingHistory : fullHistory);
+    // A past successful SPY fetch must not prevent retrying a calendar gap.
+    repository.attempts.set(marketBreadthBackfillScope(repository.universe), new Set(["SPY"]));
+    const fetched: string[] = [];
+    let providerHasGap = true;
+    const client = {
+      fetchUniverse: async () => repository.universe,
+      fetchDailySummary: async () => new Map<string, PriceBar>(),
+      fetchCustomBars: async (symbol: string) => {
+        fetched.push(symbol);
+        return providerHasGap ? missingHistory : fullHistory;
+      },
+    };
+    const incomplete = await runMarketBreadthRefresh({
+      mode: "BACKFILL", now: new Date("2026-08-17T22:00:00.000Z"), repository, client, backfillBatchSize: 1,
+    });
+    assert.equal(incomplete.status, "FAILED");
+    assert.equal(incomplete.reason, "SPY_PRICE_HISTORY_GAP");
+    assert.equal(repository.published.length, 0);
+    assert.deepEqual(fetched, ["SPY"]);
+
+    providerHasGap = false;
+    const repaired = await runMarketBreadthRefresh({
+      mode: "BACKFILL", now: new Date("2026-08-17T22:05:00.000Z"), repository, client, backfillBatchSize: 1,
+    });
+    assert.equal(repaired.status, "READY");
+    assert.deepEqual(fetched, ["SPY", "SPY"]);
+    assert.equal(repository.series.get("SPY")?.length, 420);
+    assert.ok(repository.series.get("SPY")?.some((bar) => bar.date === "2026-08-14"));
+    assert.equal(repository.published.length, 1);
+  });
+
+  it("replaces split history after a missing constituent summary still publishes READY", async () => {
+    for (const missingReference of [false, true]) {
+      const repository = new MemoryMarketBreadthRefreshRepository();
+      const splitTicker = repository.universe.holdings[0].ticker;
+      const symbols = ["SPY", ...MARKET_TEST_SECTORS.map((row) => row.etf), ...repository.universe.holdings.map((row) => row.ticker)];
+      for (const symbol of symbols) repository.series.set(symbol, barsEnding("2026-08-07").map((bar) => ({ ...bar, close: symbol === splitTicker ? 200 : 100 })));
+      repository.latestSnapshot = buildMarketBreadthSnapshot({ generatedAt: "2026-08-07T23:30:00.000Z", priceAsOf: "2026-08-07", universe: repository.universe, priceSeries: repository.series });
+      const customCalls: string[] = [];
+      const dailySummary = (date: string) => new Map(symbols.map((symbol) => [symbol, { date, close: symbol === splitTicker ? date === "2026-08-07" ? 200 : date === "2026-08-10" ? 100 : 101 : 100 }]));
+      const client = {
+        fetchUniverse: async () => repository.universe,
+        fetchDailySummary: async (date: string) => {
+          const summary = dailySummary(date);
+          if (date === "2026-08-10") summary.delete(splitTicker);
+          return summary;
+        },
+        fetchCustomBars: async (symbol: string) => {
+          customCalls.push(symbol);
+          return barsEnding("2026-08-11").filter((bar) => !missingReference || bar.date !== "2026-08-10").map((bar) => ({ ...bar, close: bar.date === "2026-08-11" ? 101 : 100 }));
+        },
+      };
+      const omitted = await runMarketBreadthRefresh({ mode: "DAILY", now: new Date("2026-08-11T17:17:00.000Z"), repository, client });
+      assert.equal(omitted.status, "READY");
+      assert.equal(repository.latestSnapshot.coverage.constituent200DayPct, 98.2);
+      assert.equal(repository.series.get(splitTicker)!.at(-1)!.date, "2026-08-07");
+      assert.deepEqual(customCalls, []);
+      client.fetchDailySummary = async (date) => {
+        const summary = dailySummary(date);
+        if (missingReference && date === "2026-08-10") summary.delete(splitTicker);
+        return summary;
+      };
+      const recovered = await runMarketBreadthRefresh({ mode: "DAILY", now: new Date("2026-08-12T17:17:00.000Z"), repository, client });
+      assert.equal(recovered.status, "READY");
+      assert.deepEqual(customCalls, [splitTicker]);
+      const repaired = repository.series.get(splitTicker)!;
+      assert.equal(repaired.at(-1)!.close, 101);
+      assert.ok(repaired.slice(0, -1).every((bar) => bar.close === 100));
+      assert.equal(repaired.some((bar) => bar.date === "2026-08-10"), !missingReference);
+      assert.deepEqual(repository.latestSnapshot.breadth.rows[0].windows.sma200, { above: 1, eligible: 5, total: 5, pct: 20 });
+    }
+  });
+
+  it("replaces the entire split-adjusted history before appending a session", async () => {
+    const series = new Map([["TEST", bars([["2026-08-07", 200], ["2026-08-10", 202]])]]);
+    const requested: string[] = [];
+    const repaired = await reconcileMarketBreadthAdjustments({
+      series, symbols: ["TEST"], referenceDate: "2026-08-10", requestedDate: "2026-08-11", fromDate: "2024-06-01",
+      currentSummary: new Map([["TEST", { date: "2026-08-11", close: 103 }]]),
+      client: {
+        fetchUniverse: async () => productionLikeUniverse(),
+        fetchDailySummary: async () => new Map([["TEST", { date: "2026-08-10", close: 101 }]]),
+        fetchCustomBars: async (symbol) => { requested.push(symbol); return bars([["2026-08-07", 100], ["2026-08-10", 101], ["2026-08-11", 103]]); },
+      },
+    });
+    assert.deepEqual(repaired, ["TEST"]);
+    assert.deepEqual(requested, ["TEST"]);
+    assert.deepEqual(series.get("TEST"), bars([["2026-08-07", 100], ["2026-08-10", 101], ["2026-08-11", 103]]));
+    assert.ok(Math.abs(calculateSessionReturn(series.get("TEST")!, 1)! - (103 / 101 - 1) * 100) < 0.0001);
+  });
+
+  it("does not re-fetch unchanged histories and rejects an inconsistent adjustment repair", async () => {
+    const series = new Map([["TEST", bars([["2026-08-10", 202]])]]);
+    let customCalls = 0;
+    const input = {
+      series, symbols: ["TEST"], referenceDate: "2026-08-10", requestedDate: "2026-08-11", fromDate: "2024-06-01",
+      currentSummary: new Map([["TEST", { date: "2026-08-11", close: 203 }]]),
+      client: {
+        fetchUniverse: async () => productionLikeUniverse(),
+        fetchDailySummary: async () => new Map([["TEST", { date: "2026-08-10", close: 202 }]]),
+        fetchCustomBars: async () => { customCalls += 1; return bars([["2026-08-10", 77], ["2026-08-11", 78]]); },
+      },
+    };
+    assert.deepEqual(await reconcileMarketBreadthAdjustments(input), []);
+    assert.equal(customCalls, 0);
+    input.client.fetchDailySummary = async () => new Map([["TEST", { date: "2026-08-10", close: 101 }]]);
+    await assert.rejects(() => reconcileMarketBreadthAdjustments(input), (error: unknown) => error instanceof MarketBreadthSourceError && error.errorClass === "ADJUSTMENT_HISTORY_INVALID");
+    assert.equal(series.get("TEST")![0].close, 202);
+    input.client.fetchCustomBars = async () => bars([["2026-08-10", 101], ["2026-08-11", 110]]);
+    await assert.rejects(() => reconcileMarketBreadthAdjustments(input), (error: unknown) => error instanceof MarketBreadthSourceError && error.errorClass === "ADJUSTMENT_HISTORY_INVALID");
+    assert.equal(series.get("TEST")![0].close, 202, "A latest-close mismatch must not overwrite the stored history");
+  });
+
   it("recognizes NYSE holidays but not an ordinary weekday", () => {
     assert.equal(isNyseTradingDay("2026-12-25"), false);
     assert.equal(isNyseTradingDay("2026-08-11"), true);

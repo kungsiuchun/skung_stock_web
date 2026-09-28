@@ -31,6 +31,10 @@ its R2 objects.
 - Every State Street and Massive request needs an abort deadline shorter than
   the GitHub job timeout; persist hangs as `PROVIDER_TIMEOUT`.
 - Pages performs exactly two R2 reads per request. Preserve that invariant.
+- L1 sector rotation reuses this producer and publishes sibling bounded rotation
+  snapshots before the shared status pointer. See `sector-rotation.md` for that
+  API and model contract. New daily runs recheck the last READY adjusted close
+  and replace affected histories before appending a new session.
 - Regression: `npm run test:market-breadth`,
   `npm run test:market-breadth:uat`, `npm run build`, and a local Pages Functions
   bundle check.
