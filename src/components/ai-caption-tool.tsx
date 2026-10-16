@@ -1,6 +1,7 @@
 import { useState, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { X, Upload, Sparkles, Loader2 } from "lucide-react";
+import { parseJsonResponse } from "@/lib/safe-json-response";
 
 interface AICaptionToolProps {
   isOpen: boolean;
@@ -42,20 +43,18 @@ const AICaptionTool = ({ isOpen, onClose }: AICaptionToolProps) => {
         body: formData,
       });
 
-      const data = await response.json();
-      console.log("AI API Response:", data);
+      const data = await parseJsonResponse<{ result?: { description?: string; response?: string }; response?: string; description?: string }>(response, "/api/caption");
 
       const aiResponse = data.result?.description || data.result?.response || data.response || data.description;
 
       if (aiResponse) {
         setCaption(aiResponse);
       } else {
-        console.warn("Unexpected AI response format:", data);
         setCaption("AI couldn't generate a caption. Use a clearer image!");
       }
     } catch (error) {
       console.error("AI captioning failed:", error);
-      setCaption("Error connecting to AI service.");
+      setCaption(error instanceof Error ? error.message : "Error connecting to AI service.");
     } finally {
       setIsLoading(false);
     }
@@ -92,7 +91,7 @@ const AICaptionTool = ({ isOpen, onClose }: AICaptionToolProps) => {
               {!selectedImage ? (
                 <div
                   onClick={() => fileInputRef.current?.click()}
-                  className="border-2 border-dashed border-white/10 rounded-2xl h-64 flex flex-col items-center justify-center gap-4 cursor-pointer hover:border-white/20 hover:bg-white/5 transition-all group"
+                    className="border-2 border-dashed border-white/10 rounded-2xl h-64 flex flex-col items-center justify-center gap-4 cursor-pointer hover:border-white/20 hover:bg-white/5 transition-colors group"
                 >
                   <div className="p-4 bg-white/5 rounded-full group-hover:scale-110 transition-transform">
                     <Upload className="w-8 h-8 text-white/40 group-hover:text-white" />
@@ -136,7 +135,7 @@ const AICaptionTool = ({ isOpen, onClose }: AICaptionToolProps) => {
                       <button
                         onClick={generateCaption}
                         disabled={isLoading}
-                        className="w-full bg-white text-black py-4 rounded-xl font-bold flex items-center justify-center gap-3 hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full bg-white text-black py-4 rounded-xl font-bold flex items-center justify-center gap-3 hover:scale-[1.02] active:scale-[0.98] transition-[transform,background-color,color,opacity] disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {isLoading ? (
                           <>

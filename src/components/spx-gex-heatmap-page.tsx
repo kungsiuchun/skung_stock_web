@@ -32,10 +32,6 @@ interface SpxGexHeatmapResponse {
   warnings: string[];
 }
 
-interface SPXGexHeatmapPageProps {
-  onBackToWork: () => void;
-}
-
 const emptyPayload: SpxGexHeatmapResponse = {
   status: "EMPTY",
   errorCode: null,
@@ -206,7 +202,7 @@ const formatSnapshotMinuteEt = (minute: number) => {
   return `${hours}:${minutes}`;
 };
 
-const parseHeatmapResponse = (response: Response, requestUrl: string) => parseJsonResponse<SpxGexHeatmapResponse & { error?: string }>(response, requestUrl);
+const parseHeatmapResponse = (response: Response, requestUrl: string) => parseJsonResponse<SpxGexHeatmapResponse & { error?: string }>(response, requestUrl, { allowHttpError: true });
 
 export const parseSpxGexBoardSelection = (hash: string) => {
   const query = hash.split("?", 2)[1] || "";
@@ -265,7 +261,7 @@ const currentEtClock = () => {
   return { tradingDate: `${parts.year}-${parts.month}-${parts.day}`, minuteEt: Number(parts.hour) * 60 + Number(parts.minute) };
 };
 
-export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
+export function SPXGexHeatmapPage() {
   const initialSelection = useMemo(initialBoardSelection, []);
   const [data, setData] = useState<SpxGexHeatmapResponse>(emptyPayload);
   const [selectedDate, setSelectedDate] = useState(initialSelection.date);
@@ -562,7 +558,7 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
       void (async () => {
         try {
           const response = await fetch(`/api/spx-gex-cell-detail?${params.toString()}`, { signal: controller.signal });
-          const payload = await parseJsonResponse<{ status: string; detail: SpxGexHeatmapCell | null; error?: string }>(response, "/api/spx-gex-cell-detail");
+          const payload = await parseJsonResponse<{ status: string; detail: SpxGexHeatmapCell | null; error?: string }>(response, "/api/spx-gex-cell-detail", { allowHttpError: true });
           if (!response.ok || payload.status !== "READY" || !payload.detail) throw new Error(payload.error || "GEX audit detail is unavailable.");
           if (!controller.signal.aborted) {
             setAuditDetailKey(activeAuditCell.key);
@@ -708,13 +704,13 @@ export function SPXGexHeatmapPage({ onBackToWork }: SPXGexHeatmapPageProps) {
       <div className="mx-auto flex w-full max-w-[1800px] flex-col gap-4">
         <header className="flex flex-col gap-4 border-b border-cyan-400/20 pb-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
-            <button
-              onClick={onBackToWork}
+            <a
+              href="#/market-lab"
               className="mb-4 inline-flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-cyan-200/70 transition-colors hover:text-cyan-100"
             >
               <ArrowLeft className="h-4 w-4" />
               Work gallery
-            </button>
+            </a>
             <div className="flex flex-wrap items-center gap-3">
               <h1 className="text-2xl font-black tracking-normal text-white sm:text-4xl">SPX Market Structure Board</h1>
               <span className="border border-amber-300/30 bg-amber-300/10 px-2 py-1 font-mono text-[10px] font-black tracking-[0.12em] text-amber-100">

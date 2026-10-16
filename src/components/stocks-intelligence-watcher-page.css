@@ -130,9 +130,9 @@
 .siw-back-button,
 .siw-icon-button {
   display: inline-flex;
-  width: 40px;
-  height: 40px;
-  flex: 0 0 40px;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
   align-items: center;
   justify-content: center;
   border-radius: 6px;
@@ -209,12 +209,17 @@
 .siw-tool-catalog input,
 .siw-filter-row select {
   width: 100%;
-  height: 42px;
+  height: 44px;
   border: 1px solid var(--siw-line);
   border-radius: 6px;
   background: rgba(4, 12, 20, 0.96);
   color: var(--siw-text);
   outline: none;
+}
+
+.siw-mobile-section-selector,
+.siw-watchlist-hint {
+  display: none;
 }
 
 .siw-search-row input,
@@ -2868,6 +2873,8 @@
     min-height: 0;
     gap: 8px;
     overflow-x: auto;
+    scroll-snap-type: x proximity;
+    scrollbar-gutter: stable;
     padding: 10px 20px 12px;
     border-bottom: 0;
   }
@@ -2885,6 +2892,14 @@
     border: 1px solid var(--siw-line);
     border-radius: 6px;
     padding: 10px;
+    scroll-snap-align: start;
+  }
+
+  .siw-watchlist-hint {
+    display: block;
+    margin: 2px 20px 0;
+    color: var(--siw-muted);
+    font-size: 11px;
   }
 
   .siw-watch-row input,
@@ -2950,15 +2965,43 @@
     display: none;
   }
 
-  .siw-main-tabs,
   .siw-options-subtabs {
     padding: 0 20px;
     overflow-x: auto;
   }
 
-  .siw-main-tabs button {
-    min-width: max-content;
-    padding: 0 14px;
+  .siw-main-tabs {
+    display: none;
+  }
+
+  .siw-mobile-section-selector {
+    display: grid;
+    gap: 6px;
+    margin: 0 20px;
+    color: var(--siw-muted);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+
+  .siw-mobile-section-selector select {
+    width: 100%;
+    min-height: 44px;
+    border: 1px solid var(--siw-line);
+    border-radius: var(--siw-control-radius);
+    background: var(--siw-panel);
+    padding: 0 12px;
+    color: var(--siw-text);
+  }
+
+  .siw-load-button,
+  .siw-refresh-all-button,
+  .siw-filter-row button,
+  .siw-watchlist-tabs button,
+  .siw-mobile-nav button {
+    min-height: 44px;
+    min-width: 44px;
   }
 
   .siw-main-scroll {

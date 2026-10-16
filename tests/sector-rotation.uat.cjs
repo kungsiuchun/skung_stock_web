@@ -89,8 +89,9 @@ async function assertRelativeSectors(page, payload, windowKey, windowLabel) {
       return request.respond({ status: mode === 'ERROR' ? 503 : 200, contentType: 'application/json', body: JSON.stringify(body) });
     });
     await page.goto(`${baseUrl}/#/market-lab`, { waitUntil: 'networkidle0' });
-    await page.waitForSelector('button[aria-label*="SPY Sector Rotation"]');
-    await page.click('button[aria-label*="SPY Sector Rotation"]');
+    const sectorRotationLink = await page.waitForSelector('a[aria-label*="SPY Sector Rotation"]');
+    assert.ok(sectorRotationLink, 'Sector Rotation card must use a native link');
+    await sectorRotationLink.click();
     await page.waitForFunction(() => location.hash === '#/work/sector-rotation');
     await page.waitForSelector('[data-testid="sector-ranking"]');
     assert.equal(await page.$$eval('[data-testid="sector-ranking"] tbody tr', rows => rows.length), 11);

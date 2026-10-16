@@ -10,6 +10,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
+import { parseJsonResponse } from "@/lib/safe-json-response";
 
 interface AgentStep {
   step: number;
@@ -118,11 +119,12 @@ export function FinanceChatPanel({
         }),
       });
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || "Failed to get response");
-      }
+      const data = await parseJsonResponse<{
+        reply?: string;
+        steps?: AgentStep[];
+        new_memories?: string[];
+        history?: HistoryMsg[];
+      }>(response, "/api/agent/chat");
 
       setMessages((prev) => [
         ...prev,

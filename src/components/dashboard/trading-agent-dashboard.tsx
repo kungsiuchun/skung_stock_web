@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Activity, Bot, Briefcase, Download, Eye, FileText, Landmark, Network, Send, ShieldCheck, Users, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { parseJsonResponse } from "@/lib/safe-json-response";
 
 type AgentMode = "trading" | "buffett" | "finrobot" | "serenity";
 
@@ -367,7 +368,7 @@ export function TradingAgentDashboard() {
           body: JSON.stringify({ stock_code: targetTicker }),
         });
 
-        const data = await res.json();
+        const data = await parseJsonResponse<any>(res, "/api/trading-agent/query");
 
         if (data.error || !data.success) {
           setLogs((prev) => [...prev, "Error: " + (data.error || "Unknown execution error")]);
@@ -395,7 +396,7 @@ export function TradingAgentDashboard() {
         body: JSON.stringify({ ticker: targetTicker, agentProfile: selectedAgent }),
       });
 
-      const data = await res.json();
+      const data = await parseJsonResponse<any>(res, "/api/finrobot");
 
       if (data.error || data.success === false) {
         setLogs((prev) => [...prev, "Error: " + (data.error || "Unknown execution error")]);
@@ -535,7 +536,7 @@ export function TradingAgentDashboard() {
                         setIsHtmlPreviewOpen(false);
                         setLogs([]);
                       }}
-                      className={`h-20 rounded-lg border px-2 text-xs font-semibold transition-all flex flex-col items-center justify-center gap-1 ${
+                        className={`h-20 rounded-lg border px-2 text-xs font-semibold transition-[border-color,background-color,color] flex flex-col items-center justify-center gap-1 ${
                         isActive ? getAccentClasses(mode).active : "border-white/10 bg-white/5 text-white/55 hover:bg-white/10 hover:text-white"
                       }`}
                       disabled={isRunning}
@@ -573,7 +574,7 @@ export function TradingAgentDashboard() {
                 <button
                   onClick={startAnalysis}
                   disabled={isRunning || !ticker}
-                  className={`w-full text-white rounded-lg px-4 py-3 font-medium flex items-center justify-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed ${accent.button}`}
+              className={`w-full text-white rounded-lg px-4 py-3 font-medium flex items-center justify-center gap-2 transition-[background-color,color,opacity] disabled:opacity-50 disabled:cursor-not-allowed ${accent.button}`}
                 >
                   <Send className="w-4 h-4" />
                   {isRunning ? "Analyzing..." : profile.button}
@@ -591,7 +592,7 @@ export function TradingAgentDashboard() {
                 <button
                   onClick={downloadReport}
                   disabled={!reportReady}
-                  className="w-full bg-white/10 hover:bg-white/20 border border-white/20 text-white rounded-lg px-4 py-3 font-medium flex items-center justify-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full bg-white/10 hover:bg-white/20 border border-white/20 text-white rounded-lg px-4 py-3 font-medium flex items-center justify-center gap-2 transition-[background-color,color,opacity] disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Download className="w-4 h-4" />
                   Download Markdown
@@ -600,7 +601,7 @@ export function TradingAgentDashboard() {
                 <button
                   onClick={() => setIsHtmlPreviewOpen(true)}
                   disabled={!reportReady}
-                  className="w-full bg-purple-500/10 hover:bg-purple-500/20 border border-purple-300/20 text-purple-50 rounded-lg px-4 py-3 font-medium flex items-center justify-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full bg-purple-500/10 hover:bg-purple-500/20 border border-purple-300/20 text-purple-50 rounded-lg px-4 py-3 font-medium flex items-center justify-center gap-2 transition-[background-color,color,opacity] disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Eye className="w-4 h-4" />
                   Preview HTML Report
@@ -609,7 +610,7 @@ export function TradingAgentDashboard() {
                 <button
                   onClick={downloadHtmlReport}
                   disabled={!reportReady}
-                  className="w-full bg-white text-black hover:bg-purple-50 border border-white rounded-lg px-4 py-3 font-semibold flex items-center justify-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full bg-white text-black hover:bg-purple-50 border border-white rounded-lg px-4 py-3 font-semibold flex items-center justify-center gap-2 transition-[background-color,color,opacity] disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <FileText className="w-4 h-4" />
                   Download HTML Report

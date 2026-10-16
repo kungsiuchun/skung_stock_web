@@ -50,10 +50,6 @@ type SettlementTransfer = {
   amountCents: number;
 };
 
-interface SettleUpPageProps {
-  onBackToWork: () => void;
-}
-
 const demoParticipants: Participant[] = [
   { id: "wil", name: "Wil" },
   { id: "monette", name: "Monette" },
@@ -351,7 +347,7 @@ const readBillFromHash = () => {
   return data ? decodeBillState(data) : null;
 };
 
-export function SettleUpPage({ onBackToWork }: SettleUpPageProps) {
+export function SettleUpPage() {
   const [bill, setBill] = useState<BillState>(() => readBillFromHash() ?? createBlankBill());
   const [newParticipantName, setNewParticipantName] = useState("");
   const [newEventName, setNewEventName] = useState("");
@@ -572,13 +568,13 @@ export function SettleUpPage({ onBackToWork }: SettleUpPageProps) {
       <div className="mx-auto flex max-w-7xl flex-col gap-5">
         <header className="flex flex-col gap-5 border-b border-white/10 pb-5 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <button
-              onClick={onBackToWork}
+            <a
+              href="#/market-lab"
               className="mb-5 inline-flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-white/50 transition-colors hover:text-white"
             >
               <ArrowLeft className="h-4 w-4" />
               Work gallery
-            </button>
+            </a>
             <div className="flex items-center gap-3">
               <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-emerald-300/25 bg-emerald-300/10 text-emerald-100">
                 <ReceiptText className="h-6 w-6" />

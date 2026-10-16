@@ -1868,13 +1868,28 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await page.goto(`${baseUrl}/#/work/stocks-intelligence-watcher?symbol=NVDA`, { waitUntil: "domcontentloaded" });
     await page.waitForSelector("[data-watcher-replica]");
     await page.waitForFunction(() => document.querySelector(".siw-hero-identity h1")?.textContent === "NVDA", { timeout: 5000 });
-    await clickText(page, "Options", true);
+    await page.select("select[name='watcher-section']", "Options");
     await page.waitForSelector("[data-options-robinhood-provenance]", { timeout: 5000 });
+    const mobileNavigation = await page.evaluate(() => {
+      const selector = document.querySelector("select[name='watcher-section']");
+      const tabs = document.querySelector(".siw-main-tabs");
+      const controls = Array.from(document.querySelectorAll(".siw-search-row button, .siw-mobile-nav button"));
+      return {
+        selectorVisible: Boolean(selector && selector.getClientRects().length),
+        selectorHeight: selector?.getBoundingClientRect().height || 0,
+        tabsVisible: Boolean(tabs && tabs.getClientRects().length),
+        controlsMeetTouchTarget: controls.every((control) => control.getBoundingClientRect().height >= 44 && control.getBoundingClientRect().width >= 44),
+      };
+    });
+    assert.equal(mobileNavigation.selectorVisible, true, "mobile Watcher must expose the labelled section selector");
+    assert.ok(mobileNavigation.selectorHeight >= 44, "mobile section selector must meet the 44px touch target");
+    assert.equal(mobileNavigation.tabsVisible, false, "wide section tabs must be hidden on mobile");
+    assert.equal(mobileNavigation.controlsMeetTouchTarget, true, "high-frequency mobile Watcher controls must be at least 44px square");
     assert.match(await page.$eval("[data-options-robinhood-provenance]", (node) => node.textContent || ""), /Robinhood MCP EOD/i, "mobile proof must use the Robinhood-backed NVDA snapshot");
     await page.screenshot({ path: path.join(screenshotsDir, "uat-mobile.png"), fullPage: true });
     await page.screenshot({ path: path.join(screenshotsDir, "08-responsive-mobile.png"), fullPage: true });
     for (const topTab of ["Overview", "Chart", "Fundamentals", "Fixed Income", "Earnings", "Options", "F/G Index", "News", "Macro"]) {
-      await clickText(page, topTab, true);
+      await page.select("select[name='watcher-section']", topTab);
       await wait(topTab === "Options" ? 500 : 250);
       const mobileOverflow = await page.evaluate(() => ({
         document: document.documentElement.scrollWidth - document.documentElement.clientWidth,

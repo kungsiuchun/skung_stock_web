@@ -11,19 +11,10 @@ import {
   Users,
   Waves,
 } from "lucide-react";
+import { getHashForView, type ViewState } from "@/lib/app-routes";
 
 interface WorkGalleryProps {
-  onOpenSettleUp: () => void;
   onOpenCaptionTool: () => void;
-  onOpenFinanceTool: () => void;
-  onOpenTradingAgentTool: () => void;
-  onOpenSPXRecap: () => void;
-  onOpenSPXGexHeatmap: () => void;
-  onOpenStocksWatcher: () => void;
-  onOpenFixedIncome: () => void;
-  onOpenMarketBreadth: () => void;
-  onOpenSectorRotation: () => void;
-  onOpenPortfolioBacktest: () => void;
 }
 
 type WorkItem = {
@@ -34,22 +25,11 @@ type WorkItem = {
   action: string;
   icon: React.ReactNode;
   featured?: boolean;
-  onClick: () => void;
+  view?: ViewState;
+  onClick?: () => void;
 };
 
-export function WorkGallery({
-  onOpenSettleUp,
-  onOpenCaptionTool,
-  onOpenFinanceTool,
-  onOpenTradingAgentTool,
-  onOpenSPXRecap,
-  onOpenSPXGexHeatmap,
-  onOpenStocksWatcher,
-  onOpenFixedIncome,
-  onOpenMarketBreadth,
-  onOpenSectorRotation,
-  onOpenPortfolioBacktest,
-}: WorkGalleryProps) {
+export function WorkGallery({ onOpenCaptionTool }: WorkGalleryProps) {
   const [filter, setFilter] = useState("All work");
   const workItems: WorkItem[] = [
     {
@@ -62,7 +42,7 @@ export function WorkGallery({
       action: "Open app",
       icon: <ReceiptText className="h-5 w-5" />,
       featured: true,
-      onClick: onOpenSettleUp,
+      view: "settle-up",
     },
     {
       title: "Finance Analyzer",
@@ -73,7 +53,7 @@ export function WorkGallery({
         "Built as a full-stack agent interface around finance APIs and market interpretation tools.",
       action: "Open dashboard",
       icon: <MessageSquare className="h-5 w-5" />,
-      onClick: onOpenFinanceTool,
+      view: "finance-dashboard",
     },
     {
       title: "Trading Agent",
@@ -84,7 +64,7 @@ export function WorkGallery({
         "Explores how role-based AI agents can debate and structure trading decisions.",
       action: "Open agent",
       icon: <Users className="h-5 w-5" />,
-      onClick: onOpenTradingAgentTool,
+      view: "trading-agent-dashboard",
     },
     {
       title: "SPX Recap",
@@ -95,7 +75,7 @@ export function WorkGallery({
         "Turns trading bot output into a readable audit trail for faster review loops.",
       action: "Open recap",
       icon: <BarChart3 className="h-5 w-5" />,
-      onClick: onOpenSPXRecap,
+      view: "spx-recap",
     },
     {
       title: "SPX GEX Heatmap",
@@ -106,7 +86,7 @@ export function WorkGallery({
         "Automates the Stocks Intelligence workflow into a date-selectable gamma map without storing raw HTML.",
       action: "Open heatmap",
       icon: <Waves className="h-5 w-5" />,
-      onClick: onOpenSPXGexHeatmap,
+      view: "spx-gex-heatmap",
     },
     {
       title: "Stocks Intelligence Watcher",
@@ -118,7 +98,7 @@ export function WorkGallery({
       action: "Open watcher",
       icon: <Activity className="h-5 w-5" />,
       featured: true,
-      onClick: onOpenStocksWatcher,
+      view: "stocks-intelligence-watcher",
     },
     {
       title: "Fixed Income",
@@ -129,7 +109,7 @@ export function WorkGallery({
         "Uses Treasury's published par yield curve directly, with explicit curve dates and basis-point changes.",
       action: "Open rates",
       icon: <Landmark className="h-5 w-5" />,
-      onClick: onOpenFixedIncome,
+      view: "fixed-income",
     },
     {
       title: "S&P 500 Market Breadth",
@@ -141,7 +121,7 @@ export function WorkGallery({
       action: "Open breadth",
       icon: <BarChart3 className="h-5 w-5" />,
       featured: true,
-      onClick: onOpenMarketBreadth,
+      view: "market-breadth",
     },
     {
       title: "SPY Sector Rotation",
@@ -153,7 +133,7 @@ export function WorkGallery({
       action: "Explore rotation",
       icon: <Activity className="h-5 w-5" />,
       featured: true,
-      onClick: onOpenSectorRotation,
+      view: "sector-rotation",
     },
     {
       title: "Portfolio vs SPY",
@@ -165,7 +145,7 @@ export function WorkGallery({
       action: "Run backtest",
       icon: <BarChart3 className="h-5 w-5" />,
       featured: true,
-      onClick: onOpenPortfolioBacktest,
+      view: "portfolio-backtest",
     },
     {
       title: "Image Caption",
@@ -257,15 +237,17 @@ export function WorkGallery({
                 <b>THE BUILD</b>
                 {item.buildNote}
               </p>
-              <button
-                type="button"
-                className="text-link"
-                onClick={item.onClick}
-                aria-label={item.action + ": " + item.title}
-              >
-                {item.action}
-                <ArrowUpRight size={18} />
-              </button>
+              {item.view ? (
+                <a className="text-link" href={getHashForView(item.view)} aria-label={item.action + ": " + item.title}>
+                  {item.action}
+                  <ArrowUpRight size={18} />
+                </a>
+              ) : (
+                <button type="button" className="text-link" onClick={item.onClick} aria-label={item.action + ": " + item.title}>
+                  {item.action}
+                  <ArrowUpRight size={18} />
+                </button>
+              )}
             </article>
           ))}
         </div>

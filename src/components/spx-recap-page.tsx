@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { parseJsonResponse } from "@/lib/safe-json-response";
 import {
   Bar,
   BarChart,
@@ -270,9 +271,7 @@ export function SPXRecapPage() {
       if (to) params.set("to", to);
       const query = params.toString() ? `?${params.toString()}` : "";
       const response = await fetch(`/api/spx-recap${query}`);
-      const payload = (await response.json()) as RecapData & { error?: string };
-
-      if (!response.ok) throw new Error(payload.error || "SPX recap API failed");
+      const payload = await parseJsonResponse<RecapData & { error?: string }>(response, `/api/spx-recap${query}`);
 
       setData(payload);
       setSelectedDate(payload.selectedDate || "");

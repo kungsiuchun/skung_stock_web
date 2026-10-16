@@ -166,6 +166,8 @@ required.
 
 US ETF Portfolio Backtester is a standalone Market Lab Work Item at `#/work/portfolio-backtest`.
 
+Its public share contract is a versioned hash link such as `#/work/portfolio-backtest?v=1&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:6000&asset=BND:4000`. Each `asset` value is a unique ETF ticker plus whole basis points. The complete setup must satisfy the same capital, date, policy, 1–10 position, uniqueness, and 10,000-basis-point validation as a submitted backtest; one invalid field rejects the entire shared setup. Links contain inputs only and never results, verification state, or provider payloads. Opening a link never starts an API request.
+
 It compares a visitor-defined USD allocation of one to ten US-listed ETFs with SPY through a read-only EOD historical simulation. The browser submits the configuration only; the Pages Function validates ETF eligibility, retrieves and normalizes history server-side, and returns a versioned result without raw provider payloads.
 
 Every portfolio must allocate exactly 10,000 whole basis points. SPY is the fixed benchmark. Rebalancing may be none, monthly, quarterly, or annual and always occurs on the last shared completed EOD session of that period.

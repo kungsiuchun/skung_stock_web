@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { ArrowDown, ArrowLeft, ArrowUp, ArrowUpDown, ExternalLink, RefreshCw, Search } from "lucide-react";
 import { SECTOR_ROTATION_WINDOWS, validateSectorRotationSnapshot, type RotationWindow, type SectorRotationHolding, type SectorRotationRow, type SectorRotationSnapshot } from "@/lib/sector-rotation";
 import type { BreadthCell, MarketBreadthFreshness } from "@/lib/market-breadth";
+import { getHashForView } from "@/lib/app-routes";
+import { parseJsonResponse } from "@/lib/safe-json-response";
 import "./sector-rotation-page.css";
 
 type ReadyPayload = SectorRotationSnapshot & { status: "READY"; freshness: MarketBreadthFreshness };
@@ -37,7 +39,7 @@ function parseReady(value: unknown): ReadyPayload {
   return { ...validateSectorRotationSnapshot(value), status: "READY", freshness };
 }
 
-export function SectorRotationPage({ onBackToWork }: { onBackToWork: () => void }) {
+export function SectorRotationPage() {
   const [data, setData] = useState<ReadyPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ title: string; message: string; code?: string } | null>(null);
@@ -56,8 +58,7 @@ export function SectorRotationPage({ onBackToWork }: { onBackToWork: () => void 
     setError(null);
     try {
       const response = await fetch("/api/sector-rotation", { headers: { Accept: "application/json" }, signal: controller.signal });
-      if (!(response.headers.get("content-type") || "").toLowerCase().includes("json")) throw new Error("The sector rotation service returned a non-JSON response.");
-      const payload: unknown = await response.json();
+      const payload = await parseJsonResponse<unknown>(response, "/api/sector-rotation", { allowHttpError: true });
       if (!response.ok) {
         const failure = payload && typeof payload === "object" ? payload as { status?: unknown; message?: unknown; errorCode?: unknown } : {};
         if (response.status === 404 && failure.status === "EMPTY") {
@@ -108,7 +109,7 @@ export function SectorRotationPage({ onBackToWork }: { onBackToWork: () => void 
   return <section className="sr-page" data-sector-rotation data-testid="rotation-page">
     <div className="sr-wrap">
       <header className="sr-header">
-        <button className="sr-back" type="button" onClick={onBackToWork}><ArrowLeft size={14} /> Market Lab</button>
+        <a className="sr-back" href={getHashForView("work-gallery")}><ArrowLeft size={14} /> Market Lab</a>
         <div className="sr-heading"><div><p className="sr-eyebrow">Market internals / L1 sectors</p><h1>SPY SECTOR ROTATION</h1><p className="sr-subtitle">Follow relative leadership. Inspect participation. Find the stocks supporting each sector.</p></div>
           <button className="sr-reload" type="button" onClick={() => void load()} disabled={loading} title="Reload the published EOD snapshot"><RefreshCw size={14} className={loading ? "sr-spin" : ""} /> Reload EOD</button>
         </div>

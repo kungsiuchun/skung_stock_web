@@ -109,6 +109,8 @@ export default function PhotographyPage() {
                 <img
                   src={photo.src}
                   alt={photoCaption(photo.alt)}
+                  width={photo.width}
+                  height={photo.height}
                   loading={index < 2 ? "eager" : "lazy"}
                   decoding="async"
                 />
@@ -163,6 +165,8 @@ export default function PhotographyPage() {
                 className="lightbox-photo"
                 src={selected.src}
                 alt={photoCaption(selected.alt)}
+                width={selected.width}
+                height={selected.height}
                 onError={() => setImageError(true)}
               />
             )}

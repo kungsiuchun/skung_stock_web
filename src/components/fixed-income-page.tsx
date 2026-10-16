@@ -11,10 +11,8 @@ import {
   YAxis,
 } from "recharts";
 import type { TreasuryCurveKey, TreasuryYieldCurveResponse } from "@/lib/treasury-yield-curve";
-
-interface FixedIncomePageProps {
-  onBackToWork: () => void;
-}
+import { getHashForView } from "@/lib/app-routes";
+import { parseJsonResponse } from "@/lib/safe-json-response";
 
 const curveStyles: Array<{ key: TreasuryCurveKey; color: string }> = [
   { key: "latest", color: "#b85c38" },
@@ -36,21 +34,7 @@ const changeClass = (value: number) => {
   return "text-[#565b61]";
 };
 
-const readPayload = async (response: Response, requestUrl: string) => {
-  const contentType = response.headers.get("content-type") || "";
-  const text = await response.text();
-  if (!contentType.toLowerCase().includes("application/json")) {
-    throw new Error(`Fixed Income API returned ${contentType || "unknown content type"} for ${requestUrl}.`);
-  }
-
-  try {
-    return JSON.parse(text) as TreasuryYieldCurveResponse & { error?: string };
-  } catch (error) {
-    throw new Error(`Fixed Income API returned invalid JSON for ${requestUrl}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-};
-
-export function FixedIncomePage({ onBackToWork }: FixedIncomePageProps) {
+export function FixedIncomePage() {
   const [data, setData] = useState<TreasuryYieldCurveResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -62,8 +46,7 @@ export function FixedIncomePage({ onBackToWork }: FixedIncomePageProps) {
 
     try {
       const response = await fetch(requestUrl, bypassCache ? { cache: "no-store" } : undefined);
-      const payload = await readPayload(response, requestUrl);
-      if (!response.ok) throw new Error(payload.error || `Fixed Income API failed with HTTP ${response.status}.`);
+      const payload = await parseJsonResponse<TreasuryYieldCurveResponse & { error?: string }>(response, requestUrl);
       setData(payload);
     } catch (requestError) {
       setData(null);
@@ -115,14 +98,13 @@ export function FixedIncomePage({ onBackToWork }: FixedIncomePageProps) {
       <div className="mx-auto w-full max-w-[1440px]">
         <header className="flex flex-col gap-5 border-b-2 border-[#252a30] pb-5 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <button
-              type="button"
-              onClick={onBackToWork}
+            <a
+              href={getHashForView("work-gallery")}
               className="mb-5 inline-flex items-center gap-2 text-[0.68rem] font-bold uppercase tracking-[0.16em] text-[#5a626b] transition-colors hover:text-[#b85c38] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#b85c38]"
             >
               <ArrowLeft className="h-3.5 w-3.5" />
               Market Lab
-            </button>
+            </a>
             <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
               <h1 className="text-2xl font-black tracking-[-0.06em] sm:text-3xl">U.S. TREASURIES</h1>
               <span className="text-xs font-bold tracking-[0.14em] text-[#69717b]">FIXED INCOME</span>

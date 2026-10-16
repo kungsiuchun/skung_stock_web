@@ -70,12 +70,19 @@ const backtestResult = (input) => ({
        return request.respond({ status: 200, contentType: "application/json", body: JSON.stringify({ data: backtestResult(input), cache: { status: "refreshed" }, requestId: "portfolio-uat" }) });
     });
 
+    await page.goto(`${baseUrl}/#/work/portfolio-backtest?v=1&capital=10000&start=2021-01-01&end=2026-08-21&rebalance=quarterly&dividend=reinvest&asset=VTI:6000&asset=BND:4000`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("form[name='portfolio-backtest']");
+    assert.equal(requestCount, 0, "opening a shared setup must not call the API");
+    assert.deepEqual(await page.$$eval("input[name$='-ticker']", (inputs) => inputs.map((input) => input.value)), ["VTI", "BND"]);
+    assert.deepEqual(await page.$$eval("input[name$='-weight']", (inputs) => inputs.map((input) => input.value)), ["60.00", "40.00"]);
+    assert.equal(await page.title(), "Portfolio vs SPY — Siu");
+
     await page.goto(`${baseUrl}/#/market-lab`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => document.body.innerText.includes("Portfolio vs SPY"));
     const clicked = await page.$$eval("article", (cards) => {
       const card = cards.find((candidate) => candidate.querySelector("h2")?.textContent?.trim() === "Portfolio vs SPY");
-      const action = card?.querySelector("button[aria-label='Run backtest: Portfolio vs SPY']");
-      if (!(action instanceof HTMLButtonElement)) return false;
+      const action = card?.querySelector("a[aria-label='Run backtest: Portfolio vs SPY']");
+      if (!(action instanceof HTMLAnchorElement)) return false;
       action.click();
       return true;
     });
@@ -84,8 +91,8 @@ const backtestResult = (input) => ({
     await page.waitForFunction(() => document.body.innerText.includes("PORTFOLIO VS SPY"));
     assert.match(await page.$eval("body", (body) => body.innerText), /PORTFOLIO VS SPY/);
 
-     const tickerInputs = await page.$$("input[aria-label='ETF ticker']");
-     const weightInputs = await page.$$("input[aria-label='ETF allocation percent']");
+     const tickerInputs = await page.$$("input[name$='-ticker']");
+     const weightInputs = await page.$$("input[name$='-weight']");
      await tickerInputs[0].type("vti");
      assert.equal(await tickerInputs[0].evaluate((input) => input.value), "VTI", "ticker input should normalize to uppercase");
     await weightInputs[0].type("60");
@@ -96,8 +103,8 @@ const backtestResult = (input) => ({
       return true;
     });
     assert.equal(addClicked, true);
-    const secondTicker = (await page.$$("input[aria-label='ETF ticker']"))[1];
-    const secondWeight = (await page.$$("input[aria-label='ETF allocation percent']"))[1];
+    const secondTicker = (await page.$$("input[name$='-ticker']"))[1];
+    const secondWeight = (await page.$$("input[name$='-weight']"))[1];
      await secondTicker.type("BND");
      await secondWeight.type("40");
      const verified = await page.$$eval("button", (buttons) => {
@@ -132,7 +139,7 @@ const backtestResult = (input) => ({
      apiMode = "success";
 
      const beforeInvalidRun = requestCount;
-     const firstWeight = (await page.$$("input[aria-label='ETF allocation percent']"))[0];
+     const firstWeight = (await page.$$("input[name$='-weight']"))[0];
      await firstWeight.click({ clickCount: 3 });
      await firstWeight.type("60.001");
      await page.$eval("button[type='submit']", (button) => button.click());
