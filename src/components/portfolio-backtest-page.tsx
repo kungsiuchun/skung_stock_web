@@ -89,8 +89,10 @@ export function PortfolioBacktestPage() {
         headers: { "content-type": "application/json", accept: "application/json" },
         body: JSON.stringify({ operation: "validate", tickers }),
       });
-      const payload = await parseJsonResponse<{ data?: { instruments?: TickerVerification[] }; error?: { message?: string } }>(response, "/api/portfolio-backtest");
-      if (!payload.data?.instruments) throw new Error(payload.error?.message || "ETF verification returned no instrument data.");
+      const payload = await parseJsonResponse<{ data?: { instruments?: TickerVerification[] }; error?: { message?: string } }>(response, "/api/portfolio-backtest", { allowHttpError: true });
+      if ((response.status !== 200 && response.status !== 206) || !payload.data?.instruments) {
+        throw new Error(payload.error?.message || `ETF verification failed with HTTP ${response.status}.`);
+      }
       setTickerVerification(payload.data.instruments);
     } catch (verificationError) {
       setError(verificationError instanceof Error ? verificationError.message : String(verificationError));
@@ -128,8 +130,10 @@ export function PortfolioBacktestPage() {
           dividendPolicy,
         }),
       });
-      const payload = await parseJsonResponse<BacktestResponse | { error?: { message?: string } }>(response, "/api/portfolio-backtest");
-      if (!("data" in payload)) throw new Error((payload as { error?: { message?: string } }).error?.message || "Backtest API returned no result data.");
+      const payload = await parseJsonResponse<BacktestResponse | { error?: { message?: string } }>(response, "/api/portfolio-backtest", { allowHttpError: true });
+      if ((response.status !== 200 && response.status !== 206) || !("data" in payload)) {
+        throw new Error((payload as { error?: { message?: string } }).error?.message || `Backtest API failed with HTTP ${response.status}.`);
+      }
       setResult(payload);
     } catch (runError) {
       setError(runError instanceof Error ? runError.message : String(runError));

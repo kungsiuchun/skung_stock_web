@@ -423,7 +423,10 @@ export function StocksIntelligenceWatcherPage() {
     const response = await fetch(`/api/stocks-intelligence-watcher?symbol=${encodeURIComponent(nextSymbol)}`, {
       signal: options.signal,
     });
-    const body = await parseJsonResponse<StocksWatcherSnapshot>(response, `/api/stocks-intelligence-watcher?symbol=${encodeURIComponent(nextSymbol)}`);
+    const body = await parseJsonResponse<StocksWatcherSnapshot & { error?: string }>(response, `/api/stocks-intelligence-watcher?symbol=${encodeURIComponent(nextSymbol)}`, { allowHttpError: true });
+    if ((response.status !== 200 && response.status !== 206) || !body.symbol || !body.quote) {
+      throw new Error(body.error || `Stocks Watcher request failed with HTTP ${response.status}.`);
+    }
     const fetchedAt = Date.now();
     snapshotCacheRef.current.set(body.symbol, { snapshot: body, fetchedAt });
     const customStock = getStocksWatcherCustomStockFromSnapshot(body, getStocksWatcherUniverseStock(body.symbol));
@@ -718,7 +721,7 @@ export function StocksIntelligenceWatcherPage() {
     setFearGreedState((current) => ({ ...current, loading: true, error: null }));
     try {
       const response = await fetch("/api/fear-greed", { headers: { Accept: "application/json" } });
-      const payload = await parseJsonResponse<{ data?: FearGreedSnapshot; cache?: MarketCacheMetadata; error?: string }>(response, "/api/fear-greed");
+      const payload = await parseJsonResponse<{ data?: FearGreedSnapshot; cache?: MarketCacheMetadata; error?: string }>(response, "/api/fear-greed", { allowHttpError: true });
       if ((response.status !== 200 && response.status !== 206) || !payload.data || !payload.cache) {
         throw new Error(payload.error || `Fear & Greed request failed with HTTP ${response.status}.`);
       }
@@ -3454,6 +3457,7 @@ export function StocksIntelligenceWatcherPage() {
                           event.stopPropagation();
                           removeSymbol(symbol);
                         }}
+                        onKeyDown={(event) => event.stopPropagation()}
                       >
                         <X className="h-3.5 w-3.5" />
                       </button>

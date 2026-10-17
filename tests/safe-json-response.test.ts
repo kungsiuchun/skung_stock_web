@@ -31,3 +31,15 @@ test("turns a JSON HTTP failure into a readable service error", async () => {
       && error.message.includes("Published snapshot is unavailable"),
   );
 });
+
+test("allows stale JSON only when the caller opts into HTTP error handling", async () => {
+  const response = new Response('{"data":{"stale":true}}', {
+    status: 206,
+    headers: { "content-type": "application/json" },
+  });
+  await assert.rejects(() => parseJsonResponse(response.clone(), "/api/example"), SafeJsonResponseError);
+  assert.deepEqual(
+    await parseJsonResponse<{ data: { stale: boolean } }>(response, "/api/example", { allowHttpError: true }),
+    { data: { stale: true } },
+  );
+});

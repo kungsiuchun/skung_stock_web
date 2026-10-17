@@ -37,3 +37,19 @@ test("rejects invalid shared setups as one unit", () => {
   for (const value of cases) assert.throws(() => decodePortfolioBacktestShareConfig(value));
   assert.equal(decodePortfolioBacktestShareConfig(`${route}-other?v=1&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:10000`), null);
 });
+
+test("requires both dates and canonicalizes ticker input before encoding", () => {
+  assert.throws(() => encodePortfolioBacktestShareConfig({ ...valid, startDate: "" }));
+  assert.throws(() => encodePortfolioBacktestShareConfig({ ...valid, endDate: "" }));
+  assert.throws(() => decodePortfolioBacktestShareConfig("#/work/portfolio-backtest?v=1&capital=10000&start=&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:10000"));
+  assert.equal(
+    encodePortfolioBacktestShareConfig({
+      ...valid,
+      positions: [
+        { ticker: " vti ", basisPoints: 6_000 },
+        { ticker: "bnd", basisPoints: 4_000 },
+      ],
+    }),
+    "#/work/portfolio-backtest?v=1&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=BND:4000&asset=VTI:6000",
+  );
+});

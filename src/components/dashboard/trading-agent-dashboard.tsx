@@ -415,8 +415,9 @@ export function TradingAgentDashboard() {
       setReportGeneratedAt(new Date().toLocaleString());
       setReportReady(true);
       setLogs((prev) => [...prev, `${data.agentLabel || profile.title} report generated.`]);
-    } catch (_err: any) {
-      setLogs((prev) => [...prev, "Terminal Error: Failed to connect to Analysis Agent"]);
+    } catch (error) {
+      const detail = error instanceof Error && error.message ? error.message : "Failed to connect to Analysis Agent.";
+      setLogs((prev) => [...prev, `Terminal Error: ${detail}`]);
     } finally {
       setIsRunning(false);
     }

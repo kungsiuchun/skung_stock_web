@@ -232,8 +232,8 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
         data?: FinanceDashboardSnapshotPayload;
         cache?: MarketCacheMetadata;
         error?: string;
-      }>(response, "/api/finance-dashboard/snapshot");
-      if (!payload.data || !payload.cache) throw new Error("分析快照回應格式無效。");
+      }>(response, "/api/finance-dashboard/snapshot", { allowHttpError: true });
+      if ((response.status !== 200 && response.status !== 206) || !payload.data || !payload.cache) throw new Error(payload.error || `分析快照請求失敗（HTTP ${response.status}）。`);
 
       setDashboardSnapshot((current) => applyDashboardSnapshot(
         current,

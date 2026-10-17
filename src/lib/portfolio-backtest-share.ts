@@ -18,17 +18,27 @@ export interface PortfolioBacktestShareConfigV1 {
 const ROUTE = "#/work/portfolio-backtest";
 const ALLOWED_KEYS = new Set(["v", "capital", "start", "end", "rebalance", "dividend", "asset"]);
 const SINGLE_VALUE_KEYS = ["v", "capital", "start", "end", "rebalance", "dividend"] as const;
+const compareTickers = (left: string, right: string) => left < right ? -1 : left > right ? 1 : 0;
 
 const validate = (config: PortfolioBacktestShareConfigV1): PortfolioBacktestShareConfigV1 => {
+  if (config.version !== 1) throw new Error("Unsupported shared backtest setup version.");
+  if (!config.startDate || !config.endDate) throw new Error("Shared backtest setup requires a complete date range.");
+  const normalized = {
+    ...config,
+    positions: config.positions.map((position) => ({
+      ...position,
+      ticker: position.ticker.trim().toUpperCase(),
+    })),
+  };
   validatePortfolioBacktestRequest({
-    startingCapital: config.startingCapital,
-    positions: config.positions,
-    requestedStart: config.startDate,
-    requestedEnd: config.endDate,
-    rebalancePolicy: config.rebalancePolicy,
-    dividendPolicy: config.dividendPolicy,
+    startingCapital: normalized.startingCapital,
+    positions: normalized.positions,
+    requestedStart: normalized.startDate,
+    requestedEnd: normalized.endDate,
+    rebalancePolicy: normalized.rebalancePolicy,
+    dividendPolicy: normalized.dividendPolicy,
   });
-  return config;
+  return { ...normalized, positions: [...normalized.positions].sort((left, right) => compareTickers(left.ticker, right.ticker)) };
 };
 
 export const decodePortfolioBacktestShareConfig = (hash: string): PortfolioBacktestShareConfigV1 | null => {
@@ -67,8 +77,6 @@ export const decodePortfolioBacktestShareConfig = (hash: string): PortfolioBackt
 
 export const encodePortfolioBacktestShareConfig = (input: PortfolioBacktestShareConfigV1): string => {
   const config = validate(input);
-  if (config.version !== 1) throw new Error("Unsupported shared backtest setup version.");
-
   const params = new URLSearchParams();
   params.set("v", "1");
   params.set("capital", String(config.startingCapital));
@@ -76,8 +84,8 @@ export const encodePortfolioBacktestShareConfig = (input: PortfolioBacktestShare
   params.set("end", config.endDate);
   params.set("rebalance", config.rebalancePolicy);
   params.set("dividend", config.dividendPolicy);
-  for (const position of [...config.positions].sort((left, right) => left.ticker.localeCompare(right.ticker))) {
-    params.append("asset", `${position.ticker.toUpperCase()}:${position.basisPoints}`);
+  for (const position of config.positions) {
+    params.append("asset", `${position.ticker}:${position.basisPoints}`);
   }
   return `${ROUTE}?${params.toString().replace(/%3A/g, ":")}`;
 };
