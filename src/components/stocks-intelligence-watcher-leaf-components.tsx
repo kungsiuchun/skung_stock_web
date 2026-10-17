@@ -96,7 +96,7 @@ export const ValuationRainbowChart = ({ valuation }: { valuation: WatcherValuati
 };
 
 export const ErrorBanner = ({ message, onRetry }: { message: string; onRetry?: () => void }) => (
-  <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-100">
+  <div role="alert" className="mb-3 flex items-center justify-between gap-3 rounded-md border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-100">
     <span>{message}</span>
     {onRetry && (
       <button type="button" onClick={onRetry} className="rounded border border-red-300/40 px-2 py-1 text-xs font-bold hover:bg-red-400/10">

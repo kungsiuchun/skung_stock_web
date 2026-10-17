@@ -1880,12 +1880,20 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       const selector = document.querySelector("select[name='watcher-section']");
       const tabs = document.querySelector(".siw-main-tabs");
       const controls = Array.from(document.querySelectorAll(".siw-search-row button, .siw-filter-row button, .siw-mobile-nav button"));
+      const interactive = Array.from(document.querySelectorAll(".siw-replica-shell button, .siw-replica-shell [role='button'], .siw-replica-shell select, .siw-replica-shell input:not([type='checkbox']):not([type='radio'])"))
+        .filter((node) => node.getClientRects().length > 0)
+        .filter((node) => {
+          const rect = node.getBoundingClientRect();
+          return rect.width < 44 || rect.height < 44;
+        })
+        .map((node) => ({ label: node.getAttribute("aria-label") || node.textContent?.trim().slice(0, 32) || node.tagName, width: node.getBoundingClientRect().width, height: node.getBoundingClientRect().height }));
       return {
         selectorVisible: Boolean(selector && selector.getClientRects().length),
         selectorHeight: selector?.getBoundingClientRect().height || 0,
         tabsVisible: Boolean(tabs && tabs.getClientRects().length),
         controlsMeetTouchTarget: controls.every((control) => control.getBoundingClientRect().height >= 44 && control.getBoundingClientRect().width >= 44),
         heroFavorite: measure(document.querySelector(".siw-logo-card button")),
+        undersized: interactive,
       };
     });
     assert.equal(mobileNavigation.selectorVisible, true, "mobile Watcher must expose the labelled section selector");
@@ -1893,6 +1901,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(mobileNavigation.tabsVisible, false, "wide section tabs must be hidden on mobile");
     assert.equal(mobileNavigation.controlsMeetTouchTarget, true, "high-frequency mobile Watcher controls must be at least 44px square");
     assert.ok(mobileNavigation.heroFavorite.width >= 44 && mobileNavigation.heroFavorite.height >= 44, "mobile hero favorite must be at least 44px square");
+    assert.deepEqual(mobileNavigation.undersized, [], `visible mobile controls must be at least 44px: ${JSON.stringify(mobileNavigation.undersized)}`);
     const watchlistScroll = await page.$eval(".siw-watchlist", (list) => {
       list.scrollLeft = 0;
       const maxScrollLeft = list.scrollWidth - list.clientWidth;
@@ -1925,6 +1934,14 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       return { width: rect.width, height: rect.height };
     });
     assert.ok(retryTouchTarget.width >= 44 && retryTouchTarget.height >= 44, "mobile settings Retry must be at least 44px square");
+    const settingsTouchTargetFailures = await page.$$eval(".siw-replica-shell button, .siw-replica-shell [role='button'], .siw-replica-shell select, .siw-replica-shell input:not([type='checkbox']):not([type='radio'])", (nodes) => nodes
+      .filter((node) => node.getClientRects().length > 0)
+      .filter((node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.width < 44 || rect.height < 44;
+      })
+      .map((node) => ({ label: node.getAttribute("aria-label") || node.textContent?.trim().slice(0, 32) || node.tagName, width: node.getBoundingClientRect().width, height: node.getBoundingClientRect().height })));
+    assert.deepEqual(settingsTouchTargetFailures, [], `visible mobile controls after opening settings must be at least 44px: ${JSON.stringify(settingsTouchTargetFailures)}`);
     assert.match(await page.$eval("[data-options-robinhood-provenance]", (node) => node.textContent || ""), /Robinhood MCP EOD/i, "mobile proof must use the Robinhood-backed NVDA snapshot");
     await page.screenshot({ path: path.join(screenshotsDir, "uat-mobile.png"), fullPage: true });
     await page.screenshot({ path: path.join(screenshotsDir, "08-responsive-mobile.png"), fullPage: true });
@@ -1934,8 +1951,16 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       const mobileOverflow = await page.evaluate(() => ({
         document: document.documentElement.scrollWidth - document.documentElement.clientWidth,
         root: document.querySelector("[data-watcher-replica]")?.scrollWidth - document.querySelector("[data-watcher-replica]")?.clientWidth,
+        touchTargets: Array.from(document.querySelectorAll(".siw-replica-shell button, .siw-replica-shell [role='button'], .siw-replica-shell select, .siw-replica-shell input:not([type='checkbox']):not([type='radio'])"))
+          .filter((node) => node.getClientRects().length > 0)
+          .filter((node) => {
+            const rect = node.getBoundingClientRect();
+            return rect.width < 44 || rect.height < 44;
+          })
+          .map((node) => ({ label: node.getAttribute("aria-label") || node.textContent?.trim().slice(0, 32) || node.tagName, width: node.getBoundingClientRect().width, height: node.getBoundingClientRect().height })),
       }));
       assert.ok(mobileOverflow.document <= 1 && mobileOverflow.root <= 1, `${topTab} mobile layout must not create horizontal page overflow; got ${JSON.stringify(mobileOverflow)}`);
+      assert.deepEqual(mobileOverflow.touchTargets, [], `${topTab} visible mobile controls must be at least 44px: ${JSON.stringify(mobileOverflow.touchTargets)}`);
     }
     await clickText(page, "Home");
     assert.match(await page.$eval(".siw-mobile-nav .is-active", (node) => node.textContent), /Home/);

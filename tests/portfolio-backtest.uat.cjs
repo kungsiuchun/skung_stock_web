@@ -77,6 +77,18 @@ const backtestResult = (input) => ({
     assert.deepEqual(await page.$$eval("input[name$='-weight']", (inputs) => inputs.map((input) => input.value)), ["60.00", "40.00"]);
     assert.equal(await page.title(), "Portfolio vs SPY — Siu");
 
+    await page.evaluate(() => {
+      window.location.hash = "#/work/portfolio-backtest?v=1&capital=20000&start=2022-01-01&end=2026-08-21&rebalance=monthly&dividend=cash&asset=VOO:7000&asset=VXUS:3000";
+    });
+    await page.waitForFunction(() => document.querySelector("input[name='capital']")?.value === "20000");
+    assert.deepEqual(await page.$$eval("input[name$='-ticker']", (inputs) => inputs.map((input) => input.value)), ["VOO", "VXUS"]);
+    assert.deepEqual(await page.$$eval("input[name$='-weight']", (inputs) => inputs.map((input) => input.value)), ["70.00", "30.00"]);
+    assert.equal(requestCount, 0, "changing a shared setup hash must not call the backtest API");
+    await page.evaluate(() => {
+      window.location.hash = "#/work/portfolio-backtest?v=1&capital=10000&start=2021-01-01&end=2026-08-21&rebalance=quarterly&dividend=reinvest&asset=VTI:6000&asset=BND:4000";
+    });
+    await page.waitForFunction(() => document.querySelector("input[name='capital']")?.value === "10000");
+
     await page.goto(`${baseUrl}/#/market-lab`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => document.body.innerText.includes("Portfolio vs SPY"));
     const clicked = await page.$$eval("article", (cards) => {
@@ -107,6 +119,35 @@ const backtestResult = (input) => ({
     const secondWeight = (await page.$$("input[name$='-weight']"))[1];
      await secondTicker.type("BND");
      await secondWeight.type("40");
+     const copySetupButtonText = () => page.$$eval("form[name='portfolio-backtest'] button", (buttons) => buttons.find((candidate) => (candidate.textContent || "").includes("setup link"))?.textContent?.trim() || "");
+     await page.evaluate(() => {
+       Object.defineProperty(navigator, "clipboard", {
+         configurable: true,
+         value: {
+           writeText: () => new Promise((resolve) => {
+             window.__shareCopyPending = true;
+             window.__resolveShareCopy = () => {
+               window.__shareCopyPending = false;
+               resolve();
+             };
+           }),
+         },
+       });
+     });
+     await page.$$eval("form[name='portfolio-backtest'] button", (buttons) => {
+       const button = buttons.find((candidate) => (candidate.textContent || "").includes("Copy setup link"));
+       if (!button) throw new Error("Missing Copy setup link button");
+       button.click();
+     });
+     await page.waitForFunction(() => window.__shareCopyPending === true);
+     await tickerInputs[0].click({ clickCount: 3 });
+     await tickerInputs[0].type("VOO");
+     await page.evaluate(() => window.__resolveShareCopy?.());
+     await wait(100);
+     assert.equal(await copySetupButtonText(), "Copy setup link", "an older clipboard result must not restore copied status after editing");
+     assert.equal(await page.$("input[name='share-url']"), null, "an older clipboard result must not restore the old manual URL");
+     await tickerInputs[0].click({ clickCount: 3 });
+     await tickerInputs[0].type("VTI");
      await page.evaluate(() => {
        Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => undefined } });
      });
@@ -118,7 +159,6 @@ const backtestResult = (input) => ({
      });
      await page.waitForFunction(() => document.body.innerText.includes("Setup link copied"));
      assert.equal(requestCount, setupRequestCount, "copying a setup link must not call the backtest API");
-     const copySetupButtonText = () => page.$$eval("form[name='portfolio-backtest'] button", (buttons) => buttons.find((candidate) => (candidate.textContent || "").includes("setup link"))?.textContent?.trim() || "");
      await tickerInputs[0].click({ clickCount: 3 });
      await tickerInputs[0].type("VOO");
      assert.equal(await copySetupButtonText(), "Copy setup link", "editing the setup must invalidate the copied status");

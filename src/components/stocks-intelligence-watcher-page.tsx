@@ -3308,6 +3308,7 @@ export function StocksIntelligenceWatcherPage() {
                     }}
                     name="stock-search"
                     autoComplete="off"
+                    aria-label="Search stocks"
                     placeholder="Search ticker or name…"
                   />
                 </label>
@@ -3325,7 +3326,7 @@ export function StocksIntelligenceWatcherPage() {
                   <RefreshCw className={watchlistRefreshing ? "animate-spin" : ""} />
                 </button>
               </div>
-              {searchError && <p className="siw-search-error">{searchError}</p>}
+              {searchError && <p className="siw-search-error" role="alert">{searchError}</p>}
               <span className="sr-only" role="status" aria-live="polite">{watchlistRefreshing ? "Refreshing watcher tickers" : loadingSymbol ? `Loading ${loadingSymbol}` : ""}</span>
 
               <div className={`siw-filter-row ${filtersOpen ? "is-open" : ""}`}>

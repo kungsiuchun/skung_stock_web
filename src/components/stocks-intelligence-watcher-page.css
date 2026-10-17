@@ -2995,18 +2995,6 @@
     color: var(--siw-text);
   }
 
-  .siw-load-button,
-  .siw-refresh-all-button,
-  .siw-filter-row button,
-  .siw-filter-state button,
-  .siw-watchlist-tabs button,
-  .siw-logo-card button,
-  .siw-settings-panel button,
-  .siw-mobile-nav button {
-    min-height: 44px;
-    min-width: 44px;
-  }
-
   .siw-main-scroll {
     overflow: visible;
     padding: var(--siw-space-3) var(--siw-space-5) 92px;
@@ -3143,5 +3131,17 @@
   .siw-mobile-nav button.is-active {
     color: var(--siw-blue);
     background: rgba(17, 135, 255, 0.12);
+  }
+
+  .siw-replica-shell button,
+  .siw-replica-shell [role="button"],
+  .siw-replica-shell .siw-chart-gex-list.is-axis-aligned .siw-chart-gex-row {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .siw-replica-shell select,
+  .siw-replica-shell input:not([type="checkbox"]):not([type="radio"]) {
+    min-height: 44px;
   }
 }

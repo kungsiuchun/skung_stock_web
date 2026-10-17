@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, BarChart3, Copy, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { PortfolioBacktestResult, PortfolioDividendPolicy, PortfolioRebalancePolicy } from "@/lib/portfolio-backtest";
@@ -30,14 +30,15 @@ const basisPointsFor = (value: string) => hasBasisPointPrecision(value) ? Number
 
 export function PortfolioBacktestPage() {
   const initialRange = useMemo(portfolioBacktestInitialRange, []);
+  const [routeHash, setRouteHash] = useState(() => typeof window === "undefined" ? "" : window.location.hash);
   const sharedSetup = useMemo(() => {
-    if (typeof window === "undefined") return { config: null, error: null };
+    if (!routeHash) return { config: null, error: null };
     try {
-      return { config: decodePortfolioBacktestShareConfig(window.location.hash), error: null };
+      return { config: decodePortfolioBacktestShareConfig(routeHash), error: null };
     } catch (shareError) {
       return { config: null, error: shareError instanceof Error ? shareError.message : String(shareError) };
     }
-  }, []);
+  }, [routeHash]);
   const [positions, setPositions] = useState<PositionDraft[]>(() => sharedSetup.config
     ? sharedSetup.config.positions.map((position, index) => ({ id: index + 1, ticker: position.ticker, weight: (position.basisPoints / 100).toFixed(2) }))
     : [{ id: 1, ticker: "", weight: "" }]);
@@ -53,8 +54,35 @@ export function PortfolioBacktestPage() {
   const [validatingTickers, setValidatingTickers] = useState(false);
   const [shareStatus, setShareStatus] = useState<"idle" | "copied" | "manual">("idle");
   const [manualShareUrl, setManualShareUrl] = useState<string | null>(null);
+  const shareGenerationRef = useRef(0);
+
+  useEffect(() => {
+    const syncRouteHash = () => {
+      shareGenerationRef.current += 1;
+      setRouteHash(window.location.hash);
+    };
+    window.addEventListener("hashchange", syncRouteHash);
+    return () => window.removeEventListener("hashchange", syncRouteHash);
+  }, []);
+
+  useEffect(() => {
+    setPositions(sharedSetup.config
+      ? sharedSetup.config.positions.map((position, index) => ({ id: index + 1, ticker: position.ticker, weight: (position.basisPoints / 100).toFixed(2) }))
+      : [{ id: 1, ticker: "", weight: "" }]);
+    setStartingCapital(String(sharedSetup.config?.startingCapital ?? 10000));
+    setStartDate(sharedSetup.config?.startDate ?? initialRange.start);
+    setEndDate(sharedSetup.config?.endDate ?? initialRange.end);
+    setRebalancePolicy(sharedSetup.config?.rebalancePolicy ?? "none");
+    setDividendPolicy(sharedSetup.config?.dividendPolicy ?? "reinvest");
+    setResult(null);
+    setError(null);
+    setTickerVerification(null);
+    setShareStatus("idle");
+    setManualShareUrl(null);
+  }, [initialRange, sharedSetup]);
 
   const invalidateShare = () => {
+    shareGenerationRef.current += 1;
     setShareStatus("idle");
     setManualShareUrl(null);
   };
@@ -151,6 +179,7 @@ export function PortfolioBacktestPage() {
   };
 
   const copySetupLink = async () => {
+    const shareGeneration = shareGenerationRef.current;
     setError(null);
     setManualShareUrl(null);
     try {
@@ -166,14 +195,17 @@ export function PortfolioBacktestPage() {
       const hash = encodePortfolioBacktestShareConfig(config);
       const url = `${window.location.origin}${window.location.pathname}${hash}`;
       if (!navigator.clipboard?.writeText) {
+        if (shareGenerationRef.current !== shareGeneration) return;
         setManualShareUrl(url);
         setShareStatus("manual");
         return;
       }
       try {
         await navigator.clipboard.writeText(url);
+        if (shareGenerationRef.current !== shareGeneration) return;
         setShareStatus("copied");
       } catch {
+        if (shareGenerationRef.current !== shareGeneration) return;
         setManualShareUrl(url);
         setShareStatus("manual");
       }
