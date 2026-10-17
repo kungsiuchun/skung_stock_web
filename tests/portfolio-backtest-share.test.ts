@@ -16,6 +16,8 @@ const valid: PortfolioBacktestShareConfigV1 = {
 };
 
 test("round trips a canonical v1 setup without results or provider state", () => {
+  const incoming = "#/work/portfolio-backtest?v=1&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:6000&asset=BND:4000";
+  assert.deepEqual(decodePortfolioBacktestShareConfig(incoming), valid, "opening a link should preserve its asset order");
   const encoded = encodePortfolioBacktestShareConfig(valid);
   assert.equal(encoded, "#/work/portfolio-backtest?v=1&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=BND:4000&asset=VTI:6000");
   assert.deepEqual(decodePortfolioBacktestShareConfig(encoded), { ...valid, positions: [valid.positions[1], valid.positions[0]] });

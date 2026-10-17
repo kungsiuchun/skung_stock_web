@@ -38,7 +38,7 @@ const validate = (config: PortfolioBacktestShareConfigV1): PortfolioBacktestShar
     rebalancePolicy: normalized.rebalancePolicy,
     dividendPolicy: normalized.dividendPolicy,
   });
-  return { ...normalized, positions: [...normalized.positions].sort((left, right) => compareTickers(left.ticker, right.ticker)) };
+  return normalized;
 };
 
 export const decodePortfolioBacktestShareConfig = (hash: string): PortfolioBacktestShareConfigV1 | null => {
@@ -84,7 +84,7 @@ export const encodePortfolioBacktestShareConfig = (input: PortfolioBacktestShare
   params.set("end", config.endDate);
   params.set("rebalance", config.rebalancePolicy);
   params.set("dividend", config.dividendPolicy);
-  for (const position of config.positions) {
+  for (const position of [...config.positions].sort((left, right) => compareTickers(left.ticker, right.ticker))) {
     params.append("asset", `${position.ticker}:${position.basisPoints}`);
   }
   return `${ROUTE}?${params.toString().replace(/%3A/g, ":")}`;

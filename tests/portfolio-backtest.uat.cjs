@@ -157,7 +157,18 @@ const backtestResult = (input) => ({
        if (!button) throw new Error("Missing Copy setup link button");
        button.click();
      });
-     await page.waitForFunction(() => document.body.innerText.includes("Setup link copied"));
+      try {
+        await page.waitForFunction(() => [...document.querySelectorAll("form[name='portfolio-backtest'] button")]
+          .some((candidate) => (candidate.textContent || "").trim() === "Setup link copied"));
+      } catch (copyError) {
+        const copyState = await page.evaluate(() => ({
+          buttonText: [...document.querySelectorAll("form[name='portfolio-backtest'] button")]
+            .find((candidate) => (candidate.textContent || "").toLowerCase().includes("setup link"))?.textContent?.trim() || "",
+          alertText: document.querySelector("[role='alert']")?.textContent?.trim() || "",
+          tickers: [...document.querySelectorAll("input[name$='-ticker']")].map((input) => input.value),
+        }));
+        throw new Error(`Copy setup link did not complete: ${JSON.stringify(copyState)}`, { cause: copyError });
+      }
      assert.equal(requestCount, setupRequestCount, "copying a setup link must not call the backtest API");
      await tickerInputs[0].click({ clickCount: 3 });
      await tickerInputs[0].type("VOO");

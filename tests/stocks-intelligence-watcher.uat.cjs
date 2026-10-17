@@ -1902,7 +1902,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(mobileNavigation.controlsMeetTouchTarget, true, "high-frequency mobile Watcher controls must be at least 44px square");
     assert.ok(mobileNavigation.heroFavorite.width >= 44 && mobileNavigation.heroFavorite.height >= 44, "mobile hero favorite must be at least 44px square");
     assert.deepEqual(mobileNavigation.undersized, [], `visible mobile controls must be at least 44px: ${JSON.stringify(mobileNavigation.undersized)}`);
-    const watchlistScroll = await page.$eval(".siw-watchlist", (list) => {
+    const mobileWatchlistScroll = await page.$eval(".siw-watchlist", (list) => {
       list.scrollLeft = 0;
       const maxScrollLeft = list.scrollWidth - list.clientWidth;
       list.scrollBy({ left: Math.min(160, maxScrollLeft), behavior: "auto" });
@@ -1914,10 +1914,10 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
         rowSnapAlign: getComputedStyle(list.querySelector(".siw-watch-row")).scrollSnapAlign,
       };
     });
-    assert.ok(watchlistScroll.maxScrollLeft > 0, `mobile watchlist must overflow horizontally: ${JSON.stringify(watchlistScroll)}`);
-    assert.ok(watchlistScroll.after > watchlistScroll.before, `mobile watchlist scrollLeft must change: ${JSON.stringify(watchlistScroll)}`);
-    assert.match(watchlistScroll.snapType, /x/i, "mobile watchlist must use horizontal scroll snapping");
-    assert.equal(watchlistScroll.rowSnapAlign, "start", "mobile watchlist cards must snap to the start");
+    assert.ok(mobileWatchlistScroll.maxScrollLeft > 0, `mobile watchlist must overflow horizontally: ${JSON.stringify(mobileWatchlistScroll)}`);
+    assert.ok(mobileWatchlistScroll.after > mobileWatchlistScroll.before, `mobile watchlist scrollLeft must change: ${JSON.stringify(mobileWatchlistScroll)}`);
+    assert.match(mobileWatchlistScroll.snapType, /x/i, "mobile watchlist must use horizontal scroll snapping");
+    assert.equal(mobileWatchlistScroll.rowSnapAlign, "start", "mobile watchlist cards must snap to the start");
     await page.click("button[aria-label='Toggle filters']");
     const resetTouchTarget = await page.$eval(".siw-filter-state button", (button) => {
       const rect = button.getBoundingClientRect();
