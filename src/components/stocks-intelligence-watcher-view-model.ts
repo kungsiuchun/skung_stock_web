@@ -6,10 +6,10 @@ import type { FearGreedSnapshot } from "@/lib/fear-greed";
 import type { MarketCacheMetadata } from "@/lib/market-data-cache";
 import type { WatcherFinancialQuarter, WatcherFinancialSource, WatcherFinancialStatements, WatcherValuationMetric } from "@/lib/stocks-watcher-valuation-data";
 
-type ToolStatus = "ok" | "failed" | "running";
-const CUSTOM_STOCKS_STORAGE_KEY = "stocks-intelligence-custom-stocks";
-const FAVORITES_MEMORY_KEY = "stocks-intelligence-favorites";
-const MARKET_INDEX_DEFINITIONS: MarketIndexDefinition[] = [
+export type ToolStatus = "ok" | "failed" | "running";
+export const CUSTOM_STOCKS_STORAGE_KEY = "stocks-intelligence-custom-stocks";
+export const FAVORITES_MEMORY_KEY = "stocks-intelligence-favorites";
+export const MARKET_INDEX_DEFINITIONS: MarketIndexDefinition[] = [
   { symbol: "SPX", yahooSymbol: "^GSPC", label: "S&P 500" },
   { symbol: "NDX", yahooSymbol: "^NDX", label: "NASDAQ 100" },
   { symbol: "DJI", yahooSymbol: "^DJI", label: "DOW JONES" },

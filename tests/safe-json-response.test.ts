@@ -32,14 +32,17 @@ test("turns a JSON HTTP failure into a readable service error", async () => {
   );
 });
 
-test("allows stale JSON only when the caller opts into HTTP error handling", async () => {
+test("accepts stale JSON 206 while rejecting actual HTTP failures", async () => {
   const response = new Response('{"data":{"stale":true}}', {
     status: 206,
     headers: { "content-type": "application/json" },
   });
-  await assert.rejects(() => parseJsonResponse(response.clone(), "/api/example"), SafeJsonResponseError);
+  await assert.rejects(() => parseJsonResponse(new Response('{"error":"unavailable"}', {
+    status: 503,
+    headers: { "content-type": "application/json" },
+  }), "/api/example"), SafeJsonResponseError);
   assert.deepEqual(
-    await parseJsonResponse<{ data: { stale: boolean } }>(response, "/api/example", { allowHttpError: true }),
+    await parseJsonResponse<{ data: { stale: boolean } }>(response, "/api/example"),
     { data: { stale: true } },
   );
 });

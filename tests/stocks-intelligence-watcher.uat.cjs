@@ -1870,21 +1870,61 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await page.waitForFunction(() => document.querySelector(".siw-hero-identity h1")?.textContent === "NVDA", { timeout: 5000 });
     await page.select("select[name='watcher-section']", "Options");
     await page.waitForSelector("[data-options-robinhood-provenance]", { timeout: 5000 });
+    await page.waitForSelector(".siw-watchlist .siw-watch-row", { timeout: 5000 });
     const mobileNavigation = await page.evaluate(() => {
+      const measure = (node) => {
+        if (!node) return { width: 0, height: 0 };
+        const rect = node.getBoundingClientRect();
+        return { width: rect.width, height: rect.height };
+      };
       const selector = document.querySelector("select[name='watcher-section']");
       const tabs = document.querySelector(".siw-main-tabs");
-      const controls = Array.from(document.querySelectorAll(".siw-search-row button, .siw-mobile-nav button"));
+      const controls = Array.from(document.querySelectorAll(".siw-search-row button, .siw-filter-row button, .siw-mobile-nav button"));
       return {
         selectorVisible: Boolean(selector && selector.getClientRects().length),
         selectorHeight: selector?.getBoundingClientRect().height || 0,
         tabsVisible: Boolean(tabs && tabs.getClientRects().length),
         controlsMeetTouchTarget: controls.every((control) => control.getBoundingClientRect().height >= 44 && control.getBoundingClientRect().width >= 44),
+        heroFavorite: measure(document.querySelector(".siw-logo-card button")),
       };
     });
     assert.equal(mobileNavigation.selectorVisible, true, "mobile Watcher must expose the labelled section selector");
     assert.ok(mobileNavigation.selectorHeight >= 44, "mobile section selector must meet the 44px touch target");
     assert.equal(mobileNavigation.tabsVisible, false, "wide section tabs must be hidden on mobile");
     assert.equal(mobileNavigation.controlsMeetTouchTarget, true, "high-frequency mobile Watcher controls must be at least 44px square");
+    assert.ok(mobileNavigation.heroFavorite.width >= 44 && mobileNavigation.heroFavorite.height >= 44, "mobile hero favorite must be at least 44px square");
+    const watchlistScroll = await page.$eval(".siw-watchlist", (list) => {
+      list.scrollLeft = 0;
+      const maxScrollLeft = list.scrollWidth - list.clientWidth;
+      list.scrollBy({ left: Math.min(160, maxScrollLeft), behavior: "auto" });
+      return {
+        before: 0,
+        after: list.scrollLeft,
+        maxScrollLeft,
+        snapType: getComputedStyle(list).scrollSnapType,
+        rowSnapAlign: getComputedStyle(list.querySelector(".siw-watch-row")).scrollSnapAlign,
+      };
+    });
+    assert.ok(watchlistScroll.maxScrollLeft > 0, `mobile watchlist must overflow horizontally: ${JSON.stringify(watchlistScroll)}`);
+    assert.ok(watchlistScroll.after > watchlistScroll.before, `mobile watchlist scrollLeft must change: ${JSON.stringify(watchlistScroll)}`);
+    assert.match(watchlistScroll.snapType, /x/i, "mobile watchlist must use horizontal scroll snapping");
+    assert.equal(watchlistScroll.rowSnapAlign, "start", "mobile watchlist cards must snap to the start");
+    await page.click("button[aria-label='Toggle filters']");
+    const resetTouchTarget = await page.$eval(".siw-filter-state button", (button) => {
+      const rect = button.getBoundingClientRect();
+      return { width: rect.width, height: rect.height };
+    });
+    assert.ok(resetTouchTarget.width >= 44 && resetTouchTarget.height >= 44, "mobile filter Reset must be at least 44px square");
+    await page.setViewport({ width: 1180, height: 820, deviceScaleFactor: 1 });
+    await wait(200);
+    await page.click("button[aria-label='Settings']");
+    await page.setViewport({ width: 390, height: 900, deviceScaleFactor: 1 });
+    await wait(200);
+    const retryTouchTarget = await page.$eval(".siw-settings-panel .siw-settings-head > button", (button) => {
+      const rect = button.getBoundingClientRect();
+      return { width: rect.width, height: rect.height };
+    });
+    assert.ok(retryTouchTarget.width >= 44 && retryTouchTarget.height >= 44, "mobile settings Retry must be at least 44px square");
     assert.match(await page.$eval("[data-options-robinhood-provenance]", (node) => node.textContent || ""), /Robinhood MCP EOD/i, "mobile proof must use the Robinhood-backed NVDA snapshot");
     await page.screenshot({ path: path.join(screenshotsDir, "uat-mobile.png"), fullPage: true });
     await page.screenshot({ path: path.join(screenshotsDir, "08-responsive-mobile.png"), fullPage: true });

@@ -2998,7 +2998,10 @@
   .siw-load-button,
   .siw-refresh-all-button,
   .siw-filter-row button,
+  .siw-filter-state button,
   .siw-watchlist-tabs button,
+  .siw-logo-card button,
+  .siw-settings-panel button,
   .siw-mobile-nav button {
     min-height: 44px;
     min-width: 44px;

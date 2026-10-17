@@ -75,8 +75,6 @@ import { parseJsonResponse } from "@/lib/safe-json-response";
 
 const HIDDEN_SYMBOLS_STORAGE_KEY = "stocks-intelligence-hidden-symbols";
 const FAVORITES_STORAGE_KEY = "stocks-intelligence-favorites";
-const FAVORITES_MEMORY_KEY = "stocks-intelligence-favorites";
-const CUSTOM_STOCKS_STORAGE_KEY = "stocks-intelligence-custom-stocks";
 const ROW_QUOTE_REFRESH_CHUNK_SIZE = 20;
 const VALUATION_METRICS: readonly WatcherValuationMetric[] = ["pe", "fcf", "ps"];
 
@@ -104,15 +102,8 @@ const OPTIONS_SUB_TABS = [
 const BASE_SECTOR_OPTIONS = ["All Sectors"];
 const BASE_TYPE_OPTIONS = ["All Types"];
 
-const MARKET_INDEX_DEFINITIONS: MarketIndexDefinition[] = [
-  { symbol: "SPX", yahooSymbol: "^GSPC", label: "S&P 500" },
-  { symbol: "NDX", yahooSymbol: "^NDX", label: "NASDAQ 100" },
-  { symbol: "DJI", yahooSymbol: "^DJI", label: "DOW JONES" },
-];
-
 type TopTab = (typeof TOP_TABS)[number];
 type OptionsSubTab = (typeof OPTIONS_SUB_TABS)[number];
-type ToolStatus = "ok" | "failed" | "running";
 
 const TOP_TAB_ICONS: Record<TopTab, typeof Sparkles> = {
   Overview: Sparkles,
@@ -129,6 +120,7 @@ const TOP_TAB_ICONS: Record<TopTab, typeof Sparkles> = {
 import {
   NativeToolResult,
   ToolRunLogEntry,
+  ToolStatus,
   TabCacheEntry,
   AsyncPanelState,
   FearGreedPanelState,
@@ -137,6 +129,9 @@ import {
   YahooExpiryPreloadState,
   StrikeDrawerState,
   ModalState,
+  CUSTOM_STOCKS_STORAGE_KEY,
+  FAVORITES_MEMORY_KEY,
+  MARKET_INDEX_DEFINITIONS,
   MarketIndexDefinition,
   MarketContextState,
   RawOptionLeg,

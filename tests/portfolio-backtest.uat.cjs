@@ -107,7 +107,25 @@ const backtestResult = (input) => ({
     const secondWeight = (await page.$$("input[name$='-weight']"))[1];
      await secondTicker.type("BND");
      await secondWeight.type("40");
-     const verified = await page.$$eval("button", (buttons) => {
+     await page.evaluate(() => {
+       Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => undefined } });
+     });
+     const setupRequestCount = requestCount;
+     await page.$$eval("form[name='portfolio-backtest'] button", (buttons) => {
+       const button = buttons.find((candidate) => (candidate.textContent || "").includes("Copy setup link"));
+       if (!button) throw new Error("Missing Copy setup link button");
+       button.click();
+     });
+     await page.waitForFunction(() => document.body.innerText.includes("Setup link copied"));
+     assert.equal(requestCount, setupRequestCount, "copying a setup link must not call the backtest API");
+     const copySetupButtonText = () => page.$$eval("form[name='portfolio-backtest'] button", (buttons) => buttons.find((candidate) => (candidate.textContent || "").includes("setup link"))?.textContent?.trim() || "");
+     await tickerInputs[0].click({ clickCount: 3 });
+     await tickerInputs[0].type("VOO");
+     assert.equal(await copySetupButtonText(), "Copy setup link", "editing the setup must invalidate the copied status");
+     assert.equal(await page.$("input[name='share-url']"), null, "editing the setup must clear the old manual URL");
+     await tickerInputs[0].click({ clickCount: 3 });
+     await tickerInputs[0].type("VTI");
+      const verified = await page.$$eval("button", (buttons) => {
        const button = buttons.find((candidate) => (candidate.textContent || "").includes("Verify ETF tickers"));
        if (!button) return false;
        button.click();
