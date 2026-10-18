@@ -265,19 +265,37 @@ const fearGreedFixture = () => ({
   cache: { status: "refreshed", dataset: "news", cachedAt: "2026-09-09T20:00:00.000Z", expiresAt: "2026-09-09T20:15:00.000Z", ageSeconds: 0, ttlMs: 900000, ageRatio: 0, guard: "fresh", rowRead: true, rowWritten: true },
 });
 
-const treasuryYieldCurveFixture = () => ({
-  asOfDate: "2026-09-08",
-  sourceUrl: "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/all/all?_format=csv&page=&type=daily_treasury_yield_curve",
-  curves: [
-    { key: "latest", label: "Latest published", date: "2026-09-08", points: [{ maturity: "1M", label: "1M", years: 1 / 12, yield: 4.2 }, { maturity: "2Y", label: "2Y", years: 2, yield: 3.9 }, { maturity: "10Y", label: "10Y", years: 10, yield: 4.1 }, { maturity: "30Y", label: "30Y", years: 30, yield: 4.5 }] },
-    { key: "oneWeek", label: "1 week ago", date: "2026-09-01", points: [{ maturity: "1M", label: "1M", years: 1 / 12, yield: 4.18 }, { maturity: "2Y", label: "2Y", years: 2, yield: 3.86 }, { maturity: "10Y", label: "10Y", years: 10, yield: 4.05 }, { maturity: "30Y", label: "30Y", years: 30, yield: 4.46 }] },
-    { key: "oneMonth", label: "1 month ago", date: "2026-08-08", points: [{ maturity: "1M", label: "1M", years: 1 / 12, yield: 4.11 }, { maturity: "2Y", label: "2Y", years: 2, yield: 3.8 }, { maturity: "10Y", label: "10Y", years: 10, yield: 4.02 }, { maturity: "30Y", label: "30Y", years: 30, yield: 4.43 }] },
-    { key: "startOfYear", label: "Start of year", date: "2026-01-02", points: [{ maturity: "1M", label: "1M", years: 1 / 12, yield: 4.3 }, { maturity: "2Y", label: "2Y", years: 2, yield: 4.02 }, { maturity: "10Y", label: "10Y", years: 10, yield: 4.2 }, { maturity: "30Y", label: "30Y", years: 30, yield: 4.62 }] },
-  ],
-  yieldRows: [{ maturity: "1M", yield: 4.2, oneDayBps: 2.1, oneWeekBps: 2, oneMonthBps: 9, yearToDateBps: -10 }, { maturity: "2Y", yield: 3.9, oneDayBps: 1.5, oneWeekBps: 4, oneMonthBps: 10, yearToDateBps: -12 }, { maturity: "10Y", yield: 4.1, oneDayBps: 2.5, oneWeekBps: 5, oneMonthBps: 8, yearToDateBps: -10 }, { maturity: "30Y", yield: 4.5, oneDayBps: 4, oneWeekBps: 4, oneMonthBps: 7, yearToDateBps: -12 }],
-  spreadRows: [{ label: "10Y - 2Y", valueBps: 20, oneDayBps: 1, oneWeekBps: 1, oneMonthBps: -2, yearToDateBps: 2 }],
-  source: { provider: "U.S. Department of the Treasury", label: "Daily Treasury Par Yield Curve Rates", url: "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/all/all?_format=csv&page=&type=daily_treasury_yield_curve", fetchedAt: "2026-09-09T20:00:00.000Z" },
-});
+const treasuryMaturities = [
+  ["1M", 1 / 12], ["1.5M", 1.5 / 12], ["2M", 2 / 12], ["3M", 3 / 12],
+  ["4M", 4 / 12], ["6M", 6 / 12], ["1Y", 1], ["2Y", 2], ["3Y", 3],
+  ["5Y", 5], ["7Y", 7], ["10Y", 10], ["20Y", 20], ["30Y", 30],
+];
+const treasuryCurvePoints = (values) => treasuryMaturities.map(([maturity, years], index) => ({
+  maturity,
+  label: maturity,
+  years,
+  yield: values[index],
+}));
+const treasuryYieldCurveFixture = () => {
+  const curveContracts = [
+    ["latest", "Latest published", "2026-09-08", [4.2, 4.17, 4.15, 4.1, 4.08, 4.05, 4.02, 3.9, 3.95, 4.0, 4.05, 4.1, 4.25, 4.5]],
+    ["oneWeek", "1 week ago", "2026-09-01", [4.18, 4.15, 4.13, 4.08, 4.06, 4.03, 4.0, 3.86, 3.91, 3.96, 4.01, 4.05, 4.2, 4.46]],
+    ["oneMonth", "1 month ago", "2026-08-08", [4.11, 4.08, 4.06, 4.01, 3.99, 3.96, 3.93, 3.8, 3.85, 3.92, 3.97, 4.02, 4.17, 4.43]],
+    ["startOfYear", "Start of year", "2026-01-02", [4.3, 4.27, 4.25, 4.2, 4.18, 4.15, 4.12, 4.02, 4.07, 4.12, 4.17, 4.2, 4.37, 4.62]],
+  ];
+  const latestValues = curveContracts[0][3];
+  return {
+    asOfDate: "2026-09-08",
+    sourceUrl: "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/all/all?_format=csv&page=&type=daily_treasury_yield_curve",
+    curves: curveContracts.map(([key, label, date, values]) => ({ key, label, date, points: treasuryCurvePoints(values) })),
+    yieldRows: treasuryMaturities.map(([maturity], index) => ({ maturity, yield: latestValues[index], oneDayBps: 1 + index / 10, oneWeekBps: 2 + index / 10, oneMonthBps: 3 + index / 10, yearToDateBps: -4 + index / 10 })),
+    spreadRows: [
+      { label: "10Y - 2Y", valueBps: 20, oneDayBps: 1, oneWeekBps: 1, oneMonthBps: -2, yearToDateBps: 2 },
+      { label: "10Y - 3M", valueBps: 0, oneDayBps: 2, oneWeekBps: 2, oneMonthBps: -1, yearToDateBps: 3 },
+    ],
+    source: { provider: "U.S. Department of the Treasury", label: "Daily Treasury Par Yield Curve Rates", url: "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/all/all?_format=csv&page=&type=daily_treasury_yield_curve", fetchedAt: "2026-09-09T20:00:00.000Z" },
+  };
+};
 
 const fomcRateProbabilityFixture = () => ({
   meeting: {
@@ -334,9 +352,9 @@ const macroFixture = () => {
       generatedAt: "2026-09-10T20:00:00.000Z", asOf: "2026-09-09",
       markets: { asOf: "2026-09-09", rows: marketRows },
       inflation: { asOf: "2026-07-01", months, rows: inflationRows },
-      source: { provider: "Federal Reserve Economic Data (FRED)", url: "https://fred.stlouisfed.org/", termsUrl: "https://fred.stlouisfed.org/docs/api/terms_of_use.html", series: [], note: "Daily EIA/Federal Reserve and monthly IMF/BEA/Dallas Fed series retrieved through FRED. Values may be revised." },
+      source: { provider: "Federal Reserve Economic Data (FRED)", url: "https://fred.stlouisfed.org/", termsUrl: "https://fred.stlouisfed.org/docs/api/terms_of_use.html", series: ["DCOILWTICO", "DCOILBRENTEU", "DHHNGSP", "PCOPPUSDM", "PURANUSDM", "DTWEXBGS", "PALLFNFINDEXM", "PNRGINDEXM", "PMETAINDEXM", "PCEPI", "PCEPILFE", "PCETRIM1M158SFRBDAL", "PCETRIM6M680SFRBDAL", "PCETRIM12M159SFRBDAL", "PI", "PCE"].map((id) => ({ id, url: `https://fred.stlouisfed.org/series/${id}` })), note: "Daily EIA/Federal Reserve and monthly IMF/BEA/Dallas Fed series retrieved through FRED. Values may be revised." },
     },
-    cache: { status: "refreshed", dataset: "history", cachedAt: "2026-09-10T20:00:00.000Z", expiresAt: "2026-09-10T21:00:00.000Z", ageSeconds: 0, ttlMs: 3600000, ageRatio: 0, guard: "fresh", rowRead: true, rowWritten: true },
+    cache: { status: "refreshed", dataset: "history", cachedAt: "2026-09-10T20:00:00.000Z", expiresAt: "2026-09-10T21:00:00.000Z", ageSeconds: 0, ttlMs: 3600000, ageRatio: 0, guard: "fresh", rowRead: true, rowWritten: true, observability: { rowRead: "hit", rowWritten: "written" }, rowsRead: 1, rowsWritten: 1, sourceAsOf: "2026-09-09" },
   };
 };
 
@@ -742,8 +760,13 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
           await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
           return;
         }
+        if (macroApiMode === "INVALID_CACHE") {
+          payload.cache = { status: "stale" };
+          await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
+          return;
+        }
         if (macroApiMode === "STALE") {
-          payload.cache = { ...payload.cache, status: "stale", refreshError: "FRED refresh timed out." };
+          payload.cache = { ...payload.cache, status: "stale", guard: "stale", refreshError: "FRED refresh timed out." };
         }
         await request.respond({ status: macroApiMode === "STALE" ? 206 : 200, contentType: "application/json", body: JSON.stringify(payload) });
         return;
@@ -1497,6 +1520,20 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     }));
     assert.match(invalidMacroProof.panel, /Macro source unavailable[\s\S]*invalid data/i);
     assert.equal(invalidMacroProof.watcherVisible, true, "invalid Macro data must stay inside the retryable panel");
+    macroApiMode = "FRESH";
+    await page.click("[data-macro-panel] .siw-macro-error button");
+    await page.waitForSelector("[data-macro-panel] [data-macro-markets]");
+
+    macroApiMode = "INVALID_CACHE";
+    await clickText(page, "News", true);
+    await clickText(page, "Macro", true);
+    await page.waitForSelector("[data-macro-panel] .siw-macro-error");
+    const invalidMacroCacheProof = await page.evaluate(() => ({
+      panel: document.querySelector("[data-macro-panel]")?.textContent || "",
+      watcherVisible: document.querySelector("[data-watcher-replica]") !== null,
+    }));
+    assert.match(invalidMacroCacheProof.panel, /Macro source unavailable[\s\S]*invalid data[\s\S]*cache\.cachedAt/i);
+    assert.equal(invalidMacroCacheProof.watcherVisible, true, "invalid Macro cache must stay inside the retryable panel");
     macroApiMode = "FRESH";
     await page.click("[data-macro-panel] .siw-macro-error button");
     await page.waitForSelector("[data-macro-panel] [data-macro-markets]");
