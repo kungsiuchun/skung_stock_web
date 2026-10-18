@@ -15,13 +15,29 @@ const fetchResponse = (factory: () => Response): typeof fetch =>
 const macroData: StocksWatcherMacroSnapshot = {
   generatedAt: "2026-10-18T00:00:00.000Z",
   asOf: "2026-10-17",
-  markets: { asOf: "2026-10-17", rows: [] },
-  inflation: { asOf: "2026-09-01", months: [], rows: [] },
+  markets: {
+    asOf: "2026-10-17",
+    rows: [{
+      id: "wti",
+      label: "WTI Crude Oil",
+      seriesId: "DCOILWTICO",
+      frequency: "daily",
+      unit: "USD / bbl",
+      value: 91.4,
+      asOf: "2026-10-17",
+      changes: { oneDay: 0.4, oneWeek: null, oneMonth: 1.2, threeMonth: null, yearToDate: 8.2 },
+    }],
+  },
+  inflation: {
+    asOf: "2026-09-01",
+    months: ["2026-09"],
+    rows: [{ id: "headline-pce", label: "Headline PCE", unit: "YoY %", seriesIds: ["PCEPI"], values: [2.7] }],
+  },
   source: {
     provider: "Federal Reserve Economic Data (FRED)",
     url: "https://fred.stlouisfed.org/",
     termsUrl: "https://fred.stlouisfed.org/docs/api/terms_of_use.html",
-    series: [],
+    series: [{ id: "PCEPI", url: "https://fred.stlouisfed.org/series/PCEPI" }],
     note: "Official FRED data.",
   },
 };
@@ -29,9 +45,9 @@ const macroData: StocksWatcherMacroSnapshot = {
 const treasuryData: TreasuryYieldCurveResponse = {
   asOfDate: "2026-10-17",
   sourceUrl: "https://home.treasury.gov/",
-  curves: [],
-  yieldRows: [],
-  spreadRows: [],
+  curves: [{ key: "latest", label: "Latest published", date: "2026-10-17", points: [{ maturity: "2Y", label: "2Y", years: 2, yield: 3.9 }] }],
+  yieldRows: [{ maturity: "2Y", yield: 3.9, oneDayBps: 1.5, oneWeekBps: 4, oneMonthBps: 10, yearToDateBps: -12 }],
+  spreadRows: [{ label: "10Y - 2Y", valueBps: 20, oneDayBps: 1, oneWeekBps: 1, oneMonthBps: -2, yearToDateBps: 2 }],
   source: {
     provider: "U.S. Department of the Treasury",
     label: "Daily Treasury Par Yield Curve Rates",
@@ -48,9 +64,13 @@ const fomcData: FomcRateProbabilityResponse = {
     closesAt: "2026-10-28T18:00:00.000Z",
     observedAt: "2026-10-18T00:00:00.000Z",
     rawProbabilityTotal: 1,
-    outcomes: [],
-    noHikeProbability: 0,
-    volume: 0,
+    outcomes: [
+      { key: "cut", label: "Cut", probability: 10 },
+      { key: "hold", label: "Hold", probability: 60 },
+      { key: "hike", label: "Hike", probability: 30 },
+    ],
+    noHikeProbability: 70,
+    volume: 12345,
   },
   source: {
     provider: "Polymarket",
@@ -73,6 +93,14 @@ test("Macro loader preserves valid and stale responses while rejecting invalid p
     /Macro API response did not include data/,
   );
   await assert.rejects(
+    () => loadStocksWatcherMacro(fetchResponse(() => response(JSON.stringify({ data: { ...macroData, markets: {} } })))),
+    /Macro API returned invalid data: data\.markets\.asOf/,
+  );
+  await assert.rejects(
+    () => loadStocksWatcherMacro(fetchResponse(() => response(JSON.stringify({ data: { ...macroData, asOf: "2026-02-30" } })))),
+    /Macro API returned invalid data: data\.asOf/,
+  );
+  await assert.rejects(
     () => loadStocksWatcherMacro(fetchResponse(() => response(""))),
     (error: unknown) => error instanceof SafeJsonResponseError && error.message.includes("empty response"),
   );
@@ -91,11 +119,35 @@ test("Fixed Income loaders preserve valid, stale, and HTTP error behavior", asyn
   assert.equal(treasury.asOfDate, treasuryData.asOfDate);
   const staleTreasury = await loadStocksWatcherTreasury(fetchResponse(() => response(JSON.stringify(treasuryData), 206)));
   assert.equal(staleTreasury.source.fetchedAt, treasuryData.source.fetchedAt);
+  await assert.rejects(
+    () => loadStocksWatcherTreasury(fetchResponse(() => response("{}"))),
+    /Fixed Income API returned invalid data: asOfDate/,
+  );
+  await assert.rejects(
+    () => loadStocksWatcherTreasury(fetchResponse(() => response(JSON.stringify({ ...treasuryData, curves: [{ ...treasuryData.curves[0], date: "2026-02-30" }] })))),
+    /Fixed Income API returned invalid data: curves\[0\]\.date/,
+  );
+  await assert.rejects(
+    () => loadStocksWatcherTreasury(fetchResponse(() => response(JSON.stringify({ ...treasuryData, yieldRows: [{ ...treasuryData.yieldRows[0], yield: "not-a-number" }] })))),
+    /Fixed Income API returned invalid data: yieldRows\[0\]\.yield/,
+  );
 
   const fomc = await loadStocksWatcherFomc(fetchResponse(() => response(JSON.stringify(fomcData))));
   assert.equal(fomc.meeting.eventSlug, fomcData.meeting.eventSlug);
   const staleFomc = await loadStocksWatcherFomc(fetchResponse(() => response(JSON.stringify(fomcData), 206)));
   assert.equal(staleFomc.source.fetchedAt, fomcData.source.fetchedAt);
+  await assert.rejects(
+    () => loadStocksWatcherFomc(fetchResponse(() => response("{}"))),
+    /FOMC probability API returned invalid data: meeting/,
+  );
+  await assert.rejects(
+    () => loadStocksWatcherFomc(fetchResponse(() => response(JSON.stringify({ ...fomcData, meeting: { ...fomcData.meeting, observedAt: "not-a-date" } })))),
+    /FOMC probability API returned invalid data: meeting\.observedAt/,
+  );
+  await assert.rejects(
+    () => loadStocksWatcherFomc(fetchResponse(() => response(JSON.stringify({ ...fomcData, meeting: { ...fomcData.meeting, outcomes: [{ key: "hold", label: "Hold", probability: 60 }] } })))),
+    /FOMC probability API returned invalid data: meeting\.outcomes/,
+  );
 
   for (const load of [loadStocksWatcherTreasury, loadStocksWatcherFomc]) {
     await assert.rejects(

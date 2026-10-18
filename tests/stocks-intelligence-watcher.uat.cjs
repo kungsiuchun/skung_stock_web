@@ -269,10 +269,10 @@ const treasuryYieldCurveFixture = () => ({
   asOfDate: "2026-09-08",
   sourceUrl: "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/all/all?_format=csv&page=&type=daily_treasury_yield_curve",
   curves: [
-    { key: "latest", label: "Latest published", date: "2026-09-08", points: [{ label: "1M", years: 1 / 12, yield: 4.2 }, { label: "2Y", years: 2, yield: 3.9 }, { label: "10Y", years: 10, yield: 4.1 }, { label: "30Y", years: 30, yield: 4.5 }] },
-    { key: "oneWeek", label: "1 week ago", date: "2026-09-01", points: [{ label: "1M", years: 1 / 12, yield: 4.18 }, { label: "2Y", years: 2, yield: 3.86 }, { label: "10Y", years: 10, yield: 4.05 }, { label: "30Y", years: 30, yield: 4.46 }] },
-    { key: "oneMonth", label: "1 month ago", date: "2026-08-08", points: [{ label: "1M", years: 1 / 12, yield: 4.11 }, { label: "2Y", years: 2, yield: 3.8 }, { label: "10Y", years: 10, yield: 4.02 }, { label: "30Y", years: 30, yield: 4.43 }] },
-    { key: "startOfYear", label: "Start of year", date: "2026-01-02", points: [{ label: "1M", years: 1 / 12, yield: 4.3 }, { label: "2Y", years: 2, yield: 4.02 }, { label: "10Y", years: 10, yield: 4.2 }, { label: "30Y", years: 30, yield: 4.62 }] },
+    { key: "latest", label: "Latest published", date: "2026-09-08", points: [{ maturity: "1M", label: "1M", years: 1 / 12, yield: 4.2 }, { maturity: "2Y", label: "2Y", years: 2, yield: 3.9 }, { maturity: "10Y", label: "10Y", years: 10, yield: 4.1 }, { maturity: "30Y", label: "30Y", years: 30, yield: 4.5 }] },
+    { key: "oneWeek", label: "1 week ago", date: "2026-09-01", points: [{ maturity: "1M", label: "1M", years: 1 / 12, yield: 4.18 }, { maturity: "2Y", label: "2Y", years: 2, yield: 3.86 }, { maturity: "10Y", label: "10Y", years: 10, yield: 4.05 }, { maturity: "30Y", label: "30Y", years: 30, yield: 4.46 }] },
+    { key: "oneMonth", label: "1 month ago", date: "2026-08-08", points: [{ maturity: "1M", label: "1M", years: 1 / 12, yield: 4.11 }, { maturity: "2Y", label: "2Y", years: 2, yield: 3.8 }, { maturity: "10Y", label: "10Y", years: 10, yield: 4.02 }, { maturity: "30Y", label: "30Y", years: 30, yield: 4.43 }] },
+    { key: "startOfYear", label: "Start of year", date: "2026-01-02", points: [{ maturity: "1M", label: "1M", years: 1 / 12, yield: 4.3 }, { maturity: "2Y", label: "2Y", years: 2, yield: 4.02 }, { maturity: "10Y", label: "10Y", years: 10, yield: 4.2 }, { maturity: "30Y", label: "30Y", years: 30, yield: 4.62 }] },
   ],
   yieldRows: [{ maturity: "1M", yield: 4.2, oneDayBps: 2.1, oneWeekBps: 2, oneMonthBps: 9, yearToDateBps: -10 }, { maturity: "2Y", yield: 3.9, oneDayBps: 1.5, oneWeekBps: 4, oneMonthBps: 10, yearToDateBps: -12 }, { maturity: "10Y", yield: 4.1, oneDayBps: 2.5, oneWeekBps: 5, oneMonthBps: 8, yearToDateBps: -10 }, { maturity: "30Y", yield: 4.5, oneDayBps: 4, oneWeekBps: 4, oneMonthBps: 7, yearToDateBps: -12 }],
   spreadRows: [{ label: "10Y - 2Y", valueBps: 20, oneDayBps: 1, oneWeekBps: 1, oneMonthBps: -2, yearToDateBps: 2 }],
@@ -398,6 +398,8 @@ let refreshAllMode = false;
 let delayedSnapshotSymbol = null;
 let marketBreadthApiMode = "READY";
 let macroApiMode = "FRESH";
+let treasuryApiMode = "FRESH";
+let fomcApiMode = "FRESH";
 
 const buildToolResponse = (tool, params = {}) => {
   if (tool === "get_watchlist") {
@@ -711,12 +713,20 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
         return;
       }
       if (url.pathname.includes("/api/treasury-yield-curve")) {
-        apiCalls.push({ method: "GET", endpoint: "treasury-yield-curve" });
+        apiCalls.push({ method: "GET", endpoint: "treasury-yield-curve", mode: treasuryApiMode });
+        if (treasuryApiMode === "INVALID") {
+          await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify({}) });
+          return;
+        }
         await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(treasuryYieldCurveFixture()) });
         return;
       }
       if (url.pathname.includes("/api/fomc-rate-probability")) {
-        apiCalls.push({ method: "GET", endpoint: "fomc-rate-probability" });
+        apiCalls.push({ method: "GET", endpoint: "fomc-rate-probability", mode: fomcApiMode });
+        if (fomcApiMode === "INVALID") {
+          await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify({}) });
+          return;
+        }
         await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(fomcRateProbabilityFixture()) });
         return;
       }
@@ -727,6 +737,11 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
           return;
         }
         const payload = macroFixture();
+        if (macroApiMode === "INVALID") {
+          payload.data.markets = {};
+          await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
+          return;
+        }
         if (macroApiMode === "STALE") {
           payload.cache = { ...payload.cache, status: "stale", refreshError: "FRED refresh timed out." };
         }
@@ -1315,6 +1330,34 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.ok(apiCalls.some((call) => call.endpoint === "treasury-yield-curve"), "Fixed Income must request the server-side Treasury API");
     assert.ok(apiCalls.some((call) => call.endpoint === "fomc-rate-probability"), "Fixed Income must request the server-side FOMC probability API");
 
+    treasuryApiMode = "INVALID";
+    await clickText(page, "News", true);
+    await clickText(page, "Fixed Income", true);
+    await page.waitForSelector("[data-fixed-income-panel] .siw-fixed-income-error");
+    const invalidTreasuryProof = await page.evaluate(() => ({
+      panel: document.querySelector("[data-fixed-income-panel]")?.textContent || "",
+      watcherVisible: document.querySelector("[data-watcher-replica]") !== null,
+    }));
+    assert.match(invalidTreasuryProof.panel, /Treasury source unavailable[\s\S]*invalid data/i);
+    assert.equal(invalidTreasuryProof.watcherVisible, true, "invalid Treasury data must stay inside the retryable panel");
+    treasuryApiMode = "FRESH";
+    await page.click("[data-fixed-income-panel] .siw-fixed-income-error button");
+    await page.waitForSelector("[data-fixed-income-chart]");
+
+    fomcApiMode = "INVALID";
+    await clickText(page, "News", true);
+    await clickText(page, "Fixed Income", true);
+    await page.waitForSelector("[data-fomc-probability-panel] .siw-fomc-probability-error");
+    const invalidFomcProof = await page.evaluate(() => ({
+      panel: document.querySelector("[data-fomc-probability-panel]")?.textContent || "",
+      watcherVisible: document.querySelector("[data-watcher-replica]") !== null,
+    }));
+    assert.match(invalidFomcProof.panel, /FOMC probability source unavailable[\s\S]*invalid data/i);
+    assert.equal(invalidFomcProof.watcherVisible, true, "invalid FOMC data must stay inside the retryable panel");
+    fomcApiMode = "FRESH";
+    await page.click("[data-fomc-probability-panel] .siw-fomc-probability-error button");
+    await page.waitForSelector("[data-fomc-probability-outcome]");
+
     await clickText(page, "F/G Index", true);
     await wait(350);
     assert.equal(await page.$("[data-fear-greed-panel]") !== null, true, "F/G Index must render the CNN sentiment surface");
@@ -1444,7 +1487,19 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.match(failedMacroProof.footer, /Federal Reserve Economic Data[\s\S]*EIA[\s\S]*IMF[\s\S]*BEA/i);
     assert.equal(failedMacroProof.publishedSignal, false, "failed Macro data must not render a published-success signal");
     assert.doesNotMatch(failedMacroProof.footer, /Published macro data/i);
+    macroApiMode = "INVALID";
+    await clickText(page, "News", true);
+    await clickText(page, "Macro", true);
+    await page.waitForSelector("[data-macro-panel] .siw-macro-error");
+    const invalidMacroProof = await page.evaluate(() => ({
+      panel: document.querySelector("[data-macro-panel]")?.textContent || "",
+      watcherVisible: document.querySelector("[data-watcher-replica]") !== null,
+    }));
+    assert.match(invalidMacroProof.panel, /Macro source unavailable[\s\S]*invalid data/i);
+    assert.equal(invalidMacroProof.watcherVisible, true, "invalid Macro data must stay inside the retryable panel");
     macroApiMode = "FRESH";
+    await page.click("[data-macro-panel] .siw-macro-error button");
+    await page.waitForSelector("[data-macro-panel] [data-macro-markets]");
 
     await page.type('input[name="stock-search"]', "NVDA");
     await clickText(page, "LOAD");
