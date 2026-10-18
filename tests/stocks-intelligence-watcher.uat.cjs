@@ -1923,8 +1923,37 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
       const rect = button.getBoundingClientRect();
       return { width: rect.width, height: rect.height };
     });
-    assert.ok(resetTouchTarget.width >= 44 && resetTouchTarget.height >= 44, "mobile filter Reset must be at least 44px square");
-    await page.setViewport({ width: 1180, height: 820, deviceScaleFactor: 1 });
+     assert.ok(resetTouchTarget.width >= 44 && resetTouchTarget.height >= 44, "mobile filter Reset must be at least 44px square");
+     await page.select("select[name='watcher-section']", "Chart");
+     await wait(500);
+     await page.click("[data-chart-gex-expiry-trigger]");
+     const mobileChartExpiryChoices = await page.$$eval(".siw-chart-expiry-choice", (labels) => labels
+       .filter((label) => label.getClientRects().length > 0)
+       .map((label) => {
+         const rect = label.getBoundingClientRect();
+         return { width: rect.width, height: rect.height, text: label.textContent?.trim() || "" };
+       }));
+     assert.ok(mobileChartExpiryChoices.length > 0, "mobile Chart GEX must expose expiry choices");
+     assert.equal(mobileChartExpiryChoices.every((choice) => choice.width >= 44 && choice.height >= 44), true, `mobile Chart GEX expiry labels must be at least 44px: ${JSON.stringify(mobileChartExpiryChoices)}`);
+     const visibleCheckboxFailures = await page.$$eval(".siw-replica-shell input[type='checkbox'], .siw-replica-shell input[type='radio']", (inputs) => inputs
+       .filter((input) => input.getClientRects().length > 0)
+       .map((input) => {
+         const target = input.closest("label") || input;
+         const rect = target.getBoundingClientRect();
+         return { type: input.type, label: input.closest("label")?.textContent?.trim() || input.getAttribute("aria-label") || "", width: rect.width, height: rect.height };
+       })
+       .filter((target) => target.width < 44 || target.height < 44));
+     assert.deepEqual(visibleCheckboxFailures, [], `visible mobile checkbox/radio targets must be at least 44px: ${JSON.stringify(visibleCheckboxFailures)}`);
+     const uncheckedChartExpiry = await page.$eval(".siw-chart-expiry-choice input:not(:checked)", (input) => {
+       const label = input.closest("label");
+       if (!label) throw new Error("Chart expiry checkbox must be wrapped by a label");
+       label.click();
+       return input.getAttribute("data-chart-gex-expiry");
+     });
+     await wait(150);
+     assert.equal(await page.$eval(`[data-chart-gex-expiry='${uncheckedChartExpiry}']`, (input) => input.checked), true, "clicking a mobile Chart GEX expiry label must toggle its checkbox");
+     await page.click("[data-chart-gex-expiry-trigger]");
+     await page.setViewport({ width: 1180, height: 820, deviceScaleFactor: 1 });
     await wait(200);
     await page.click("button[aria-label='Settings']");
     await page.setViewport({ width: 390, height: 900, deviceScaleFactor: 1 });

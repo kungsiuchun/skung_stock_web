@@ -70,10 +70,11 @@ const successResponse = (input, requestId) => ({
       const url = new URL(request.url());
       if (url.pathname !== "/api/portfolio-backtest") return request.continue();
       requestCount += 1;
-       const input = JSON.parse(request.postData() || "{}");
-       if (input.operation === "validate") {
-         if (delayedApiMode === "verification") return;
-         return request.respond({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { instruments: input.tickers.map((ticker) => ({ ticker, displayName: `${ticker} Fund`, eligibility: "verified_us_etf", exchange: "NMS" })), warnings: [] }, cache: { status: "refreshed" }, requestId: "portfolio-uat-validate" }) });
+        const input = JSON.parse(request.postData() || "{}");
+        if (input.operation === "validate") {
+          if (delayedApiMode === "verification") return;
+          if (apiMode === "verification-error") return request.respond({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "VERIFICATION_UNAVAILABLE", message: "ETF verification provider is temporarily unavailable." } }) });
+          return request.respond({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { instruments: input.tickers.map((ticker) => ({ ticker, displayName: `${ticker} Fund`, eligibility: "verified_us_etf", exchange: "NMS" })), warnings: [] }, cache: { status: "refreshed" }, requestId: "portfolio-uat-validate" }) });
        }
        policyRequests.add(`${input.rebalancePolicy}:${input.dividendPolicy}`);
        if (delayedApiMode === "backtest") return;
@@ -287,8 +288,27 @@ const successResponse = (input, requestId) => ({
         await page.$eval("button[type='submit']", (button) => button.click());
         await page.waitForSelector("[data-testid='portfolio-performance-chart']");
         assert.match(await page.$eval("body", (body) => body.innerText), new RegExp(`${rebalancePolicy} rebalancing`, "i"));
-      }
+     }
     }
+    apiMode = "verification-error";
+    await page.$$eval("button", (buttons) => {
+      const verify = buttons.find((button) => (button.textContent || "").includes("Verify ETF tickers"));
+      if (!verify) throw new Error("Missing Verify ETF tickers button");
+      verify.click();
+    });
+    await page.waitForSelector("[role='alert']");
+    const verificationErrorText = await page.$eval("[role='alert']", (node) => node.textContent || "");
+    assert.match(verificationErrorText, /ETF verification unavailable[\s\S]*temporarily unavailable/i);
+    assert.notEqual(await page.$("[data-testid='portfolio-performance-chart']"), null, "verification failure must preserve the valid backtest result");
+    assert.equal(await page.$$eval("button", (buttons) => buttons.some((button) => (button.textContent || "").includes("Retry last backtest"))), false, "verification failure must not expose a backtest retry");
+    assert.equal(await page.$$eval("button", (buttons) => buttons.some((button) => (button.textContent || "").includes("Retry ETF verification"))), true, "verification failure must expose the verification retry");
+    apiMode = "success";
+    await page.$$eval("button", (buttons) => {
+      const retry = buttons.find((button) => (button.textContent || "").includes("Retry ETF verification"));
+      if (!retry) throw new Error("Missing retry ETF verification button");
+      retry.click();
+    });
+    await page.waitForSelector("[data-testid='verified-etf-tickers']");
     assert.equal(policyRequests.size, 8, "each rebalancing/dividend policy pair must reach the API seam");
     assert.equal(await page.$$("[data-testid='portfolio-performance-chart']").then((nodes) => nodes.length), 1);
      assert.match(await page.$eval("body", (body) => body.innerText), /Requested:[\s\S]*Effective:[\s\S]*Yahoo Finance chart API[\s\S]*Excluded sessions:[\s\S]*None[\s\S]*No taxes, trading costs/i);
@@ -302,10 +322,21 @@ const successResponse = (input, requestId) => ({
      apiMode = "success";
 
      const beforeInvalidRun = requestCount;
-     const firstWeight = (await page.$$("input[name$='-weight']"))[0];
-     await firstWeight.click({ clickCount: 3 });
-     await firstWeight.type("60.001");
-     await page.$eval("button[type='submit']", (button) => button.click());
+      const firstWeight = (await page.$$("input[name$='-weight']"))[0];
+      await firstWeight.click({ clickCount: 3 });
+      await firstWeight.type("60.001");
+      await page.waitForFunction(() => document.querySelector("input[name='asset-1-weight']")?.value === "60.001");
+      await page.$$eval("form[name='portfolio-backtest'] button", (buttons) => {
+        const copy = buttons.find((button) => (button.textContent || "").includes("Copy setup link"));
+        if (!copy) throw new Error("Missing Copy setup link button");
+        copy.click();
+      });
+      await page.waitForSelector("[role='alert']");
+      const shareErrorText = await page.$eval("[role='alert']", (node) => node.textContent || "");
+      assert.match(shareErrorText, /Setup link unavailable/i);
+      assert.doesNotMatch(shareErrorText, /Backtest unavailable|Retry last backtest/i, "share failure must not use the backtest error banner or retry");
+      assert.equal(requestCount, beforeInvalidRun, "invalid setup sharing must not call the backtest API");
+      await page.$eval("button[type='submit']", (button) => button.click());
      await page.waitForSelector("[role='alert']");
      assert.match(await page.$eval("[role='alert']", (node) => node.textContent || ""), /0\.01% increments[\s\S]*100\.00%/);
      assert.equal(requestCount, beforeInvalidRun, "sub-basis-point allocation must not call the backtest API");

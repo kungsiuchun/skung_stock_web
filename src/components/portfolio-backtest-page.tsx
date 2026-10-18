@@ -9,6 +9,7 @@ import { getHashForView } from "@/lib/app-routes";
 type PositionDraft = { id: number; ticker: string; weight: string };
 type BacktestResponse = { data: PortfolioBacktestResult; cache: { status: "hit" | "refreshed" | "stale" | "bypassed" } };
 type TickerVerification = { ticker: string; displayName: string; eligibility: "verified_us_etf"; exchange: string };
+type PortfolioError = { kind: "backtest" | "verification" | "share"; message: string };
 
 const MAX_POSITIONS = 10;
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
@@ -49,7 +50,7 @@ export function PortfolioBacktestPage() {
   const [dividendPolicy, setDividendPolicy] = useState<PortfolioDividendPolicy>(() => sharedSetup.config?.dividendPolicy ?? "reinvest");
   const [result, setResult] = useState<BacktestResponse | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<PortfolioError | null>(null);
   const [tickerVerification, setTickerVerification] = useState<TickerVerification[] | null>(null);
   const [validatingTickers, setValidatingTickers] = useState(false);
   const [shareStatus, setShareStatus] = useState<"idle" | "copied" | "manual">("idle");
@@ -116,7 +117,7 @@ export function PortfolioBacktestPage() {
     if (isOperationBusy()) return;
     const tickers = positions.map((position) => position.ticker.trim().toUpperCase());
     if (tickers.length === 0 || tickers.some((ticker) => !/^[A-Z0-9.^-]{1,16}$/.test(ticker)) || new Set(tickers).size !== tickers.length) {
-      setError("Enter unique, valid ETF tickers before requesting server-side ETF verification.");
+      setError({ kind: "verification", message: "Enter unique, valid ETF tickers before requesting server-side ETF verification." });
       return;
     }
     operationRef.current = "verification";
@@ -138,7 +139,7 @@ export function PortfolioBacktestPage() {
       if (verificationGenerationRef.current === requestGeneration) setTickerVerification(payload.data.instruments);
     } catch (verificationError) {
       if (verificationGenerationRef.current === requestGeneration) {
-        setError(verificationError instanceof Error ? verificationError.message : String(verificationError));
+        setError({ kind: "verification", message: verificationError instanceof Error ? verificationError.message : String(verificationError) });
       }
     } finally {
       if (verificationGenerationRef.current === requestGeneration) {
@@ -154,16 +155,16 @@ export function PortfolioBacktestPage() {
     setError(null);
     setResult(null);
     if (!allocationValid) {
-      setError("Enter 1–10 US ETF tickers with positive weights in 0.01% increments totaling exactly 100.00%.");
+      setError({ kind: "backtest", message: "Enter 1–10 US ETF tickers with positive weights in 0.01% increments totaling exactly 100.00%." });
       return;
     }
     const capital = Number(startingCapital);
     if (!Number.isFinite(capital) || capital <= 0) {
-      setError("Starting capital must be a positive USD amount.");
+      setError({ kind: "backtest", message: "Starting capital must be a positive USD amount." });
       return;
     }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate) || startDate > endDate) {
-      setError("Choose a valid chronological date range.");
+      setError({ kind: "backtest", message: "Choose a valid chronological date range." });
       return;
     }
     operationRef.current = "backtest";
@@ -188,7 +189,7 @@ export function PortfolioBacktestPage() {
       if (backtestGenerationRef.current === requestGeneration) setResult(payload);
     } catch (runError) {
       if (backtestGenerationRef.current === requestGeneration) {
-        setError(runError instanceof Error ? runError.message : String(runError));
+        setError({ kind: "backtest", message: runError instanceof Error ? runError.message : String(runError) });
       }
     } finally {
       if (backtestGenerationRef.current === requestGeneration) {
@@ -230,8 +231,9 @@ export function PortfolioBacktestPage() {
         setShareStatus("manual");
       }
     } catch (shareError) {
+      if (shareGenerationRef.current !== shareGeneration) return;
       setShareStatus("idle");
-      setError(shareError instanceof Error ? shareError.message : String(shareError));
+      setError({ kind: "share", message: shareError instanceof Error ? shareError.message : String(shareError) });
     }
   };
 
@@ -273,7 +275,7 @@ export function PortfolioBacktestPage() {
         </form>
 
         <div className="min-w-0 space-y-5">
-          {error && <div className="border border-rose-500/50 bg-rose-500/10 p-4 text-sm leading-6 text-rose-100" role="alert"><span className="font-black uppercase tracking-[0.12em]">Backtest unavailable</span><p className="mt-1 text-rose-200/80">{error}</p><button type="button" onClick={() => void runBacktest()} disabled={isOperationBusy()} className="mt-3 border border-rose-400/60 px-3 py-1.5 text-[0.62rem] font-black uppercase tracking-[0.12em] text-rose-100 hover:bg-rose-400/10 disabled:opacity-50">Retry last backtest</button></div>}
+          {error && <div className="border border-rose-500/50 bg-rose-500/10 p-4 text-sm leading-6 text-rose-100" role="alert"><span className="font-black uppercase tracking-[0.12em]">{error.kind === "backtest" ? "Backtest unavailable" : error.kind === "verification" ? "ETF verification unavailable" : "Setup link unavailable"}</span><p className="mt-1 text-rose-200/80">{error.message}</p>{error.kind === "backtest" && <button type="button" onClick={() => void runBacktest()} disabled={isOperationBusy()} className="mt-3 border border-rose-400/60 px-3 py-1.5 text-[0.62rem] font-black uppercase tracking-[0.12em] text-rose-100 hover:bg-rose-400/10 disabled:opacity-50">Retry last backtest</button>}{error.kind === "verification" && <button type="button" onClick={() => void verifyTickers()} disabled={isOperationBusy()} className="mt-3 border border-rose-400/60 px-3 py-1.5 text-[0.62rem] font-black uppercase tracking-[0.12em] text-rose-100 hover:bg-rose-400/10 disabled:opacity-50">Retry ETF verification</button>}</div>}
           {!result && !error && <div className="flex min-h-[420px] items-center justify-center border border-dashed border-zinc-800 bg-[#111416] p-8 text-center"><div><BarChart3 className="mx-auto h-9 w-9 text-zinc-700" /><h2 className="mt-4 text-lg font-black text-zinc-300">Configure an ETF mix</h2><p className="mx-auto mt-2 max-w-sm text-xs leading-5 text-zinc-600">Add one or more US-listed ETFs whose weights total 100.00%. SPY is always the benchmark.</p></div></div>}
           {result && <ResultsPanel result={result.data} />}
         </div>

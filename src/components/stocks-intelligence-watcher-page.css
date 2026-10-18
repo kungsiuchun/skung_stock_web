@@ -3131,9 +3131,15 @@
 
   .siw-replica-shell button,
   .siw-replica-shell [role="button"],
+  .siw-replica-shell .siw-chart-expiry-choice,
   .siw-replica-shell .siw-chart-gex-list.is-axis-aligned .siw-chart-gex-row {
     min-width: 44px;
     min-height: 44px;
+  }
+
+  .siw-replica-shell .siw-chart-expiry-choice {
+    box-sizing: border-box;
+    padding: 4px;
   }
 
   .siw-replica-shell select,
