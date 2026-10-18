@@ -230,10 +230,57 @@ const successResponse = (input, requestId) => ({
        return true;
      });
      assert.equal(verified, true, "ETF verification must be available before the backtest");
-     await page.waitForSelector("[data-testid='verified-etf-tickers']");
-     assert.match(await page.$eval("[data-testid='verified-etf-tickers']", (node) => node.textContent || ""), /VTI[\s\S]*VTI Fund[\s\S]*BND[\s\S]*verified US ETF/);
+      await page.waitForSelector("[data-testid='verified-etf-tickers']");
+      assert.match(await page.$eval("[data-testid='verified-etf-tickers']", (node) => node.textContent || ""), /VTI[\s\S]*VTI Fund[\s\S]*BND[\s\S]*verified US ETF/);
 
-    for (const rebalancePolicy of ["none", "monthly", "quarterly", "annual"]) {
+      delayedApiMode = "backtest";
+      const concurrentBacktestRequestPromise = page.waitForRequest(isBacktestRequest);
+      await page.$eval("button[type='submit']", (button) => button.click());
+      const concurrentBacktestRequest = await concurrentBacktestRequestPromise;
+      await page.waitForFunction(() => {
+        const verify = [...document.querySelectorAll("button")].find((button) => (button.textContent || "").includes("Verify ETF tickers"));
+        return document.querySelector("button[type='submit']")?.disabled === true && verify?.disabled === true;
+      });
+      const beforeBlockedVerification = requestCount;
+      await page.$$eval("button", (buttons) => {
+        const verify = buttons.find((button) => (button.textContent || "").includes("Verify ETF tickers"));
+        if (!verify) throw new Error("Missing Verify ETF tickers button");
+        verify.click();
+      });
+      await wait(100);
+      assert.equal(requestCount, beforeBlockedVerification, "Verify must not start while a backtest is pending");
+      delayedApiMode = null;
+      await concurrentBacktestRequest.respond(successResponse(JSON.parse(concurrentBacktestRequest.postData() || "{}"), "portfolio-uat-serialized-backtest"));
+      await page.waitForSelector("[data-testid='portfolio-performance-chart']");
+      assert.equal(await page.$("[role='alert']"), null, "a blocked verification must not create a mismatched backtest error");
+
+      delayedApiMode = "verification";
+      const concurrentVerificationRequestPromise = page.waitForRequest((request) => {
+        const url = new URL(request.url());
+        if (url.pathname !== "/api/portfolio-backtest" || request.method() !== "POST") return false;
+        return JSON.parse(request.postData() || "{}").operation === "validate";
+      });
+      await page.$$eval("button", (buttons) => {
+        const verify = buttons.find((button) => (button.textContent || "").includes("Verify ETF tickers"));
+        if (!verify) throw new Error("Missing Verify ETF tickers button");
+        verify.click();
+      });
+      const concurrentVerificationRequest = await concurrentVerificationRequestPromise;
+      await page.waitForFunction(() => {
+        const verify = [...document.querySelectorAll("button")].find((button) => (button.textContent || "").includes("Verifying ETF tickers"));
+        return document.querySelector("button[type='submit']")?.disabled === true && verify?.disabled === true;
+      });
+      const beforeBlockedBacktest = requestCount;
+      await page.$eval("button[type='submit']", (button) => button.click());
+      await wait(100);
+      assert.equal(requestCount, beforeBlockedBacktest, "Run must not start while ETF verification is pending");
+      delayedApiMode = null;
+      const concurrentVerificationInput = JSON.parse(concurrentVerificationRequest.postData() || "{}");
+      await concurrentVerificationRequest.respond({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { instruments: concurrentVerificationInput.tickers.map((ticker) => ({ ticker, displayName: `${ticker} Fund`, eligibility: "verified_us_etf", exchange: "NMS" })), warnings: [] }, cache: { status: "refreshed" }, requestId: "portfolio-uat-serialized-validate" }) });
+      await page.waitForSelector("[data-testid='verified-etf-tickers']");
+      assert.equal(await page.$("[role='alert']"), null, "a blocked backtest must not create a mismatched error after verification");
+
+     for (const rebalancePolicy of ["none", "monthly", "quarterly", "annual"]) {
       for (const dividendPolicy of ["reinvest", "cash"]) {
         await page.select("select[aria-label='Rebalancing policy']", rebalancePolicy);
         await page.select("select[aria-label='Dividend policy']", dividendPolicy);

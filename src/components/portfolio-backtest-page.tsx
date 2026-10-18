@@ -57,11 +57,13 @@ export function PortfolioBacktestPage() {
   const shareGenerationRef = useRef(0);
   const verificationGenerationRef = useRef(0);
   const backtestGenerationRef = useRef(0);
+  const operationRef = useRef<"verification" | "backtest" | null>(null);
 
   const invalidateFormState = useCallback(() => {
     shareGenerationRef.current += 1;
     verificationGenerationRef.current += 1;
     backtestGenerationRef.current += 1;
+    operationRef.current = null;
     setResult(null);
     setError(null);
     setTickerVerification(null);
@@ -95,6 +97,7 @@ export function PortfolioBacktestPage() {
   const allocationBasisPoints = useMemo(() => positions.reduce((sum, position) => sum + (Number.isInteger(basisPointsFor(position.weight)) ? basisPointsFor(position.weight) : 0), 0), [positions]);
   const allocationPrecisionValid = positions.every((position) => Number.isInteger(basisPointsFor(position.weight)));
   const allocationValid = positions.length > 0 && positions.every((position) => /^[A-Za-z0-9.^-]{1,16}$/.test(position.ticker.trim()) && Number.isInteger(basisPointsFor(position.weight)) && basisPointsFor(position.weight) > 0) && allocationBasisPoints === 10_000;
+  const isOperationBusy = () => operationRef.current !== null || loading || validatingTickers;
   const updatePosition = (id: number, field: "ticker" | "weight", value: string) => {
     setPositions((current) => current.map((position) => position.id === id ? { ...position, [field]: field === "ticker" ? value.toUpperCase() : value } : position));
     invalidateFormState();
@@ -110,11 +113,13 @@ export function PortfolioBacktestPage() {
     invalidateFormState();
   };
   const verifyTickers = async () => {
+    if (isOperationBusy()) return;
     const tickers = positions.map((position) => position.ticker.trim().toUpperCase());
     if (tickers.length === 0 || tickers.some((ticker) => !/^[A-Z0-9.^-]{1,16}$/.test(ticker)) || new Set(tickers).size !== tickers.length) {
       setError("Enter unique, valid ETF tickers before requesting server-side ETF verification.");
       return;
     }
+    operationRef.current = "verification";
     const requestGeneration = verificationGenerationRef.current + 1;
     verificationGenerationRef.current = requestGeneration;
     setError(null);
@@ -136,10 +141,14 @@ export function PortfolioBacktestPage() {
         setError(verificationError instanceof Error ? verificationError.message : String(verificationError));
       }
     } finally {
-      if (verificationGenerationRef.current === requestGeneration) setValidatingTickers(false);
+      if (verificationGenerationRef.current === requestGeneration) {
+        setValidatingTickers(false);
+        if (operationRef.current === "verification") operationRef.current = null;
+      }
     }
   };
   const runBacktest = async () => {
+    if (isOperationBusy()) return;
     const requestGeneration = backtestGenerationRef.current + 1;
     backtestGenerationRef.current = requestGeneration;
     setError(null);
@@ -157,6 +166,7 @@ export function PortfolioBacktestPage() {
       setError("Choose a valid chronological date range.");
       return;
     }
+    operationRef.current = "backtest";
     setLoading(true);
     try {
       const response = await fetch("/api/portfolio-backtest", {
@@ -181,7 +191,10 @@ export function PortfolioBacktestPage() {
         setError(runError instanceof Error ? runError.message : String(runError));
       }
     } finally {
-      if (backtestGenerationRef.current === requestGeneration) setLoading(false);
+      if (backtestGenerationRef.current === requestGeneration) {
+        setLoading(false);
+        if (operationRef.current === "backtest") operationRef.current = null;
+      }
     }
   };
 
@@ -248,10 +261,10 @@ export function PortfolioBacktestPage() {
           <label className="mt-5 block text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Starting capital (USD)<input name="capital" autoComplete="off" value={startingCapital} onChange={(event) => { setStartingCapital(event.target.value); invalidateFormState(); }} inputMode="decimal" className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="Starting capital" /></label>
           <div className="mt-5 grid grid-cols-2 gap-3"><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Start date<input name="start-date" type="date" value={startDate} onChange={(event) => { setStartDate(event.target.value); invalidateFormState(); }} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-2 py-2 text-xs text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="Start date" /></label><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">End date<input name="end-date" type="date" value={endDate} onChange={(event) => { setEndDate(event.target.value); invalidateFormState(); }} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-2 py-2 text-xs text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="End date" /></label></div>
           <div className="mt-5 space-y-2"><div className="flex items-center justify-between"><p className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">ETF allocation</p><span className={allocationValid ? "text-xs font-black text-emerald-400" : "text-xs font-black text-rose-400"}>{allocationPrecisionValid ? `${(allocationBasisPoints / 100).toFixed(2)}%` : "Use 0.01% increments"}</span></div>{positions.map((position, index) => <div key={position.id} className="grid grid-cols-[1fr_96px_44px] gap-2"><input name={`asset-${index + 1}-ticker`} autoComplete="off" spellCheck={false} value={position.ticker} onChange={(event) => updatePosition(position.id, "ticker", event.target.value)} placeholder="VTI…" className="min-h-11 min-w-0 border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm uppercase text-zinc-100 outline-none placeholder:text-zinc-700 focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label={`ETF ticker ${index + 1}`} /><input name={`asset-${index + 1}-weight`} autoComplete="off" value={position.weight} onChange={(event) => updatePosition(position.id, "weight", event.target.value)} inputMode="decimal" placeholder="60.00…" className="min-h-11 min-w-0 border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none placeholder:text-zinc-700 focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label={`ETF allocation percent ${index + 1}`} /><button type="button" disabled={positions.length === 1} onClick={() => removePosition(position.id)} aria-label={`Remove ${position.ticker || "ETF"}`} className="min-h-11 min-w-11 border border-zinc-800 text-zinc-500 hover:border-rose-400 hover:text-rose-400 focus-visible:ring-2 focus-visible:ring-rose-400 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 className="mx-auto h-3.5 w-3.5" /></button></div>)}</div>
-          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2"><button type="button" disabled={positions.length >= MAX_POSITIONS} onClick={addPosition} className="inline-flex min-h-11 items-center gap-1.5 text-[0.65rem] font-bold uppercase tracking-[0.12em] text-zinc-400 hover:text-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400 disabled:opacity-40"><Plus className="h-3.5 w-3.5" /> Add ETF</button><button type="button" disabled={validatingTickers} onClick={() => void verifyTickers()} className="min-h-11 text-[0.65rem] font-bold uppercase tracking-[0.12em] text-zinc-400 hover:text-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400 disabled:opacity-40">{validatingTickers ? "Verifying ETF tickers…" : "Verify ETF tickers"}</button></div>
+          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2"><button type="button" disabled={positions.length >= MAX_POSITIONS} onClick={addPosition} className="inline-flex min-h-11 items-center gap-1.5 text-[0.65rem] font-bold uppercase tracking-[0.12em] text-zinc-400 hover:text-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400 disabled:opacity-40"><Plus className="h-3.5 w-3.5" /> Add ETF</button><button type="button" disabled={isOperationBusy()} onClick={() => void verifyTickers()} className="min-h-11 text-[0.65rem] font-bold uppercase tracking-[0.12em] text-zinc-400 hover:text-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400 disabled:opacity-40">{validatingTickers ? "Verifying ETF tickers…" : "Verify ETF tickers"}</button></div>
           {tickerVerification && <div className="mt-3 border border-emerald-500/30 bg-emerald-500/5 p-3 text-xs text-emerald-100" data-testid="verified-etf-tickers">{tickerVerification.map((instrument) => <p key={instrument.ticker}><span className="font-black">{instrument.ticker}</span> · {instrument.displayName} · {instrument.exchange} · verified US ETF</p>)}</div>}
           <div className="mt-5 grid gap-3"><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Rebalancing<select name="rebalance-policy" value={rebalancePolicy} onChange={(event) => { setRebalancePolicy(event.target.value as PortfolioRebalancePolicy); invalidateFormState(); }} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="Rebalancing policy"><option value="none">No rebalancing</option><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="annual">Annual</option></select></label><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Dividend policy<select name="dividend-policy" value={dividendPolicy} onChange={(event) => { setDividendPolicy(event.target.value as PortfolioDividendPolicy); invalidateFormState(); }} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="Dividend policy"><option value="reinvest">Reinvest dividends</option><option value="cash">Hold dividends as cash</option></select></label></div>
-          <button type="submit" disabled={loading} className="mt-6 inline-flex w-full items-center justify-center gap-2 border border-emerald-400/70 bg-emerald-400/10 px-4 py-3 text-[0.68rem] font-black uppercase tracking-[0.15em] text-emerald-300 transition-colors hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-50">{loading ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Fetching and simulating EOD history</> : "Run backtest"}</button>
+          <button type="submit" disabled={isOperationBusy()} className="mt-6 inline-flex w-full items-center justify-center gap-2 border border-emerald-400/70 bg-emerald-400/10 px-4 py-3 text-[0.68rem] font-black uppercase tracking-[0.15em] text-emerald-300 transition-colors hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-50">{loading ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Fetching and simulating EOD history</> : "Run backtest"}</button>
           <button type="button" onClick={() => void copySetupLink()} className="mt-3 inline-flex min-h-11 w-full items-center justify-center gap-2 border border-zinc-700 px-4 text-[0.68rem] font-black uppercase tracking-[0.15em] text-zinc-300 hover:border-emerald-400 hover:text-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-400"><Copy className="h-3.5 w-3.5" /> {shareStatus === "copied" ? "Setup link copied" : "Copy setup link"}</button>
           <p className="mt-2 text-center text-[0.62rem] text-zinc-500" aria-live="polite">{shareStatus === "copied" ? "The link contains inputs only and will not run automatically." : shareStatus === "manual" ? "Clipboard unavailable. Copy the URL below." : "Shares inputs only — never results or provider data."}</p>
           {manualShareUrl && <label className="mt-3 block text-[0.62rem] font-bold uppercase tracking-[0.12em] text-zinc-500">Setup URL<input name="share-url" readOnly value={manualShareUrl} onFocus={(event) => event.currentTarget.select()} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-3 text-xs normal-case text-zinc-200 focus-visible:ring-2 focus-visible:ring-emerald-400" /></label>}
@@ -260,7 +273,7 @@ export function PortfolioBacktestPage() {
         </form>
 
         <div className="min-w-0 space-y-5">
-          {error && <div className="border border-rose-500/50 bg-rose-500/10 p-4 text-sm leading-6 text-rose-100" role="alert"><span className="font-black uppercase tracking-[0.12em]">Backtest unavailable</span><p className="mt-1 text-rose-200/80">{error}</p><button type="button" onClick={() => void runBacktest()} disabled={loading} className="mt-3 border border-rose-400/60 px-3 py-1.5 text-[0.62rem] font-black uppercase tracking-[0.12em] text-rose-100 hover:bg-rose-400/10 disabled:opacity-50">Retry last backtest</button></div>}
+          {error && <div className="border border-rose-500/50 bg-rose-500/10 p-4 text-sm leading-6 text-rose-100" role="alert"><span className="font-black uppercase tracking-[0.12em]">Backtest unavailable</span><p className="mt-1 text-rose-200/80">{error}</p><button type="button" onClick={() => void runBacktest()} disabled={isOperationBusy()} className="mt-3 border border-rose-400/60 px-3 py-1.5 text-[0.62rem] font-black uppercase tracking-[0.12em] text-rose-100 hover:bg-rose-400/10 disabled:opacity-50">Retry last backtest</button></div>}
           {!result && !error && <div className="flex min-h-[420px] items-center justify-center border border-dashed border-zinc-800 bg-[#111416] p-8 text-center"><div><BarChart3 className="mx-auto h-9 w-9 text-zinc-700" /><h2 className="mt-4 text-lg font-black text-zinc-300">Configure an ETF mix</h2><p className="mx-auto mt-2 max-w-sm text-xs leading-5 text-zinc-600">Add one or more US-listed ETFs whose weights total 100.00%. SPY is always the benchmark.</p></div></div>}
           {result && <ResultsPanel result={result.data} />}
         </div>
