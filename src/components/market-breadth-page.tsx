@@ -152,7 +152,7 @@ export function MarketBreadthPanel({ variant = "standalone" }: MarketBreadthPane
         <header className={standalone ? "border-b border-zinc-700 pb-5" : "siw-spx-market-breadth-header"}>
           <div className={standalone ? "flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between" : "siw-spx-market-breadth-heading"}>
             <div>
-              {standalone && <a href={getHashForView("work-gallery")} className="mb-5 inline-flex items-center gap-2 text-[0.68rem] font-bold uppercase tracking-[0.16em] text-zinc-500 transition-colors hover:text-amber-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"><ArrowLeft className="h-3.5 w-3.5" /> Market Lab</a>}
+              {standalone && <a href={getHashForView("work-gallery")} className="mb-5 inline-flex min-h-11 items-center gap-2 text-[0.68rem] font-bold uppercase tracking-[0.16em] text-zinc-500 transition-colors hover:text-amber-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"><ArrowLeft className="h-3.5 w-3.5" /> Market Lab</a>}
               <p className="text-[0.65rem] font-bold uppercase tracking-[0.22em] text-amber-500">Market internals / SPY universe</p>
               <h1 className={standalone ? "mt-2 text-2xl font-black tracking-[-0.055em] text-zinc-100 sm:text-4xl" : "siw-spx-market-breadth-title"}>S&amp;P 500 MARKET BREADTH</h1>
               <p className={standalone ? "mt-3 max-w-3xl text-xs leading-5 text-zinc-500" : "siw-spx-market-breadth-subtitle"}>

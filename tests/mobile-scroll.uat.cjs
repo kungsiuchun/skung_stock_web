@@ -45,6 +45,15 @@ async function expectChatAccessible(page, name) {
   assert.ok(reachable.bottom <= reachable.viewport, `${name} input must become reachable through document scrolling: ${JSON.stringify({ state, reachable })}`);
 }
 
+async function expectRouteBackTarget(page, name, selector) {
+  await page.waitForSelector(selector);
+  const target = await page.$eval(selector, (node) => {
+    const rect = node.getBoundingClientRect();
+    return { width: rect.width, height: rect.height };
+  });
+  assert.ok(target.width >= 44 && target.height >= 44, `${name} route back control must be at least 44x44: ${JSON.stringify(target)}`);
+}
+
 (async () => {
   const server = startVite({ rootDir, port });
   let browser;
@@ -91,6 +100,21 @@ async function expectChatAccessible(page, name) {
       await page.goto(`${baseUrl}/#/work/portfolio-backtest`, { waitUntil: "domcontentloaded" });
       await page.waitForSelector("form[name='portfolio-backtest']");
       assert.equal(await page.$$eval("form[name='portfolio-backtest'] input, form[name='portfolio-backtest'] select", (controls) => controls.every((control) => Boolean(control.getAttribute("name")))), true, "backtest fields must expose stable form names");
+
+      const routeBackChecks = [
+        ["finance analyzer", "#/work/finance-analyzer", '[title="Back to Market Lab"]'],
+        ["fixed income", "#/work/fixed-income", 'a[href="#/market-lab"]'],
+        ["market breadth", "#/work/market-breadth", 'a[href="#/market-lab"]'],
+        ["sector rotation", "#/work/sector-rotation", ".sr-back"],
+        ["settle up", "#/work/settle-up", 'a[href="#/market-lab"]'],
+        ["SPX GEX", "#/work/spx-gex-heatmap", 'a[href="#/market-lab"]'],
+        ["stocks watcher", "#/work/stocks-intelligence-watcher", '.siw-sidebar-head .siw-back-button'],
+        ["portfolio backtest", "#/work/portfolio-backtest", 'a[href="#/market-lab"]'],
+      ];
+      for (const [name, hash, selector] of routeBackChecks) {
+        await page.goto(`${baseUrl}/${hash}`, { waitUntil: "domcontentloaded" });
+        await expectRouteBackTarget(page, `${name} (${width}px)`, selector);
+      }
     }
 
     await page.setViewport({ width: 1440, height: 900 });

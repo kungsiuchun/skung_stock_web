@@ -86,6 +86,9 @@ function App() {
       ? "home"
       : getViewFromHash(window.location.hash),
   );
+  const [currentHash, setCurrentHash] = useState(() =>
+    typeof window === "undefined" ? "" : window.location.hash,
+  );
   const isPortfolioView = [
     "home",
     "about",
@@ -115,7 +118,9 @@ function App() {
 
   useEffect(() => {
     const syncViewFromHash = () => {
-      setCurrentView(getViewFromHash(window.location.hash));
+      const hash = window.location.hash;
+      setCurrentHash(hash);
+      setCurrentView(getViewFromHash(hash));
     };
 
     syncViewFromHash();
@@ -154,7 +159,7 @@ function App() {
                 title="Back to Market Lab"
                 aria-label="Back to Market Lab"
                 href={getHashForView("work-gallery")}
-                className="mb-5 rounded-lg border border-white/10 p-3 text-white/60 transition-colors hover:border-cyan-400/50 hover:bg-cyan-500/10 hover:text-cyan-300"
+                className="mb-5 inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg border border-white/10 p-3 text-white/60 transition-colors hover:border-cyan-400/50 hover:bg-cyan-500/10 hover:text-cyan-300"
               >
                 <ArrowLeft className="w-5 h-5" />
               </a>
@@ -186,7 +191,7 @@ function App() {
                 : "min-w-0 flex-1 overflow-visible lg:h-full lg:overflow-hidden"
             }
           >
-            <RouteErrorBoundary routeKey={currentView}>
+            <RouteErrorBoundary routeKey={currentHash}>
               <Suspense
               fallback={
                 <p role="status" className="portfolio-loading">

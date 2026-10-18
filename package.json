@@ -40,7 +40,7 @@
     "test:deploy-scope": "node --test tests/deploy-scope.test.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
-    "test:portfolio-ui": "node --import tsx --test tests/app-routes.test.ts tests/portfolio-experience.test.ts tests/portfolio-backtest-share.test.ts tests/safe-json-response.test.ts",
+    "test:portfolio-ui": "node --import tsx --test tests/app-routes.test.ts tests/portfolio-experience.test.ts tests/portfolio-backtest-share.test.ts tests/safe-json-response.test.ts tests/stocks-watcher-panel-loaders.test.ts",
     "test:sector-rotation": "node --import tsx --test tests/sector-rotation.test.ts tests/sector-rotation-r2.test.ts",
     "test:sector-rotation:uat": "node --import tsx tests/sector-rotation.uat.cjs"
   },

@@ -570,7 +570,7 @@ export function SettleUpPage() {
           <div>
             <a
               href="#/market-lab"
-              className="mb-5 inline-flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-white/50 transition-colors hover:text-white"
+              className="mb-5 inline-flex min-h-11 items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-white/50 transition-colors hover:text-white"
             >
               <ArrowLeft className="h-4 w-4" />
               Work gallery

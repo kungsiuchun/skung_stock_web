@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { ExternalLink, RefreshCw } from "lucide-react";
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { FomcRateProbabilityResponse } from "@/lib/fomc-rate-probability";
-import { parseJsonResponse } from "@/lib/safe-json-response";
 import type { TreasuryCurveKey, TreasuryYieldCurveResponse } from "@/lib/treasury-yield-curve";
+import { loadStocksWatcherFomc, loadStocksWatcherTreasury } from "./stocks-watcher-panel-loaders";
 
 const CURVE_STYLES: Array<{ key: TreasuryCurveKey; color: string }> = [
   { key: "latest", color: "#2fa8ff" }, { key: "oneWeek", color: "#8b9ab0" },
@@ -26,23 +26,17 @@ export function StocksWatcherFixedIncomePanel() {
   const [fomcLoading, setFomcLoading] = useState(true);
   const [fomcError, setFomcError] = useState<string | null>(null);
   const loadTreasury = async (bypassCache = false) => {
-    const requestUrl = `/api/treasury-yield-curve${bypassCache ? `?_=${Date.now()}` : ""}`;
     setLoading(true); setError(null);
     try {
-      const response = await fetch(requestUrl, bypassCache ? { cache: "no-store" } : undefined);
-      const payload = await parseJsonResponse<TreasuryYieldCurveResponse & { error?: string }>(response, requestUrl, { allowHttpError: true });
-      if (!response.ok) throw new Error(payload.error || `Fixed Income API failed with HTTP ${response.status}.`);
+      const payload = await loadStocksWatcherTreasury(fetch, bypassCache);
       setData(payload);
     } catch (requestError) { setData(null); setError(requestError instanceof Error ? requestError.message : "Fixed Income API failed."); }
     finally { setLoading(false); }
   };
   const loadFomc = async (bypassCache = false) => {
-    const requestUrl = `/api/fomc-rate-probability${bypassCache ? `?_=${Date.now()}` : ""}`;
     setFomcLoading(true); setFomcError(null);
     try {
-      const response = await fetch(requestUrl, bypassCache ? { cache: "no-store" } : undefined);
-      const payload = await parseJsonResponse<FomcRateProbabilityResponse & { error?: string }>(response, requestUrl, { allowHttpError: true });
-      if (!response.ok) throw new Error(payload.error || `FOMC probability API failed with HTTP ${response.status}.`);
+      const payload = await loadStocksWatcherFomc(fetch, bypassCache);
       setFomc(payload);
     } catch (requestError) { setFomc(null); setFomcError(requestError instanceof Error ? requestError.message : "FOMC probability API failed."); }
     finally { setFomcLoading(false); }

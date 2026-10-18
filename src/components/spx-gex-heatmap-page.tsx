@@ -706,7 +706,7 @@ export function SPXGexHeatmapPage() {
           <div>
             <a
               href="#/market-lab"
-              className="mb-4 inline-flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-cyan-200/70 transition-colors hover:text-cyan-100"
+              className="mb-4 inline-flex min-h-11 items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-cyan-200/70 transition-colors hover:text-cyan-100"
             >
               <ArrowLeft className="h-4 w-4" />
               Work gallery

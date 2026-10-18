@@ -100,7 +100,7 @@ export function FixedIncomePage() {
           <div>
             <a
               href={getHashForView("work-gallery")}
-              className="mb-5 inline-flex items-center gap-2 text-[0.68rem] font-bold uppercase tracking-[0.16em] text-[#5a626b] transition-colors hover:text-[#b85c38] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#b85c38]"
+              className="mb-5 inline-flex min-h-11 items-center gap-2 text-[0.68rem] font-bold uppercase tracking-[0.16em] text-[#5a626b] transition-colors hover:text-[#b85c38] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#b85c38]"
             >
               <ArrowLeft className="h-3.5 w-3.5" />
               Market Lab
