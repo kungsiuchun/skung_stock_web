@@ -46,3 +46,17 @@ test("accepts stale JSON 206 while rejecting actual HTTP failures", async () => 
     { data: { stale: true } },
   );
 });
+
+test("supports stale panel payloads and preserves JSON errors for panel status checks", async () => {
+  const stale = await parseJsonResponse<{ data: { status: string } }>(new Response('{"data":{"status":"stale"}}', {
+    status: 206,
+    headers: { "content-type": "application/json" },
+  }), "/api/stocks-watcher-macro", { allowHttpError: true });
+  assert.deepEqual(stale, { data: { status: "stale" } });
+
+  const failure = await parseJsonResponse<{ error: string }>(new Response('{"error":"Treasury source unavailable."}', {
+    status: 502,
+    headers: { "content-type": "application/json" },
+  }), "/api/treasury-yield-curve", { allowHttpError: true });
+  assert.deepEqual(failure, { error: "Treasury source unavailable." });
+});

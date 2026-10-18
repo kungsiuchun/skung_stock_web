@@ -24,6 +24,16 @@ test("round trips a canonical v1 setup without results or provider state", () =>
   assert.equal(decodePortfolioBacktestShareConfig("#/work/portfolio-backtest"), null);
 });
 
+test("round trips capital values whose canonical form uses an exponent", () => {
+  for (const startingCapital of [1e21, 1e-7]) {
+    const config = { ...valid, startingCapital };
+    assert.deepEqual(decodePortfolioBacktestShareConfig(encodePortfolioBacktestShareConfig(config)), {
+      ...config,
+      positions: [valid.positions[1], valid.positions[0]],
+    });
+  }
+});
+
 test("rejects invalid shared setups as one unit", () => {
   const route = "#/work/portfolio-backtest";
   const cases = [

@@ -19,6 +19,17 @@ const ROUTE = "#/work/portfolio-backtest";
 const ALLOWED_KEYS = new Set(["v", "capital", "start", "end", "rebalance", "dividend", "asset"]);
 const SINGLE_VALUE_KEYS = ["v", "capital", "start", "end", "rebalance", "dividend"] as const;
 const compareTickers = (left: string, right: string) => left < right ? -1 : left > right ? 1 : 0;
+const canonicalCapitalText = (value: number) => {
+  if (!Number.isFinite(value) || value <= 0) throw new Error("Shared starting capital is invalid.");
+  return String(value);
+};
+const parseCanonicalCapital = (text: string) => {
+  const value = Number(text);
+  if (!text || !Number.isFinite(value) || value <= 0 || canonicalCapitalText(value) !== text) {
+    throw new Error("Shared starting capital is invalid.");
+  }
+  return value;
+};
 
 const validate = (config: PortfolioBacktestShareConfigV1): PortfolioBacktestShareConfigV1 => {
   if (config.version !== 1) throw new Error("Unsupported shared backtest setup version.");
@@ -56,7 +67,6 @@ export const decodePortfolioBacktestShareConfig = (hash: string): PortfolioBackt
   if (params.get("v") !== "1") throw new Error("Unsupported shared backtest setup version.");
 
   const capitalText = params.get("capital") || "";
-  if (!/^\d+(?:\.\d+)?$/.test(capitalText)) throw new Error("Shared starting capital is invalid.");
   const assets = params.getAll("asset");
   const positions = assets.map((asset) => {
     const match = /^([A-Za-z0-9.^-]{1,16}):(\d+)$/.exec(asset);
@@ -66,7 +76,7 @@ export const decodePortfolioBacktestShareConfig = (hash: string): PortfolioBackt
 
   return validate({
     version: 1,
-    startingCapital: Number(capitalText),
+    startingCapital: parseCanonicalCapital(capitalText),
     startDate: params.get("start") || "",
     endDate: params.get("end") || "",
     rebalancePolicy: (params.get("rebalance") || "") as PortfolioRebalancePolicy,
@@ -79,7 +89,7 @@ export const encodePortfolioBacktestShareConfig = (input: PortfolioBacktestShare
   const config = validate(input);
   const params = new URLSearchParams();
   params.set("v", "1");
-  params.set("capital", String(config.startingCapital));
+  params.set("capital", canonicalCapitalText(config.startingCapital));
   params.set("start", config.startDate);
   params.set("end", config.endDate);
   params.set("rebalance", config.rebalancePolicy);
