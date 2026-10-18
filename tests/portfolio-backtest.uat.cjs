@@ -34,11 +34,23 @@ const backtestResult = (input) => ({
   warnings: [],
   methodologyVersion: "v1",
 });
+const isBacktestRequest = (request) => {
+  const url = new URL(request.url());
+  if (url.pathname !== "/api/portfolio-backtest" || request.method() !== "POST") return false;
+  const input = JSON.parse(request.postData() || "{}");
+  return input.operation !== "validate";
+};
+const successResponse = (input, requestId) => ({
+  status: 200,
+  contentType: "application/json",
+  body: JSON.stringify({ data: backtestResult(input), cache: { status: "refreshed" }, requestId }),
+});
 
 (async () => {
   let server;
   let browser;
   let apiMode = "success";
+  let delayedApiMode = null;
   let requestCount = 0;
   const policyRequests = new Set();
   const consoleErrors = [];
@@ -59,15 +71,19 @@ const backtestResult = (input) => ({
       if (url.pathname !== "/api/portfolio-backtest") return request.continue();
       requestCount += 1;
        const input = JSON.parse(request.postData() || "{}");
-       if (input.operation === "validate") return request.respond({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { instruments: input.tickers.map((ticker) => ({ ticker, displayName: `${ticker} Fund`, eligibility: "verified_us_etf", exchange: "NMS" })), warnings: [] }, cache: { status: "refreshed" }, requestId: "portfolio-uat-validate" }) });
+       if (input.operation === "validate") {
+         if (delayedApiMode === "verification") return;
+         return request.respond({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { instruments: input.tickers.map((ticker) => ({ ticker, displayName: `${ticker} Fund`, eligibility: "verified_us_etf", exchange: "NMS" })), warnings: [] }, cache: { status: "refreshed" }, requestId: "portfolio-uat-validate" }) });
+       }
        policyRequests.add(`${input.rebalancePolicy}:${input.dividendPolicy}`);
+       if (delayedApiMode === "backtest") return;
        if (apiMode === "error") return request.respond({ status: 504, contentType: "application/json", body: JSON.stringify({ error: { code: "REQUEST_TIMEOUT", message: "The portfolio backtest exceeded its allowed market-data deadline." } }) });
        if (apiMode === "stale") {
          const result = backtestResult(input);
          result.warnings = ["Historical data is stale because a refresh failed; retry before relying on this comparison."];
          return request.respond({ status: 206, contentType: "application/json", body: JSON.stringify({ data: result, cache: { status: "stale" }, requestId: "portfolio-uat-stale" }) });
        }
-       return request.respond({ status: 200, contentType: "application/json", body: JSON.stringify({ data: backtestResult(input), cache: { status: "refreshed" }, requestId: "portfolio-uat" }) });
+       return request.respond(successResponse(input, "portfolio-uat"));
     });
 
     await page.goto(`${baseUrl}/#/work/portfolio-backtest?v=1&capital=10000&start=2021-01-01&end=2026-08-21&rebalance=quarterly&dividend=reinvest&asset=VTI:6000&asset=BND:4000`, { waitUntil: "domcontentloaded" });
@@ -176,7 +192,38 @@ const backtestResult = (input) => ({
      assert.equal(await page.$("input[name='share-url']"), null, "editing the setup must clear the old manual URL");
      await tickerInputs[0].click({ clickCount: 3 });
      await tickerInputs[0].type("VTI");
-      const verified = await page.$$eval("button", (buttons) => {
+      delayedApiMode = "verification";
+      const delayedVerificationRequestPromise = page.waitForRequest((request) => {
+        const url = new URL(request.url());
+        if (url.pathname !== "/api/portfolio-backtest" || request.method() !== "POST") return false;
+        return JSON.parse(request.postData() || "{}").operation === "validate";
+      });
+      await page.$$eval("button", (buttons) => {
+       const button = buttons.find((candidate) => (candidate.textContent || "").includes("Verify ETF tickers"));
+       if (!button) return false;
+       button.click();
+       return true;
+      });
+      const delayedVerificationRequest = await delayedVerificationRequestPromise;
+      await page.waitForFunction(() => [...document.querySelectorAll("form[name='portfolio-backtest'] button")]
+        .some((candidate) => (candidate.textContent || "").includes("Verifying ETF tickers")));
+      const verificationTicker = await page.$("input[name='asset-1-ticker']");
+      await verificationTicker.click({ clickCount: 3 });
+      await verificationTicker.type("VOO");
+      await page.waitForFunction(() => document.querySelector("[data-testid='verified-etf-tickers']") === null
+        && ![...document.querySelectorAll("form[name='portfolio-backtest'] button")]
+          .some((candidate) => (candidate.textContent || "").includes("Verifying ETF tickers")));
+      delayedApiMode = null;
+      const delayedVerificationInput = JSON.parse(delayedVerificationRequest.postData() || "{}");
+      await delayedVerificationRequest.respond({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { instruments: delayedVerificationInput.tickers.map((ticker) => ({ ticker, displayName: `${ticker} Fund`, eligibility: "verified_us_etf", exchange: "NMS" })), warnings: [] }, cache: { status: "refreshed" }, requestId: "portfolio-uat-delayed-validate" }) });
+      await wait(100);
+      assert.equal(await page.$("[data-testid='verified-etf-tickers']"), null, "an older verification response must not appear after editing the setup");
+      assert.equal(await page.$("[role='alert']"), null, "an older verification response must not create an error after editing the setup");
+      assert.equal(await page.$$eval("form[name='portfolio-backtest'] button", (buttons) => buttons.some((candidate) => (candidate.textContent || "").includes("Verifying ETF tickers"))), false, "an older verification finally must not restore loading after editing the setup");
+      const restoredTicker = await page.$("input[name='asset-1-ticker']");
+      await restoredTicker.click({ clickCount: 3 });
+      await restoredTicker.type("VTI");
+       const verified = await page.$$eval("button", (buttons) => {
        const button = buttons.find((candidate) => (candidate.textContent || "").includes("Verify ETF tickers"));
        if (!button) return false;
        button.click();
@@ -234,7 +281,52 @@ const backtestResult = (input) => ({
      assert.equal(requestCount, beforeRetry + 1, "retry must resubmit the last valid backtest configuration");
 
      await page.screenshot({ path: path.join(screenshotsDir, "desktop-error.png"), fullPage: true });
-    assert.equal(consoleErrors.length, 0, `console errors: ${consoleErrors.join("; ")}`);
+
+    apiMode = "success";
+    delayedApiMode = "backtest";
+    const delayedBacktestARequestPromise = page.waitForRequest(isBacktestRequest);
+    await page.$eval("button[type='submit']", (button) => button.click());
+    const delayedBacktestARequest = await delayedBacktestARequestPromise;
+    const delayedBacktestAInput = JSON.parse(delayedBacktestARequest.postData() || "{}");
+    await page.waitForFunction(() => document.querySelector("button[type='submit']")?.textContent?.includes("Fetching and simulating EOD history"));
+    await page.evaluate(() => {
+      window.location.hash = "#/work/portfolio-backtest?v=1&capital=20000&start=2022-01-01&end=2026-08-21&rebalance=monthly&dividend=cash&asset=VOO:7000&asset=VXUS:3000";
+    });
+    await page.waitForFunction(() => document.querySelector("input[name='capital']")?.value === "20000");
+    assert.equal(await page.$("[data-testid='portfolio-performance-chart']"), null, "loading a new shared setup must clear the old result");
+    assert.equal(await page.$("[role='alert']"), null, "loading a new shared setup must clear the old error");
+    assert.equal(await page.$eval("button[type='submit']", (button) => button.textContent?.includes("Fetching and simulating EOD history")), false, "loading a new shared setup must clear the old loading state");
+    const delayedBacktestBRequestPromise = page.waitForRequest(isBacktestRequest);
+    await page.$eval("button[type='submit']", (button) => button.click());
+    const delayedBacktestBRequest = await delayedBacktestBRequestPromise;
+    const delayedBacktestBInput = JSON.parse(delayedBacktestBRequest.postData() || "{}");
+    await page.waitForFunction(() => document.querySelector("button[type='submit']")?.textContent?.includes("Fetching and simulating EOD history"));
+    delayedApiMode = null;
+    await delayedBacktestARequest.respond(successResponse(delayedBacktestAInput, "portfolio-uat-delayed-a"));
+    await wait(100);
+    assert.equal(await page.$("[data-testid='portfolio-performance-chart']"), null, "an older backtest result must not overwrite a newer loading setup");
+    assert.equal(await page.$("[role='alert']"), null, "an older backtest response must not create an error for a newer setup");
+    assert.equal(await page.$eval("button[type='submit']", (button) => button.textContent?.includes("Fetching and simulating EOD history")), true, "an older backtest finally must not clear a newer request's loading state");
+    await delayedBacktestBRequest.respond(successResponse(delayedBacktestBInput, "portfolio-uat-delayed-b"));
+    await page.waitForSelector("[data-testid='portfolio-performance-chart']");
+    assert.match(await page.$eval("body", (body) => body.innerText), /VOO ETF[\s\S]*VXUS ETF/, "the newer backtest result must win");
+
+    delayedApiMode = "backtest";
+    const delayedBacktestErrorRequestPromise = page.waitForRequest(isBacktestRequest);
+    await page.$eval("button[type='submit']", (button) => button.click());
+    const delayedBacktestErrorRequest = await delayedBacktestErrorRequestPromise;
+    await page.waitForFunction(() => document.querySelector("button[type='submit']")?.textContent?.includes("Fetching and simulating EOD history"));
+    await page.evaluate(() => {
+      window.location.hash = "#/work/portfolio-backtest?v=1&capital=30000&start=2023-01-01&end=2026-08-21&rebalance=none&dividend=reinvest&asset=VTI:10000";
+    });
+    await page.waitForFunction(() => document.querySelector("input[name='capital']")?.value === "30000");
+    delayedApiMode = null;
+    await delayedBacktestErrorRequest.respond({ status: 504, contentType: "application/json", body: JSON.stringify({ error: { code: "REQUEST_TIMEOUT", message: "The delayed A request must not surface on the new setup." } }) });
+    await wait(100);
+    assert.equal(await page.$("[data-testid='portfolio-performance-chart']"), null, "a stale backtest error must not restore the old result");
+    assert.equal(await page.$("[role='alert']"), null, "a stale backtest error must not surface after loading a new setup");
+    assert.equal(await page.$eval("button[type='submit']", (button) => button.textContent?.includes("Fetching and simulating EOD history")), false, "a stale backtest finally must not leave a loading state on the new setup");
+     assert.equal(consoleErrors.length, 0, `console errors: ${consoleErrors.join("; ")}`);
     console.log(`Portfolio backtest UAT passed. Screenshots: ${screenshotsDir}`);
   } finally {
     if (browser) await browser.close();

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, BarChart3, Copy, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { PortfolioBacktestResult, PortfolioDividendPolicy, PortfolioRebalancePolicy } from "@/lib/portfolio-backtest";
@@ -55,17 +55,33 @@ export function PortfolioBacktestPage() {
   const [shareStatus, setShareStatus] = useState<"idle" | "copied" | "manual">("idle");
   const [manualShareUrl, setManualShareUrl] = useState<string | null>(null);
   const shareGenerationRef = useRef(0);
+  const verificationGenerationRef = useRef(0);
+  const backtestGenerationRef = useRef(0);
+
+  const invalidateFormState = useCallback(() => {
+    shareGenerationRef.current += 1;
+    verificationGenerationRef.current += 1;
+    backtestGenerationRef.current += 1;
+    setResult(null);
+    setError(null);
+    setTickerVerification(null);
+    setLoading(false);
+    setValidatingTickers(false);
+    setShareStatus("idle");
+    setManualShareUrl(null);
+  }, []);
 
   useEffect(() => {
     const syncRouteHash = () => {
-      shareGenerationRef.current += 1;
+      invalidateFormState();
       setRouteHash(window.location.hash);
     };
     window.addEventListener("hashchange", syncRouteHash);
     return () => window.removeEventListener("hashchange", syncRouteHash);
-  }, []);
+  }, [invalidateFormState]);
 
   useEffect(() => {
+    invalidateFormState();
     setPositions(sharedSetup.config
       ? sharedSetup.config.positions.map((position, index) => ({ id: index + 1, ticker: position.ticker, weight: (position.basisPoints / 100).toFixed(2) }))
       : [{ id: 1, ticker: "", weight: "" }]);
@@ -74,41 +90,24 @@ export function PortfolioBacktestPage() {
     setEndDate(sharedSetup.config?.endDate ?? initialRange.end);
     setRebalancePolicy(sharedSetup.config?.rebalancePolicy ?? "none");
     setDividendPolicy(sharedSetup.config?.dividendPolicy ?? "reinvest");
-    setResult(null);
-    setError(null);
-    setTickerVerification(null);
-    setShareStatus("idle");
-    setManualShareUrl(null);
-  }, [initialRange, sharedSetup]);
-
-  const invalidateShare = () => {
-    shareGenerationRef.current += 1;
-    setShareStatus("idle");
-    setManualShareUrl(null);
-  };
+  }, [initialRange, invalidateFormState, sharedSetup]);
 
   const allocationBasisPoints = useMemo(() => positions.reduce((sum, position) => sum + (Number.isInteger(basisPointsFor(position.weight)) ? basisPointsFor(position.weight) : 0), 0), [positions]);
   const allocationPrecisionValid = positions.every((position) => Number.isInteger(basisPointsFor(position.weight)));
   const allocationValid = positions.length > 0 && positions.every((position) => /^[A-Za-z0-9.^-]{1,16}$/.test(position.ticker.trim()) && Number.isInteger(basisPointsFor(position.weight)) && basisPointsFor(position.weight) > 0) && allocationBasisPoints === 10_000;
   const updatePosition = (id: number, field: "ticker" | "weight", value: string) => {
     setPositions((current) => current.map((position) => position.id === id ? { ...position, [field]: field === "ticker" ? value.toUpperCase() : value } : position));
-    setResult(null);
-    setTickerVerification(null);
-    invalidateShare();
+    invalidateFormState();
   };
   const addPosition = () => {
     if (positions.length >= MAX_POSITIONS) return;
     setPositions((current) => [...current, { id: Math.max(0, ...current.map((position) => position.id)) + 1, ticker: "", weight: "" }]);
-    setResult(null);
-    setTickerVerification(null);
-    invalidateShare();
+    invalidateFormState();
   };
   const removePosition = (id: number) => {
     if (positions.length === 1) return;
     setPositions((current) => current.filter((position) => position.id !== id));
-    setResult(null);
-    setTickerVerification(null);
-    invalidateShare();
+    invalidateFormState();
   };
   const verifyTickers = async () => {
     const tickers = positions.map((position) => position.ticker.trim().toUpperCase());
@@ -116,6 +115,8 @@ export function PortfolioBacktestPage() {
       setError("Enter unique, valid ETF tickers before requesting server-side ETF verification.");
       return;
     }
+    const requestGeneration = verificationGenerationRef.current + 1;
+    verificationGenerationRef.current = requestGeneration;
     setError(null);
     setTickerVerification(null);
     setValidatingTickers(true);
@@ -129,14 +130,18 @@ export function PortfolioBacktestPage() {
       if ((response.status !== 200 && response.status !== 206) || !payload.data?.instruments) {
         throw new Error(payload.error?.message || `ETF verification failed with HTTP ${response.status}.`);
       }
-      setTickerVerification(payload.data.instruments);
+      if (verificationGenerationRef.current === requestGeneration) setTickerVerification(payload.data.instruments);
     } catch (verificationError) {
-      setError(verificationError instanceof Error ? verificationError.message : String(verificationError));
+      if (verificationGenerationRef.current === requestGeneration) {
+        setError(verificationError instanceof Error ? verificationError.message : String(verificationError));
+      }
     } finally {
-      setValidatingTickers(false);
+      if (verificationGenerationRef.current === requestGeneration) setValidatingTickers(false);
     }
   };
   const runBacktest = async () => {
+    const requestGeneration = backtestGenerationRef.current + 1;
+    backtestGenerationRef.current = requestGeneration;
     setError(null);
     setResult(null);
     if (!allocationValid) {
@@ -170,11 +175,13 @@ export function PortfolioBacktestPage() {
       if ((response.status !== 200 && response.status !== 206) || !("data" in payload)) {
         throw new Error((payload as { error?: { message?: string } }).error?.message || `Backtest API failed with HTTP ${response.status}.`);
       }
-      setResult(payload);
+      if (backtestGenerationRef.current === requestGeneration) setResult(payload);
     } catch (runError) {
-      setError(runError instanceof Error ? runError.message : String(runError));
+      if (backtestGenerationRef.current === requestGeneration) {
+        setError(runError instanceof Error ? runError.message : String(runError));
+      }
     } finally {
-      setLoading(false);
+      if (backtestGenerationRef.current === requestGeneration) setLoading(false);
     }
   };
 
@@ -238,12 +245,12 @@ export function PortfolioBacktestPage() {
       <main className="grid gap-5 py-6 xl:grid-cols-[420px_minmax(0,1fr)]">
         <form name="portfolio-backtest" onSubmit={(event) => { event.preventDefault(); void runBacktest(); }} className="h-fit border border-zinc-800 bg-[#111416] p-4 sm:p-5" noValidate>
           <div className="flex items-center justify-between border-b border-zinc-800 pb-3"><div><p className="text-[0.62rem] font-bold uppercase tracking-[0.15em] text-zinc-500">Portfolio specification</p><h2 className="mt-1 text-lg font-black">US-listed ETFs</h2></div><BarChart3 className="h-5 w-5 text-emerald-400" /></div>
-          <label className="mt-5 block text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Starting capital (USD)<input name="capital" autoComplete="off" value={startingCapital} onChange={(event) => { setStartingCapital(event.target.value); setResult(null); invalidateShare(); }} inputMode="decimal" className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="Starting capital" /></label>
-          <div className="mt-5 grid grid-cols-2 gap-3"><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Start date<input name="start-date" type="date" value={startDate} onChange={(event) => { setStartDate(event.target.value); setResult(null); invalidateShare(); }} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-2 py-2 text-xs text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="Start date" /></label><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">End date<input name="end-date" type="date" value={endDate} onChange={(event) => { setEndDate(event.target.value); setResult(null); invalidateShare(); }} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-2 py-2 text-xs text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="End date" /></label></div>
+          <label className="mt-5 block text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Starting capital (USD)<input name="capital" autoComplete="off" value={startingCapital} onChange={(event) => { setStartingCapital(event.target.value); invalidateFormState(); }} inputMode="decimal" className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="Starting capital" /></label>
+          <div className="mt-5 grid grid-cols-2 gap-3"><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Start date<input name="start-date" type="date" value={startDate} onChange={(event) => { setStartDate(event.target.value); invalidateFormState(); }} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-2 py-2 text-xs text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="Start date" /></label><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">End date<input name="end-date" type="date" value={endDate} onChange={(event) => { setEndDate(event.target.value); invalidateFormState(); }} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-2 py-2 text-xs text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="End date" /></label></div>
           <div className="mt-5 space-y-2"><div className="flex items-center justify-between"><p className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">ETF allocation</p><span className={allocationValid ? "text-xs font-black text-emerald-400" : "text-xs font-black text-rose-400"}>{allocationPrecisionValid ? `${(allocationBasisPoints / 100).toFixed(2)}%` : "Use 0.01% increments"}</span></div>{positions.map((position, index) => <div key={position.id} className="grid grid-cols-[1fr_96px_44px] gap-2"><input name={`asset-${index + 1}-ticker`} autoComplete="off" spellCheck={false} value={position.ticker} onChange={(event) => updatePosition(position.id, "ticker", event.target.value)} placeholder="VTI…" className="min-h-11 min-w-0 border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm uppercase text-zinc-100 outline-none placeholder:text-zinc-700 focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label={`ETF ticker ${index + 1}`} /><input name={`asset-${index + 1}-weight`} autoComplete="off" value={position.weight} onChange={(event) => updatePosition(position.id, "weight", event.target.value)} inputMode="decimal" placeholder="60.00…" className="min-h-11 min-w-0 border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none placeholder:text-zinc-700 focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label={`ETF allocation percent ${index + 1}`} /><button type="button" disabled={positions.length === 1} onClick={() => removePosition(position.id)} aria-label={`Remove ${position.ticker || "ETF"}`} className="min-h-11 min-w-11 border border-zinc-800 text-zinc-500 hover:border-rose-400 hover:text-rose-400 focus-visible:ring-2 focus-visible:ring-rose-400 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 className="mx-auto h-3.5 w-3.5" /></button></div>)}</div>
           <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2"><button type="button" disabled={positions.length >= MAX_POSITIONS} onClick={addPosition} className="inline-flex min-h-11 items-center gap-1.5 text-[0.65rem] font-bold uppercase tracking-[0.12em] text-zinc-400 hover:text-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400 disabled:opacity-40"><Plus className="h-3.5 w-3.5" /> Add ETF</button><button type="button" disabled={validatingTickers} onClick={() => void verifyTickers()} className="min-h-11 text-[0.65rem] font-bold uppercase tracking-[0.12em] text-zinc-400 hover:text-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400 disabled:opacity-40">{validatingTickers ? "Verifying ETF tickers…" : "Verify ETF tickers"}</button></div>
           {tickerVerification && <div className="mt-3 border border-emerald-500/30 bg-emerald-500/5 p-3 text-xs text-emerald-100" data-testid="verified-etf-tickers">{tickerVerification.map((instrument) => <p key={instrument.ticker}><span className="font-black">{instrument.ticker}</span> · {instrument.displayName} · {instrument.exchange} · verified US ETF</p>)}</div>}
-          <div className="mt-5 grid gap-3"><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Rebalancing<select name="rebalance-policy" value={rebalancePolicy} onChange={(event) => { setRebalancePolicy(event.target.value as PortfolioRebalancePolicy); setResult(null); invalidateShare(); }} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="Rebalancing policy"><option value="none">No rebalancing</option><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="annual">Annual</option></select></label><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Dividend policy<select name="dividend-policy" value={dividendPolicy} onChange={(event) => { setDividendPolicy(event.target.value as PortfolioDividendPolicy); setResult(null); invalidateShare(); }} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="Dividend policy"><option value="reinvest">Reinvest dividends</option><option value="cash">Hold dividends as cash</option></select></label></div>
+          <div className="mt-5 grid gap-3"><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Rebalancing<select name="rebalance-policy" value={rebalancePolicy} onChange={(event) => { setRebalancePolicy(event.target.value as PortfolioRebalancePolicy); invalidateFormState(); }} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="Rebalancing policy"><option value="none">No rebalancing</option><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="annual">Annual</option></select></label><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Dividend policy<select name="dividend-policy" value={dividendPolicy} onChange={(event) => { setDividendPolicy(event.target.value as PortfolioDividendPolicy); invalidateFormState(); }} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="Dividend policy"><option value="reinvest">Reinvest dividends</option><option value="cash">Hold dividends as cash</option></select></label></div>
           <button type="submit" disabled={loading} className="mt-6 inline-flex w-full items-center justify-center gap-2 border border-emerald-400/70 bg-emerald-400/10 px-4 py-3 text-[0.68rem] font-black uppercase tracking-[0.15em] text-emerald-300 transition-colors hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-50">{loading ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Fetching and simulating EOD history</> : "Run backtest"}</button>
           <button type="button" onClick={() => void copySetupLink()} className="mt-3 inline-flex min-h-11 w-full items-center justify-center gap-2 border border-zinc-700 px-4 text-[0.68rem] font-black uppercase tracking-[0.15em] text-zinc-300 hover:border-emerald-400 hover:text-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-400"><Copy className="h-3.5 w-3.5" /> {shareStatus === "copied" ? "Setup link copied" : "Copy setup link"}</button>
           <p className="mt-2 text-center text-[0.62rem] text-zinc-500" aria-live="polite">{shareStatus === "copied" ? "The link contains inputs only and will not run automatically." : shareStatus === "manual" ? "Clipboard unavailable. Copy the URL below." : "Shares inputs only — never results or provider data."}</p>
