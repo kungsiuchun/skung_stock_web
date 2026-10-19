@@ -8,6 +8,7 @@ import { AboutPage } from "../src/components/about-page";
 import { AboutResumeTerminal } from "../src/components/about-resume-terminal";
 import { portfolioBacktestInitialRange } from "../src/components/portfolio-backtest-page";
 import PhotographyPage from "../src/components/photography-page";
+import { WorkGallery } from "../src/components/work-gallery";
 
 test("portfolio defaults follow the New York market date instead of UTC", () => {
   assert.deepEqual(
@@ -75,5 +76,12 @@ test("personal photography uses local assets and keyboard reachable viewer trigg
   const html = renderToStaticMarkup(createElement(PhotographyPage));
   assert.doesNotMatch(html, /unsplash/);
   assert.equal((html.match(/aria-label="View photograph:/g) || []).length, 22);
+  assert.equal((html.match(/<img[^>]+width="\d+"[^>]+height="\d+"/g) || []).length, 22);
   assert.match(html, /<dialog[^>]+aria-label="Photograph viewer"/);
+});
+
+test("Market Lab uses native links for routes and keeps only the caption modal as a button", () => {
+  const html = renderToStaticMarkup(createElement(WorkGallery, { onOpenCaptionTool: () => undefined }));
+  assert.equal((html.match(/class="text-link" href="#\/work\//g) || []).length, 10);
+  assert.equal((html.match(/<button[^>]+class="text-link"/g) || []).length, 1);
 });

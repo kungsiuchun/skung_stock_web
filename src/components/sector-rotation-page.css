@@ -5,7 +5,7 @@
 .sr-page button { cursor: pointer; }
 .sr-page button:disabled { cursor: wait; opacity: .6; }
 .sr-page button:focus-visible, .sr-page a:focus-visible, .sr-page input:focus-visible, .sr-page summary:focus-visible, .sr-page circle[role=button]:focus-visible { outline: 2px solid var(--sr-amber); outline-offset: 3px; }
-.sr-back { display: inline-flex; align-items: center; gap: 8px; color: #9ca5a3; background: none; border: 0; padding: 0; margin-bottom: 19px; font-size: 11px !important; text-transform: uppercase; letter-spacing: .08em; }
+.sr-back { display: inline-flex; min-width: 44px; min-height: 44px; align-items: center; gap: 8px; color: #9ca5a3; background: none; border: 0; padding: 0; margin-bottom: 19px; font-size: 11px !important; text-transform: uppercase; letter-spacing: .08em; }
 .sr-back:hover { color: var(--sr-amber); }
 .sr-heading { display: flex; justify-content: space-between; align-items: end; gap: 20px; }
 .sr-eyebrow { color: var(--sr-amber); text-transform: uppercase; letter-spacing: .14em; font-size: 10px; font-weight: 700; margin: 0 0 7px; }

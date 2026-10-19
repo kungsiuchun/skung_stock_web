@@ -3,6 +3,7 @@ import { ExternalLink, RefreshCw } from "lucide-react";
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { FomcRateProbabilityResponse } from "@/lib/fomc-rate-probability";
 import type { TreasuryCurveKey, TreasuryYieldCurveResponse } from "@/lib/treasury-yield-curve";
+import { loadStocksWatcherFomc, loadStocksWatcherTreasury } from "./stocks-watcher-panel-loaders";
 
 const CURVE_STYLES: Array<{ key: TreasuryCurveKey; color: string }> = [
   { key: "latest", color: "#2fa8ff" }, { key: "oneWeek", color: "#8b9ab0" },
@@ -12,14 +13,6 @@ const formatDate = (date: string) => new Intl.DateTimeFormat("en-US", { month: "
 const formatBps = (value: number) => `${value > 0 ? "+" : ""}${value.toFixed(1)}`;
 const changeClass = (value: number) => value > 0 ? "siw-up" : value < 0 ? "siw-down" : "";
 const formatTimestamp = (timestamp: string) => new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(timestamp));
-
-const readPayload = async <T,>(response: Response, requestUrl: string) => {
-  const contentType = response.headers.get("content-type") || "";
-  const text = await response.text();
-  if (!contentType.toLowerCase().includes("application/json")) throw new Error(`Fixed Income API returned ${contentType || "unknown content type"} for ${requestUrl}.`);
-  try { return JSON.parse(text) as T & { error?: string }; }
-  catch (error) { throw new Error(`Fixed Income API returned invalid JSON for ${requestUrl}: ${error instanceof Error ? error.message : String(error)}`); }
-};
 
 function ChangeCell({ value }: { value: number }) {
   return <td className={`siw-fixed-income-number ${changeClass(value)}`}>{formatBps(value)}</td>;
@@ -33,23 +26,17 @@ export function StocksWatcherFixedIncomePanel() {
   const [fomcLoading, setFomcLoading] = useState(true);
   const [fomcError, setFomcError] = useState<string | null>(null);
   const loadTreasury = async (bypassCache = false) => {
-    const requestUrl = `/api/treasury-yield-curve${bypassCache ? `?_=${Date.now()}` : ""}`;
     setLoading(true); setError(null);
     try {
-      const response = await fetch(requestUrl, bypassCache ? { cache: "no-store" } : undefined);
-      const payload = await readPayload<TreasuryYieldCurveResponse>(response, requestUrl);
-      if (!response.ok) throw new Error(payload.error || `Fixed Income API failed with HTTP ${response.status}.`);
+      const payload = await loadStocksWatcherTreasury(fetch, bypassCache);
       setData(payload);
     } catch (requestError) { setData(null); setError(requestError instanceof Error ? requestError.message : "Fixed Income API failed."); }
     finally { setLoading(false); }
   };
   const loadFomc = async (bypassCache = false) => {
-    const requestUrl = `/api/fomc-rate-probability${bypassCache ? `?_=${Date.now()}` : ""}`;
     setFomcLoading(true); setFomcError(null);
     try {
-      const response = await fetch(requestUrl, bypassCache ? { cache: "no-store" } : undefined);
-      const payload = await readPayload<FomcRateProbabilityResponse>(response, requestUrl);
-      if (!response.ok) throw new Error(payload.error || `FOMC probability API failed with HTTP ${response.status}.`);
+      const payload = await loadStocksWatcherFomc(fetch, bypassCache);
       setFomc(payload);
     } catch (requestError) { setFomc(null); setFomcError(requestError instanceof Error ? requestError.message : "FOMC probability API failed."); }
     finally { setFomcLoading(false); }

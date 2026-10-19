@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getHashForView, getViewFromHash, type ViewState } from "../src/lib/app-routes";
+import { getHashForView, getTitleForView, getViewFromHash, type ViewState } from "../src/lib/app-routes";
 
 test("maps finance analyzer hashes to the dashboard view", () => {
   assert.equal(getViewFromHash("#/work/finance-analyzer"), "finance-dashboard");
@@ -36,5 +36,7 @@ test("round trips every page-level view to a hash route", () => {
   for (const [view, hash] of expected) {
     assert.equal(getHashForView(view), hash);
     assert.equal(getViewFromHash(hash), view);
+    assert.match(getTitleForView(view), / — Siu$/);
   }
+  assert.equal(new Set(expected.map(([view]) => getTitleForView(view))).size, expected.length, "every route should have a distinct document title");
 });

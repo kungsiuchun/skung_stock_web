@@ -2,195 +2,166 @@ export interface PortfolioImage {
   id: number;
   alt: string;
   src: string;
+  width: number;
+  height: number;
 }
 
 export const portfolioConfig = {
   ownerName: "Siu",
   images: [
-    // {
-    //   id: 1,
-    //   alt: "Silhouette of a traditional Japanese pagoda at sunset",
-    //   src: "https://images.unsplash.com/photo-1512692723619-8b3e68365c9c?q=80&w=1974&auto=format&fit=crop",
-    // },
-    // {
-    //   id: 2,
-    //   alt: "Himeji Castle on a clear day",
-    //   src: "https://images.unsplash.com/photo-1491884662610-dfcd28f30cfb?q=80&w=1974&auto=format&fit=crop",
-    // },
-    // {
-    //   id: 3,
-    //   alt: "Red Car",
-    //   src: "https://images.unsplash.com/photo-1536901766856-5d45744cd180?w=500&auto=format&fit=crop",
-    // },
-    // {
-    //   id: 4,
-    //   alt: "Woman in kimono standing beside a traditional Japanese house",
-    //   src: "https://images.unsplash.com/photo-1505069446780-4ef442b5207f?q=80&w=1974&auto=format&fit=crop",
-    // },
-    // {
-    //   id: 5,
-    //   alt: "Group of men in black suits inside a hallway",
-    //   src: "https://images.unsplash.com/photo-1554797589-7241bb691973?q=80&w=1936&auto=format&fit=crop",
-    // },
-    // {
-    //   id: 6,
-    //   alt: "Crowd walking through a street decorated with red lanterns",
-    //   src: "https://images.unsplash.com/photo-1596713109885-c94bdfd7f19d?q=80&w=1974&auto=format&fit=crop",
-    // },
-    // {
-    //   id: 7,
-    //   alt: "Timelapse of traffic lights and buildings at night",
-    //   src: "https://images.unsplash.com/photo-1498036882173-b41c28a8ba34?q=80&w=1964&auto=format&fit=crop",
-    // },
-    // {
-    //   id: 8,
-    //   alt: "Close-up of orange and black wooden torii gate posts",
-    //   src: "https://images.unsplash.com/photo-1585028281328-54ec883cd7cf?q=80&w=1935&auto=format&fit=crop",
-    // },
-    // {
-    //   id: 9,
-    //   alt: "Historic building with brown and white stone exterior in daylight",
-    //   src: "https://images.unsplash.com/photo-1614003024056-e3ecbf8888f7?q=80&w=1974&auto=format&fit=crop",
-    // },
-    // {
-    //   id: 10,
-    //   alt: "Lantern glowing on a quiet street at night",
-    //   src: "https://images.unsplash.com/photo-1573455494057-12684d151bf4?q=80&w=1924&auto=format&fit=crop",
-    // },
-    // {
-    //   id: 11,
-    //   alt: "View of Osaka Castle with clear sky backdrop",
-    //   src: "https://images.unsplash.com/photo-1575489129683-4f7d23379975?q=80&w=1935&auto=format&fit=crop",
-    // },
-    // {
-    //   id: 12,
-    //   alt: "Pagoda silhouetted during golden hour",
-    //   src: "https://images.unsplash.com/photo-1512692723619-8b3e68365c9c?q=80&w=1974&auto=format&fit=crop",
-    // },
-    // {
-    //   id: 13,
-    //   alt: "Himeji Castle seen from a distance",
-    //   src: "https://images.unsplash.com/photo-1491884662610-dfcd28f30cfb?q=80&w=1974&auto=format&fit=crop",
-    // },
-    {
-      id: 14,
-      alt: "Torii gate pillars in vibrant orange and black",
-      src: "https://images.unsplash.com/photo-1585028281328-54ec883cd7cf?q=80&w=1935&auto=format&fit=crop",
-    },
-    {
-      id: 15,
-      alt: "Traditional Japanese home under daylight",
-      src: "https://images.unsplash.com/photo-1505069446780-4ef442b5207f?q=80&w=1974&auto=format&fit=crop",
-    },
     {
       id: 37,
       alt: "Garden portrait with straw hat",
       src: "/image/DSC_0990.JPG",
+      width: 1280,
+      height: 1920,
     },
     {
       id: 31,
       alt: "Wrigley Building clock tower at dusk",
       src: "/image/DSC_0372.JPG?v=2",
+      width: 1920,
+      height: 1280,
     },
     {
       id: 24,
       alt: "Portrait beside a wooden train carriage",
       src: "/image/DSC_0053.JPG",
+      width: 1280,
+      height: 1920,
     },
     {
       id: 34,
       alt: "Colorful portrait wall at Navy Pier",
       src: "/image/DSC_0297.JPG?v=2",
+      width: 1280,
+      height: 1920,
     },
     {
       id: 20,
       alt: "Temple roof framed by green leaves",
       src: "/image/DSC_0154.JPG",
+      width: 1280,
+      height: 1920,
     },
     {
       id: 29,
       alt: "Navy Pier ferris wheel against blue sky",
       src: "/image/DSC_0346.JPG?v=2",
+      width: 1920,
+      height: 1280,
     },
     {
       id: 39,
       alt: "Temple elephant statue portrait",
       src: "/image/DSC_0849.JPG",
+      width: 1280,
+      height: 1920,
     },
     {
       id: 32,
       alt: "Chicago skyline reflected on the river at dusk",
       src: "/image/DSC_0395.JPG?v=2",
+      width: 1920,
+      height: 1280,
     },
     {
       id: 25,
       alt: "Portrait at a railway station in the mountains",
       src: "/image/DSC_0060.JPG",
+      width: 1280,
+      height: 1920,
     },
     {
       id: 28,
       alt: "Chicago Cloud Gate plaza portrait",
       src: "/image/DSC_0455.JPG?v=2",
+      width: 1280,
+      height: 1920,
     },
     {
       id: 38,
       alt: "Hong Kong skyline selfie at golden hour",
       src: "/image/DSC_0777.JPG",
+      width: 1920,
+      height: 1280,
     },
     {
       id: 22,
       alt: "Portrait beneath a timber pavilion",
       src: "/image/DSC_0276.JPG",
+      width: 1280,
+      height: 1920,
     },
     {
       id: 36,
       alt: "Chicago skyline portrait",
       src: "/image/DSC_0335.JPG",
+      width: 1024,
+      height: 1536,
     },
     {
       id: 27,
       alt: "Walking across a wooden bridge into the trees",
       src: "/image/DSC_0146.JPG",
+      width: 1280,
+      height: 1920,
     },
     {
       id: 30,
       alt: "Chicago skyline reflected at Cloud Gate",
       src: "/image/DSC_0458.JPG?v=2",
+      width: 1280,
+      height: 1920,
     },
     {
       id: 23,
       alt: "Portrait in a sunlit wooden corridor",
       src: "/image/DSC_0280.JPG",
+      width: 1280,
+      height: 1920,
     },
     {
       id: 40,
       alt: "Garden portrait through circular frame",
       src: "/image/DSC_0956.JPG",
+      width: 1920,
+      height: 1280,
     },
     {
       id: 21,
       alt: "A walk along a quiet city street",
       src: "/image/DSC_0171.JPG",
+      width: 1280,
+      height: 1920,
     },
     {
       id: 33,
       alt: "Chicago river skyline at night",
       src: "/image/DSC_0407.JPG?v=2",
+      width: 1920,
+      height: 1280,
     },
     {
       id: 26,
       alt: "A pause on a shaded woodland boardwalk",
       src: "/image/DSC_0103.JPG",
+      width: 1280,
+      height: 1920,
     },
     {
       id: 35,
       alt: "Route 66 Navy Pier sign with ferris wheel",
       src: "/image/DSC_0294.JPG?v=2",
+      width: 1920,
+      height: 1280,
     },
     {
       id: 19,
       alt: "Portrait among tall forest trees",
       src: "/image/DSC_0132.JPG",
+      width: 1280,
+      height: 1920,
     },
   ]
 }

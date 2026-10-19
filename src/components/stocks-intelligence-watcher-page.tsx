@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
+import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
 import {
   Activity,
   ArrowLeft,
@@ -19,11 +19,9 @@ import {
   Star,
   X,
 } from "lucide-react";
-import { AreaSeries, BarSeries, CandlestickSeries, ColorType, HistogramSeries, LineSeries, createChart } from "lightweight-charts";
 import "./stocks-intelligence-watcher-page.css";
 import type {
   StocksWatcherChartMode,
-  StocksWatcherExpiryRow,
   StocksWatcherRowQuote,
   StocksWatcherSnapshotCacheEntry,
   StocksWatcherSnapshot,
@@ -58,7 +56,6 @@ import {
   getStocksWatcherStrikeDetailToolPlan,
   getStocksWatcherTopTabCacheKey,
   getStocksWatcherTopTabToolPlan,
-  STOCKS_WATCHER_PRICE_RANGES,
 } from "@/lib/stocks-intelligence-watcher-session";
 import type { StocksWatcherPriceRange } from "@/lib/stocks-intelligence-watcher-session";
 import {
@@ -69,27 +66,17 @@ import { getStocksWatcherInitialSymbolFromHash, STOCKS_WATCHER_DEFAULT_SYMBOL } 
 import { normalizeOptionsVisualModel, optionsExpiryMatchesRequest } from "@/lib/stocks-watcher-options-visual";
 import type { FearGreedSnapshot } from "@/lib/fear-greed";
 import type { MarketCacheMetadata } from "@/lib/market-data-cache";
-import type { WatcherFinancialQuarter, WatcherFinancialSource, WatcherFinancialStatements, WatcherValuationBands, WatcherValuationMetric } from "@/lib/stocks-watcher-valuation-data";
+import type { WatcherValuationBands, WatcherValuationMetric } from "@/lib/stocks-watcher-valuation-data";
 import { StocksWatcherFearGreedPanel } from "./stocks-watcher-fear-greed-panel";
 import { StocksWatcherFixedIncomePanel } from "./stocks-watcher-fixed-income-panel";
 import { StocksWatcherMacroPanel } from "./stocks-watcher-macro-panel";
 import { MarketBreadthPanel } from "./market-breadth-page";
-
-interface StocksIntelligenceWatcherPageProps {
-  onBackToWork: () => void;
-}
+import { parseJsonResponse } from "@/lib/safe-json-response";
 
 const HIDDEN_SYMBOLS_STORAGE_KEY = "stocks-intelligence-hidden-symbols";
 const FAVORITES_STORAGE_KEY = "stocks-intelligence-favorites";
-const FAVORITES_MEMORY_KEY = "stocks-intelligence-favorites";
-const CUSTOM_STOCKS_STORAGE_KEY = "stocks-intelligence-custom-stocks";
 const ROW_QUOTE_REFRESH_CHUNK_SIZE = 20;
 const VALUATION_METRICS: readonly WatcherValuationMetric[] = ["pe", "fcf", "ps"];
-const VALUATION_METRIC_LABEL: Record<WatcherValuationMetric, string> = {
-  pe: "P/E",
-  fcf: "P/FCF",
-  ps: "P/S",
-};
 
 const TOP_TABS = [
   "Overview",
@@ -115,15 +102,8 @@ const OPTIONS_SUB_TABS = [
 const BASE_SECTOR_OPTIONS = ["All Sectors"];
 const BASE_TYPE_OPTIONS = ["All Types"];
 
-const MARKET_INDEX_DEFINITIONS: MarketIndexDefinition[] = [
-  { symbol: "SPX", yahooSymbol: "^GSPC", label: "S&P 500" },
-  { symbol: "NDX", yahooSymbol: "^NDX", label: "NASDAQ 100" },
-  { symbol: "DJI", yahooSymbol: "^DJI", label: "DOW JONES" },
-];
-
 type TopTab = (typeof TOP_TABS)[number];
 type OptionsSubTab = (typeof OPTIONS_SUB_TABS)[number];
-type ToolStatus = "ok" | "failed" | "running";
 
 const TOP_TAB_ICONS: Record<TopTab, typeof Sparkles> = {
   Overview: Sparkles,
@@ -137,1891 +117,113 @@ const TOP_TAB_ICONS: Record<TopTab, typeof Sparkles> = {
   Macro: Globe2,
 };
 
-interface NativeToolResult {
-  tool: string;
-  params: Record<string, unknown>;
-  text: string;
-  raw: unknown;
-  error?: string;
-}
-
-interface ToolRunLogEntry {
-  id: string;
-  name: string;
-  params: Record<string, unknown>;
-  status: ToolStatus;
-  startedAt: number;
-  endedAt?: number;
-  durationMs?: number;
-  payload?: unknown;
-  error?: string;
-}
-
-interface TabCacheEntry {
-  data: Record<string, NativeToolResult>;
-  fetchedAt: number;
-}
-
-interface AsyncPanelState {
-  loading: boolean;
-  error: string | null;
-  data: Record<string, NativeToolResult> | null;
-}
-
-interface FearGreedPanelState {
-  loading: boolean;
-  error: string | null;
-  data: FearGreedSnapshot | null;
-  cache: MarketCacheMetadata | null;
-}
-
-interface ChartGexAggregateRow {
-  strike: number;
-  netGex: number;
-  contributors: number;
-}
-
-interface SharedPriceAxisRange {
-  min: number;
-  max: number;
-}
-
-/**
- * Strike coordinates are relative to the price card, never the browser
- * viewport. This makes a chart/profile pair stable while its parent scrolls.
- */
-interface SharedPriceAxisCoordinates {
-  [strike: string]: number;
-}
-
-interface YahooExpiryPreloadState {
-  runId: number;
-  total: number;
-  loaded: number;
-  failed: number;
-  complete: boolean;
-}
-
-interface StrikeDrawerState {
-  open: boolean;
-  strike: number | null;
-  expiry: string | null;
-  loading?: boolean;
-  error?: string | null;
-  data?: Record<string, NativeToolResult> | null;
-}
-
-type ModalState =
-  | { type: null; data?: null }
-  | { type: "runTool"; data: { toolName: string; paramsText: string; result?: NativeToolResult; loading?: boolean; error?: string | null } };
-
-interface MarketIndexDefinition {
-  symbol: string;
-  yahooSymbol: string;
-  label: string;
-}
-
-interface MarketIndexCard {
-  symbol: string;
-  sourceSymbol: string;
-  label: string;
-  status: "ok" | "unavailable";
-  value: number;
-  change: number;
-  changePercent: number;
-  historyPointCount: number;
-  error?: string;
-  history: RawHistoryPoint[];
-}
-
-interface MarketContextState {
-  loading: boolean;
-  error: string | null;
-  regime: NativeToolResult | null;
-  breadth: NativeToolResult | null;
-  sectorStats: NativeToolResult | null;
-  sectorTopHoldings: NativeToolResult | null;
-  indices: MarketIndexCard[];
-}
-
-interface ApprovedUniverseRegime {
-  regime: "risk_on" | "risk_off" | "mixed";
-  advancers: number;
-  avgChange: number;
-  universeCount: number;
-}
-
-interface ApprovedUniverseHolding {
-  symbol: string;
-  sector: string;
-  price: number;
-  changePercent: number;
-  volume: number;
-}
-
-interface RawOptionLeg {
-  strike?: number;
-  bid?: number;
-  ask?: number;
-  lastPrice?: number;
-  mark?: number;
-  volume?: number;
-  openInterest?: number;
-  impliedVolatility?: number;
-  contractSymbol?: string;
-}
-
-interface RawOptionChain {
-  spot?: number;
-  selectedExpiry?: string | null;
-  expiries?: string[];
-  calls?: RawOptionLeg[];
-  puts?: RawOptionLeg[];
-}
-
-interface ExpirySelectorRow {
-  expiry: string;
-  loaded: boolean;
-  openInterest?: number;
-  primaryStrike?: number;
-  volume?: number;
-  dominantType?: "C" | "P";
-  netGex?: number;
-  netDex?: number;
-}
-
-interface RawOptionExposure {
-  strike?: number;
-  callGex?: number;
-  putGex?: number;
-  netGex?: number;
-  callDex?: number;
-  putDex?: number;
-  netDex?: number;
-  avgIv?: number;
-  callIv?: number;
-  putIv?: number;
-  callOpenInterest?: number;
-  putOpenInterest?: number;
-  callVolume?: number;
-  putVolume?: number;
-  callEffectiveOpenInterest?: number;
-  putEffectiveOpenInterest?: number;
-  openInterestSource?: string;
-  call?: RawOptionLeg;
-  put?: RawOptionLeg;
-}
-
-interface RawHistoryPoint {
-  date?: string;
-  open?: number;
-  high?: number;
-  low?: number;
-  close?: number;
-  volume?: number;
-}
-
-interface SparklinePoint {
-  label: string;
-  dateTimeLabel?: string;
-  rangeLabel?: string;
-  granularityLabel?: string;
-  value: number;
-  source?: string;
-}
-
-interface SparklineTooltipPosition {
-  left: number;
-  top: number;
-  alignRight: boolean;
-}
-
-interface RawQuoteRow {
-  symbol?: string;
-  name?: string;
-  price?: number;
-  change?: number;
-  changePercent?: number;
-  volume?: number;
-}
-
-const formatNumber = (value: number) => {
-  const abs = Math.abs(value);
-  if (abs >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
-  if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (abs >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
-  return value.toLocaleString(undefined, { maximumFractionDigits: 0 });
-};
-
-const formatOptionalSignedExposure = (value: number | null | undefined) => {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
-  return `${value > 0 ? "+" : ""}${formatNumber(value)}`;
-};
-
-const currency = (value: number) =>
-  `$${value.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}`;
-
-const quoteDirection = (change: number | null | undefined, changePercent: number | null | undefined) => {
-  if (typeof change === "number" && Number.isFinite(change) && change !== 0) return change > 0 ? 1 : -1;
-  if (typeof changePercent === "number" && Number.isFinite(changePercent) && changePercent !== 0) return changePercent > 0 ? 1 : -1;
-  return 0;
-};
-
-const signedNumberText = (value: number) => `${value > 0 ? "+" : ""}${value.toFixed(2)}`;
-const directionArrow = (direction: number) => direction > 0 ? "▲" : direction < 0 ? "▼" : "";
-
-const formatOptionalPrice = (value: number | null | undefined) =>
-  typeof value === "number" && Number.isFinite(value)
-    ? value.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })
-    : "N/A";
-
-const formatSignedPercent = (value: number | null | undefined) =>
-  typeof value === "number" && Number.isFinite(value)
-    ? `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`
-    : "N/A";
-
-const formatOptionalNumber = (value: number | null | undefined, digits = 2) =>
-  typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "N/A";
-
-/** Regular US equities session only. The exchange timezone handles DST correctly. */
-const getUsEquitiesMarketStatus = (timestamp: number) => {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    weekday: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(new Date(timestamp));
-  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((entry) => entry.type === type)?.value || "";
-  const weekday = part("weekday");
-  const minutesSinceMidnight = Number(part("hour")) * 60 + Number(part("minute"));
-  const isWeekday = ["Mon", "Tue", "Wed", "Thu", "Fri"].includes(weekday);
-  const isOpen = isWeekday && minutesSinceMidnight >= 9 * 60 + 30 && minutesSinceMidnight < 16 * 60;
-  return { label: isOpen ? "Open" : "Closed", isOpen };
-};
-
-const formatNewsTimestamp = (value: string | null | undefined) => {
-  if (!value) return "Yahoo";
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) return value;
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZone: "America/New_York",
-  }).format(new Date(parsed));
-};
-
-const formatIndexValue = (value: number) =>
-  value > 0 ? value.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 }) : "--";
-
-const formatSparklineDateTime = (value: string | undefined, fallback: string, mode: "date" | "dateTime" = "date") => {
-  if (!value) return fallback;
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) return value;
-  const options: Intl.DateTimeFormatOptions = mode === "dateTime"
-    ? { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZone: "America/New_York" }
-    : { month: "short", day: "numeric", year: "numeric", timeZone: "America/New_York" };
-  return `${new Intl.DateTimeFormat("en-US", options).format(new Date(parsed))}${mode === "dateTime" ? " ET" : ""}`;
-};
-
-const dateFromAsOfAndSessionLabel = (asOf: string | null | undefined, label: string | undefined) => {
-  if (!asOf || !label) return null;
-  const baseDate = Date.parse(asOf);
-  if (!Number.isFinite(baseDate)) return null;
-  const timeMatch = label.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?$/i);
-  if (!timeMatch) return new Date(baseDate).toISOString();
-  let hours = Number(timeMatch[1]);
-  const minutes = Number(timeMatch[2] || 0);
-  const suffix = timeMatch[3]?.toUpperCase();
-  if (suffix === "PM" && hours < 12) hours += 12;
-  if (suffix === "AM" && hours === 12) hours = 0;
-  const date = new Date(baseDate);
-  date.setUTCHours(hours + 4, minutes, 0, 0);
-  return date.toISOString();
-};
-
-const formatQuoteAsOf = (asOf: string | null | undefined) => {
-  if (!asOf) return "loading";
-  const parsed = Date.parse(asOf);
-  if (!Number.isFinite(parsed)) return asOf;
-  return new Intl.DateTimeFormat("en-US", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZone: "America/New_York",
-  }).format(new Date(parsed));
-};
-
-const normalizeExpiryDate = (expiry: string | null | undefined) => {
-  if (!expiry) return "";
-  if (/^\d{2}-\d{2}-\d{2}$/.test(expiry)) return `20${expiry}`;
-  return expiry;
-};
-
-const formatExpiryDate = (expiry: string | null | undefined, style: "compact" | "short" | "long" = "short") => {
-  const normalized = normalizeExpiryDate(expiry);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return normalized || "--";
-  if (style === "compact") return normalized.slice(2);
-  const date = new Date(`${normalized}T12:00:00Z`);
-  return new Intl.DateTimeFormat("en-US", style === "long"
-    ? { weekday: "short", month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }
-    : { month: "short", day: "numeric", timeZone: "UTC" }).format(date);
-};
-
-const toYahooExpiry = (expiry: string | null | undefined) => {
-  if (!expiry) return undefined;
-  if (/^\d{2}-\d{2}-\d{2}$/.test(expiry)) return `20${expiry}`;
-  return expiry;
-};
-
-const modeLabel: Record<StocksWatcherChartMode, string> = {
-  oi: "Open Interest",
-  volume: "Options Volume",
-  gex: "Option GEX",
-};
-
-const priceRangeLabel: Record<StocksWatcherPriceRange, string> = {
-  "1mo": "1M",
-  "3mo": "3M",
-  "1y": "1Y",
-};
-
-const getMaxForMode = (rows: StocksWatcherStrikeRow[], mode: StocksWatcherChartMode) =>
-  Math.max(
-    1,
-    ...rows.flatMap((row) => {
-      if (mode === "oi") return [row.callOpenInterest, row.putOpenInterest];
-      if (mode === "volume") return [row.callVolume, row.putVolume];
-      return [Math.abs(row.callGex), Math.abs(row.putGex)];
-    }),
-  );
-
-const getCallValue = (row: StocksWatcherStrikeRow, mode: StocksWatcherChartMode) => {
-  if (mode === "oi") return row.callOpenInterest;
-  if (mode === "volume") return row.callVolume;
-  return row.callGex;
-};
-
-const getPutValue = (row: StocksWatcherStrikeRow, mode: StocksWatcherChartMode) => {
-  if (mode === "oi") return row.putOpenInterest;
-  if (mode === "volume") return row.putVolume;
-  return row.putGex;
-};
-
-const chartMetricLabel: Record<StocksWatcherChartMode, string> = {
-  oi: "Open Interest",
-  volume: "Volume",
-  gex: "Gamma Exposure",
-};
-
-interface ChartTooltipState {
-  strike: number;
-  callValue: number;
-  putValue: number;
-  netGex: number;
-  x: number;
-  y: number;
-}
-
-const normalizeSymbol = (symbol: string) => symbol.trim().toUpperCase();
-const sanitizeSymbols = (symbols: string[]) =>
-  Array.from(new Set(symbols.map(normalizeSymbol).filter((symbol) => /^[A-Z0-9.^-]{1,12}$/.test(symbol))));
-
-const readStoredSymbols = (key: string, fallback: string[]) => {
-  if (typeof window === "undefined") return fallback;
-
-  try {
-    const saved = window.localStorage.getItem(key);
-    return saved ? JSON.parse(saved) as string[] : fallback;
-  } catch {
-    return fallback;
-  }
-};
-
-const uniqueStocks = (stocks: StocksWatcherUniverseStock[]) => {
-  const bySymbol = new Map<string, StocksWatcherUniverseStock>();
-  for (const stock of stocks) {
-    const symbol = normalizeSymbol(stock.symbol);
-    if (!symbol || bySymbol.has(symbol)) continue;
-    bySymbol.set(symbol, { ...stock, symbol });
-  }
-  return Array.from(bySymbol.values());
-};
-
-const stockFromRecord = (record: Record<string, unknown>, fallback?: StocksWatcherUniverseStock) => {
-  const symbol = typeof record.symbol === "string" ? normalizeSymbol(record.symbol) : fallback?.symbol || "";
-  if (!symbol || !/^[A-Z0-9.^-]{1,12}$/.test(symbol)) return null;
-  return {
-    symbol,
-    companyName: typeof record.companyName === "string" ? record.companyName : fallback?.companyName || `${symbol} custom stock`,
-    sector: typeof record.sector === "string" ? record.sector : fallback?.sector || "Custom",
-    type: record.type === "ETF" || record.type === "ADR" || record.type === "Stock" ? record.type : fallback?.type || "Stock",
-    fallbackPrice: typeof record.fallbackPrice === "number" ? record.fallbackPrice : fallback?.fallbackPrice ?? Number.NaN,
-    fallbackChange: typeof record.fallbackChange === "number" ? record.fallbackChange : fallback?.fallbackChange ?? Number.NaN,
-    fallbackChangePercent: typeof record.fallbackChangePercent === "number" ? record.fallbackChangePercent : fallback?.fallbackChangePercent ?? Number.NaN,
-  } satisfies StocksWatcherUniverseStock;
-};
-
-const readStoredCustomStocks = () => {
-  if (typeof window === "undefined") return [];
-  try {
-    const saved = window.localStorage.getItem(CUSTOM_STOCKS_STORAGE_KEY);
-    const parsed = saved ? JSON.parse(saved) : [];
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .map((item) => item && typeof item === "object" && !Array.isArray(item) ? stockFromRecord(item as Record<string, unknown>) : null)
-      .filter((stock): stock is StocksWatcherUniverseStock => Boolean(stock));
-  } catch {
-    return [];
-  }
-};
-
-const stringifyPayload = (payload: unknown) => {
-  if (typeof payload === "string") return payload;
-  try {
-    return JSON.stringify(payload, null, 2);
-  } catch {
-    return String(payload);
-  }
-};
-
-const chunkSymbols = (symbols: string[], size: number) => {
-  const chunks: string[][] = [];
-  for (let index = 0; index < symbols.length; index += size) {
-    chunks.push(symbols.slice(index, index + size));
-  }
-  return chunks;
-};
-
-const parseWatchlistStocks = (result: NativeToolResult): StocksWatcherUniverseStock[] => {
-  const raw = result.raw && typeof result.raw === "object" && !Array.isArray(result.raw)
-    ? result.raw as Record<string, unknown>
-    : {};
-  const stocks = Array.isArray(raw.stocks) ? raw.stocks : [];
-  const parsedStocks = stocks
-    .map((item) => {
-      if (!item || typeof item !== "object" || Array.isArray(item)) return null;
-      const record = item as Record<string, unknown>;
-      const symbol = typeof record.symbol === "string" ? normalizeSymbol(record.symbol) : "";
-      if (!symbol) return null;
-      return stockFromRecord(record);
-    })
-    .filter((stock): stock is StocksWatcherUniverseStock => Boolean(stock));
-
-  if (parsedStocks.length > 0) return parsedStocks;
-
-  return [];
-};
-
-const resultLooksHtml = (result: NativeToolResult | undefined) =>
-  Boolean(result?.tool.startsWith("chart_") || /<html|<body|<div|<svg|<!doctype/i.test(result?.text || ""));
-
-const htmlSrcDoc = (result: NativeToolResult) => {
-  if (/<html|<body|<!doctype/i.test(result.text)) return result.text;
-  return `<!doctype html><html><body style="margin:0;background:#020617;color:#e2e8f0;font-family:Inter,system-ui,sans-serif"><pre style="white-space:pre-wrap;padding:16px">${result.text.replace(/[&<>]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[char] || char)}</pre></body></html>`;
-};
-
-const rawRecord = (value: unknown): Record<string, unknown> | null =>
-  value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-
-const rawNumber = (value: unknown) => {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string") {
-    const parsed = Number(value.replace(/[$,%]/g, "").replace(/,/g, ""));
-    return Number.isFinite(parsed) ? parsed : 0;
-  }
-  return 0;
-};
-
-const rawNullableNumber = (value: unknown): number | null => {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value.replace(/[$,%]/g, "").replace(/,/g, ""));
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-};
-
-const rawNullableString = (value: unknown): string | null =>
-  typeof value === "string" && value.trim() ? value.trim() : null;
-
-const financialStatementsFromResult = (result: NativeToolResult | undefined): WatcherFinancialStatements | null => {
-  const body = rawRecord(result?.raw);
-  const financialSourceRaw = rawRecord(body?.financialSource);
-  const rawQuarters = Array.isArray(body?.quarters) ? body.quarters : null;
-  const source = rawNullableString(financialSourceRaw?.source);
-  const sourceType = rawNullableString(financialSourceRaw?.sourceType);
-  const fetchedAt = rawNullableString(financialSourceRaw?.fetchedAt);
-  const sourceDataAsOf = rawNullableString(financialSourceRaw?.dataAsOf);
-  const generatedAt = rawNullableString(body?.generatedAt);
-  const dataAsOf = rawNullableString(body?.dataAsOf);
-  const symbol = rawNullableString(body?.symbol);
-  if (!body || body.schemaVersion !== "1.0" || !rawQuarters || rawQuarters.length < 1 || rawQuarters.length > 12 || !source || !sourceType || !fetchedAt || !sourceDataAsOf || !generatedAt || !dataAsOf || !symbol) return null;
-
-  const quarters = rawQuarters.map((value): WatcherFinancialQuarter | null => {
-    const row = rawRecord(value);
-    const date = rawNullableString(row?.date);
-    if (!row || !date) return null;
-    const number = (field: string) => rawNullableNumber(row[field]);
-    return {
-      date,
-      filingDate: rawNullableString(row.filingDate),
-      fiscalYear: rawNullableString(row.fiscalYear),
-      period: rawNullableString(row.period),
-      currency: rawNullableString(row.currency),
-      revenue: number("revenue"),
-      netIncome: number("netIncome"),
-      eps: number("eps"),
-      operatingCashFlow: number("operatingCashFlow"),
-      freeCashFlow: number("freeCashFlow"),
-      revenue_qoq: number("revenue_qoq"),
-      revenue_yoy: number("revenue_yoy"),
-      netIncome_qoq: number("netIncome_qoq"),
-      netIncome_yoy: number("netIncome_yoy"),
-      eps_qoq: number("eps_qoq"),
-      eps_yoy: number("eps_yoy"),
-      operatingCashFlow_qoq: number("operatingCashFlow_qoq"),
-      operatingCashFlow_yoy: number("operatingCashFlow_yoy"),
-    };
-  });
-  if (!quarters.length || quarters.some((quarter) => !quarter)) return null;
-
-  const financialSource: WatcherFinancialSource = {
-    source,
-    sourceType,
-    sourceUrl: rawNullableString(financialSourceRaw?.sourceUrl),
-    fetchedAt,
-    dataAsOf: sourceDataAsOf,
-    filingDate: rawNullableString(financialSourceRaw?.filingDate),
-  };
-  return {
-    schemaVersion: rawNullableString(body.schemaVersion) || "unknown",
-    source: rawNullableString(body.source) || "ValuationCalculation",
-    symbol,
-    generatedAt,
-    dataAsOf,
-    financialSource,
-    quarters: quarters as WatcherFinancialQuarter[],
-  };
-};
-
-const formatFinancialAmount = (value: number | null, currencyCode: string | null) => {
-  if (value === null) return "N/A";
-  if (!currencyCode || !/^[A-Z]{3}$/.test(currencyCode)) return formatNumber(value);
-  try {
-    return new Intl.NumberFormat(undefined, {
-      style: "currency",
-      currency: currencyCode,
-      notation: "compact",
-      maximumFractionDigits: 1,
-    }).format(value);
-  } catch {
-    return formatNumber(value);
-  }
-};
-
-const formatProvenanceTimestamp = (value: string) => {
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) return value;
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-    timeZone: "UTC",
-    timeZoneName: "short",
-  }).format(new Date(timestamp));
-};
-
-const historyFromResult = (result: NativeToolResult | undefined): RawHistoryPoint[] => {
-  const raw = rawRecord(result?.raw);
-  const history = raw?.history || raw?.historyTail;
-  if (!Array.isArray(history)) return [];
-  return history
-    .map((item) => rawRecord(item))
-    .filter((item): item is Record<string, unknown> => Boolean(item))
-    .map((item) => ({
-      date: typeof item.date === "string" ? item.date : typeof item.label === "string" ? item.label : "",
-      open: rawNumber(item.open ?? item.price ?? item.close),
-      high: rawNumber(item.high ?? item.price ?? item.close),
-      low: rawNumber(item.low ?? item.price ?? item.close),
-      close: rawNumber(item.close ?? item.price),
-      volume: rawNumber(item.volume),
-    }))
-    .filter((row) => row.close && row.high && row.low);
-};
-
-const unavailableMarketIndexCard = (definition: MarketIndexDefinition, error?: string): MarketIndexCard => ({
-  symbol: definition.symbol,
-  sourceSymbol: definition.yahooSymbol,
-  label: definition.label,
-  status: "unavailable",
-  value: 0,
-  change: 0,
-  changePercent: 0,
-  historyPointCount: 0,
-  error,
-  history: [],
-});
-
-const emptyMarketIndexCards = (): MarketIndexCard[] =>
-  MARKET_INDEX_DEFINITIONS.map((definition) => unavailableMarketIndexCard(definition));
-
-const parseMarketIndexCard = (definition: MarketIndexDefinition, result: NativeToolResult): MarketIndexCard => {
-  const history = historyFromResult(result)
-    .filter((row): row is RawHistoryPoint & { date: string; close: number } =>
-      typeof row.date === "string" && typeof row.close === "number" && Number.isFinite(row.close) && row.close > 0)
-    .sort((a, b) => a.date.localeCompare(b.date))
-    .slice(-45);
-  if (history.length < 10) {
-    throw new Error(`${definition.label} Yahoo history returned ${history.length} valid points`);
-  }
-  const latest = history[history.length - 1]?.close || 0;
-  const previous = history[Math.max(0, history.length - 2)]?.close || latest;
-  if (latest <= 0 || previous <= 0) {
-    throw new Error(`${definition.label} Yahoo history returned invalid close values`);
-  }
-  const change = latest - previous;
-  const changePercent = previous > 0 ? (change / previous) * 100 : 0;
-  return {
-    symbol: definition.symbol,
-    sourceSymbol: definition.yahooSymbol,
-    label: definition.label,
-    status: "ok",
-    value: latest,
-    change,
-    changePercent,
-    historyPointCount: history.length,
-    history,
-  };
-};
-
-const quotesFromResult = (result: NativeToolResult | undefined): RawQuoteRow[] => {
-  const raw = rawRecord(result?.raw);
-  const quotes = raw?.quotes;
-  if (!Array.isArray(quotes)) return [];
-  return quotes
-    .map((item) => rawRecord(item))
-    .filter((item): item is Record<string, unknown> => Boolean(item))
-    .map((item) => ({
-      symbol: typeof item.symbol === "string" ? item.symbol : "",
-      name: typeof item.name === "string" ? item.name : "",
-      price: rawNumber(item.price),
-      change: rawNumber(item.change),
-      changePercent: rawNumber(item.changePercent),
-      volume: rawNumber(item.volume),
-    }))
-    .filter((quote) => quote.symbol);
-};
-
-const compactDateLabel = (value: string | undefined) => {
-  if (!value) return "--";
-  if (value.includes("T")) {
-    return new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit" }).format(new Date(value));
-  }
-  return value.length > 10 ? value.slice(5, 16) : value.slice(5) || value;
-};
-
-const optionChainFromResult = (result: NativeToolResult | undefined): RawOptionChain | null => {
-  const raw = rawRecord(result?.raw);
-  const chain = rawRecord(raw?.chain);
-  if (chain) return chain as unknown as RawOptionChain;
-  return raw && (Array.isArray(raw.calls) || Array.isArray(raw.puts))
-    ? raw as unknown as RawOptionChain
-    : null;
-};
-
-const optionExposuresFromResult = (result: NativeToolResult | undefined): RawOptionExposure[] => {
-  const raw = rawRecord(result?.raw);
-  const exposures = raw?.exposures || raw?.rows;
-  return Array.isArray(exposures) ? exposures as RawOptionExposure[] : [];
-};
-
-const optionLegNumber = (value: unknown) => {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string") {
-    const parsed = Number(value.replace(/[$,%]/g, "").replace(/,/g, ""));
-    return Number.isFinite(parsed) ? parsed : 0;
-  }
-  return 0;
-};
-
-const optionLegDisplayNumber = (value: unknown) => {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value.replace(/[$,%]/g, "").replace(/,/g, ""));
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-};
-
-const formatOptionIv = (value: unknown) => {
-  const parsed = optionLegDisplayNumber(value);
-  if (parsed === null) return "n/a";
-  return `${(parsed > 0 && parsed <= 3 ? parsed * 100 : parsed).toFixed(1)}%`;
-};
-
-const effectiveLegOpenInterest = (leg: RawOptionLeg | undefined, explicit?: unknown) => {
-  if (explicit !== undefined && explicit !== null) return Math.max(0, optionLegNumber(explicit));
-  const openInterest = optionLegNumber(leg?.openInterest);
-  return Math.max(0, openInterest);
-};
-
-const effectiveExposureIv = (row: RawOptionExposure) => {
-  const values = [
-    optionLegNumber(row.callIv) || optionLegNumber(row.call?.impliedVolatility),
-    optionLegNumber(row.putIv) || optionLegNumber(row.put?.impliedVolatility),
-  ].filter((value) => value > 0);
-  if (values.length > 0) return values.reduce((sum, value) => sum + value, 0) / values.length;
-  return optionLegNumber(row.avgIv);
-};
-
-const buildStrikeRowsFromOptionRaw = (
-  chain: RawOptionChain | null,
-  exposures: RawOptionExposure[],
-) => {
-  if (!chain) return [];
-  const spot = optionLegNumber(chain.spot);
-  const strikes = Array.from(new Set([
-    ...(chain.calls || []).map((leg) => optionLegNumber(leg.strike)),
-    ...(chain.puts || []).map((leg) => optionLegNumber(leg.strike)),
-    ...exposures.map((row) => optionLegNumber(row.strike)),
-  ])).filter((strike) => strike > 0)
-    .sort((a, b) => Math.abs(a - spot) - Math.abs(b - spot))
-    .slice(0, 80)
-    .sort((a, b) => a - b);
-
-  return strikes.map((strike) => {
-    const call = (chain.calls || []).find((leg) => optionLegNumber(leg.strike) === strike);
-    const put = (chain.puts || []).find((leg) => optionLegNumber(leg.strike) === strike);
-    const exposure = exposures.find((row) => optionLegNumber(row.strike) === strike);
-    const callOpenInterest = effectiveLegOpenInterest(call, exposure?.callEffectiveOpenInterest ?? exposure?.callOpenInterest);
-    const putOpenInterest = effectiveLegOpenInterest(put, exposure?.putEffectiveOpenInterest ?? exposure?.putOpenInterest);
-    const callVolume = optionLegNumber(call?.volume);
-    const putVolume = optionLegNumber(put?.volume);
-    const callGex = optionLegNumber(exposure?.callGex);
-    const putGex = optionLegNumber(exposure?.putGex);
-    return {
-      strike,
-      callOpenInterest,
-      putOpenInterest,
-      callVolume,
-      putVolume,
-      callGex,
-      putGex,
-      netGex: optionLegNumber(exposure?.netGex) || callGex + putGex,
-    };
-  });
-};
-
-const buildExpiryRowsForSelector = (snapshot: StocksWatcherSnapshot | null): ExpirySelectorRow[] => {
-  if (!snapshot) return [];
-  const existing = snapshot.expiryRows?.length ? snapshot.expiryRows : snapshot.expiries || [];
-  const byExpiry = new Map<string, StocksWatcherExpiryRow[]>();
-
-  for (const row of existing) {
-    const expiry = normalizeExpiryDate(row.expiry);
-    byExpiry.set(expiry, [...(byExpiry.get(expiry) || []), { ...row, expiry }]);
-  }
-
-  const expiries = snapshot.availableExpiries?.length
-    ? snapshot.availableExpiries.map(normalizeExpiryDate)
-    : Array.from(byExpiry.keys());
-
-  return expiries.map((expiry) => {
-    const rows = byExpiry.get(expiry) || [];
-    if (rows.length === 0) {
-      return { expiry, loaded: false };
-    }
-
-    const callOi = rows.filter((row) => row.type === "C").reduce((sum, row) => sum + row.openInterest, 0);
-    const putOi = rows.filter((row) => row.type === "P").reduce((sum, row) => sum + row.openInterest, 0);
-    const dominantType = callOi >= putOi ? "C" : "P";
-    const primary = rows.reduce((best, row) => (row.openInterest + row.volume) > (best.openInterest + best.volume) ? row : best);
-
-    return {
-      expiry,
-      loaded: true,
-      openInterest: rows.reduce((sum, row) => sum + row.openInterest, 0),
-      primaryStrike: primary.primaryStrike || primary.strike,
-      volume: rows.reduce((sum, row) => sum + row.volume, 0),
-      dominantType,
-      netGex: rows.length > 0 && rows.every((row) => typeof row.netGex === "number" && Number.isFinite(row.netGex))
-        ? rows.reduce((sum, row) => sum + (row.netGex || 0), 0)
-        : undefined,
-      netDex: rows.length > 0 && rows.every((row) => typeof row.netDex === "number" && Number.isFinite(row.netDex))
-        ? rows.reduce((sum, row) => sum + (row.netDex || 0), 0)
-        : undefined,
-    };
-  });
-};
-
-const exposureToneClassName = (value: number | undefined, available: boolean) => {
-  if (!available || typeof value !== "number" || !Number.isFinite(value)) return "siw-unavailable";
-  return value < 0 ? "siw-down" : "siw-up";
-};
-
-const chartGexRowsFromResult = (data: Record<string, NativeToolResult> | null): StocksWatcherStrikeRow[] => {
-  if (!data) return [];
-  const visual = normalizeOptionsVisualModel({
-    chainRaw: data.get_options?.raw,
-    exposureRaw: data.get_options_gex?.raw,
-  });
-  if (!visual.capabilities.gex) return [];
-  const exposureStrikes = new Set(
-    (visual.strikeRows as unknown as RawOptionExposure[])
-      .filter((row) => [row.netGex, row.callGex, row.putGex].some((value) => typeof value === "number" && Number.isFinite(value)))
-      .map((row) => optionLegNumber(row.strike)),
-  );
-  return buildStrikeRowsFromOptionRaw(
-    visual.chain as unknown as RawOptionChain | null,
-    visual.strikeRows as unknown as RawOptionExposure[],
-  ).filter((row) => exposureStrikes.has(row.strike) && Number.isFinite(row.netGex));
-};
-
-const aggregateChartGexRows = (
-  expiries: string[],
-  rowsByExpiry: Record<string, AsyncPanelState>,
-): ChartGexAggregateRow[] => {
-  const aggregates = new Map<number, { total: number; contributors: number }>();
-  for (const expiry of expiries) {
-    for (const row of chartGexRowsFromResult(rowsByExpiry[expiry]?.data || null)) {
-      const current = aggregates.get(row.strike) || { total: 0, contributors: 0 };
-      aggregates.set(row.strike, {
-        total: current.total + row.netGex,
-        contributors: current.contributors + 1,
-      });
-    }
-  }
-  return [...aggregates.entries()]
-    .map(([strike, aggregate]) => ({
-      strike,
-      netGex: aggregate.total / aggregate.contributors,
-      contributors: aggregate.contributors,
-    }))
-    .sort((a, b) => b.strike - a.strike);
-};
-
-const summaryFromLoadedOptionChain = (
-  chain: RawOptionChain | null,
-  exposures: RawOptionExposure[] = [],
-): ExpirySelectorRow | null => {
-  if (!chain?.selectedExpiry) return null;
-  const legs = [
-    ...(chain.calls || []).map((leg) => ({ ...leg, type: "C" as const })),
-    ...(chain.puts || []).map((leg) => ({ ...leg, type: "P" as const })),
-  ];
-  if (legs.length === 0) return null;
-  const total = (key: "openInterest" | "volume", type?: "C" | "P") => legs
-    .filter((leg) => !type || leg.type === type)
-    .reduce((sum, leg) => sum + optionLegNumber(leg[key]), 0);
-  const callOi = total("openInterest", "C");
-  const putOi = total("openInterest", "P");
-  const primary = legs.reduce((best, leg) => optionLegNumber(leg.openInterest) + optionLegNumber(leg.volume) > optionLegNumber(best.openInterest) + optionLegNumber(best.volume) ? leg : best);
-  const sumFiniteExposure = (key: "netGex" | "netDex") => {
-    const values = exposures
-      .map((row) => row[key])
-      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-    return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : undefined;
-  };
-  return {
-    expiry: normalizeExpiryDate(chain.selectedExpiry),
-    loaded: true,
-    openInterest: total("openInterest"),
-    primaryStrike: optionLegNumber(primary.strike),
-    volume: total("volume"),
-    dominantType: callOi >= putOi ? "C" : "P",
-    netGex: sumFiniteExposure("netGex"),
-    netDex: sumFiniteExposure("netDex"),
-  };
-};
-
-const yahooExpiryExposureCacheKey = (symbol: string, expiry: string) =>
-  `${normalizeSymbol(symbol)}:${normalizeExpiryDate(expiry)}:YahooOptionsExposure`;
-
-const getRunColor = (status: ToolStatus) => {
-  if (status === "ok") return "border-emerald-400/40 bg-emerald-500/15 text-emerald-200";
-  if (status === "running") return "border-yellow-400/40 bg-yellow-500/15 text-yellow-100";
-  return "border-red-400/40 bg-red-500/15 text-red-100";
-};
-
-const getToolCategory = (name: string) => {
-  if (/option|greek|dex|flow|iv|pcr|sweep|0dte|mispricing/i.test(name)) return "Options";
-  if (/intraday|indicator|beta|stats|signal|stock|earnings|history/i.test(name)) return "Technicals";
-  if (/macro|breadth|sector|holders|briefing|event/i.test(name)) return "Macro";
-  if (/memory|memories|share/i.test(name)) return "Memory";
-  return "Other";
-};
-
-const getToolInputDraft = (name: string, symbol: string, expiry?: string, strike?: number) => {
-  const params: Record<string, unknown> = {};
-  if (!/market_breadth|get_macro_regime|get_watchlist|list_memories/i.test(name)) {
-    params.ticker = symbol;
-  }
-  if (/greeks|iv|mispricing|dex|chain|options|sweeps|0dte|pcr/i.test(name) && expiry) {
-    params.expiry = toYahooExpiry(expiry);
-  }
-  if (/greeks|iv|mispricing/i.test(name) && typeof strike === "number") {
-    params.strike = strike;
-  }
-  if (name === "list_memories") params.key = FAVORITES_MEMORY_KEY;
-  if (name === "save_memory") {
-    params.key = FAVORITES_MEMORY_KEY;
-    params.value = JSON.stringify({ symbols: [symbol] });
-  }
-  return JSON.stringify(params, null, 2);
-};
-
-const SkeletonBlock = ({ className = "" }: { className?: string }) => (
-  <div className={`animate-pulse rounded-md bg-slate-800/70 ${className}`} />
-);
-
-const MetricTile = ({
-  label,
-  value,
-  tone = "neutral",
-}: {
-  label: string;
-  value: string;
-  tone?: "neutral" | "positive" | "negative" | "blue" | "yellow";
-}) => (
-  <div className={`siw-metric-tile siw-tone-${tone}`}>
-    <span>{label}</span>
-    <strong>{value}</strong>
-  </div>
-);
-
-const ValuationRainbowChart = ({ valuation }: { valuation: WatcherValuationBands }) => {
-  const bands = valuation.latest.bands;
-  const values = [bands.down2, bands.down1, bands.mean, bands.up1, bands.up2, valuation.latest.price]
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  if (values.length < 2 || valuation.latest.price === null) return null;
-
-  const low = Math.min(...values);
-  const high = Math.max(...values);
-  const range = Math.max(high - low, Math.max(1, Math.abs(high)) * 0.04);
-  const position = (value: number | null) => typeof value === "number" && Number.isFinite(value)
-    ? Math.max(0, Math.min(100, ((value - low) / range) * 100))
-    : null;
-  const currentPosition = position(valuation.latest.price);
-  const labels = [
-    { key: "down2", label: "−2σ", value: bands.down2 },
-    { key: "down1", label: "−1σ", value: bands.down1 },
-    { key: "mean", label: "Mean", value: bands.mean },
-    { key: "up1", label: "+1σ", value: bands.up1 },
-    { key: "up2", label: "+2σ", value: bands.up2 },
-  ];
-
-  return (
-    <div
-      className="siw-valuation-rainbow"
-      data-valuation-rainbow-chart
-      data-valuation-metric={valuation.metric}
-      aria-label={`${valuation.symbol} ${VALUATION_METRIC_LABEL[valuation.metric]} ${valuation.window} valuation band chart`}
-    >
-      <div className="siw-valuation-rainbow-rail" aria-hidden="true">
-        {currentPosition !== null && <i className="siw-valuation-rainbow-marker" style={{ left: `${currentPosition}%` }} />}
-      </div>
-      <div className="siw-valuation-rainbow-labels">
-        {labels.map((band) => {
-          const bandPosition = position(band.value);
-          return bandPosition === null ? null : (
-            <span key={band.key} style={{ left: `${bandPosition}%` }}>
-              <b>{band.label}</b>{currency(band.value || 0)}
-            </span>
-          );
-        })}
-      </div>
-      <p><b>Current {currency(valuation.latest.price)}</b><span>Discounted → Fair value → Stretched</span></p>
-    </div>
-  );
-};
-
-const ErrorBanner = ({ message, onRetry }: { message: string; onRetry?: () => void }) => (
-  <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-100">
-    <span>{message}</span>
-    {onRetry && (
-      <button type="button" onClick={onRetry} className="rounded border border-red-300/40 px-2 py-1 text-xs font-bold hover:bg-red-400/10">
-        Retry
-      </button>
-    )}
-  </div>
-);
-
-const OptionsEmptyState = ({ expiry, onRetry }: { expiry?: string | null; onRetry?: () => void }) => (
-  <div className="flex min-h-[18rem] flex-col items-center justify-center rounded-md border border-slate-800 bg-slate-950/50 p-6 text-center">
-    <p className="text-sm font-black text-blue-100">No structured options data for this expiry</p>
-    <p className="mt-2 max-w-md text-xs leading-5 text-slate-500">
-      The active source has no supported payload for {formatExpiryDate(expiry, "long")} in this panel.
-    </p>
-    {onRetry && (
-      <button type="button" onClick={onRetry} className="mt-4 rounded-md border border-blue-400/40 px-3 py-2 text-xs font-bold text-blue-100 hover:bg-blue-500/10">
-        Retry
-      </button>
-    )}
-  </div>
-);
-
-const OptionsUnsupportedState = ({ title, reason, source }: { title: string; reason: string; source?: string | null }) => (
-  <div className="flex min-h-[14rem] flex-col items-center justify-center rounded-md border border-amber-500/25 bg-amber-500/5 p-6 text-center" data-options-unsupported>
-    <p className="text-sm font-black text-amber-100">{title}</p>
-    <p className="mt-2 max-w-lg text-xs leading-5 text-slate-400">{reason}</p>
-    {source && <p className="mt-3 text-[0.7rem] font-bold uppercase tracking-wide text-slate-500">Source: {source}</p>}
-  </div>
-);
-
-const PutCallRatioChart = ({
-  raw,
-  hasOpenInterest,
-}: {
-  raw: Record<string, unknown>;
-  hasOpenInterest: boolean;
-}) => {
-  const metrics = [
-    {
-      key: "open-interest",
-      label: "Open Interest",
-      ratio: hasOpenInterest ? optionLegDisplayNumber(raw.putCallOpenInterest) : null,
-      calls: optionLegDisplayNumber(raw.callOi),
-      puts: optionLegDisplayNumber(raw.putOi),
-    },
-    {
-      key: "volume",
-      label: "Volume",
-      ratio: optionLegDisplayNumber(raw.putCallVolume),
-      calls: optionLegDisplayNumber(raw.callVol),
-      puts: optionLegDisplayNumber(raw.putVol),
-    },
-  ];
-
-  return (
-    <figure className="rounded-md border border-slate-800 bg-slate-950/60 p-4" data-options-pcr-chart>
-      <div className="mb-4 flex flex-wrap items-end justify-between gap-2">
-        <div>
-          <p className="text-xs font-black uppercase tracking-[0.12em] text-blue-200">Put / Call Pressure</p>
-          <p className="mt-1 text-[0.68rem] text-slate-500">Selected expiry · 1.00 parity · 2.00+ capped on chart</p>
-        </div>
-        <div className="flex gap-3 text-[0.65rem] font-bold text-slate-400" aria-hidden="true">
-          <span><i className="mr-1 inline-block h-2 w-2 rounded-full bg-cyan-400" />Call-heavy</span>
-          <span><i className="mr-1 inline-block h-2 w-2 rounded-full bg-amber-400" />Put-heavy</span>
-        </div>
-      </div>
-      <div className="space-y-5">
-        {metrics.map((metric) => {
-          const ratio = metric.ratio;
-          const available = typeof ratio === "number" && Number.isFinite(ratio);
-          const width = available ? Math.max(0, Math.min(100, ratio / 2 * 100)) : 0;
-          const putHeavy = available && ratio > 1;
-          return (
-            <div key={metric.key} data-options-pcr-metric={metric.key}>
-              <div className="mb-2 flex items-baseline justify-between gap-3">
-                <div>
-                  <p className="text-xs font-black uppercase text-slate-400">P/C {metric.label}</p>
-                  {metric.calls !== null && metric.puts !== null && (
-                    <p className="mt-0.5 text-[0.65rem] tabular-nums text-slate-500">Puts {formatNumber(metric.puts)} · Calls {formatNumber(metric.calls)}</p>
-                  )}
-                </div>
-                <strong className={`text-2xl font-black tabular-nums ${putHeavy ? "text-amber-200" : "text-cyan-200"}`}>
-                  {available ? ratio.toFixed(2) : "n/a"}
-                </strong>
-              </div>
-              <div
-                className="relative h-4 overflow-hidden rounded-full border border-slate-700 bg-slate-900"
-                role="img"
-                aria-label={available ? `${metric.label} put-call ratio ${ratio.toFixed(2)}; parity is 1.00` : `${metric.label} put-call ratio unavailable`}
-              >
-                <span
-                  className={`absolute inset-y-0 left-0 rounded-full ${putHeavy ? "bg-amber-400/80" : "bg-cyan-400/80"}`}
-                  style={{ width: `${width}%` }}
-                />
-                <span className="absolute inset-y-0 left-1/2 w-px bg-white/80" aria-hidden="true" />
-              </div>
-              <div className="mt-1 grid grid-cols-3 text-[0.62rem] font-bold tabular-nums text-slate-600" aria-hidden="true">
-                <span>0</span><span className="text-center">1.00 parity</span><span className="text-right">2.00+</span>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      <figcaption className="mt-4 border-t border-slate-800 pt-3 text-[0.68rem] leading-5 text-slate-500">
-        Below 1.00 means more calls than puts; above 1.00 means more puts than calls. This is positioning context, not a directional forecast.
-      </figcaption>
-    </figure>
-  );
-};
-
-const OptionsResultProvenance = ({ result }: { result: NativeToolResult | undefined }) => {
-  const raw = rawRecord(result?.raw);
-  const provenance = rawRecord(raw?.provenance);
-  if (!provenance) return null;
-  const provider = provenance.provider === "robinhood_mcp" ? "Robinhood MCP EOD" : String(provenance.provider || "Unknown source");
-  const capturedAt = typeof provenance.capturedAt === "string" ? formatOptionsSourceTime(provenance.capturedAt) : "capture time unavailable";
-  const methodology = typeof provenance.methodology === "string" ? provenance.methodology : "methodology unavailable";
-  return (
-    <p className="mb-3 rounded border border-cyan-500/25 bg-cyan-500/5 px-3 py-2 text-[0.7rem] leading-5 text-cyan-100" data-options-result-provenance>
-      Source: {provider} · Captured: {capturedAt} · Methodology: {methodology}
-    </p>
-  );
-};
-
-/** Source labels are audit evidence, not a millisecond-level activity log. */
-const formatOptionsSourceTime = (value: string) => {
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return value;
-  return `${new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "numeric",
-    hour12: true,
-  }).format(date)} ET`;
-};
-
-const ExpandableDescription = ({ description }: { description: string }) => {
-  const [expanded, setExpanded] = useState(false);
-  const previewLimit = 220;
-  const isLong = description.length > previewLimit;
-  const visibleDescription = expanded || !isLong ? description : `${description.slice(0, previewLimit).trimEnd()}…`;
-  return (
-    <>
-      <p>{visibleDescription || "Company description unavailable from Yahoo."}</p>
-      {isLong && (
-        <button type="button" className="siw-description-toggle" aria-expanded={expanded} onClick={() => setExpanded((current) => !current)}>
-          {expanded ? "Show less" : "Read more"}
-        </button>
-      )}
-    </>
-  );
-};
-
-type PriceChartStyle = "line" | "mountain" | "candle" | "ohlc";
-
-interface PriceChartRow extends RawHistoryPoint {
-  time: number;
-}
-
-interface PriceChartTooltip {
-  x: number;
-  y: number;
-  point: PriceChartRow;
-}
-
-const toChartRows = (points: RawHistoryPoint[]): PriceChartRow[] => {
-  let previousTime = 0;
-  return points
-    .map((point, index) => {
-      const parsed = point.date ? Date.parse(point.date) : Number.NaN;
-      const fallback = 1_700_000_000 + index * 86_400;
-      let time = Number.isFinite(parsed) ? Math.floor(parsed / 1000) : fallback;
-      if (time <= previousTime) time = previousTime + 60;
-      previousTime = time;
-      const close = point.close || point.open || point.high || point.low || 0;
-      const open = point.open || close;
-      const high = point.high || Math.max(open, close);
-      const low = point.low || Math.min(open, close);
-      return { ...point, time, open, high, low, close, volume: point.volume || 0 };
-    })
-    .filter((point) => point.close && point.high && point.low);
-};
-
-const getSharedPriceAxisRange = (
-  result: NativeToolResult,
-  gexRows: ChartGexAggregateRow[],
-): SharedPriceAxisRange | null => {
-  const priceRows = toChartRows(historyFromResult(result));
-  const values = [
-    ...priceRows.flatMap((row) => [row.low, row.high].filter((value): value is number => typeof value === "number")),
-    ...gexRows.map((row) => row.strike),
-  ].filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  if (values.length === 0) return null;
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const padding = Math.max((max - min) * 0.04, 0.01);
-  return { min: min - padding, max: max + padding };
-};
-
-const OhlcVolumeChart = ({
-  result,
-  priceRange = "3mo",
-  onPriceRangeChange = () => undefined,
-  sharedPriceAxisRange,
-  sharedAxisStrikes = [],
-  onPriceAxisCoordinatesChange,
-}: {
-  result: NativeToolResult;
-  priceRange?: StocksWatcherPriceRange;
-  onPriceRangeChange?: (range: StocksWatcherPriceRange) => void;
-  sharedPriceAxisRange?: SharedPriceAxisRange | null;
-  sharedAxisStrikes?: number[];
-  onPriceAxisCoordinatesChange?: (coordinates: SharedPriceAxisCoordinates | null) => void;
-}) => {
-  const allPoints = useMemo(() => historyFromResult(result), [result]);
-  const [chartStyle, setChartStyle] = useState<PriceChartStyle>("ohlc");
-  const [tooltip, setTooltip] = useState<PriceChartTooltip | null>(null);
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const chartRef = useRef<any>(null);
-
-  const points = useMemo(() => toChartRows(allPoints), [allPoints]);
-  const latest = points[points.length - 1];
-  const activePoint = tooltip?.point || latest;
-  const priorPoint = points[Math.max(0, points.length - 2)];
-  const isUp = (activePoint?.close || 0) >= (activePoint?.open || priorPoint?.close || 0);
-  const firstLabel = compactDateLabel(points[0]?.date);
-  const latestLabel = compactDateLabel(latest?.date);
-  const sharedAxisStrikeKey = sharedAxisStrikes.join("|");
-  const axisStrikes = useMemo(
-    () => sharedAxisStrikes.filter((strike) => Number.isFinite(strike)),
-    [sharedAxisStrikeKey],
-  );
-
-  useEffect(() => {
-    if (!containerRef.current || points.length < 2) return undefined;
-
-    if (chartRef.current) {
-      chartRef.current.remove();
-      chartRef.current = null;
-    }
-    setTooltip(null);
-
-    const chart = createChart(containerRef.current, {
-      width: containerRef.current.clientWidth,
-      height: containerRef.current.clientHeight,
-      autoSize: true,
-      layout: {
-        background: { type: ColorType.Solid, color: "#05080d" },
-        textColor: "#8aa0bc",
-        fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-        fontSize: 11,
-      },
-      grid: {
-        vertLines: { color: "rgba(148,163,184,0.10)" },
-        horzLines: { color: "rgba(148,163,184,0.12)" },
-      },
-      rightPriceScale: {
-        borderVisible: false,
-        scaleMargins: { top: 0.05, bottom: 0.22 },
-      },
-      timeScale: {
-        borderVisible: false,
-        timeVisible: true,
-        secondsVisible: false,
-        rightOffset: 4,
-        barSpacing: chartStyle === "line" || chartStyle === "mountain" ? 5 : 7,
-      },
-      crosshair: {
-        horzLine: { color: "rgba(96,165,250,0.55)", labelBackgroundColor: "#1d4ed8" },
-        vertLine: { color: "rgba(96,165,250,0.55)", labelBackgroundColor: "#1d4ed8" },
-      },
-      handleScroll: true,
-      handleScale: true,
-    });
-
-    chartRef.current = chart;
-
-    const candleData = points.map((point) => ({
-      time: point.time as any,
-      open: point.open || point.close || 0,
-      high: point.high || point.close || 0,
-      low: point.low || point.close || 0,
-      close: point.close || point.open || 0,
-    }));
-    const closeData = points.map((point) => ({ time: point.time as any, value: point.close || 0 }));
-    const volumeData = points.map((point) => ({
-      time: point.time as any,
-      value: point.volume || 0,
-      color: (point.close || 0) >= (point.open || 0) ? "rgba(16,185,129,0.58)" : "rgba(248,113,113,0.58)",
-    }));
-
-    const priceSeries = chartStyle === "line"
-      ? chart.addSeries(LineSeries, {
-          color: "#60a5fa",
-          lineWidth: 2,
-          priceLineVisible: false,
-          lastValueVisible: true,
-        })
-      : chartStyle === "mountain"
-        ? chart.addSeries(AreaSeries, {
-            lineColor: "#60a5fa",
-            topColor: "rgba(37,99,235,0.38)",
-            bottomColor: "rgba(37,99,235,0.02)",
-            lineWidth: 2,
-            priceLineVisible: false,
-          })
-        : chartStyle === "candle"
-          ? chart.addSeries(CandlestickSeries, {
-              upColor: "#10b981",
-              downColor: "#f43f5e",
-              borderUpColor: "#34d399",
-              borderDownColor: "#fb7185",
-              wickUpColor: "#34d399",
-              wickDownColor: "#fb7185",
-            })
-          : chart.addSeries(BarSeries, {
-              upColor: "#10b981",
-              downColor: "#f43f5e",
-              thinBars: false,
-            });
-
-    const volumeSeries = chart.addSeries(HistogramSeries, {
-      priceFormat: { type: "volume" },
-      priceScaleId: "volume",
-      priceLineVisible: false,
-      lastValueVisible: false,
-    });
-    chart.priceScale("volume").applyOptions({
-      scaleMargins: { top: 0.78, bottom: 0 },
-    });
-    if (sharedPriceAxisRange) {
-      priceSeries.applyOptions({
-        autoscaleInfoProvider: () => ({
-          priceRange: { minValue: sharedPriceAxisRange.min, maxValue: sharedPriceAxisRange.max },
-        }),
-      });
-    }
-
-    priceSeries.setData(chartStyle === "line" || chartStyle === "mountain" ? closeData : candleData);
-    volumeSeries.setData(volumeData);
-    chart.timeScale().fitContent();
-
-    let axisFrame: number | null = null;
-    let axisSettleTimer: number | null = null;
-    let axisGestureActive = false;
-    const reportAxisCoordinates = () => {
-      if (!onPriceAxisCoordinatesChange || !containerRef.current) return;
-      const surfaceBounds = containerRef.current.getBoundingClientRect();
-      const pricePanelBounds = containerRef.current.closest(".siw-chart-price-panel")?.getBoundingClientRect();
-      const chartTop = pricePanelBounds ? surfaceBounds.top - pricePanelBounds.top : 0;
-      const coordinates = Object.fromEntries(
-        axisStrikes.flatMap((strike) => {
-          const coordinate = priceSeries.priceToCoordinate(strike);
-          return coordinate === null || !Number.isFinite(coordinate)
-            ? []
-            : [[String(strike), chartTop + coordinate]];
-        }),
-      );
-      onPriceAxisCoordinatesChange(coordinates);
-    };
-    const scheduleAxisCoordinates = () => {
-      if (axisFrame !== null) window.cancelAnimationFrame(axisFrame);
-      axisFrame = window.requestAnimationFrame(reportAxisCoordinates);
-    };
-    const settleAxisCoordinates = () => {
-      scheduleAxisCoordinates();
-      if (axisSettleTimer !== null) window.clearTimeout(axisSettleTimer);
-      // The chart library applies a price-scale drag after its pointer handler.
-      // Sample once more after that gesture settles, without coupling to scroll.
-      axisSettleTimer = window.setTimeout(scheduleAxisCoordinates, 48);
-    };
-    const beginAxisGesture = (event: PointerEvent) => {
-      axisGestureActive = event.target instanceof Node && Boolean(containerRef.current?.contains(event.target));
-    };
-    const observeAxisGesture = () => {
-      if (axisGestureActive) scheduleAxisCoordinates();
-    };
-    const finishAxisGesture = () => {
-      if (!axisGestureActive) return;
-      axisGestureActive = false;
-      settleAxisCoordinates();
-    };
-    const axisObserver = new ResizeObserver(scheduleAxisCoordinates);
-    axisObserver.observe(containerRef.current);
-    containerRef.current.addEventListener("wheel", scheduleAxisCoordinates, { passive: true });
-    containerRef.current.addEventListener("pointermove", scheduleAxisCoordinates);
-    containerRef.current.addEventListener("pointerup", scheduleAxisCoordinates);
-    containerRef.current.addEventListener("dblclick", scheduleAxisCoordinates);
-    // lightweight-charts owns the price-scale canvas edge, so a drag there can
-    // bypass the surface element. Capture that gesture only; page scrolling and
-    // unrelated pointer movement must never feed the profile coordinate system.
-    window.addEventListener("pointerdown", beginAxisGesture, true);
-    window.addEventListener("pointermove", observeAxisGesture, true);
-    window.addEventListener("pointerup", finishAxisGesture, true);
-    scheduleAxisCoordinates();
-
-    const pointByTime = new Map(points.map((point) => [String(point.time), point]));
-    chart.subscribeCrosshairMove((param: any) => {
-      if (!param?.time || !param?.point) {
-        return;
-      }
-      const point = pointByTime.get(String(param.time));
-      if (!point) {
-        return;
-      }
-      setTooltip((current) => {
-        if (
-          current?.point.time === point.time &&
-          Math.abs(current.x - param.point.x) < 1 &&
-          Math.abs(current.y - param.point.y) < 1
-        ) {
-          return current;
-        }
-        return { x: param.point.x, y: param.point.y, point };
-      });
-    });
-
-    return () => {
-      if (axisFrame !== null) window.cancelAnimationFrame(axisFrame);
-      if (axisSettleTimer !== null) window.clearTimeout(axisSettleTimer);
-      axisObserver.disconnect();
-      containerRef.current?.removeEventListener("wheel", scheduleAxisCoordinates);
-      containerRef.current?.removeEventListener("pointermove", scheduleAxisCoordinates);
-      containerRef.current?.removeEventListener("pointerup", scheduleAxisCoordinates);
-      containerRef.current?.removeEventListener("dblclick", scheduleAxisCoordinates);
-      window.removeEventListener("pointerdown", beginAxisGesture, true);
-      window.removeEventListener("pointermove", observeAxisGesture, true);
-      window.removeEventListener("pointerup", finishAxisGesture, true);
-      onPriceAxisCoordinatesChange?.(null);
-      chart.remove();
-      chartRef.current = null;
-    };
-  }, [axisStrikes, chartStyle, onPriceAxisCoordinatesChange, points, sharedPriceAxisRange?.min, sharedPriceAxisRange?.max]);
-
-  if (points.length < 2) return <ToolTextSummary result={result} />;
-
-  return (
-    <div
-      className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-slate-800 bg-[#05080d]"
-      data-chart-style={chartStyle}
-      data-price-chart-range={priceRange}
-      data-shared-price-axis-range={sharedPriceAxisRange ? `${sharedPriceAxisRange.min}:${sharedPriceAxisRange.max}` : undefined}
-    >
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 px-3 py-2">
-        <div className="flex flex-wrap items-center gap-2">
-          {(["line", "mountain", "candle", "ohlc"] as PriceChartStyle[]).map((style) => (
-            <button
-              key={style}
-              type="button"
-              onClick={() => setChartStyle(style)}
-              className={`rounded border px-3 py-1.5 text-xs font-black uppercase tracking-normal transition ${
-                chartStyle === style
-                  ? "border-blue-400/60 bg-blue-500/20 text-blue-200"
-                  : "border-slate-700 bg-slate-950 text-slate-300 hover:border-blue-400/50 hover:text-blue-100"
-              }`}
-            >
-              {style}
-            </button>
-          ))}
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {STOCKS_WATCHER_PRICE_RANGES.map((range) => (
-            <button
-              key={range}
-              type="button"
-              onClick={() => onPriceRangeChange(range)}
-              className={`rounded border px-3 py-1.5 text-xs font-black transition ${
-                priceRange === range
-                  ? "border-blue-400/60 bg-blue-500/20 text-blue-100"
-                  : "border-slate-700 bg-slate-950 text-slate-300 hover:border-blue-400/50"
-              }`}
-              aria-pressed={priceRange === range}
-            >
-              {priceRangeLabel[range]}
-            </button>
-          ))}
-          <span className="rounded border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs font-bold text-slate-400">
-            Updated {latestLabel}
-          </span>
-        </div>
-      </div>
-      <div className="px-3 pt-3">
-        <div className="flex flex-wrap items-center gap-3 text-xs">
-          <span className={`rounded-full px-3 py-1.5 font-black ${isUp ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}`}>
-            {tooltip ? compactDateLabel(activePoint.date) : "Last"} {currency(activePoint.close || 0)}
-          </span>
-          <span className="rounded-full bg-slate-800 px-3 py-1.5 font-bold text-slate-300">O {currency(activePoint.open || 0)}</span>
-          <span className="rounded-full bg-slate-800 px-3 py-1.5 font-bold text-emerald-200">H {currency(activePoint.high || 0)}</span>
-          <span className="rounded-full bg-slate-800 px-3 py-1.5 font-bold text-red-200">L {currency(activePoint.low || 0)}</span>
-          <span className="rounded-full bg-slate-800 px-3 py-1.5 font-bold text-slate-300">Vol {formatNumber(activePoint.volume || 0)}</span>
-        </div>
-      </div>
-      <div
-        className="relative min-h-[28rem] flex-1 px-3 pb-3 pt-2"
-        onMouseLeave={() => setTooltip(null)}
-      >
-        <div ref={containerRef} className="h-full w-full" data-price-chart-surface />
-        {tooltip && (
-          <div
-            className="pointer-events-none absolute z-20 w-56 rounded-md border border-blue-400/50 bg-slate-950/95 px-3 py-2 text-xs shadow-2xl shadow-blue-950/50"
-            data-price-chart-tooltip
-            style={{
-              left: tooltip.x > 280 ? tooltip.x - 226 : tooltip.x + 26,
-              top: Math.max(58, tooltip.y - 36),
-            }}
-          >
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <span className="font-black text-blue-100">{compactDateLabel(tooltip.point.date)}</span>
-              <span className={`font-black ${(tooltip.point.close || 0) >= (tooltip.point.open || 0) ? "text-emerald-300" : "text-red-300"}`}>
-                {(tooltip.point.close || 0) >= (tooltip.point.open || 0) ? "UP" : "DOWN"}
-              </span>
-            </div>
-            <div className="grid grid-cols-2 gap-x-3 gap-y-1 tabular-nums text-slate-300">
-              <span>Open</span><span className="text-right text-slate-100">{currency(tooltip.point.open || 0)}</span>
-              <span>High</span><span className="text-right text-emerald-200">{currency(tooltip.point.high || 0)}</span>
-              <span>Low</span><span className="text-right text-red-200">{currency(tooltip.point.low || 0)}</span>
-              <span>Close</span><span className="text-right text-blue-100">{currency(tooltip.point.close || 0)}</span>
-              <span>Volume</span><span className="text-right text-slate-100">{formatNumber(tooltip.point.volume || 0)}</span>
-            </div>
-          </div>
-        )}
-      </div>
-      <div className="flex items-center justify-between border-t border-slate-800 px-3 py-2 text-xs text-slate-500">
-        <span>{firstLabel} - {latestLabel}</span>
-        <span>{priceRangeLabel[priceRange]} Daily | {points.length} bars | Yahoo</span>
-      </div>
-    </div>
-  );
-};
-
-const QuoteBreadthPanel = ({ result }: { result: NativeToolResult }) => {
-  const quotes = quotesFromResult(result);
-  if (quotes.length === 0) return <ToolTextSummary result={result} />;
-  const advancers = quotes.filter((quote) => (quote.changePercent || 0) >= 0).length;
-  const breadthPct = Math.round((advancers / quotes.length) * 100);
-  const leaders = quotes.slice(0, 3);
-  const laggards = quotes.slice(-3).reverse();
-
-  return (
-    <div className="space-y-4 rounded-md border border-slate-800 bg-[#05080d] p-4">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <p className="text-xs font-black uppercase tracking-[0.14em] text-slate-500">Universe Breadth</p>
-          <p className="mt-1 text-3xl font-black tabular-nums text-white">{advancers}/{quotes.length}</p>
-        </div>
-        <span className="rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-black text-emerald-300">{breadthPct}% positive</span>
-      </div>
-      <div className="h-3 overflow-hidden rounded-full bg-slate-800">
-        <div className="h-full rounded-full bg-emerald-400" style={{ width: `${breadthPct}%` }} />
-      </div>
-      <div className="grid gap-3 md:grid-cols-2">
-        <QuoteMiniList title="Leaders" quotes={leaders} tone="up" />
-        <QuoteMiniList title="Laggards" quotes={laggards} tone="down" />
-      </div>
-    </div>
-  );
-};
-
-const QuoteMiniList = ({ title, quotes, tone }: { title: string; quotes: RawQuoteRow[]; tone: "up" | "down" }) => (
-  <div className="rounded-md border border-slate-800 bg-slate-950/60 p-3">
-    <p className="mb-2 text-xs font-black uppercase tracking-[0.12em] text-slate-500">{title}</p>
-    <div className="space-y-2">
-      {quotes.map((quote) => (
-        <div key={quote.symbol} className="grid grid-cols-[4rem_1fr_auto] items-center gap-2 text-xs">
-          <span className="font-black text-blue-100">{quote.symbol}</span>
-          <span className="min-w-0 truncate text-slate-400">{quote.name}</span>
-          <span className={`font-black tabular-nums ${tone === "up" ? "text-emerald-300" : "text-red-300"}`}>
-            {(quote.changePercent || 0) >= 0 ? "+" : ""}{(quote.changePercent || 0).toFixed(2)}%
-          </span>
-        </div>
-      ))}
-    </div>
-  </div>
-);
-
-const StatsPanel = ({ result }: { result: NativeToolResult }) => {
-  const raw = rawRecord(result.raw);
-  const quote = rawRecord(raw?.quote);
-  const summary = rawRecord(raw?.summary);
-  const stats = rawRecord(summary?.defaultKeyStatistics);
-  const financial = rawRecord(summary?.financialData);
-  const profile = rawRecord(summary?.assetProfile);
-  const companyDescription = typeof profile?.longBusinessSummary === "string" && profile.longBusinessSummary.trim()
-    ? profile.longBusinessSummary.trim()
-    : null;
-  const fmt = (value: unknown) => {
-    const record = rawRecord(value);
-    if (typeof record?.fmt === "string") return record.fmt;
-    if (typeof value === "string") return value;
-    const numeric = rawNumber(record?.raw ?? value);
-    return numeric ? formatNumber(numeric) : "n/a";
-  };
-  const metrics = [
-    ["Price", currency(rawNumber(quote?.price))],
-    ["Change", `${rawNumber(quote?.changePercent).toFixed(2)}%`],
-    ["Forward P/E", fmt(stats?.forwardPE)],
-    ["Trailing P/E", fmt(stats?.trailingPE)],
-    ["Beta", fmt(stats?.beta)],
-    ["Target Mean", fmt(financial?.targetMeanPrice)],
-    ["Sector", typeof profile?.sector === "string" ? profile.sector : "n/a"],
-    ["Industry", typeof profile?.industry === "string" ? profile.industry : "n/a"],
-  ];
-
-  return (
-    <div className="space-y-3">
-      <dl data-fundamentals-metrics className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {metrics.map(([label, value]) => (
-          <div key={label} className="min-w-0 rounded-md border border-slate-800 bg-[#05080d] p-4">
-            <dt className="text-[0.65rem] font-black uppercase tracking-[0.12em] text-slate-500">{label}</dt>
-            <dd className="mt-2 break-words text-lg font-black tabular-nums text-blue-100">{value}</dd>
-          </div>
-        ))}
-      </dl>
-      <article data-company-description className="rounded-md border border-slate-800 bg-[#05080d] p-4">
-        <h4 className="text-[0.65rem] font-black uppercase tracking-[0.12em] text-slate-500">Company Description</h4>
-        <div className="siw-description-copy mt-2 text-sm leading-6 text-slate-300">
-          <ExpandableDescription description={companyDescription || ""} />
-        </div>
-      </article>
-    </div>
-  );
-};
-
-const ToolTextSummary = ({ result }: { result: NativeToolResult }) => (
-  <div className="max-h-[28rem] overflow-auto rounded-md border border-slate-800 bg-slate-950 p-3 text-xs leading-5 text-slate-300">
-    {(result.text || "No formatted summary was returned for this tool.").split("\n").filter(Boolean).slice(0, 8).map((line) => (
-      <p key={line} className="break-words">{line.replace(/^#+\s*/, "").replace(/\*\*/g, "")}</p>
-    ))}
-  </div>
-);
-
-const ToolResultBlock = ({ result }: { result: NativeToolResult }) => {
-  if (["get_intraday", "get_stock_history", "chart_indicator"].includes(result.tool) && historyFromResult(result).length > 1) {
-    return <OhlcVolumeChart result={result} />;
-  }
-
-  if (["market_breadth", "basket_relative_strength", "morning_briefing", "signal_scan", "get_sector_stats", "get_sector_top_holdings"].includes(result.tool) && quotesFromResult(result).length > 0) {
-    return <QuoteBreadthPanel result={result} />;
-  }
-
-  if (["get_stock_stats", "get_beta"].includes(result.tool)) {
-    return <StatsPanel result={result} />;
-  }
-
-  if (resultLooksHtml(result)) {
-    return (
-      <iframe
-        title={`${result.tool} result`}
-        srcDoc={htmlSrcDoc(result)}
-        className="h-[28rem] w-full rounded-md border border-slate-800 bg-slate-950"
-        sandbox="allow-scripts allow-same-origin"
-      />
-    );
-  }
-
-  return <ToolTextSummary result={result} />;
-};
-
-const BrandMark = () => (
-  <div className="siw-brand-mark" aria-hidden="true">
-    <span />
-    <span />
-    <span />
-  </div>
-);
-
-const TickerLogo = ({ symbol, large = false }: { symbol: string; large?: boolean }) => {
-  const normalized = normalizeSymbol(symbol || "?");
-  const palette = [
-    "siw-logo-lime",
-    "siw-logo-white",
-    "siw-logo-blue",
-    "siw-logo-red",
-    "siw-logo-orange",
-    "siw-logo-cyan",
-  ];
-  const className = palette[normalized.charCodeAt(0) % palette.length];
-
-  return (
-    <span className={`siw-ticker-logo ${className} ${large ? "siw-ticker-logo-large" : ""}`} data-ticker-logo={normalized} aria-hidden="true">
-      {normalized.slice(0, normalized === "BRK-B" ? 3 : 1)}
-    </span>
-  );
-};
-
-const approvedUniverseRegimeFromResult = (result: NativeToolResult | null): ApprovedUniverseRegime | null => {
-  const raw = rawRecord(result?.raw);
-  if (!raw) return null;
-  const regime = raw.regime;
-  if (regime !== "risk_on" && regime !== "risk_off" && regime !== "mixed") return null;
-  const universeCount = rawNumber(raw.universeCount);
-  if (universeCount <= 0) return null;
-  return {
-    regime,
-    advancers: rawNumber(raw.advancers),
-    avgChange: rawNumber(raw.avgChange),
-    universeCount,
-  };
-};
-
-const approvedUniverseHoldingsFromResult = (result: NativeToolResult | null): ApprovedUniverseHolding[] => {
-  const raw = rawRecord(result?.raw);
-  const rows = Array.isArray(raw?.holdings) ? raw.holdings : [];
-  return rows
-    .map((item) => rawRecord(item))
-    .filter((item): item is Record<string, unknown> => Boolean(item))
-    .map((item) => ({
-      symbol: typeof item.symbol === "string" ? item.symbol : "",
-      sector: typeof item.sector === "string" ? item.sector : "",
-      price: rawNumber(item.price),
-      changePercent: rawNumber(item.changePercent),
-      volume: rawNumber(item.volume),
-    }))
-    .filter((item) => item.symbol)
-    .sort((a, b) => b.changePercent - a.changePercent);
-};
-
-const MiniSparkline = ({
-  points,
-  positive = true,
-  className = "",
-  dataRole,
-  tooltip,
-  sourceLabel,
-  valueFormatter,
-  placement = "top",
-}: {
-  points: Array<number | SparklinePoint>;
-  positive?: boolean;
-  className?: string;
-  dataRole?: "hero" | "index";
-  tooltip?: string;
-  sourceLabel?: string;
-  valueFormatter?: (value: number) => string;
-  placement?: "top" | "bottom" | "auto";
-}) => {
-  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
-  const [tooltipPosition, setTooltipPosition] = useState<SparklineTooltipPosition | null>(null);
-  const cleanPoints = points
-    .map((point, index): SparklinePoint | null => {
-      if (typeof point === "number") {
-        return Number.isFinite(point) ? { label: `Point ${index + 1}`, value: point, source: sourceLabel } : null;
-      }
-      return Number.isFinite(point.value) ? { ...point, source: point.source || sourceLabel } : null;
-    })
-    .filter((point): point is SparklinePoint => Boolean(point));
-  const geometry = dataRole === "index"
-    ? { viewBox: "0 0 100 64", baseline: 60, amplitude: 54, fillBase: 64, emptyTextY: 34 }
-    : dataRole === "hero"
-      ? { viewBox: "0 0 100 52", baseline: 49, amplitude: 45, fillBase: 52, emptyTextY: 28 }
-      : { viewBox: "0 0 100 40", baseline: 36, amplitude: 32, fillBase: 40, emptyTextY: 22 };
-  const resetHover = () => {
-    setHoverIndex(null);
-    setTooltipPosition(null);
-  };
-  if (cleanPoints.length < 2) {
-    const unavailableLabel = tooltip || "Price sparkline unavailable";
-    return (
-      <span className="siw-sparkline-frame">
-        <svg
-          className={`siw-sparkline siw-empty ${className}`}
-          viewBox={geometry.viewBox}
-          preserveAspectRatio="none"
-          role="img"
-          aria-label={unavailableLabel}
-          data-hero-sparkline={dataRole === "hero" ? "true" : undefined}
-          data-index-sparkline={dataRole === "index" ? "true" : undefined}
-        >
-          <title>{unavailableLabel}</title>
-          <text x="50" y={geometry.emptyTextY} textAnchor="middle">N/A</text>
-        </svg>
-      </span>
-    );
-  }
-  const values = cleanPoints.map((point) => point.value);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = max - min || 1;
-  const first = values[0];
-  const latest = values[values.length - 1];
-  const changePercent = first ? ((latest - first) / first) * 100 : 0;
-  const tooltipText = tooltip || `Price sparkline: ${values.length} points, latest ${latest.toFixed(2)}, ${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}% from first point`;
-  const formatValue = valueFormatter || ((value: number) => value.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 }));
-  const pointX = (index: number) => (index / Math.max(1, values.length - 1)) * 100;
-  const pointY = (value: number) => geometry.baseline - ((value - min) / range) * geometry.amplitude;
-  const path = values
-    .map((value, index) => {
-      const x = pointX(index);
-      const y = pointY(value);
-      return `${index === 0 ? "M" : "L"}${x.toFixed(2)} ${y.toFixed(2)}`;
-    })
-    .join(" ");
-  const activeIndex = hoverIndex === null ? null : Math.min(values.length - 1, Math.max(0, hoverIndex));
-  const activePoint = activeIndex === null ? null : cleanPoints[activeIndex];
-  const activeValue = activeIndex === null ? null : values[activeIndex];
-  const previousValue = activeIndex === null || activeIndex === 0 ? null : values[activeIndex - 1];
-  const activeChange = activeValue !== null && previousValue !== null ? activeValue - previousValue : null;
-  const activeChangePercent = activeChange !== null && previousValue ? (activeChange / previousValue) * 100 : null;
-  const activeX = activeIndex === null ? 0 : pointX(activeIndex);
-  const activeChangeText = activeChange === null
-    ? null
-    : dataRole
-      ? activeChangePercent === null ? null : `${activeChangePercent >= 0 ? "+" : ""}${activeChangePercent.toFixed(2)}%`
-      : `${activeChange >= 0 ? "+" : ""}${formatValue(activeChange)}`;
-  const activeRange = [activePoint?.rangeLabel, activePoint?.granularityLabel].filter(Boolean).join(" ");
-  const activeHeader = activePoint
-    ? [activePoint.label, activePoint.dateTimeLabel, activeRange].filter(Boolean).join(" · ")
-    : "";
-  const tooltipPlacement = placement === "auto" && dataRole === "hero" ? "bottom" : placement;
-  const handlePointerMove = (event: ReactPointerEvent<HTMLElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)));
-    setHoverIndex(Math.round(ratio * (values.length - 1)));
-    const shouldOpenBelow = tooltipPlacement === "bottom" || event.clientY < 170;
-    const left = Math.max(12, Math.min(window.innerWidth - 12, event.clientX + (event.clientX > window.innerWidth - 260 ? -12 : 12)));
-    const top = shouldOpenBelow
-      ? Math.min(window.innerHeight - 148, event.clientY + 18)
-      : Math.max(12, event.clientY - 148);
-    setTooltipPosition({
-      left,
-      top,
-      alignRight: event.clientX > window.innerWidth - 260,
-    });
-  };
-
-  return (
-    <span className="siw-sparkline-frame" onPointerMove={handlePointerMove} onPointerLeave={resetHover}>
-      <svg
-        className={`siw-sparkline ${positive ? "siw-positive" : "siw-negative"} ${className}`}
-        viewBox={geometry.viewBox}
-        preserveAspectRatio="none"
-        role="img"
-        aria-label={tooltipText}
-        tabIndex={0}
-        data-hero-sparkline={dataRole === "hero" ? "true" : undefined}
-        data-index-sparkline={dataRole === "index" ? "true" : undefined}
-        onBlur={resetHover}
-      >
-        <title>{tooltipText}</title>
-        <path className="siw-sparkline-fill" d={`${path} L100 ${geometry.fillBase} L0 ${geometry.fillBase} Z`} />
-        <path className="siw-sparkline-line" d={path} />
-        {activePoint && (
-          <line
-            className="siw-sparkline-crosshair"
-            x1={activeX}
-            x2={activeX}
-            y1="0"
-            y2={geometry.fillBase}
-            data-sparkline-crosshair
-          />
-        )}
-      </svg>
-      {activePoint && activeValue !== null && (
-        <span
-          className={`siw-sparkline-tooltip is-fixed ${tooltipPosition?.alignRight ? "is-right" : ""} ${tooltipPlacement === "bottom" ? "is-bottom" : ""}`}
-          data-sparkline-tooltip
-          data-sparkline-tooltip-placement={tooltipPlacement}
-          style={{
-            left: tooltipPosition ? `${tooltipPosition.left}px` : `${activeX}%`,
-            top: tooltipPosition ? `${tooltipPosition.top}px` : undefined,
-          }}
-        >
-          <b>{activeHeader}</b>
-          <span className="siw-sparkline-tooltip-main">
-            <strong>{formatValue(activeValue)}</strong>
-            {activeChangeText && <small data-sparkline-change className={activeChange !== null && activeChange >= 0 ? "siw-up" : "siw-down"}>{activeChangeText}</small>}
-          </span>
-          <em>{activePoint.source || sourceLabel || "Source"} · {activeIndex === null ? 0 : activeIndex + 1}/{values.length} pts</em>
-        </span>
-      )}
-    </span>
-  );
-};
-
-export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligenceWatcherPageProps) {
+import {
+  NativeToolResult,
+  ToolRunLogEntry,
+  ToolStatus,
+  TabCacheEntry,
+  AsyncPanelState,
+  FearGreedPanelState,
+  ChartGexAggregateRow,
+  SharedPriceAxisCoordinates,
+  YahooExpiryPreloadState,
+  StrikeDrawerState,
+  ModalState,
+  CUSTOM_STOCKS_STORAGE_KEY,
+  FAVORITES_MEMORY_KEY,
+  MARKET_INDEX_DEFINITIONS,
+  MarketIndexDefinition,
+  MarketContextState,
+  RawOptionLeg,
+  RawOptionChain,
+  ExpirySelectorRow,
+  RawOptionExposure,
+  RawHistoryPoint,
+  SparklinePoint,
+  formatNumber,
+  formatOptionalSignedExposure,
+  currency,
+  quoteDirection,
+  signedNumberText,
+  directionArrow,
+  formatOptionalPrice,
+  formatSignedPercent,
+  formatOptionalNumber,
+  getUsEquitiesMarketStatus,
+  formatNewsTimestamp,
+  formatIndexValue,
+  formatSparklineDateTime,
+  dateFromAsOfAndSessionLabel,
+  formatQuoteAsOf,
+  normalizeExpiryDate,
+  formatExpiryDate,
+  toYahooExpiry,
+  modeLabel,
+  getMaxForMode,
+  getCallValue,
+  getPutValue,
+  chartMetricLabel,
+  ChartTooltipState,
+  normalizeSymbol,
+  sanitizeSymbols,
+  readStoredSymbols,
+  uniqueStocks,
+  readStoredCustomStocks,
+  stringifyPayload,
+  chunkSymbols,
+  parseWatchlistStocks,
+  resultLooksHtml,
+  rawRecord,
+  rawNumber,
+  rawNullableNumber,
+  rawNullableString,
+  financialStatementsFromResult,
+  formatFinancialAmount,
+  formatProvenanceTimestamp,
+  unavailableMarketIndexCard,
+  emptyMarketIndexCards,
+  parseMarketIndexCard,
+  optionChainFromResult,
+  optionExposuresFromResult,
+  optionLegNumber,
+  optionLegDisplayNumber,
+  formatOptionIv,
+  effectiveLegOpenInterest,
+  effectiveExposureIv,
+  buildStrikeRowsFromOptionRaw,
+  buildExpiryRowsForSelector,
+  exposureToneClassName,
+  chartGexRowsFromResult,
+  aggregateChartGexRows,
+  summaryFromLoadedOptionChain,
+  yahooExpiryExposureCacheKey,
+  getRunColor,
+  getToolCategory,
+  getToolInputDraft,
+  VALUATION_METRIC_LABEL,
+} from "./stocks-intelligence-watcher-view-model";
+import {
+  SkeletonBlock,
+  MetricTile,
+  ValuationRainbowChart,
+  ErrorBanner,
+  OptionsEmptyState,
+  OptionsUnsupportedState,
+  PutCallRatioChart,
+  OptionsResultProvenance,
+  formatOptionsSourceTime,
+  ExpandableDescription,
+  getSharedPriceAxisRange,
+  OhlcVolumeChart,
+  QuoteBreadthPanel,
+  ToolResultBlock,
+  BrandMark,
+  TickerLogo,
+  approvedUniverseRegimeFromResult,
+  approvedUniverseHoldingsFromResult,
+  MiniSparkline,
+} from "./stocks-intelligence-watcher-leaf-components";
+export function StocksIntelligenceWatcherPage() {
   const [selectedSymbol, setSelectedSymbol] = useState(() =>
     typeof window === "undefined"
       ? STOCKS_WATCHER_DEFAULT_SYMBOL
@@ -2177,8 +379,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tool: name, params }),
       });
-      const payload = await response.json() as { ok?: boolean; tool?: string; text?: string; raw?: unknown; error?: string };
-      if (!response.ok || payload.ok === false) {
+      const payload = await parseJsonResponse<{ ok?: boolean; tool?: string; text?: string; raw?: unknown; error?: string }>(response, "/api/stocks-intelligence-watcher");
+      if (payload.ok === false) {
         throw new Error(payload.error || `native Yahoo tool ${name} failed with HTTP ${response.status}`);
       }
 
@@ -2216,10 +418,10 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     const response = await fetch(`/api/stocks-intelligence-watcher?symbol=${encodeURIComponent(nextSymbol)}`, {
       signal: options.signal,
     });
-    if (!response.ok) {
-      throw new Error(`stocks watcher snapshot ${nextSymbol} failed with HTTP ${response.status}`);
+    const body = await parseJsonResponse<StocksWatcherSnapshot & { error?: string }>(response, `/api/stocks-intelligence-watcher?symbol=${encodeURIComponent(nextSymbol)}`, { allowHttpError: true });
+    if ((response.status !== 200 && response.status !== 206) || !body.symbol || !body.quote) {
+      throw new Error(body.error || `Stocks Watcher request failed with HTTP ${response.status}.`);
     }
-    const body = await response.json() as StocksWatcherSnapshot;
     const fetchedAt = Date.now();
     snapshotCacheRef.current.set(body.symbol, { snapshot: body, fetchedAt });
     const customStock = getStocksWatcherCustomStockFromSnapshot(body, getStocksWatcherUniverseStock(body.symbol));
@@ -2514,7 +716,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
     setFearGreedState((current) => ({ ...current, loading: true, error: null }));
     try {
       const response = await fetch("/api/fear-greed", { headers: { Accept: "application/json" } });
-      const payload = await response.json() as { data?: FearGreedSnapshot; cache?: MarketCacheMetadata; error?: string };
+      const payload = await parseJsonResponse<{ data?: FearGreedSnapshot; cache?: MarketCacheMetadata; error?: string }>(response, "/api/fear-greed", { allowHttpError: true });
       if ((response.status !== 200 && response.status !== 206) || !payload.data || !payload.cache) {
         throw new Error(payload.error || `Fear & Greed request failed with HTTP ${response.status}.`);
       }
@@ -3419,6 +1621,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                     <label key={expiry} className="siw-chart-expiry-choice">
                       <input
                         type="checkbox"
+                        name={`chart-expiry-${expiry}`}
                         data-chart-gex-expiry={expiry}
                         checked={checked}
                         onChange={() => expiry && toggleChartGexExpiry(expiry)}
@@ -3632,6 +1835,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
               Strike Zoom
               <input
                 aria-label="Strike zoom"
+                name="strike-zoom"
                 type="range"
                 min="1"
                 max="3"
@@ -3768,7 +1972,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                     <div className="relative flex h-1/2 items-end justify-center border-b border-blue-300/30">
                       {netGamma >= 0 && (
                       <div
-                        className="w-3 rounded-t-[2px] bg-gradient-to-t from-emerald-600/75 to-emerald-300 shadow-[0_0_16px_rgba(16,185,129,0.2)] transition-all group-hover:w-4 group-hover:from-emerald-500 group-hover:to-emerald-200 sm:w-4 sm:group-hover:w-5"
+                                className="w-3 rounded-t-[2px] bg-gradient-to-t from-emerald-600/75 to-emerald-300 shadow-[0_0_16px_rgba(16,185,129,0.2)] transition-[width,background-color] group-hover:w-4 group-hover:from-emerald-500 group-hover:to-emerald-200 sm:w-4 sm:group-hover:w-5"
                         style={{ height: `${netGammaHeight}%` }}
                         title={`Net GEX ${formatNumber(netGamma)}`}
                       />
@@ -3777,7 +1981,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                     <div className="relative flex h-1/2 items-start justify-center">
                       {netGamma < 0 && (
                       <div
-                        className="w-3 rounded-b-[2px] bg-gradient-to-b from-red-400 to-red-700/75 shadow-[0_0_16px_rgba(248,113,113,0.18)] transition-all group-hover:w-4 group-hover:from-red-300 group-hover:to-red-500 sm:w-4 sm:group-hover:w-5"
+                                className="w-3 rounded-b-[2px] bg-gradient-to-b from-red-400 to-red-700/75 shadow-[0_0_16px_rgba(248,113,113,0.18)] transition-[width,background-color] group-hover:w-4 group-hover:from-red-300 group-hover:to-red-500 sm:w-4 sm:group-hover:w-5"
                         style={{ height: `${netGammaHeight}%` }}
                         title={`Net GEX ${formatNumber(netGamma)}`}
                       />
@@ -4861,6 +3065,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             <div className="siw-valuation-controls">
               <label>Ticker
                 <select
+                  name="valuation-ticker"
                   aria-label="Curated valuation ticker"
                   value={valuationTicker}
                   onChange={(event) => setValuationTicker(event.target.value)}
@@ -4870,7 +3075,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 </select>
               </label>
               <label>Metric
-                <select aria-label="Valuation metric" value={valuationMetric} onChange={(event) => setValuationMetric(event.target.value as WatcherValuationMetric)}>
+                <select name="valuation-metric" aria-label="Valuation metric" value={valuationMetric} onChange={(event) => setValuationMetric(event.target.value as WatcherValuationMetric)}>
                   {VALUATION_METRICS.map((metric) => <option key={metric} value={metric}>{VALUATION_METRIC_LABEL[metric]}</option>)}
                 </select>
               </label>
@@ -5067,9 +3272,9 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
       <div className={`siw-replica-shell ${watchlistCollapsed ? "is-rail-collapsed" : ""}`} data-watcher-replica>
         <aside className="siw-sidebar">
           <div className="siw-sidebar-head">
-            <button type="button" className="siw-back-button" onClick={onBackToWork} aria-label="Back to work">
+            <a href="#/market-lab" className="siw-back-button" aria-label="Back to work">
               <ArrowLeft className="h-4 w-4" />
-            </button>
+            </a>
             <div className="siw-brand">
               <BrandMark />
               <div>
@@ -5103,7 +3308,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                     }}
                     name="stock-search"
                     autoComplete="off"
-                    placeholder="Search ticker or name..."
+                    aria-label="Search stocks"
+                    placeholder="Search ticker or name…"
                   />
                 </label>
                 <button type="button" onClick={submitSearch} className="siw-load-button">
@@ -5120,17 +3326,18 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                   <RefreshCw className={watchlistRefreshing ? "animate-spin" : ""} />
                 </button>
               </div>
-              {searchError && <p className="siw-search-error">{searchError}</p>}
+              {searchError && <p className="siw-search-error" role="alert">{searchError}</p>}
+              <span className="sr-only" role="status" aria-live="polite">{watchlistRefreshing ? "Refreshing watcher tickers" : loadingSymbol ? `Loading ${loadingSymbol}` : ""}</span>
 
               <div className={`siw-filter-row ${filtersOpen ? "is-open" : ""}`}>
                 <label>
-                  <select aria-label="Sector filter" value={sectorFilter} onChange={(event) => runSectorFilter(event.target.value)}>
+                  <select name="watcher-sector-filter" aria-label="Sector filter" value={sectorFilter} onChange={(event) => runSectorFilter(event.target.value)}>
                     {sectorOptions.map((sector) => <option key={sector}>{sector}</option>)}
                   </select>
                   <ChevronDown className="h-4 w-4" />
                 </label>
                 <label>
-                  <select aria-label="Type filter" value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
+                  <select name="watcher-type-filter" aria-label="Type filter" value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
                     {typeOptions.map((type) => <option key={type}>{type}</option>)}
                   </select>
                   <ChevronDown className="h-4 w-4" />
@@ -5174,7 +3381,8 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 <span>Change</span>
               </div>
 
-              <div className="siw-watchlist" data-watchlist-scope data-cache-version={cacheVersion}>
+              <p className="siw-watchlist-hint">Swipe horizontally for more tickers. Each card is keyboard selectable.</p>
+              <div className="siw-watchlist" data-watchlist-scope data-cache-version={cacheVersion} role="region" aria-label="Horizontally scrollable stock watchlist" tabIndex={0}>
                 {watchlist.map((stock) => {
                   const symbol = stock.symbol;
                   const selected = symbol === selectedSymbol;
@@ -5217,6 +3425,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                     >
                       <input
                         type="checkbox"
+                        name={`favorite-${symbol}`}
                         aria-label={`Favorite ${symbol}`}
                         checked={isFavorite}
                         onChange={() => toggleFavorite(symbol)}
@@ -5225,7 +3434,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                       />
                       <TickerLogo symbol={symbol} />
                       <div className="siw-row-name">
-                        <strong>{symbol}{isRowLoading ? " ..." : ""}</strong>
+                        <strong>{symbol}{isRowLoading ? " …" : ""}</strong>
                         <span>{stock.companyName}</span>
                       </div>
                       <div className="siw-row-price">
@@ -5244,6 +3453,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                           event.stopPropagation();
                           removeSymbol(symbol);
                         }}
+                        onKeyDown={(event) => event.stopPropagation()}
                       >
                         <X className="h-3.5 w-3.5" />
                       </button>
@@ -5356,6 +3566,13 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
               );
             })}
           </nav>
+
+          <label className="siw-mobile-section-selector">
+            <span>Watcher section</span>
+            <select name="watcher-section" value={activeTab} onChange={(event) => setActiveTab(event.target.value as TopTab)}>
+              {TOP_TABS.map((item) => <option key={item} value={item}>{item}</option>)}
+            </select>
+          </label>
 
           <div className="siw-main-scroll">
             {error && <ErrorBanner message={error} onRetry={refreshCurrent} />}
@@ -5470,14 +3687,13 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           ) : (
           <>
           <div className="mb-4 flex items-center justify-between gap-3">
-            <button
-              type="button"
-              onClick={onBackToWork}
+            <a
+              href="#/market-lab"
               className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.16em] text-slate-400 transition-colors hover:text-white"
             >
               <ArrowLeft className="h-4 w-4" />
               Work Gallery
-            </button>
+            </a>
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -5513,7 +3729,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 onKeyDown={(event) => {
                   if (event.key === "Enter") submitSearch();
                 }}
-                className="h-10 w-full rounded-md border border-slate-700 bg-[#0b111a] pl-9 pr-3 text-sm text-white outline-none transition-colors placeholder:text-slate-500 focus:border-blue-400"
+                className="h-10 w-full rounded-md border border-slate-700 bg-[#0b111a] pl-9 pr-3 text-sm text-white outline-none transition-colors placeholder:text-slate-500 focus-visible:border-blue-400 focus-visible:ring-2 focus-visible:ring-blue-400"
                 name="stock-search"
                 autoComplete="off"
                 placeholder="Search ticker or company…"
@@ -5531,10 +3747,11 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
           <div className="mt-3 grid grid-cols-2 gap-2">
             <label className="relative flex-1">
               <select
+                name="legacy-sector-filter"
                 aria-label="Sector filter"
                 value={sectorFilter}
                 onChange={(event) => runSectorFilter(event.target.value)}
-                className="h-9 w-full appearance-none rounded-md border border-slate-700 bg-[#0b111a] px-3 pr-8 text-sm text-white outline-none"
+                className="h-9 w-full appearance-none rounded-md border border-slate-700 bg-[#0b111a] px-3 pr-8 text-sm text-white outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
               >
                 {sectorOptions.map((sector) => <option key={sector}>{sector}</option>)}
               </select>
@@ -5542,10 +3759,11 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
             </label>
             <label className="relative flex-1">
               <select
+                name="legacy-type-filter"
                 aria-label="Type filter"
                 value={typeFilter}
                 onChange={(event) => setTypeFilter(event.target.value)}
-                className="h-9 w-full appearance-none rounded-md border border-slate-700 bg-[#0b111a] px-3 pr-8 text-sm text-white outline-none"
+                className="h-9 w-full appearance-none rounded-md border border-slate-700 bg-[#0b111a] px-3 pr-8 text-sm text-white outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
               >
                 {typeOptions.map((type) => <option key={type}>{type}</option>)}
               </select>
@@ -5626,6 +3844,7 @@ export function StocksIntelligenceWatcherPage({ onBackToWork }: StocksIntelligen
                 >
                   <input
                     type="checkbox"
+                    name={`legacy-favorite-${symbol}`}
                     aria-label={`Favorite ${symbol}`}
                     checked={isFavorite}
                     onChange={() => toggleFavorite(symbol)}

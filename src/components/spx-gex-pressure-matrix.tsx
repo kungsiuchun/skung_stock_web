@@ -393,7 +393,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
           signal: controller.signal,
           onRetry: () => setReconnecting(true),
         });
-        const payload = await parseJsonResponse<PressureResponse>(response, "/api/spx-gex-pressure");
+        const payload = await parseJsonResponse<PressureResponse>(response, "/api/spx-gex-pressure", { allowHttpError: true });
         if (!response.ok || payload.status === "ERROR" || payload.status === "STORAGE_UNAVAILABLE" || payload.status === "BINDING_MISSING") {
           throw new Error(payload.error || `SPX GEX pressure API failed with HTTP ${response.status}`);
         }
@@ -459,7 +459,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
           signal: controller.signal,
           onRetry: () => setReconnecting(true),
         });
-        const payload = await parseJsonResponse<NonNullable<PriceOverlayState["data"]>>(response, "/api/spx-price-action-compass");
+        const payload = await parseJsonResponse<NonNullable<PriceOverlayState["data"]>>(response, "/api/spx-price-action-compass", { allowHttpError: true });
         if (!canCommit()) return;
         if (!response.ok) {
           const message = payload.warnings?.join(" ") || `SPX 1-minute API failed with HTTP ${response.status}`;

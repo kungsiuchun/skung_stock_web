@@ -33,7 +33,27 @@ const VIEW_HASHES: Record<ViewState, string> = {
   "portfolio-backtest": "#/work/portfolio-backtest",
 };
 
+const VIEW_TITLES: Record<ViewState, string> = {
+  home: "Code & Camera",
+  about: "About & résumé",
+  contact: "Contact",
+  photography: "Photo journal",
+  "work-gallery": "Market Lab",
+  "settle-up": "Settle Up",
+  "finance-dashboard": "Finance Analyzer",
+  "trading-agent-dashboard": "Trading Agent",
+  "spx-recap": "SPX Recap",
+  "spx-gex-heatmap": "SPX GEX Heatmap",
+  "stocks-intelligence-watcher": "Stocks Intelligence Watcher",
+  "fixed-income": "Fixed Income",
+  "market-breadth": "S&P 500 Market Breadth",
+  "sector-rotation": "SPY Sector Rotation",
+  "portfolio-backtest": "Portfolio vs SPY",
+};
+
 export const getHashForView = (view: ViewState): string => VIEW_HASHES[view];
+
+export const getTitleForView = (view: ViewState): string => `${VIEW_TITLES[view]} — Siu`;
 
 export const getViewFromHash = (hash: string): ViewState => {
   if (!hash || hash === "#/" || hash === "#") {

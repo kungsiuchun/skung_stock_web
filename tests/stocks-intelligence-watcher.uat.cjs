@@ -265,19 +265,37 @@ const fearGreedFixture = () => ({
   cache: { status: "refreshed", dataset: "news", cachedAt: "2026-09-09T20:00:00.000Z", expiresAt: "2026-09-09T20:15:00.000Z", ageSeconds: 0, ttlMs: 900000, ageRatio: 0, guard: "fresh", rowRead: true, rowWritten: true },
 });
 
-const treasuryYieldCurveFixture = () => ({
-  asOfDate: "2026-09-08",
-  sourceUrl: "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/all/all?_format=csv&page=&type=daily_treasury_yield_curve",
-  curves: [
-    { key: "latest", label: "Latest published", date: "2026-09-08", points: [{ label: "1M", years: 1 / 12, yield: 4.2 }, { label: "2Y", years: 2, yield: 3.9 }, { label: "10Y", years: 10, yield: 4.1 }, { label: "30Y", years: 30, yield: 4.5 }] },
-    { key: "oneWeek", label: "1 week ago", date: "2026-09-01", points: [{ label: "1M", years: 1 / 12, yield: 4.18 }, { label: "2Y", years: 2, yield: 3.86 }, { label: "10Y", years: 10, yield: 4.05 }, { label: "30Y", years: 30, yield: 4.46 }] },
-    { key: "oneMonth", label: "1 month ago", date: "2026-08-08", points: [{ label: "1M", years: 1 / 12, yield: 4.11 }, { label: "2Y", years: 2, yield: 3.8 }, { label: "10Y", years: 10, yield: 4.02 }, { label: "30Y", years: 30, yield: 4.43 }] },
-    { key: "startOfYear", label: "Start of year", date: "2026-01-02", points: [{ label: "1M", years: 1 / 12, yield: 4.3 }, { label: "2Y", years: 2, yield: 4.02 }, { label: "10Y", years: 10, yield: 4.2 }, { label: "30Y", years: 30, yield: 4.62 }] },
-  ],
-  yieldRows: [{ maturity: "1M", yield: 4.2, oneDayBps: 2.1, oneWeekBps: 2, oneMonthBps: 9, yearToDateBps: -10 }, { maturity: "2Y", yield: 3.9, oneDayBps: 1.5, oneWeekBps: 4, oneMonthBps: 10, yearToDateBps: -12 }, { maturity: "10Y", yield: 4.1, oneDayBps: 2.5, oneWeekBps: 5, oneMonthBps: 8, yearToDateBps: -10 }, { maturity: "30Y", yield: 4.5, oneDayBps: 4, oneWeekBps: 4, oneMonthBps: 7, yearToDateBps: -12 }],
-  spreadRows: [{ label: "10Y - 2Y", valueBps: 20, oneDayBps: 1, oneWeekBps: 1, oneMonthBps: -2, yearToDateBps: 2 }],
-  source: { provider: "U.S. Department of the Treasury", label: "Daily Treasury Par Yield Curve Rates", url: "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/all/all?_format=csv&page=&type=daily_treasury_yield_curve", fetchedAt: "2026-09-09T20:00:00.000Z" },
-});
+const treasuryMaturities = [
+  ["1M", 1 / 12], ["1.5M", 1.5 / 12], ["2M", 2 / 12], ["3M", 3 / 12],
+  ["4M", 4 / 12], ["6M", 6 / 12], ["1Y", 1], ["2Y", 2], ["3Y", 3],
+  ["5Y", 5], ["7Y", 7], ["10Y", 10], ["20Y", 20], ["30Y", 30],
+];
+const treasuryCurvePoints = (values) => treasuryMaturities.map(([maturity, years], index) => ({
+  maturity,
+  label: maturity,
+  years,
+  yield: values[index],
+}));
+const treasuryYieldCurveFixture = () => {
+  const curveContracts = [
+    ["latest", "Latest published", "2026-09-08", [4.2, 4.17, 4.15, 4.1, 4.08, 4.05, 4.02, 3.9, 3.95, 4.0, 4.05, 4.1, 4.25, 4.5]],
+    ["oneWeek", "1 week ago", "2026-09-01", [4.18, 4.15, 4.13, 4.08, 4.06, 4.03, 4.0, 3.86, 3.91, 3.96, 4.01, 4.05, 4.2, 4.46]],
+    ["oneMonth", "1 month ago", "2026-08-08", [4.11, 4.08, 4.06, 4.01, 3.99, 3.96, 3.93, 3.8, 3.85, 3.92, 3.97, 4.02, 4.17, 4.43]],
+    ["startOfYear", "Start of year", "2026-01-02", [4.3, 4.27, 4.25, 4.2, 4.18, 4.15, 4.12, 4.02, 4.07, 4.12, 4.17, 4.2, 4.37, 4.62]],
+  ];
+  const latestValues = curveContracts[0][3];
+  return {
+    asOfDate: "2026-09-08",
+    sourceUrl: "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/all/all?_format=csv&page=&type=daily_treasury_yield_curve",
+    curves: curveContracts.map(([key, label, date, values]) => ({ key, label, date, points: treasuryCurvePoints(values) })),
+    yieldRows: treasuryMaturities.map(([maturity], index) => ({ maturity, yield: latestValues[index], oneDayBps: 1 + index / 10, oneWeekBps: 2 + index / 10, oneMonthBps: 3 + index / 10, yearToDateBps: -4 + index / 10 })),
+    spreadRows: [
+      { label: "10Y - 2Y", valueBps: 20, oneDayBps: 1, oneWeekBps: 1, oneMonthBps: -2, yearToDateBps: 2 },
+      { label: "10Y - 3M", valueBps: 0, oneDayBps: 2, oneWeekBps: 2, oneMonthBps: -1, yearToDateBps: 3 },
+    ],
+    source: { provider: "U.S. Department of the Treasury", label: "Daily Treasury Par Yield Curve Rates", url: "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/all/all?_format=csv&page=&type=daily_treasury_yield_curve", fetchedAt: "2026-09-09T20:00:00.000Z" },
+  };
+};
 
 const fomcRateProbabilityFixture = () => ({
   meeting: {
@@ -334,9 +352,9 @@ const macroFixture = () => {
       generatedAt: "2026-09-10T20:00:00.000Z", asOf: "2026-09-09",
       markets: { asOf: "2026-09-09", rows: marketRows },
       inflation: { asOf: "2026-07-01", months, rows: inflationRows },
-      source: { provider: "Federal Reserve Economic Data (FRED)", url: "https://fred.stlouisfed.org/", termsUrl: "https://fred.stlouisfed.org/docs/api/terms_of_use.html", series: [], note: "Daily EIA/Federal Reserve and monthly IMF/BEA/Dallas Fed series retrieved through FRED. Values may be revised." },
+      source: { provider: "Federal Reserve Economic Data (FRED)", url: "https://fred.stlouisfed.org/", termsUrl: "https://fred.stlouisfed.org/docs/api/terms_of_use.html", series: ["DCOILWTICO", "DCOILBRENTEU", "DHHNGSP", "PCOPPUSDM", "PURANUSDM", "DTWEXBGS", "PALLFNFINDEXM", "PNRGINDEXM", "PMETAINDEXM", "PCEPI", "PCEPILFE", "PCETRIM1M158SFRBDAL", "PCETRIM6M680SFRBDAL", "PCETRIM12M159SFRBDAL", "PI", "PCE"].map((id) => ({ id, url: `https://fred.stlouisfed.org/series/${id}` })), note: "Daily EIA/Federal Reserve and monthly IMF/BEA/Dallas Fed series retrieved through FRED. Values may be revised." },
     },
-    cache: { status: "refreshed", dataset: "history", cachedAt: "2026-09-10T20:00:00.000Z", expiresAt: "2026-09-10T21:00:00.000Z", ageSeconds: 0, ttlMs: 3600000, ageRatio: 0, guard: "fresh", rowRead: true, rowWritten: true },
+    cache: { status: "refreshed", dataset: "history", cachedAt: "2026-09-10T20:00:00.000Z", expiresAt: "2026-09-10T21:00:00.000Z", ageSeconds: 0, ttlMs: 3600000, ageRatio: 0, guard: "fresh", rowRead: true, rowWritten: true, observability: { rowRead: "hit", rowWritten: "written" }, rowsRead: 1, rowsWritten: 1, sourceAsOf: "2026-09-09" },
   };
 };
 
@@ -398,6 +416,8 @@ let refreshAllMode = false;
 let delayedSnapshotSymbol = null;
 let marketBreadthApiMode = "READY";
 let macroApiMode = "FRESH";
+let treasuryApiMode = "FRESH";
+let fomcApiMode = "FRESH";
 
 const buildToolResponse = (tool, params = {}) => {
   if (tool === "get_watchlist") {
@@ -711,12 +731,20 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
         return;
       }
       if (url.pathname.includes("/api/treasury-yield-curve")) {
-        apiCalls.push({ method: "GET", endpoint: "treasury-yield-curve" });
+        apiCalls.push({ method: "GET", endpoint: "treasury-yield-curve", mode: treasuryApiMode });
+        if (treasuryApiMode === "INVALID") {
+          await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify({}) });
+          return;
+        }
         await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(treasuryYieldCurveFixture()) });
         return;
       }
       if (url.pathname.includes("/api/fomc-rate-probability")) {
-        apiCalls.push({ method: "GET", endpoint: "fomc-rate-probability" });
+        apiCalls.push({ method: "GET", endpoint: "fomc-rate-probability", mode: fomcApiMode });
+        if (fomcApiMode === "INVALID") {
+          await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify({}) });
+          return;
+        }
         await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(fomcRateProbabilityFixture()) });
         return;
       }
@@ -727,8 +755,18 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
           return;
         }
         const payload = macroFixture();
+        if (macroApiMode === "INVALID") {
+          payload.data.markets = {};
+          await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
+          return;
+        }
+        if (macroApiMode === "INVALID_CACHE") {
+          payload.cache = { status: "stale" };
+          await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
+          return;
+        }
         if (macroApiMode === "STALE") {
-          payload.cache = { ...payload.cache, status: "stale", refreshError: "FRED refresh timed out." };
+          payload.cache = { ...payload.cache, status: "stale", guard: "stale", refreshError: "FRED refresh timed out." };
         }
         await request.respond({ status: macroApiMode === "STALE" ? 206 : 200, contentType: "application/json", body: JSON.stringify(payload) });
         return;
@@ -1315,6 +1353,34 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.ok(apiCalls.some((call) => call.endpoint === "treasury-yield-curve"), "Fixed Income must request the server-side Treasury API");
     assert.ok(apiCalls.some((call) => call.endpoint === "fomc-rate-probability"), "Fixed Income must request the server-side FOMC probability API");
 
+    treasuryApiMode = "INVALID";
+    await clickText(page, "News", true);
+    await clickText(page, "Fixed Income", true);
+    await page.waitForSelector("[data-fixed-income-panel] .siw-fixed-income-error");
+    const invalidTreasuryProof = await page.evaluate(() => ({
+      panel: document.querySelector("[data-fixed-income-panel]")?.textContent || "",
+      watcherVisible: document.querySelector("[data-watcher-replica]") !== null,
+    }));
+    assert.match(invalidTreasuryProof.panel, /Treasury source unavailable[\s\S]*invalid data/i);
+    assert.equal(invalidTreasuryProof.watcherVisible, true, "invalid Treasury data must stay inside the retryable panel");
+    treasuryApiMode = "FRESH";
+    await page.click("[data-fixed-income-panel] .siw-fixed-income-error button");
+    await page.waitForSelector("[data-fixed-income-chart]");
+
+    fomcApiMode = "INVALID";
+    await clickText(page, "News", true);
+    await clickText(page, "Fixed Income", true);
+    await page.waitForSelector("[data-fomc-probability-panel] .siw-fomc-probability-error");
+    const invalidFomcProof = await page.evaluate(() => ({
+      panel: document.querySelector("[data-fomc-probability-panel]")?.textContent || "",
+      watcherVisible: document.querySelector("[data-watcher-replica]") !== null,
+    }));
+    assert.match(invalidFomcProof.panel, /FOMC probability source unavailable[\s\S]*invalid data/i);
+    assert.equal(invalidFomcProof.watcherVisible, true, "invalid FOMC data must stay inside the retryable panel");
+    fomcApiMode = "FRESH";
+    await page.click("[data-fomc-probability-panel] .siw-fomc-probability-error button");
+    await page.waitForSelector("[data-fomc-probability-outcome]");
+
     await clickText(page, "F/G Index", true);
     await wait(350);
     assert.equal(await page.$("[data-fear-greed-panel]") !== null, true, "F/G Index must render the CNN sentiment surface");
@@ -1444,7 +1510,33 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.match(failedMacroProof.footer, /Federal Reserve Economic Data[\s\S]*EIA[\s\S]*IMF[\s\S]*BEA/i);
     assert.equal(failedMacroProof.publishedSignal, false, "failed Macro data must not render a published-success signal");
     assert.doesNotMatch(failedMacroProof.footer, /Published macro data/i);
+    macroApiMode = "INVALID";
+    await clickText(page, "News", true);
+    await clickText(page, "Macro", true);
+    await page.waitForSelector("[data-macro-panel] .siw-macro-error");
+    const invalidMacroProof = await page.evaluate(() => ({
+      panel: document.querySelector("[data-macro-panel]")?.textContent || "",
+      watcherVisible: document.querySelector("[data-watcher-replica]") !== null,
+    }));
+    assert.match(invalidMacroProof.panel, /Macro source unavailable[\s\S]*invalid data/i);
+    assert.equal(invalidMacroProof.watcherVisible, true, "invalid Macro data must stay inside the retryable panel");
     macroApiMode = "FRESH";
+    await page.click("[data-macro-panel] .siw-macro-error button");
+    await page.waitForSelector("[data-macro-panel] [data-macro-markets]");
+
+    macroApiMode = "INVALID_CACHE";
+    await clickText(page, "News", true);
+    await clickText(page, "Macro", true);
+    await page.waitForSelector("[data-macro-panel] .siw-macro-error");
+    const invalidMacroCacheProof = await page.evaluate(() => ({
+      panel: document.querySelector("[data-macro-panel]")?.textContent || "",
+      watcherVisible: document.querySelector("[data-watcher-replica]") !== null,
+    }));
+    assert.match(invalidMacroCacheProof.panel, /Macro source unavailable[\s\S]*invalid data[\s\S]*cache\.cachedAt/i);
+    assert.equal(invalidMacroCacheProof.watcherVisible, true, "invalid Macro cache must stay inside the retryable panel");
+    macroApiMode = "FRESH";
+    await page.click("[data-macro-panel] .siw-macro-error button");
+    await page.waitForSelector("[data-macro-panel] [data-macro-markets]");
 
     await page.type('input[name="stock-search"]', "NVDA");
     await clickText(page, "LOAD");
@@ -1868,19 +1960,142 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await page.goto(`${baseUrl}/#/work/stocks-intelligence-watcher?symbol=NVDA`, { waitUntil: "domcontentloaded" });
     await page.waitForSelector("[data-watcher-replica]");
     await page.waitForFunction(() => document.querySelector(".siw-hero-identity h1")?.textContent === "NVDA", { timeout: 5000 });
-    await clickText(page, "Options", true);
+    await page.select("select[name='watcher-section']", "Options");
     await page.waitForSelector("[data-options-robinhood-provenance]", { timeout: 5000 });
+    await page.waitForSelector(".siw-watchlist .siw-watch-row", { timeout: 5000 });
+    const mobileNavigation = await page.evaluate(() => {
+      const measure = (node) => {
+        if (!node) return { width: 0, height: 0 };
+        const rect = node.getBoundingClientRect();
+        return { width: rect.width, height: rect.height };
+      };
+      const selector = document.querySelector("select[name='watcher-section']");
+      const tabs = document.querySelector(".siw-main-tabs");
+      const controls = Array.from(document.querySelectorAll(".siw-search-row button, .siw-filter-row button, .siw-mobile-nav button"));
+      const interactive = Array.from(document.querySelectorAll(".siw-replica-shell button, .siw-replica-shell [role='button'], .siw-replica-shell select, .siw-replica-shell input:not([type='checkbox']):not([type='radio'])"))
+        .filter((node) => node.getClientRects().length > 0)
+        .filter((node) => {
+          const rect = node.getBoundingClientRect();
+          return rect.width < 44 || rect.height < 44;
+        })
+        .map((node) => ({ label: node.getAttribute("aria-label") || node.textContent?.trim().slice(0, 32) || node.tagName, width: node.getBoundingClientRect().width, height: node.getBoundingClientRect().height }));
+      return {
+        selectorVisible: Boolean(selector && selector.getClientRects().length),
+        selectorHeight: selector?.getBoundingClientRect().height || 0,
+        tabsVisible: Boolean(tabs && tabs.getClientRects().length),
+        controlsMeetTouchTarget: controls.every((control) => control.getBoundingClientRect().height >= 44 && control.getBoundingClientRect().width >= 44),
+        heroFavorite: measure(document.querySelector(".siw-logo-card button")),
+        undersized: interactive,
+      };
+    });
+    assert.equal(mobileNavigation.selectorVisible, true, "mobile Watcher must expose the labelled section selector");
+    assert.ok(mobileNavigation.selectorHeight >= 44, "mobile section selector must meet the 44px touch target");
+    assert.equal(mobileNavigation.tabsVisible, false, "wide section tabs must be hidden on mobile");
+    assert.equal(mobileNavigation.controlsMeetTouchTarget, true, "high-frequency mobile Watcher controls must be at least 44px square");
+    assert.ok(mobileNavigation.heroFavorite.width >= 44 && mobileNavigation.heroFavorite.height >= 44, "mobile hero favorite must be at least 44px square");
+    assert.deepEqual(mobileNavigation.undersized, [], `visible mobile controls must be at least 44px: ${JSON.stringify(mobileNavigation.undersized)}`);
+    const mobileWatchlistScroll = await page.$eval(".siw-watchlist", (list) => {
+      list.scrollLeft = 0;
+      const maxScrollLeft = list.scrollWidth - list.clientWidth;
+      list.scrollBy({ left: Math.min(160, maxScrollLeft), behavior: "auto" });
+      return {
+        before: 0,
+        after: list.scrollLeft,
+        maxScrollLeft,
+        snapType: getComputedStyle(list).scrollSnapType,
+        rowSnapAlign: getComputedStyle(list.querySelector(".siw-watch-row")).scrollSnapAlign,
+      };
+    });
+    assert.ok(mobileWatchlistScroll.maxScrollLeft > 0, `mobile watchlist must overflow horizontally: ${JSON.stringify(mobileWatchlistScroll)}`);
+    assert.ok(mobileWatchlistScroll.after > mobileWatchlistScroll.before, `mobile watchlist scrollLeft must change: ${JSON.stringify(mobileWatchlistScroll)}`);
+    assert.match(mobileWatchlistScroll.snapType, /x/i, "mobile watchlist must use horizontal scroll snapping");
+    assert.equal(mobileWatchlistScroll.rowSnapAlign, "start", "mobile watchlist cards must snap to the start");
+    await page.click("button[aria-label='Toggle filters']");
+    const resetTouchTarget = await page.$eval(".siw-filter-state button", (button) => {
+      const rect = button.getBoundingClientRect();
+      return { width: rect.width, height: rect.height };
+    });
+     assert.ok(resetTouchTarget.width >= 44 && resetTouchTarget.height >= 44, "mobile filter Reset must be at least 44px square");
+     await page.select("select[name='watcher-section']", "Chart");
+     await wait(500);
+      await page.$eval("[data-chart-gex-expiry-trigger]", (button) => button.scrollIntoView({ block: "center" }));
+     await page.click("[data-chart-gex-expiry-trigger]");
+      try {
+        await page.waitForSelector("[data-chart-gex-expiry-menu] .siw-chart-expiry-choice", { visible: true, timeout: 5000 });
+      } catch (expiryMenuError) {
+        await page.screenshot({ path: path.join(screenshotsDir, "mobile-expiry-menu-failure.png"), fullPage: true });
+        const expiryMenuState = await page.evaluate(() => ({
+          triggers: [...document.querySelectorAll("[data-chart-gex-expiry-trigger]")].map((node) => ({ expanded: node.getAttribute("aria-expanded"), text: node.textContent })),
+          menus: [...document.querySelectorAll("[data-chart-gex-expiry-menu]")].map((node) => node.textContent),
+          expiryRows: document.querySelectorAll("[data-expiry-row]").length,
+        }));
+        throw new Error(`Mobile expiry menu did not open: ${JSON.stringify(expiryMenuState)}`, { cause: expiryMenuError });
+      }
+     const mobileChartExpiryChoices = await page.$$eval(".siw-chart-expiry-choice", (labels) => labels
+       .filter((label) => label.getClientRects().length > 0)
+       .map((label) => {
+         const rect = label.getBoundingClientRect();
+         return { width: rect.width, height: rect.height, text: label.textContent?.trim() || "" };
+       }));
+     assert.ok(mobileChartExpiryChoices.length > 0, "mobile Chart GEX must expose expiry choices");
+     assert.equal(mobileChartExpiryChoices.every((choice) => choice.width >= 44 && choice.height >= 44), true, `mobile Chart GEX expiry labels must be at least 44px: ${JSON.stringify(mobileChartExpiryChoices)}`);
+     const visibleCheckboxFailures = await page.$$eval(".siw-replica-shell input[type='checkbox'], .siw-replica-shell input[type='radio']", (inputs) => inputs
+       .filter((input) => input.getClientRects().length > 0)
+       .map((input) => {
+         const target = input.closest("label") || input;
+         const rect = target.getBoundingClientRect();
+         return { type: input.type, label: input.closest("label")?.textContent?.trim() || input.getAttribute("aria-label") || "", width: rect.width, height: rect.height };
+       })
+       .filter((target) => target.width < 44 || target.height < 44));
+     assert.deepEqual(visibleCheckboxFailures, [], `visible mobile checkbox/radio targets must be at least 44px: ${JSON.stringify(visibleCheckboxFailures)}`);
+     const uncheckedChartExpiry = await page.$eval(".siw-chart-expiry-choice input:not(:checked)", (input) => {
+       const label = input.closest("label");
+       if (!label) throw new Error("Chart expiry checkbox must be wrapped by a label");
+       label.click();
+       return input.getAttribute("data-chart-gex-expiry");
+     });
+     await wait(150);
+     assert.equal(await page.$eval(`[data-chart-gex-expiry='${uncheckedChartExpiry}']`, (input) => input.checked), true, "clicking a mobile Chart GEX expiry label must toggle its checkbox");
+     await page.click("[data-chart-gex-expiry-trigger]");
+      await page.select("select[name='watcher-section']", "Options");
+      await page.waitForSelector("[data-options-robinhood-provenance]", { visible: true });
+     await page.setViewport({ width: 1180, height: 820, deviceScaleFactor: 1 });
+    await wait(200);
+    await page.click("button[aria-label='Settings']");
+    await page.setViewport({ width: 390, height: 900, deviceScaleFactor: 1 });
+    await wait(200);
+    const retryTouchTarget = await page.$eval(".siw-settings-panel .siw-settings-head > button", (button) => {
+      const rect = button.getBoundingClientRect();
+      return { width: rect.width, height: rect.height };
+    });
+    assert.ok(retryTouchTarget.width >= 44 && retryTouchTarget.height >= 44, "mobile settings Retry must be at least 44px square");
+    const settingsTouchTargetFailures = await page.$$eval(".siw-replica-shell button, .siw-replica-shell [role='button'], .siw-replica-shell select, .siw-replica-shell input:not([type='checkbox']):not([type='radio'])", (nodes) => nodes
+      .filter((node) => node.getClientRects().length > 0)
+      .filter((node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.width < 44 || rect.height < 44;
+      })
+      .map((node) => ({ label: node.getAttribute("aria-label") || node.textContent?.trim().slice(0, 32) || node.tagName, width: node.getBoundingClientRect().width, height: node.getBoundingClientRect().height })));
+    assert.deepEqual(settingsTouchTargetFailures, [], `visible mobile controls after opening settings must be at least 44px: ${JSON.stringify(settingsTouchTargetFailures)}`);
     assert.match(await page.$eval("[data-options-robinhood-provenance]", (node) => node.textContent || ""), /Robinhood MCP EOD/i, "mobile proof must use the Robinhood-backed NVDA snapshot");
     await page.screenshot({ path: path.join(screenshotsDir, "uat-mobile.png"), fullPage: true });
     await page.screenshot({ path: path.join(screenshotsDir, "08-responsive-mobile.png"), fullPage: true });
     for (const topTab of ["Overview", "Chart", "Fundamentals", "Fixed Income", "Earnings", "Options", "F/G Index", "News", "Macro"]) {
-      await clickText(page, topTab, true);
+      await page.select("select[name='watcher-section']", topTab);
       await wait(topTab === "Options" ? 500 : 250);
       const mobileOverflow = await page.evaluate(() => ({
         document: document.documentElement.scrollWidth - document.documentElement.clientWidth,
         root: document.querySelector("[data-watcher-replica]")?.scrollWidth - document.querySelector("[data-watcher-replica]")?.clientWidth,
+        touchTargets: Array.from(document.querySelectorAll(".siw-replica-shell button, .siw-replica-shell [role='button'], .siw-replica-shell select, .siw-replica-shell input:not([type='checkbox']):not([type='radio'])"))
+          .filter((node) => node.getClientRects().length > 0)
+          .filter((node) => {
+            const rect = node.getBoundingClientRect();
+            return rect.width < 44 || rect.height < 44;
+          })
+          .map((node) => ({ label: node.getAttribute("aria-label") || node.textContent?.trim().slice(0, 32) || node.tagName, width: node.getBoundingClientRect().width, height: node.getBoundingClientRect().height })),
       }));
       assert.ok(mobileOverflow.document <= 1 && mobileOverflow.root <= 1, `${topTab} mobile layout must not create horizontal page overflow; got ${JSON.stringify(mobileOverflow)}`);
+      assert.deepEqual(mobileOverflow.touchTargets, [], `${topTab} visible mobile controls must be at least 44px: ${JSON.stringify(mobileOverflow.touchTargets)}`);
     }
     await clickText(page, "Home");
     assert.match(await page.$eval(".siw-mobile-nav .is-active", (node) => node.textContent), /Home/);

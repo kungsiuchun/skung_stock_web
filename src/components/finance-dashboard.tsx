@@ -30,6 +30,7 @@ import {
 } from "@/lib/finance-dashboard-ai-decision";
 import type { FinanceDashboardData as DashboardData, FinanceDashboardSnapshotPayload } from "@/lib/finance-dashboard-snapshot";
 import type { MarketCacheMetadata } from "@/lib/market-data-cache";
+import { parseJsonResponse } from "@/lib/safe-json-response";
 import {
   DASHBOARD_LOADING_LABELS,
   DASHBOARD_LOADING_PHASE_MS,
@@ -125,7 +126,7 @@ function FinanceDashboardLoading({ phase, symbol }: { phase: DashboardLoadingPha
             {symbol ? `${symbol.toUpperCase()} · ` : ""}{DASHBOARD_LOADING_LABELS[phase]}
           </p>
           <div className="mt-3 h-2 overflow-hidden rounded-full bg-gray-100">
-            <div className="h-full rounded-full bg-blue-500 transition-all duration-700" style={{ width: `${((activeIndex + 1) / phases.length) * 100}%` }} />
+      <div className="h-full rounded-full bg-blue-500 transition-[width] duration-700" style={{ width: `${((activeIndex + 1) / phases.length) * 100}%` }} />
           </div>
         </div>
         <div className="h-[360px] animate-pulse rounded-3xl border border-gray-200 bg-white p-8 shadow-sm">
@@ -227,13 +228,12 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
           symbol: symbol.toUpperCase(),
         }),
       });
-      const payload = await response.json() as {
+      const payload = await parseJsonResponse<{
         data?: FinanceDashboardSnapshotPayload;
         cache?: MarketCacheMetadata;
         error?: string;
-      };
-      if (!response.ok && response.status !== 206) throw new Error(payload.error || "分析快照請求失敗");
-      if (!payload.data || !payload.cache) throw new Error("分析快照回應格式無效。");
+      }>(response, "/api/finance-dashboard/snapshot", { allowHttpError: true });
+      if ((response.status !== 200 && response.status !== 206) || !payload.data || !payload.cache) throw new Error(payload.error || `分析快照請求失敗（HTTP ${response.status}）。`);
 
       setDashboardSnapshot((current) => applyDashboardSnapshot(
         current,
@@ -310,8 +310,12 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
                 <Search className="absolute left-4 w-4 h-4 text-gray-400 group-focus-within:text-blue-500 transition-colors" />
                 <input
                   type="text"
+                  name="finance-symbol"
+                  aria-label="股票代碼"
+                  autoComplete="off"
+                  spellCheck={false}
                   placeholder="輸入股票代碼 (例如: TSLA, AAPL)..."
-                  className="w-full lg:w-[400px] bg-white border border-gray-200 rounded-2xl py-4 pl-12 pr-4 text-sm font-medium focus:outline-none focus:border-blue-500 transition-all placeholder:text-gray-400 text-gray-900 shadow-sm"
+                className="w-full lg:w-[400px] bg-white border border-gray-200 rounded-2xl py-4 pl-12 pr-4 text-sm font-medium focus:outline-none focus:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500 transition-[border-color,box-shadow] placeholder:text-gray-400 text-gray-900 shadow-sm"
                   value={symbol}
                   onChange={(e) => setSymbol(e.target.value)}
                   onFocus={() => setShowHistory(true)}
@@ -364,7 +368,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
             <button
               onClick={() => handleAnalyze()}
               disabled={loading}
-              className="px-8 py-4 bg-gray-900 text-white rounded-2xl text-sm font-bold hover:bg-blue-600 transition-all active:scale-95 disabled:opacity-50 disabled:active:scale-100 flex items-center gap-2 whitespace-nowrap shadow-md"
+              className="px-8 py-4 bg-gray-900 text-white rounded-2xl text-sm font-bold hover:bg-blue-600 transition-[background-color,transform,opacity] active:scale-95 disabled:opacity-50 disabled:active:scale-100 flex items-center gap-2 whitespace-nowrap shadow-md"
             >
               {loading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
               {loading ? "分析中..." : "開始分析"}
@@ -393,7 +397,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
         ) : !activeData ? (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
              <div className="lg:col-span-8 space-y-8">
-                <div className="bg-white border border-gray-200 rounded-3xl p-12 flex flex-col items-center justify-center text-center min-h-[500px] group transition-all duration-700 shadow-sm">
+            <div className="bg-white border border-gray-200 rounded-3xl p-12 flex flex-col items-center justify-center text-center min-h-[500px] group transition-[border-color,box-shadow] duration-700 shadow-sm">
                   <div className="w-24 h-24 rounded-full bg-blue-50 flex items-center justify-center mb-8 relative">
                     <div className="absolute inset-0 rounded-full bg-blue-100 animate-ping opacity-50" />
                     <BarChart3 className="w-10 h-10 text-blue-600" />
@@ -407,7 +411,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
                       <button 
                         key={s}
                         onClick={() => { setSymbol(s); }}
-                        className="px-4 py-2 rounded-xl bg-gray-100 text-gray-700 border border-gray-200 text-xs font-bold hover:bg-blue-50 hover:text-blue-600 transition-all shadow-sm"
+                    className="px-4 py-2 rounded-xl bg-gray-100 text-gray-700 border border-gray-200 text-xs font-bold hover:bg-blue-50 hover:text-blue-600 transition-colors shadow-sm"
                       >
                         {s}
                       </button>
@@ -433,7 +437,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
                             setSymbol(h.symbol);
                           }
                         }}
-                        className="w-full flex items-center justify-between p-4 rounded-2xl bg-gray-50 border border-transparent hover:border-blue-200 hover:bg-blue-50 transition-all group"
+                      className="w-full flex items-center justify-between p-4 rounded-2xl bg-gray-50 border border-transparent hover:border-blue-200 hover:bg-blue-50 transition-[border-color,background-color] group"
                       >
                         <div className="flex items-center gap-3">
                           <span className="font-black text-gray-900 group-hover:text-blue-600 transition-colors">{h.symbol}</span>
@@ -460,7 +464,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
               {/* Asset Header Info */}
               {activeData && (
                 <div className="bg-white border border-gray-200 rounded-3xl p-8 lg:p-10 shadow-sm relative overflow-hidden group">
-                  <div className="absolute top-0 right-0 w-96 h-96 bg-blue-100 blur-[100px] -mr-48 -mt-48 transition-all duration-700" />
+            <div className="absolute top-0 right-0 w-96 h-96 bg-blue-100 blur-[100px] -mr-48 -mt-48" />
                   
                   <div className="flex flex-col md:flex-row md:items-end justify-between gap-8 relative">
                     <div className="flex items-start gap-8">
@@ -543,7 +547,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
               {/* Key Insights AI Analysis */}
               {activeData && activeData.dashboardNarrative?.status === "available" && activeData.finalAnalysis ? (
                 <div className="bg-gradient-to-br from-blue-50 to-white border border-blue-100 shadow-sm rounded-3xl p-8 lg:p-10 relative overflow-hidden group mt-8">
-                   <div className="absolute top-0 right-0 w-64 h-64 bg-blue-100 blur-[80px] -mr-32 -mt-32 rounded-full transition-all duration-700" />
+                <div className="absolute top-0 right-0 w-64 h-64 bg-blue-100 blur-[80px] -mr-32 -mt-32 rounded-full" />
                    <h3 className="text-xl font-black text-blue-800 tracking-tight mb-6 flex items-center gap-3">
                      <Zap className="w-5 h-5 text-blue-500" />
                      個股解讀（AI Key Insights）
