@@ -211,9 +211,10 @@ export function FinanceChatPanel({
           <label className="relative block">
             <span className="sr-only">Analysis strategy</span>
             <select
+              name="analysis-strategy"
               value={selectedStrategy}
               onChange={(e) => setSelectedStrategy(e.target.value)}
-              className="h-10 w-full appearance-none rounded-lg border border-white/10 bg-[#1b2230] px-3 pr-9 text-xs font-bold text-white outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-500/30"
+              className="min-h-11 w-full appearance-none rounded-lg border border-white/10 bg-[#1b2230] px-3 pr-9 text-xs font-bold text-white outline-none transition-[border-color,box-shadow] focus:border-blue-400 focus:ring-2 focus:ring-blue-500/30"
             >
               {STRATEGY_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -226,7 +227,7 @@ export function FinanceChatPanel({
         </div>
       </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-5 sm:px-5 lg:px-6">
+      <div ref={scrollRef} role="log" aria-live="polite" aria-label="Finance chat messages" className="flex-1 overflow-y-auto px-4 py-5 sm:px-5 lg:px-6">
         {messages.length === 0 && (
           <div className="flex h-full min-h-[360px] flex-col items-center justify-center gap-4 text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-500/10 text-blue-300">
@@ -294,7 +295,7 @@ export function FinanceChatPanel({
           ))}
 
           {loading && (
-            <div className="flex justify-start">
+            <div role="status" className="flex justify-start">
               <div className="flex items-center gap-2 rounded-2xl rounded-bl-md border border-white/10 bg-white/[0.06] px-4 py-2.5">
                 <Loader2 className="h-4 w-4 animate-spin text-blue-300" />
                 <span className="text-sm font-medium text-white/45">Thinking and calling tools...</span>
@@ -307,6 +308,9 @@ export function FinanceChatPanel({
       <div className="shrink-0 border-t border-white/10 bg-[#11151c] px-4 py-4 sm:px-5 lg:px-6">
         <div className="flex gap-3">
           <input
+            name="finance-question"
+            aria-label="Finance question"
+            autoComplete="off"
             type="text"
             placeholder="Type your question... (e.g. 分析 MSFT)"
             value={input}

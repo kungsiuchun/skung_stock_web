@@ -138,7 +138,7 @@ const successResponse = (input, requestId) => ({
     const secondWeight = (await page.$$("input[name$='-weight']"))[1];
      await secondTicker.type("BND");
      await secondWeight.type("40");
-     const copySetupButtonText = () => page.$$eval("form[name='portfolio-backtest'] button", (buttons) => buttons.find((candidate) => (candidate.textContent || "").includes("setup link"))?.textContent?.trim() || "");
+     const copySetupButtonText = () => page.$$eval("form[name='portfolio-backtest'] button", (buttons) => buttons.find((candidate) => (candidate.textContent || "").toLowerCase().includes("setup link"))?.textContent?.trim() || "");
      await page.evaluate(() => {
        Object.defineProperty(navigator, "clipboard", {
          configurable: true,
@@ -168,11 +168,27 @@ const successResponse = (input, requestId) => ({
      await tickerInputs[0].click({ clickCount: 3 });
      await tickerInputs[0].type("VTI");
      await page.evaluate(() => {
+       window.__copyRequests = [];
+       Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+         writeText: () => new Promise((resolve, reject) => window.__copyRequests.push({ resolve, reject })),
+       } });
+     });
+     for (let index = 0; index < 2; index++) {
+       await page.$$eval("form[name='portfolio-backtest'] button", (buttons) => buttons.find((button) => button.textContent.includes("Copy setup link")).click());
+     }
+     await page.waitForFunction(() => window.__copyRequests.length === 2);
+     await page.evaluate(() => window.__copyRequests[1].resolve());
+     await page.waitForFunction(() => document.querySelector("form[name='portfolio-backtest']").textContent.includes("Setup link copied"));
+     await page.evaluate(() => window.__copyRequests[0].reject(new Error("older clipboard failure")));
+     await wait(50);
+     assert.equal(await copySetupButtonText(), "Setup link copied", "older clipboard rejection must not overwrite the latest copy success");
+     assert.equal(await page.$("input[name='share-url']"), null, "older clipboard rejection must not restore manual fallback");
+     await page.evaluate(() => {
        Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => undefined } });
      });
      const setupRequestCount = requestCount;
      await page.$$eval("form[name='portfolio-backtest'] button", (buttons) => {
-       const button = buttons.find((candidate) => (candidate.textContent || "").includes("Copy setup link"));
+       const button = buttons.find((candidate) => (candidate.textContent || "").toLowerCase().includes("setup link"));
        if (!button) throw new Error("Missing Copy setup link button");
        button.click();
      });
@@ -301,6 +317,9 @@ const successResponse = (input, requestId) => ({
     await page.waitForSelector("[role='alert']");
     const verificationErrorText = await page.$eval("[role='alert']", (node) => node.textContent || "");
     assert.match(verificationErrorText, /ETF verification unavailable[\s\S]*temporarily unavailable/i);
+    await page.$$eval("form[name='portfolio-backtest'] button", (buttons) => buttons.find((button) => button.textContent.toLowerCase().includes("setup link")).click());
+    await wait(50);
+    assert.match(await page.$eval("[role='alert']", (node) => node.textContent), /ETF verification unavailable/, "copying must preserve the API error and its retry action");
     assert.notEqual(await page.$("[data-testid='portfolio-performance-chart']"), null, "verification failure must preserve the valid backtest result");
     assert.equal(await page.$$eval("button", (buttons) => buttons.some((button) => (button.textContent || "").includes("Retry last backtest"))), false, "verification failure must not expose a backtest retry");
     assert.equal(await page.$$eval("button", (buttons) => buttons.some((button) => (button.textContent || "").includes("Retry ETF verification"))), true, "verification failure must expose the verification retry");
@@ -339,8 +358,7 @@ const successResponse = (input, requestId) => ({
       assert.doesNotMatch(shareErrorText, /Backtest unavailable|Retry last backtest/i, "share failure must not use the backtest error banner or retry");
       assert.equal(requestCount, beforeInvalidRun, "invalid setup sharing must not call the backtest API");
       await page.$eval("button[type='submit']", (button) => button.click());
-     await page.waitForSelector("[role='alert']");
-     assert.match(await page.$eval("[role='alert']", (node) => node.textContent || ""), /0\.01% increments[\s\S]*100\.00%/);
+     await page.waitForFunction(() => [...document.querySelectorAll("[role='alert']")].some((node) => /0\.01% increments[\s\S]*100\.00%/.test(node.textContent || "")));
      assert.equal(requestCount, beforeInvalidRun, "sub-basis-point allocation must not call the backtest API");
 
     await firstWeight.click({ clickCount: 3 });

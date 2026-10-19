@@ -66,7 +66,7 @@ export const parseJsonResponse = async <T>(
   } catch (error) {
     if (error instanceof SafeJsonResponseError) throw error;
     throw new SafeJsonResponseError(
-      `HTTP ${response.status}${rayId ? ` · Ray ${rayId}` : ""}: ${requestUrl} returned invalid JSON (${error instanceof Error ? error.message : String(error)}).`,
+      `HTTP ${response.status}${rayId ? ` · Ray ${rayId}` : ""}: ${requestUrl} returned invalid JSON. Retry the request; if it persists, the service is unavailable.`,
       response.status,
       contentType,
       rayId,

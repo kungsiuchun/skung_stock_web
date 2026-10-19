@@ -8,7 +8,7 @@ import {
   MACRO_MARKET_DEFINITIONS,
   type StocksWatcherMacroSnapshot,
 } from "../src/lib/stocks-watcher-macro";
-import type { TreasuryYieldCurveResponse } from "../src/lib/treasury-yield-curve";
+import { buildTreasuryYieldCurveResponse, type TreasuryYieldCurveResponse } from "../src/lib/treasury-yield-curve";
 import { loadStocksWatcherFomc, loadStocksWatcherMacro, loadStocksWatcherTreasury } from "../src/components/stocks-watcher-panel-loaders";
 
 const response = (body: string, status = 200, contentType = "application/json") =>
@@ -198,6 +198,14 @@ test("Macro loader enforces complete provider payloads and preserves stale respo
 });
 
 test("Fixed Income loaders enforce complete Treasury and FOMC provider contracts", async () => {
+  const januaryCsv = [
+    "Date,1 Mo,1.5 Mo,2 Mo,3 Mo,4 Mo,6 Mo,1 Yr,2 Yr,3 Yr,5 Yr,7 Yr,10 Yr,20 Yr,30 Yr",
+    ...["12/30/2025", "01/02/2026", "01/23/2026", "01/29/2026", "01/30/2026"].map((date, day) =>
+      [date, ...Array.from({ length: 14 }, (_, index) => (3.5 + day / 10 + index / 100).toFixed(2))].join(",")),
+  ].join("\n");
+  const januaryData = buildTreasuryYieldCurveResponse(januaryCsv, "2026-01-30T22:00:00.000Z");
+  const january = await loadStocksWatcherTreasury(fetchResponse(() => response(JSON.stringify(januaryData))));
+  assert.ok(january.curves[3].date > january.curves[2].date, "start-of-year may follow the one-month baseline in January");
   const treasury = await loadStocksWatcherTreasury(fetchResponse(() => response(JSON.stringify(treasuryData))));
   assert.equal(treasury.asOfDate, treasuryData.asOfDate);
   const staleTreasury = await loadStocksWatcherTreasury(fetchResponse(() => response(JSON.stringify(treasuryData), 206)));
@@ -228,6 +236,10 @@ test("Fixed Income loaders enforce complete Treasury and FOMC provider contracts
   assert.equal(fomc.meeting.eventSlug, fomcData.meeting.eventSlug);
   const staleFomc = await loadStocksWatcherFomc(fetchResponse(() => response(JSON.stringify(fomcData), 206)));
   assert.equal(staleFomc.meeting.outcomes.length, 3);
+  for (const observedAt of ["2026-10-19T06:33:13.576075Z", "2026-10-19T06:33:13.576075123Z"]) {
+    const precise = await loadStocksWatcherFomc(fetchResponse(() => response(JSON.stringify({ ...fomcData, meeting: { ...fomcData.meeting, observedAt } }))));
+    assert.equal(precise.meeting.observedAt, observedAt, "provider sub-millisecond timestamps must remain valid and unchanged");
+  }
   await assert.rejects(
     () => loadStocksWatcherFomc(fetchResponse(() => response(JSON.stringify({ ...fomcData, meeting: { ...fomcData.meeting, rawProbabilityTotal: 0 } })))),
     /FOMC probability API returned invalid data: meeting\.rawProbabilityTotal/,

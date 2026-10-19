@@ -74,6 +74,9 @@ async function expectRouteBackTarget(page, name, selector) {
       await page.click('button[title="Analyzer (Chat Bot)"]');
       await page.waitForSelector('[aria-label="Finance Agent Chat"]');
       await expectChatAccessible(page, `Finance Agent Chat (${width}px)`);
+      assert.equal(await page.$eval("input[name='finance-question']", (node) => node.getAttribute("aria-label")), "Finance question");
+      assert.equal(await page.$eval("select[name='analysis-strategy']", (node) => node.labels.length > 0), true);
+      assert.notEqual(await page.$("[role='log'][aria-label='Finance chat messages']"), null);
 
       await page.goto(`${baseUrl}/#/work/stocks-intelligence-watcher`, { waitUntil: "domcontentloaded" });
       await page.waitForSelector('[data-stocks-watcher-root]');
@@ -94,6 +97,17 @@ async function expectRouteBackTarget(page, name, selector) {
         buttons: nodes.filter((node) => node instanceof HTMLButtonElement).length,
       }));
       assert.deepEqual(actions, { anchors: 10, buttons: 1 }, "tool routes must be native links; only the caption modal stays a button");
+      await page.click(".work-card button.text-link");
+      await page.waitForSelector("input[name='caption-image']");
+      const upload = await page.waitForSelector("button[aria-label='Upload image for caption']", { visible: true });
+      await upload.focus();
+      assert.equal(await page.$eval("button[aria-label='Upload image for caption']", (node) => node === document.activeElement), true, "upload must accept keyboard focus");
+      const chooserPromise = page.waitForFileChooser();
+      await page.keyboard.press("Enter");
+      const chooser = await chooserPromise;
+      await chooser.cancel();
+      assert.equal(await page.$eval("input[name='caption-image']", (node) => node.getAttribute("aria-label")), "Image for caption");
+      await page.click("button[aria-label='Close image caption tool']");
 
       await page.goto(`${baseUrl}/#/photography`, { waitUntil: "domcontentloaded" });
       await page.waitForSelector(".gallery-grid img");
@@ -134,6 +148,23 @@ async function expectRouteBackTarget(page, name, selector) {
     });
     assert.notEqual(focusState.tag, "BODY", "keyboard navigation must move focus to an interactive control");
     assert.notEqual(focusState.outlineWidth, "0px", "keyboard focus must remain visible");
+
+    let treasuryRequests = 0;
+    await page.setRequestInterception(true);
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname === "/api/treasury-yield-curve") {
+        treasuryRequests++;
+        void request.respond({ status: 200, contentType: "application/json", body: "{}" });
+      } else void request.continue();
+    });
+    await page.goto(`${baseUrl}/#/work/fixed-income`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("[role='alert']");
+    assert.match(await page.$eval("[role='alert']", (node) => node.textContent), /Treasury source unavailable[\s\S]*invalid data/);
+    const beforeTreasuryRetry = treasuryRequests;
+    const retry = await page.waitForSelector("button::-p-text(Retry source)");
+    await retry.click();
+    await page.waitForFunction(() => document.querySelector("[role='alert']")?.textContent.includes("invalid data"));
+    assert.equal(treasuryRequests, beforeTreasuryRetry + 1, "malformed Treasury data must remain isolated with a working source retry");
 
     console.log("Mobile scroll UAT passed.");
   } finally {

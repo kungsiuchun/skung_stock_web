@@ -483,7 +483,7 @@ export function TradingAgentDashboard() {
                 <Activity className={`w-5 h-5 ${accent.icon}`} /> Agent Execution Logs
               </h3>
 
-              <div className="flex-1 bg-[#0a0f16] rounded-xl border border-white/5 p-4 font-mono text-sm overflow-y-auto text-white/70">
+              <div role="log" aria-live="polite" aria-label="Agent execution logs" className="flex-1 bg-[#0a0f16] rounded-xl border border-white/5 p-4 font-mono text-sm overflow-y-auto text-white/70">
                 {logs.length === 0 ? (
                   <span className="text-white/30 italic">Waiting for ticker assignment...</span>
                 ) : (
@@ -561,12 +561,16 @@ export function TradingAgentDashboard() {
 
               <div className="space-y-4">
                 <div>
-                  <label className="block text-xs uppercase tracking-wider text-white/50 mb-2 font-semibold">{targetLabel}</label>
+                  <label htmlFor="agent-target" className="block text-xs uppercase tracking-wider text-white/50 mb-2 font-semibold">{targetLabel}</label>
                   <input
                     type="text"
+                    id="agent-target"
+                    name="agent-target"
+                    autoComplete="off"
+                    spellCheck={false}
                     value={ticker}
                     onChange={(e) => setTicker(isSerenity ? e.target.value : e.target.value.toUpperCase())}
-                    className={`w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-white focus:outline-none transition-colors ${isSerenity ? "" : "uppercase"} ${accent.focus}`}
+                    className={`w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 transition-colors ${isSerenity ? "" : "uppercase"} ${accent.focus}`}
                     placeholder={targetPlaceholder}
                     disabled={isRunning}
                   />

@@ -82,7 +82,7 @@ const isIsoMonth = (value: unknown): value is string => {
 
 const isTimestamp = (value: unknown): value is string => {
   if (typeof value !== "string") return false;
-  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|[+-]\d{2}:\d{2})$/.exec(value);
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/.exec(value);
   if (!match || !isIsoDate(match[1])) return false;
   const hours = Number(match[2]);
   const minutes = Number(match[3]);
@@ -267,7 +267,7 @@ const validateTreasuryResponse = (value: unknown): value is TreasuryYieldCurveRe
       if (index === 0) latestYields.push(yieldValue);
     }
   }
-  requireValid(isNonIncreasing(curveDates), source, "curves.date");
+  requireValid(isNonIncreasing(curveDates.slice(0, 3)) && curveDates[3] <= curveDates[0], source, "curves.date");
   requireValid(asOfDate === curveDates[0], source, "asOfDate");
 
   const yieldRows = expectArray(data.yieldRows, source, "yieldRows");

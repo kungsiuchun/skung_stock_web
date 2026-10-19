@@ -12,7 +12,7 @@ import {
 } from "recharts";
 import type { TreasuryCurveKey, TreasuryYieldCurveResponse } from "@/lib/treasury-yield-curve";
 import { getHashForView } from "@/lib/app-routes";
-import { parseJsonResponse } from "@/lib/safe-json-response";
+import { loadStocksWatcherTreasury } from "./stocks-watcher-panel-loaders";
 
 const curveStyles: Array<{ key: TreasuryCurveKey; color: string }> = [
   { key: "latest", color: "#b85c38" },
@@ -40,13 +40,11 @@ export function FixedIncomePage() {
   const [error, setError] = useState<string | null>(null);
 
   const load = async (bypassCache = false) => {
-    const requestUrl = `/api/treasury-yield-curve${bypassCache ? `?_=${Date.now()}` : ""}`;
     setLoading(true);
     setError(null);
 
     try {
-      const response = await fetch(requestUrl, bypassCache ? { cache: "no-store" } : undefined);
-      const payload = await parseJsonResponse<TreasuryYieldCurveResponse & { error?: string }>(response, requestUrl);
+      const payload = await loadStocksWatcherTreasury(fetch, bypassCache);
       setData(payload);
     } catch (requestError) {
       setData(null);
@@ -127,7 +125,7 @@ export function FixedIncomePage() {
         {loading && <FixedIncomeSkeleton />}
 
         {error && !loading && (
-          <div className="mt-8 border border-[#b83232] bg-[#fff5f4] p-6">
+          <div role="alert" className="mt-8 border border-[#b83232] bg-[#fff5f4] p-6">
             <p className="text-xs font-bold uppercase tracking-[0.14em] text-[#b83232]">Treasury source unavailable</p>
             <p className="mt-3 max-w-4xl text-sm leading-6 text-[#552221]">{error}</p>
             <button

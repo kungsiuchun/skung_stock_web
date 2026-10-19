@@ -80,7 +80,8 @@ const AICaptionTool = ({ isOpen, onClose }: AICaptionToolProps) => {
               </div>
               <button
                 onClick={onClose}
-                className="p-2 hover:bg-white/5 rounded-full transition-colors text-white/50 hover:text-white"
+                aria-label="Close image caption tool"
+                className="min-h-11 min-w-11 flex items-center justify-center hover:bg-white/5 rounded-full transition-colors text-white/50 hover:text-white focus-visible:ring-2 focus-visible:ring-purple-400"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -89,18 +90,20 @@ const AICaptionTool = ({ isOpen, onClose }: AICaptionToolProps) => {
             {/* Content */}
             <div className="p-8 space-y-8">
               {!selectedImage ? (
-                <div
+                <button
+                  type="button"
+                  aria-label="Upload image for caption"
                   onClick={() => fileInputRef.current?.click()}
-                    className="border-2 border-dashed border-white/10 rounded-2xl h-64 flex flex-col items-center justify-center gap-4 cursor-pointer hover:border-white/20 hover:bg-white/5 transition-colors group"
+                    className="w-full border-2 border-dashed border-white/10 rounded-2xl h-64 flex flex-col items-center justify-center gap-4 cursor-pointer hover:border-white/20 hover:bg-white/5 transition-colors group focus-visible:ring-2 focus-visible:ring-purple-400"
                 >
-                  <div className="p-4 bg-white/5 rounded-full group-hover:scale-110 transition-transform">
+                  <span className="p-4 bg-white/5 rounded-full group-hover:scale-110 transition-transform">
                     <Upload className="w-8 h-8 text-white/40 group-hover:text-white" />
-                  </div>
-                  <div className="text-center">
-                    <p className="text-white font-medium">Click to upload image</p>
-                    <p className="text-white/40 text-sm mt-1">PNG, JPG up to 5MB</p>
-                  </div>
-                </div>
+                  </span>
+                  <span className="text-center">
+                    <span className="block text-white font-medium">Click to upload image</span>
+                    <span className="block text-white/40 text-sm mt-1">PNG, JPG up to 5MB</span>
+                  </span>
+                </button>
               ) : (
                 <div className="space-y-6">
                   <div className="relative group rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 max-h-80 mx-auto w-fit">
@@ -111,12 +114,14 @@ const AICaptionTool = ({ isOpen, onClose }: AICaptionToolProps) => {
                     />
                     <button
                       onClick={() => { setSelectedImage(null); setFile(null); setCaption(null); }}
-                      className="absolute top-4 right-4 p-2 bg-black/60 backdrop-blur-md rounded-full text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                      aria-label="Remove uploaded image"
+                      className="absolute top-4 right-4 min-h-11 min-w-11 flex items-center justify-center bg-black/60 backdrop-blur-md rounded-full text-white opacity-0 group-hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-purple-400 transition-opacity"
                     >
                       <X className="w-4 h-4" />
                     </button>
                   </div>
 
+                  <div role="status" aria-live="polite" aria-busy={isLoading}>
                   <AnimatePresence mode="wait">
                     {caption ? (
                       <motion.div
@@ -151,12 +156,15 @@ const AICaptionTool = ({ isOpen, onClose }: AICaptionToolProps) => {
                       </button>
                     )}
                   </AnimatePresence>
+                  </div>
                 </div>
               )}
             </div>
 
             <input
               type="file"
+              name="caption-image"
+              aria-label="Image for caption"
               ref={fileInputRef}
               onChange={handleFileChange}
               accept="image/*"

@@ -32,6 +32,18 @@ test("turns a JSON HTTP failure into a readable service error", async () => {
   );
 });
 
+test("malformed JSON never exposes response fragments or native parser errors", async () => {
+  await assert.rejects(
+    () => parseJsonResponse(new Response('{"private-provider-fragment":broken}', {
+      headers: { "content-type": "application/json", "cf-ray": "test-ray" },
+    }), "/api/example"),
+    (error: unknown) => error instanceof SafeJsonResponseError
+      && error.message.includes("Ray test-ray")
+      && error.message.includes("Retry the request")
+      && !/private-provider-fragment|Unexpected token|position|JSON\.parse/.test(error.message),
+  );
+});
+
 test("accepts stale JSON 206 while rejecting actual HTTP failures", async () => {
   const response = new Response('{"data":{"stale":true}}', {
     status: 206,

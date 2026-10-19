@@ -9,7 +9,7 @@ import { getHashForView } from "@/lib/app-routes";
 type PositionDraft = { id: number; ticker: string; weight: string };
 type BacktestResponse = { data: PortfolioBacktestResult; cache: { status: "hit" | "refreshed" | "stale" | "bypassed" } };
 type TickerVerification = { ticker: string; displayName: string; eligibility: "verified_us_etf"; exchange: string };
-type PortfolioError = { kind: "backtest" | "verification" | "share"; message: string };
+type PortfolioError = { kind: "backtest" | "verification"; message: string };
 
 const MAX_POSITIONS = 10;
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
@@ -54,6 +54,7 @@ export function PortfolioBacktestPage() {
   const [tickerVerification, setTickerVerification] = useState<TickerVerification[] | null>(null);
   const [validatingTickers, setValidatingTickers] = useState(false);
   const [shareStatus, setShareStatus] = useState<"idle" | "copied" | "manual">("idle");
+  const [shareError, setShareError] = useState<string | null>(null);
   const [manualShareUrl, setManualShareUrl] = useState<string | null>(null);
   const shareGenerationRef = useRef(0);
   const verificationGenerationRef = useRef(0);
@@ -71,6 +72,7 @@ export function PortfolioBacktestPage() {
     setLoading(false);
     setValidatingTickers(false);
     setShareStatus("idle");
+    setShareError(null);
     setManualShareUrl(null);
   }, []);
 
@@ -200,8 +202,9 @@ export function PortfolioBacktestPage() {
   };
 
   const copySetupLink = async () => {
-    const shareGeneration = shareGenerationRef.current;
-    setError(null);
+    const shareGeneration = ++shareGenerationRef.current;
+    setShareError(null);
+    setShareStatus("idle");
     setManualShareUrl(null);
     try {
       const config: PortfolioBacktestShareConfigV1 = {
@@ -233,7 +236,7 @@ export function PortfolioBacktestPage() {
     } catch (shareError) {
       if (shareGenerationRef.current !== shareGeneration) return;
       setShareStatus("idle");
-      setError({ kind: "share", message: shareError instanceof Error ? shareError.message : String(shareError) });
+      setShareError(shareError instanceof Error ? shareError.message : String(shareError));
     }
   };
 
@@ -270,6 +273,7 @@ export function PortfolioBacktestPage() {
           <button type="button" onClick={() => void copySetupLink()} className="mt-3 inline-flex min-h-11 w-full items-center justify-center gap-2 border border-zinc-700 px-4 text-[0.68rem] font-black uppercase tracking-[0.15em] text-zinc-300 hover:border-emerald-400 hover:text-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-400"><Copy className="h-3.5 w-3.5" /> {shareStatus === "copied" ? "Setup link copied" : "Copy setup link"}</button>
           <p className="mt-2 text-center text-[0.62rem] text-zinc-500" aria-live="polite">{shareStatus === "copied" ? "The link contains inputs only and will not run automatically." : shareStatus === "manual" ? "Clipboard unavailable. Copy the URL below." : "Shares inputs only — never results or provider data."}</p>
           {manualShareUrl && <label className="mt-3 block text-[0.62rem] font-bold uppercase tracking-[0.12em] text-zinc-500">Setup URL<input name="share-url" readOnly value={manualShareUrl} onFocus={(event) => event.currentTarget.select()} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-3 text-xs normal-case text-zinc-200 focus-visible:ring-2 focus-visible:ring-emerald-400" /></label>}
+          {shareError && <div role="alert" className="mt-3 border border-rose-500/50 bg-rose-500/10 p-4 text-sm text-rose-100"><strong>Setup link unavailable</strong><p>{shareError}</p></div>}
           {loading && <p role="status" className="mt-2 text-center text-[0.62rem] text-zinc-500">Verifying US ETF eligibility, aligning completed sessions, and calculating the comparison.</p>}
           <p className="mt-4 text-[0.62rem] leading-4 text-zinc-600">Fractional shares. No taxes, trading costs, slippage, cash interest, or execution assumptions. Non-reinvested dividends remain zero-yield cash.</p>
         </form>

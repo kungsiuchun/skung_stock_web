@@ -310,8 +310,12 @@ export function FinanceDashboard({ showChat = false, onCloseChat }: FinanceDashb
                 <Search className="absolute left-4 w-4 h-4 text-gray-400 group-focus-within:text-blue-500 transition-colors" />
                 <input
                   type="text"
+                  name="finance-symbol"
+                  aria-label="股票代碼"
+                  autoComplete="off"
+                  spellCheck={false}
                   placeholder="輸入股票代碼 (例如: TSLA, AAPL)..."
-                className="w-full lg:w-[400px] bg-white border border-gray-200 rounded-2xl py-4 pl-12 pr-4 text-sm font-medium focus:outline-none focus:border-blue-500 transition-[border-color,box-shadow] placeholder:text-gray-400 text-gray-900 shadow-sm"
+                className="w-full lg:w-[400px] bg-white border border-gray-200 rounded-2xl py-4 pl-12 pr-4 text-sm font-medium focus:outline-none focus:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500 transition-[border-color,box-shadow] placeholder:text-gray-400 text-gray-900 shadow-sm"
                   value={symbol}
                   onChange={(e) => setSymbol(e.target.value)}
                   onFocus={() => setShowHistory(true)}
