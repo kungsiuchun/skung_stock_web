@@ -61,7 +61,9 @@ const successResponse = (input, requestId) => ({
     browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
     const page = await browser.newPage();
     page.on("console", (message) => {
-      if (message.type() === "error" && !message.text().includes("status of 504")) consoleErrors.push(message.text());
+      const expectedApiFailure = /^Failed to load resource: the server responded with a status of (503|504) \(/.test(message.text())
+        && message.location().url?.split("?")[0] === `${baseUrl}/api/portfolio-backtest`;
+      if (message.type() === "error" && !expectedApiFailure) consoleErrors.push(message.text());
     });
     page.on("pageerror", (error) => consoleErrors.push(error.message));
     await page.setViewport({ width: 1440, height: 1000, deviceScaleFactor: 1 });

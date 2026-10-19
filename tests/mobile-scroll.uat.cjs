@@ -46,12 +46,14 @@ async function expectChatAccessible(page, name) {
 }
 
 async function expectRouteBackTarget(page, name, selector) {
-  await page.waitForSelector(selector);
-  const target = await page.$eval(selector, (node) => {
-    const rect = node.getBoundingClientRect();
-    return { width: rect.width, height: rect.height };
-  });
-  assert.ok(target.width >= 44 && target.height >= 44, `${name} route back control must be at least 44x44: ${JSON.stringify(target)}`);
+  await page.waitForFunction((query) => [...document.querySelectorAll(query)].some((node) => node.getClientRects().length > 0), {}, selector);
+  const targets = await page.$$eval(selector, (nodes) => nodes
+    .filter((node) => node.getClientRects().length > 0)
+    .map((node) => {
+      const rect = node.getBoundingClientRect();
+      return { width: rect.width, height: rect.height };
+    }));
+  assert.ok(targets.length > 0 && targets.every((target) => target.width >= 44 && target.height >= 44), `${name} visible route back controls must be at least 44x44: ${JSON.stringify(targets)}`);
 }
 
 (async () => {

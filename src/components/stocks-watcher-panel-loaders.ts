@@ -109,9 +109,9 @@ const isNonIncreasing = (values: readonly unknown[]): boolean =>
     return typeof value === "string" && typeof previous === "string" && value <= previous;
   });
 
-const invalidData = (source: string, field: string): never => {
+function invalidData(source: string, field: string): never {
   throw new Error(`${source} API returned invalid data: ${field}. Retry this source.`);
-};
+}
 
 const requireValid = (condition: boolean, source: string, field: string): void => {
   if (!condition) invalidData(source, field);
@@ -365,8 +365,8 @@ export const loadStocksWatcherMacro = async (
   if (!response.ok) throw new Error(readApiError(payload) || `Macro API failed with HTTP ${response.status}.`);
   if (!isRecord(payload) || !payload.data) throw new Error("Macro API response did not include data. Retry this source.");
   if (payload.cache !== undefined && payload.cache !== null) validateMacroCache(payload.cache);
-  validateMacroSnapshot(payload.data);
-  return payload as StocksWatcherMacroApiResponse & { data: StocksWatcherMacroSnapshot };
+  if (!validateMacroSnapshot(payload.data)) invalidData("Macro", "data");
+  return { ...payload, data: payload.data };
 };
 
 export const loadStocksWatcherTreasury = async (

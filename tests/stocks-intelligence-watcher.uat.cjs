@@ -2018,7 +2018,19 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
      assert.ok(resetTouchTarget.width >= 44 && resetTouchTarget.height >= 44, "mobile filter Reset must be at least 44px square");
      await page.select("select[name='watcher-section']", "Chart");
      await wait(500);
+      await page.$eval("[data-chart-gex-expiry-trigger]", (button) => button.scrollIntoView({ block: "center" }));
      await page.click("[data-chart-gex-expiry-trigger]");
+      try {
+        await page.waitForSelector("[data-chart-gex-expiry-menu] .siw-chart-expiry-choice", { visible: true, timeout: 5000 });
+      } catch (expiryMenuError) {
+        await page.screenshot({ path: path.join(screenshotsDir, "mobile-expiry-menu-failure.png"), fullPage: true });
+        const expiryMenuState = await page.evaluate(() => ({
+          triggers: [...document.querySelectorAll("[data-chart-gex-expiry-trigger]")].map((node) => ({ expanded: node.getAttribute("aria-expanded"), text: node.textContent })),
+          menus: [...document.querySelectorAll("[data-chart-gex-expiry-menu]")].map((node) => node.textContent),
+          expiryRows: document.querySelectorAll("[data-expiry-row]").length,
+        }));
+        throw new Error(`Mobile expiry menu did not open: ${JSON.stringify(expiryMenuState)}`, { cause: expiryMenuError });
+      }
      const mobileChartExpiryChoices = await page.$$eval(".siw-chart-expiry-choice", (labels) => labels
        .filter((label) => label.getClientRects().length > 0)
        .map((label) => {
@@ -2045,6 +2057,8 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
      await wait(150);
      assert.equal(await page.$eval(`[data-chart-gex-expiry='${uncheckedChartExpiry}']`, (input) => input.checked), true, "clicking a mobile Chart GEX expiry label must toggle its checkbox");
      await page.click("[data-chart-gex-expiry-trigger]");
+      await page.select("select[name='watcher-section']", "Options");
+      await page.waitForSelector("[data-options-robinhood-provenance]", { visible: true });
      await page.setViewport({ width: 1180, height: 820, deviceScaleFactor: 1 });
     await wait(200);
     await page.click("button[aria-label='Settings']");
