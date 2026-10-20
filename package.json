@@ -31,6 +31,7 @@
     "test:portfolio-backtest:uat": "node tests/portfolio-backtest.uat.cjs",
     "market-breadth:action:check": "tsx scripts/refresh-market-breadth.ts",
     "test:mobile-scroll:uat": "node tests/mobile-scroll.uat.cjs",
+    "test:caption:uat": "node tests/ai-caption.uat.cjs",
     "deploy": "npm run deploy:production --",
     "deploy:pages": "node scripts/deploy-site.js",
     "deploy:pages:with-secrets": "node scripts/deploy-site.js --sync-secrets",

@@ -154,7 +154,6 @@ import {
   formatIndexValue,
   formatSparklineDateTime,
   dateFromAsOfAndSessionLabel,
-  formatQuoteAsOf,
   normalizeExpiryDate,
   formatExpiryDate,
   toYahooExpiry,
@@ -197,7 +196,6 @@ import {
   aggregateChartGexRows,
   summaryFromLoadedOptionChain,
   yahooExpiryExposureCacheKey,
-  getRunColor,
   getToolCategory,
   getToolInputDraft,
   VALUATION_METRIC_LABEL,
@@ -215,7 +213,6 @@ import {
   ExpandableDescription,
   getSharedPriceAxisRange,
   OhlcVolumeChart,
-  QuoteBreadthPanel,
   ToolResultBlock,
   BrandMark,
   TickerLogo,
@@ -270,7 +267,6 @@ export function StocksIntelligenceWatcherPage() {
   const [cacheVersion, setCacheVersion] = useState(0);
   const [sectorFilter, setSectorFilter] = useState("All Sectors");
   const [typeFilter, setTypeFilter] = useState("All Types");
-  const [sectorState, setSectorState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
   const [activeTab, setActiveTab] = useState<TopTab>("Overview");
   const [earningsQuarterLimit, setEarningsQuarterLimit] = useState<4 | 8 | 12>(8);
   const [activeSubTab, setActiveSubTab] = useState<OptionsSubTab>("Overview");
@@ -1075,11 +1071,6 @@ export function StocksIntelligenceWatcherPage() {
       .filter((stock): stock is StocksWatcherUniverseStock => Boolean(stock));
   }, [allStocks, favorites, hiddenSymbols, query, searchError, sectorFilter, selectedSymbol, typeFilter, watchlistSource]);
 
-  const favoriteCount = useMemo(() => {
-    const hidden = new Set(hiddenSymbols.map(normalizeSymbol));
-    return Array.from(new Set(favorites.map(normalizeSymbol))).filter((symbol) => symbol && !hidden.has(symbol)).length;
-  }, [favorites, hiddenSymbols]);
-
   const availableTools = snapshot?.availableTools || [];
   const filteredTools = useMemo(() => {
     const needle = toolSearch.trim().toLowerCase();
@@ -1246,11 +1237,6 @@ export function StocksIntelligenceWatcherPage() {
     setStrikeDrawer({ open: false, strike: null, expiry: null, data: null });
   };
 
-  const runSectorFilter = (sector: string) => {
-    setSectorFilter(sector);
-    setSectorState({ loading: false, error: null, data: null });
-  };
-
   const openRunToolModal = (toolName: string) => {
     setModalState({
       type: "runTool",
@@ -1352,7 +1338,6 @@ export function StocksIntelligenceWatcherPage() {
   const yahooExpiryPreloadLabel = usesNativeYahooOptions && yahooExpiryPreload.total > 0
     ? `Yahoo next ${yahooExpiryPreload.total}: ${yahooExpiryPreload.loaded}/${yahooExpiryPreload.total}${yahooExpiryPreload.failed ? ` · ${yahooExpiryPreload.failed} retry` : ""}`
     : null;
-  const optionsSectionMinHeightRem = Math.max(52, 3 + selectorExpiryRows.length * 2.35);
   const hasOptionsOpenInterest = optionsVisualModel.capabilities.openInterest;
   const hasOptionsGex = hasOptionsOpenInterest && optionsVisualModel.capabilities.gex;
   const optionsSourceLabel = snapshot?.optionsSnapshot
@@ -3331,7 +3316,7 @@ export function StocksIntelligenceWatcherPage() {
 
               <div className={`siw-filter-row ${filtersOpen ? "is-open" : ""}`}>
                 <label>
-                  <select name="watcher-sector-filter" aria-label="Sector filter" value={sectorFilter} onChange={(event) => runSectorFilter(event.target.value)}>
+                  <select name="watcher-sector-filter" aria-label="Sector filter" value={sectorFilter} onChange={(event) => setSectorFilter(event.target.value)}>
                     {sectorOptions.map((sector) => <option key={sector}>{sector}</option>)}
                   </select>
                   <ChevronDown className="h-4 w-4" />
@@ -3636,494 +3621,6 @@ export function StocksIntelligenceWatcherPage() {
         </main>
       </div>
 
-      <div style={{ display: "none" }} className={`grid min-h-full grid-cols-1 pt-2 lg:h-full ${watchlistCollapsed ? "lg:grid-cols-[4.5rem_minmax(0,1fr)]" : "lg:grid-cols-[28rem_minmax(0,1fr)]"}`}>
-        <aside className={`border-r border-slate-700/50 bg-[#070b11] pb-5 pt-4 lg:h-full ${watchlistCollapsed ? "px-2" : "px-4 sm:px-5"}`}>
-          {watchlistCollapsed ? (
-            <div className="flex h-full flex-col items-center gap-3">
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setWatchlistCollapsed(false);
-                }}
-                className="flex h-10 w-10 items-center justify-center rounded-md border border-blue-400/50 bg-blue-500/15 text-blue-100 transition-colors hover:bg-blue-500/25"
-                title="Expand watchlist"
-                aria-label="Expand watchlist"
-              >
-                <PanelLeftOpen className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => void refreshAllWatchers()}
-                className="flex h-10 w-10 items-center justify-center rounded-md border border-slate-700 bg-slate-900 text-slate-300 transition-colors hover:border-blue-400 hover:text-blue-300"
-                title="Refresh all watcher tickers"
-                aria-label="Refresh all watcher tickers"
-              >
-                <RefreshCw className={`h-4 w-4 ${watchlistRefreshing ? "animate-spin" : ""}`} />
-              </button>
-              <div className="mt-2 flex min-h-28 w-10 items-center justify-center rounded-md border border-slate-800 bg-slate-950/70 text-xs font-black tracking-[0.18em] text-blue-100 [writing-mode:vertical-rl]">
-                {selectedSymbol}
-              </div>
-              <div className="h-px w-8 bg-slate-800" />
-              <div className="flex flex-col gap-2">
-                {watchlist.slice(0, 8).map((stock) => (
-                  <button
-                    key={stock.symbol}
-                    type="button"
-                    onClick={() => selectWatchlistSymbol(stock.symbol)}
-                    className={`flex h-9 w-10 items-center justify-center rounded-md border text-[0.65rem] font-black transition-colors ${
-                      stock.symbol === selectedSymbol
-                        ? "border-blue-400/60 bg-blue-500/20 text-blue-100"
-                        : "border-slate-800 bg-slate-950/60 text-slate-400 hover:border-slate-600 hover:text-white"
-                    }`}
-                    title={stock.symbol}
-                  >
-                    {stock.symbol.slice(0, 3)}
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : (
-          <>
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <a
-              href="#/market-lab"
-              className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.16em] text-slate-400 transition-colors hover:text-white"
-            >
-              <ArrowLeft className="h-4 w-4" />
-              Work Gallery
-            </a>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => void refreshAllWatchers()}
-                className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-700 bg-slate-900 text-slate-300 transition-colors hover:border-blue-400 hover:text-blue-300"
-                title="Refresh all watcher tickers"
-                aria-label="Refresh all watcher tickers"
-              >
-                <RefreshCw className={`h-4 w-4 ${watchlistRefreshing ? "animate-spin" : ""}`} />
-              </button>
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setWatchlistCollapsed(true);
-                }}
-                className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-700 bg-slate-900 text-slate-300 transition-colors hover:border-blue-400 hover:text-blue-300"
-                title="Collapse watchlist"
-                aria-label="Collapse watchlist"
-              >
-                <PanelLeftClose className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
-
-          <div className="flex gap-2">
-            <label className="relative flex-1">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
-              <input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") submitSearch();
-                }}
-                className="h-10 w-full rounded-md border border-slate-700 bg-[#0b111a] pl-9 pr-3 text-sm text-white outline-none transition-colors placeholder:text-slate-500 focus-visible:border-blue-400 focus-visible:ring-2 focus-visible:ring-blue-400"
-                name="stock-search"
-                autoComplete="off"
-                placeholder="Search ticker or company…"
-              />
-            </label>
-            <button
-              type="button"
-              onClick={submitSearch}
-              className="rounded-md border border-blue-400/50 bg-blue-500/15 px-4 text-xs font-bold uppercase tracking-[0.14em] text-blue-100 transition-colors hover:bg-blue-500/25"
-            >
-              Load
-            </button>
-          </div>
-
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <label className="relative flex-1">
-              <select
-                name="legacy-sector-filter"
-                aria-label="Sector filter"
-                value={sectorFilter}
-                onChange={(event) => runSectorFilter(event.target.value)}
-                className="h-9 w-full appearance-none rounded-md border border-slate-700 bg-[#0b111a] px-3 pr-8 text-sm text-white outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
-              >
-                {sectorOptions.map((sector) => <option key={sector}>{sector}</option>)}
-              </select>
-              <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
-            </label>
-            <label className="relative flex-1">
-              <select
-                name="legacy-type-filter"
-                aria-label="Type filter"
-                value={typeFilter}
-                onChange={(event) => setTypeFilter(event.target.value)}
-                className="h-9 w-full appearance-none rounded-md border border-slate-700 bg-[#0b111a] px-3 pr-8 text-sm text-white outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
-              >
-                {typeOptions.map((type) => <option key={type}>{type}</option>)}
-              </select>
-              <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
-            </label>
-          </div>
-          {sectorState.loading && <SkeletonBlock className="mt-2 h-7 w-full" />}
-          {sectorState.error && <p className="mt-2 rounded border border-red-400/30 bg-red-500/10 px-2 py-1 text-xs text-red-100">{sectorState.error}</p>}
-
-          <div className="mt-3 flex items-center gap-2 border-b border-slate-800 pb-3">
-            <button
-              type="button"
-              onClick={() => {
-                setWatchlistSource("all");
-                void loadNativeWatchlist();
-              }}
-              className={`rounded-full border px-4 py-1.5 text-sm ${watchlistSource === "all" ? "border-blue-400/60 bg-blue-500/20 text-blue-100" : "border-slate-700 text-slate-200"}`}
-            >
-              All Stocks
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setWatchlistSource("favorites");
-                loadFavoritesFromLocal();
-              }}
-              className={`rounded-full border px-4 py-1.5 text-sm font-semibold ${watchlistSource === "favorites" ? "border-blue-400/60 bg-blue-500/20 text-blue-100" : "border-slate-700 text-slate-200"}`}
-            >
-              FAV ({favoriteCount})
-            </button>
-            <button
-              type="button"
-              onClick={() => toggleFavorite(selectedSymbol)}
-              className="flex h-9 w-9 items-center justify-center rounded-full border border-slate-700 text-slate-300 hover:border-blue-400 hover:text-blue-200"
-              title="Toggle favorite"
-            >
-              <Star className={`h-4 w-4 ${favorites.includes(selectedSymbol) ? "fill-blue-300 text-blue-300" : ""}`} />
-            </button>
-          </div>
-
-          <div className="mt-3 grid grid-cols-[2rem_1fr_5rem_5rem_5rem_2rem] items-center border-b border-slate-800 pb-2 text-xs font-bold text-slate-400">
-            <span />
-            <span>Ticker</span>
-            <span>Price</span>
-            <span>Chg</span>
-            <span>Chg%</span>
-            <span />
-          </div>
-
-          <div className="max-h-[20rem] overflow-y-auto lg:max-h-[calc(100vh-22rem)]">
-            {watchlist.map((stock) => {
-              const symbol = stock.symbol;
-              const selected = symbol === selectedSymbol;
-              const cachedRowQuote = getFreshStocksWatcherCacheEntry(snapshotCacheRef.current, symbol)?.snapshot.quote ?? null;
-              const rowQuote = selected && snapshot?.symbol === symbol ? snapshot.quote : cachedRowQuote;
-              const change = rowQuote?.change ?? null;
-              const rowPositive = change !== null && change >= 0;
-              const isRowLoading = loadingSymbol === symbol;
-              const isFavorite = favorites.includes(symbol);
-
-              return (
-                <div
-                  key={symbol}
-                  data-watchlist-row={symbol}
-                  data-stock-sector={stock.sector}
-                  data-stock-type={stock.type}
-                  role="button"
-                  tabIndex={0}
-                  title={`${stock.symbol} - ${stock.companyName}`}
-                  onClick={() => selectWatchlistSymbol(symbol)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      selectWatchlistSymbol(symbol);
-                    }
-                  }}
-                  className={`grid w-full cursor-pointer grid-cols-[2rem_minmax(3.5rem,1fr)_4.5rem_4rem_4rem_2rem] items-center border-b border-slate-800 py-3 text-left text-xs transition-colors hover:bg-slate-900 sm:grid-cols-[2rem_1fr_5rem_5rem_5rem_2rem] sm:text-sm ${selected ? "border-b-blue-400 bg-blue-500/5" : ""}`}
-                >
-                  <input
-                    type="checkbox"
-                    name={`legacy-favorite-${symbol}`}
-                    aria-label={`Favorite ${symbol}`}
-                    checked={isFavorite}
-                    onChange={() => toggleFavorite(symbol)}
-                    onClick={(event) => event.stopPropagation()}
-                    onKeyDown={(event) => event.stopPropagation()}
-                    className="h-4 w-4 cursor-pointer accent-blue-400"
-                  />
-                  <span className="min-w-0 truncate font-black text-white">{symbol}{isRowLoading ? " …" : ""}</span>
-                  <span>{rowQuote ? currency(rowQuote.price) : "Unavailable"}</span>
-                  <span className={change === null ? "" : rowPositive ? "text-emerald-400" : "text-red-400"}>{change === null ? "--" : `${rowPositive ? "+" : ""}${change.toFixed(2)}`}</span>
-                  <span className={change === null ? "" : rowPositive ? "text-emerald-400" : "text-red-400"}>
-                    {rowQuote ? `${rowPositive ? "+" : ""}${rowQuote.changePercent.toFixed(2)}%` : "--"}
-                  </span>
-                  <button
-                    type="button"
-                    title="Remove ticker"
-                    aria-label={`Remove ${symbol}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      removeSymbol(symbol);
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        removeSymbol(symbol);
-                      }
-                    }}
-                    className="flex h-7 w-7 items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-slate-800 hover:text-red-300"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              );
-            })}
-            {watchlist.length === 0 && (
-              <div className="rounded-md border border-slate-800 bg-slate-950/60 px-3 py-6 text-center text-sm text-slate-400">
-                No stocks match this search/filter.
-              </div>
-            )}
-          </div>
-          </>
-          )}
-        </aside>
-
-        <main ref={detailPanelRef} className="flex min-w-0 flex-col overflow-y-visible px-4 pb-6 pt-4 sm:px-6 lg:overflow-y-auto">
-          <header className="flex flex-col gap-4 border-b border-slate-800 pb-4 xl:flex-row xl:items-start xl:justify-between">
-            <div>
-              <div className="flex flex-wrap items-baseline gap-2">
-                <h1 className="text-3xl font-black tracking-normal text-white">{snapshot?.symbol || selectedSymbol}</h1>
-                <span className="text-2xl font-black">{snapshot ? currency(snapshot.quote.price) : "--"}</span>
-                {snapshot && (
-                  <span className={`font-bold ${isPositive ? "text-emerald-400" : "text-red-400"}`}>
-                    {signedNumberText(snapshot.quote.change)} ({signedNumberText(snapshot.quote.changePercent)}%)
-                  </span>
-                )}
-              </div>
-              <p className="mt-1 text-sm text-blue-200/70">
-                {snapshot?.quote.companyName || "Stocks Intelligence watcher"} - {formatQuoteAsOf(snapshot?.quote.asOf)}
-              </p>
-              <p className="mt-1 text-xs text-slate-500">
-                {`updated ${formatStocksWatcherRelativeAge(updatedSecondsAgo)}`}
-              </p>
-            </div>
-
-            <nav className="flex flex-wrap items-center gap-1">
-              {TOP_TABS.map((item) => (
-                <button
-                  key={item}
-                  type="button"
-                  onClick={() => setActiveTab(item)}
-                  className={`h-10 border px-4 text-xs font-bold uppercase tracking-[0.08em] transition-colors ${
-                    item === activeTab
-                      ? "border-blue-400/50 bg-blue-500/15 text-blue-200"
-                      : "border-slate-700 bg-slate-950 text-slate-300 hover:border-slate-500"
-                  }`}
-                >
-                  {item}
-                </button>
-              ))}
-            </nav>
-          </header>
-
-          <section
-            data-primary-tab-panel={activeTab}
-            style={activeTab === "Options" ? { minHeight: `${optionsSectionMinHeightRem}rem` } : undefined}
-            className={`mt-4 grid grid-cols-1 gap-4 ${
-              activeTab === "Chart"
-                ? "min-h-[32rem] sm:min-h-[52rem]"
-                : activeTab === "Options"
-                  ? "min-h-[52rem] xl:grid-cols-[22rem_minmax(0,1fr)]"
-                  : "min-h-[30rem] sm:min-h-[42rem]"
-            }`}
-          >
-            {activeTab === "Options" && (
-              <div data-options-expiry-selector className="h-full overflow-hidden rounded-md border border-slate-800 bg-[#0b111a]">
-                <div className="grid grid-cols-[minmax(5rem,1fr)_3.8rem_3.8rem_4.6rem_2.4rem] border-b border-slate-800 px-3 py-3 text-xs font-black text-blue-200">
-                  <span>Expiry</span>
-                  <span>OI</span>
-                  <span>Str</span>
-                  <span>Volume</span>
-                  <span>Type</span>
-                </div>
-                <div className="px-3">
-                  {selectorExpiryRows.map((row) => {
-                    const normalizedExpiry = normalizeExpiryDate(row.expiry);
-                    const active = normalizeExpiryDate(currentExpiry) === normalizedExpiry;
-                    const loadState = getExpirySelectorLoadState(row);
-                    return (
-                      <button
-                        key={normalizedExpiry}
-                        type="button"
-                        data-expiry-row={normalizedExpiry}
-                        onClick={() => {
-                          setSelectedExpiry(normalizedExpiry);
-                          setChartTooltip(null);
-                          if (activeSubTab === "Overview") {
-                            void loadExpiryOverview(normalizedExpiry);
-                          } else {
-                            setSubTabPanelState({ loading: true, error: null, data: null });
-                          }
-                        }}
-                        className={`grid w-full cursor-pointer grid-cols-[minmax(5rem,1fr)_3.8rem_3.8rem_4.6rem_2.4rem] border-b py-2 text-left text-sm font-bold transition-colors hover:bg-slate-900 focus-visible:ring-2 focus-visible:ring-blue-400/40 ${active ? "border-b-blue-400 bg-blue-500/10 text-blue-100 shadow-[inset_3px_0_0_rgba(96,165,250,0.85)]" : "border-slate-800 text-slate-200"}`}
-                      >
-                        <span>{formatExpiryDate(row.expiry, "compact")}</span>
-                        <span>{row.loaded ? formatNumber(row.openInterest || 0) : loadState === "loading" ? "Loading" : loadState === "retry" ? "Retry" : "Load"}</span>
-                        <span>{row.loaded ? row.primaryStrike || "—" : loadState === "loading" ? "next 8" : loadState === "retry" ? "failed" : "on select"}</span>
-                        <span>{row.loaded ? formatNumber(row.volume || 0) : "—"}</span>
-                        <span className={row.loaded && row.dominantType === "P" ? "text-red-400" : "text-emerald-400"}>{row.loaded ? row.dominantType : "—"}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            <div className="flex h-full min-h-[52rem] min-w-0 flex-col overflow-hidden rounded-md border border-slate-800 bg-[#0b111a]">
-              {activeTab === "Options" && (
-                <>
-                  <div className="flex flex-wrap items-center gap-1 border-b border-slate-800 px-4">
-                    {(["oi", "volume", "gex"] as StocksWatcherChartMode[]).map((item) => (
-                      <button
-                        key={item}
-                        type="button"
-                        onClick={() => {
-                          if ((item === "oi" && !hasOptionsOpenInterest) || (item === "gex" && !hasOptionsGex)) return;
-                          setMode(item);
-                          setActiveSubTab("Overview");
-                        }}
-                        disabled={(item === "oi" && !hasOptionsOpenInterest) || (item === "gex" && !hasOptionsGex)}
-                        className={`border-b-2 px-3 py-3 text-sm font-semibold ${activeSubTab === "Overview" && mode === item ? "border-blue-400 text-blue-300" : "border-transparent text-slate-300 hover:text-white"}`}
-                      >
-                        {item === "oi" ? "OI" : item === "volume" ? "Vol" : "GEX"}
-                      </button>
-                    ))}
-                    {OPTIONS_SUB_TABS.filter((item) => item !== "Overview").map((item) => {
-                      const disabled = !hasOptionsOpenInterest && ["Greeks", "DEX", "P/C"].includes(item);
-                      return (
-                        <button
-                          key={item}
-                          type="button"
-                          disabled={disabled}
-                          onClick={() => {
-                            if (!disabled) setActiveSubTab(item);
-                          }}
-                          className={`border-b-2 px-3 py-3 text-sm font-semibold ${activeSubTab === item ? "border-blue-400 text-blue-300" : "border-transparent text-slate-300 hover:text-white"}`}
-                        >
-                          {item}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  {renderOptionsSubTab()}
-                </>
-              )}
-              {activeTab === "F/G Index" && !fearGreedState.loading && !fearGreedState.error && fearGreedState.data && (
-                <StocksWatcherFearGreedPanel snapshot={fearGreedState.data} cache={fearGreedState.cache} onRefresh={() => void loadFearGreed(true)} />
-              )}
-              {activeTab === "F/G Index" && fearGreedState.loading && <SkeletonBlock className="m-4 h-64 w-auto" />}
-              {activeTab === "F/G Index" && fearGreedState.error && <div className="m-4"><ErrorBanner message={fearGreedState.error} onRetry={() => void loadFearGreed(true)} /></div>}
-              {activeTab === "Fixed Income" && <StocksWatcherFixedIncomePanel />}
-              {activeTab === "Fundamentals" && renderStatsReferencePanel()}
-              {activeTab === "Earnings" && renderEarningsPanel()}
-              {activeTab !== "Options" && activeTab !== "F/G Index" && activeTab !== "Fixed Income" && activeTab !== "Fundamentals" && activeTab !== "Earnings" && renderGenericPanel(tabPanelState, () => void loadTopTab(activeTab, true))}
-            </div>
-          </section>
-
-          <div data-detail-stack className="mt-[clamp(0.75rem,1.2vw,1rem)] space-y-[clamp(0.75rem,1.2vw,1rem)]">
-            {renderAiSummaryPanel()}
-
-            <section className="grid min-w-0 gap-3 xl:grid-cols-3">
-            <div className="rounded-md border border-slate-800 bg-slate-950/60 p-3">
-              <div className="mb-2 flex items-center gap-2 text-sm font-bold text-blue-100">
-                <BarChart3 className="h-4 w-4" />
-                Native Yahoo Tool Runs - {toolRunLog.length || snapshot?.toolRuns.length || 0}
-              </div>
-              <div className="flex max-h-40 flex-wrap gap-2 overflow-y-auto pr-1">
-                {toolRunLog.map((run) => (
-                  <button
-                    key={run.id}
-                    type="button"
-                    onClick={() => setExpandedRunId(expandedRunId === run.id ? null : run.id)}
-                    className={`rounded-full border px-2 py-1 text-[0.68rem] font-bold ${getRunColor(run.status)}`}
-                  >
-                    {run.status === "running" && <Loader2 className="mr-1 inline h-3 w-3 animate-spin" />}
-                    {run.name} {run.durationMs ? `${run.durationMs}ms` : ""}
-                  </button>
-                ))}
-                {toolRunLog.length === 0 && (snapshot?.toolRuns || []).map((run) => (
-                  <span key={`${run.name}-${run.detail}`} className={`rounded-full border px-2 py-1 text-[0.68rem] font-bold ${run.status === "ok" ? getRunColor("ok") : getRunColor("failed")}`}>
-                    {run.name}: {run.status}
-                  </span>
-                ))}
-              </div>
-              {expandedRunId && (
-                <pre className="mt-3 max-h-48 overflow-auto rounded border border-slate-800 bg-[#05080d] p-2 text-[0.68rem] text-slate-300">
-                  {stringifyPayload(toolRunLog.find((run) => run.id === expandedRunId))}
-                </pre>
-              )}
-            </div>
-
-            <div className="rounded-md border border-slate-800 bg-slate-950/60 p-3">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-sm font-bold text-blue-100">
-                  <Building2 className="h-4 w-4" />
-                  Market Context
-                </div>
-                <button type="button" onClick={() => void loadMarketContext()} className="text-xs font-bold text-slate-400 hover:text-blue-200">Refresh</button>
-              </div>
-              {marketContext.loading && <SkeletonBlock className="h-24 w-full" />}
-              {marketContext.error && <ErrorBanner message={marketContext.error} onRetry={() => void loadMarketContext()} />}
-              {!marketContext.loading && !marketContext.error && (
-                marketContext.breadth
-                  ? <QuoteBreadthPanel result={marketContext.breadth} />
-                  : <p className="text-xs leading-5 text-slate-400">{snapshot?.marketContext.breadth || "Market context unavailable."}</p>
-              )}
-            </div>
-
-            <div className="rounded-md border border-slate-800 bg-slate-950/60 p-3">
-              <div className="mb-2 text-sm font-bold text-blue-100">Tool Catalog</div>
-              <label className="relative mb-3 block">
-                <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
-                <input
-                  value={toolSearch}
-                  onChange={(event) => setToolSearch(event.target.value)}
-                  aria-label="Search native Yahoo tools"
-                  name="native-yahoo-tool-search"
-                  className="h-8 w-full rounded-md border border-slate-800 bg-[#05080d] pl-8 pr-2 text-xs outline-none focus-visible:border-blue-400 focus-visible:ring-2 focus-visible:ring-blue-400/30"
-                  placeholder="Search native Yahoo tools…"
-                />
-              </label>
-              <div className="max-h-52 space-y-3 overflow-y-auto pr-1">
-                {Object.entries(groupedTools).map(([category, tools]) => (
-                  <div key={category}>
-                    <div className="mb-1 text-[0.65rem] font-black uppercase tracking-[0.14em] text-slate-500">{category}</div>
-                    <div className="flex flex-wrap gap-2">
-                      {tools.map((tool) => (
-                        <button
-                          key={tool.name}
-                          type="button"
-                          title={tool.description || tool.name}
-                          onClick={() => openRunToolModal(tool.name)}
-                          className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[0.68rem] font-semibold text-slate-300 hover:border-blue-400 hover:text-blue-100"
-                        >
-                          {tool.name}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-                {availableTools.length === 0 && (
-                  <span className="text-xs text-slate-500">Tool list unavailable in fallback mode.</span>
-                )}
-              </div>
-            </div>
-            </section>
-          </div>
-        </main>
-      </div>
 
       {strikeDrawer.open && (
         <div className="fixed inset-0 z-[200] flex justify-end bg-slate-950/60 backdrop-blur-sm">

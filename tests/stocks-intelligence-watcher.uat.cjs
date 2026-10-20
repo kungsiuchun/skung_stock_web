@@ -693,6 +693,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
   let browser;
   const apiCalls = [];
   const consoleErrors = [];
+  const chartWarnings = [];
 
   try {
     fs.mkdirSync(screenshotsDir, { recursive: true });
@@ -702,6 +703,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
     const page = await browser.newPage();
     page.on("console", (message) => {
+      if (message.type() === "warn" && /The width\(/.test(message.text())) chartWarnings.push(message.text());
       if (message.type() === "error" && !/status of (404|502|503)/.test(message.text())) consoleErrors.push(message.text());
     });
     page.on("pageerror", (error) => consoleErrors.push(error.message));
@@ -1342,8 +1344,13 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.doesNotMatch(await page.$eval("[data-primary-tab-panel='Fundamentals']", (node) => node.textContent || ""), /Needs checking/i, "Fundamentals must render Yahoo values or n\/a, never a placeholder");
     await page.screenshot({ path: path.join(screenshotsDir, "04-stats-fundamentals-earnings-desktop.png") });
 
+    const ratesCallsBefore = apiCalls.filter((call) => ["treasury-yield-curve", "fomc-rate-probability"].includes(call.endpoint)).length;
+    const chartWarningsBefore = chartWarnings.length;
     await clickText(page, "Fixed Income", true);
-    await wait(500);
+    await wait(1500);
+    assert.equal(await page.$$eval("[data-fixed-income-panel]", (panels) => panels.length), 1, "Fixed Income must mount once, not also in a hidden legacy layout");
+    assert.ok(apiCalls.filter((call) => ["treasury-yield-curve", "fomc-rate-probability"].includes(call.endpoint)).length - ratesCallsBefore <= 4, "each rates source may mount twice in development StrictMode, not four times for duplicate layouts");
+    assert.deepEqual(chartWarnings.slice(chartWarningsBefore).filter((warning) => /width\(0\).*height\(0\)/s.test(warning)), [], "a hidden chart must not keep rendering zero-size warnings");
     assert.equal(await page.$("[data-fixed-income-panel]") !== null, true, "Fixed Income must render the Treasury curve surface");
     assert.equal(await page.$("[data-fomc-probability-panel]") !== null, true, "Fixed Income must render the FOMC probability surface");
     assert.match(await page.$eval("[data-fomc-probability-panel]", (node) => node.textContent || ""), /Polymarket prediction-market implied/, "FOMC probabilities must disclose the prediction-market source");
@@ -1963,6 +1970,9 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     await page.select("select[name='watcher-section']", "Options");
     await page.waitForSelector("[data-options-robinhood-provenance]", { timeout: 5000 });
     await page.waitForSelector(".siw-watchlist .siw-watch-row", { timeout: 5000 });
+    await page.click(".siw-watch-row[data-watchlist-row='NVDA']");
+    await page.waitForFunction(() => Math.abs(document.querySelector(".siw-main").getBoundingClientRect().top) <= 1, { timeout: 5000 });
+    assert.ok(await page.evaluate(() => window.scrollY > 0), "mobile ticker selection must scroll to the visible detail panel, not a hidden duplicate ref");
     const mobileNavigation = await page.evaluate(() => {
       const measure = (node) => {
         if (!node) return { width: 0, height: 0 };
