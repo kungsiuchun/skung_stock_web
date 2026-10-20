@@ -331,6 +331,40 @@ const successResponse = (input, requestId) => ({
     });
     await page.waitForSelector("[data-testid='verified-etf-tickers']");
     assert.equal(policyRequests.size, 8, "each rebalancing/dividend policy pair must reach the API seam");
+    const downloadLink = await page.waitForSelector("a[download$='.csv']");
+    const downloadState = await downloadLink.evaluate((node) => ({ filename: node.download, href: node.href }));
+    assert.equal(downloadState.filename, "portfolio-vs-spy-2021-08-23-to-2026-08-21.csv");
+    const comparisonCsv = decodeURIComponent(downloadState.href.split(",").slice(1).join(","));
+    assert.match(comparisonCsv, /^date,portfolio_value_usd,spy_value_usd,portfolio_index_base_100,spy_index_base_100,/);
+    assert.match(comparisonCsv, /"2026-08-21",16900,15700,169,157,"annual","cash","2026-08-21","refreshed","v1",""/);
+    const downloadsDir = path.join(screenshotsDir, "downloads");
+    fs.mkdirSync(downloadsDir, { recursive: true });
+    const downloadSession = await page.createCDPSession();
+    await downloadSession.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: downloadsDir, eventsEnabled: true });
+    const completedDownload = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Comparison CSV download did not complete")), 10000);
+      downloadSession.on("Browser.downloadProgress", (event) => {
+        if (event.state === "completed") { clearTimeout(timeout); resolve(); }
+        if (event.state === "canceled") { clearTimeout(timeout); reject(new Error("Comparison CSV download canceled")); }
+      });
+    });
+    const beforeExport = requestCount;
+    await downloadLink.focus();
+    await page.keyboard.press("Enter");
+    await completedDownload;
+    assert.equal(fs.readFileSync(path.join(downloadsDir, downloadState.filename), "utf8"), comparisonCsv, "the actual downloaded CSV must match the displayed result without recomputation");
+    assert.equal(requestCount, beforeExport, "export must not call the backtest API");
+    for (const width of [390, 768]) {
+      await page.setViewport({ width, height: 844 });
+      await downloadLink.evaluate((node) => node.scrollIntoView({ block: "center" }));
+      const exportBounds = await downloadLink.evaluate((node) => {
+        const rect = node.getBoundingClientRect();
+        return { width: rect.width, height: rect.height, overflow: document.documentElement.scrollWidth - innerWidth };
+      });
+      assert.ok(exportBounds.width >= 44 && exportBounds.height >= 44 && exportBounds.overflow <= 1, `CSV link must fit mobile and remain touch accessible: ${JSON.stringify(exportBounds)}`);
+      await page.screenshot({ path: path.join(screenshotsDir, `comparison-csv-${width}.png`) });
+    }
+    await page.setViewport({ width: 1440, height: 1000 });
     assert.equal(await page.$$("[data-testid='portfolio-performance-chart']").then((nodes) => nodes.length), 1);
      assert.match(await page.$eval("body", (body) => body.innerText), /Requested:[\s\S]*Effective:[\s\S]*Yahoo Finance chart API[\s\S]*Excluded sessions:[\s\S]*None[\s\S]*No taxes, trading costs/i);
      await page.screenshot({ path: path.join(screenshotsDir, "desktop-success.png"), fullPage: true });
@@ -340,6 +374,8 @@ const successResponse = (input, requestId) => ({
      await wait(250);
      const staleText = await page.$eval("body", (body) => body.innerText);
      assert.match(staleText, /Cache: stale[\s\S]*Data warning[\s\S]*Historical data is stale because a refresh failed/i);
+     const staleCsv = await page.$eval("a[download$='.csv']", (node) => decodeURIComponent(node.href.split(",").slice(1).join(",")));
+     assert.match(staleCsv, /"stale","v1","Historical data is stale because a refresh failed/);
      apiMode = "success";
 
      const beforeInvalidRun = requestCount;
@@ -368,6 +404,7 @@ const successResponse = (input, requestId) => ({
     await page.waitForSelector("[role='alert']");
      assert.match(await page.$eval("[role='alert']", (node) => node.textContent || ""), /Backtest unavailable[\s\S]*deadline/i);
      assert.equal(await page.$("[data-testid='portfolio-performance-chart']"), null, "provider failure must not retain a successful chart");
+     assert.equal(await page.$("a[download$='.csv']"), null, "provider failure must not retain an old result export");
      assert.equal(await page.$$eval("button", (buttons) => buttons.some((button) => (button.textContent || "").includes("Retry last backtest"))), true, "provider failure must expose a retry action");
      const beforeRetry = requestCount;
      await page.$$eval("button", (buttons) => {

@@ -170,6 +170,8 @@ Its public share contract is a versioned hash link such as `#/work/portfolio-bac
 
 Encoding sorts a copy of the assets by ticker for canonical links; decoding preserves the asset order present in the URL. Sharing never reorders the current form.
 
+Completed results offer a browser-only comparison CSV download containing the existing session curve's USD values and base-100 indexes, rebalancing/dividend policies, source-as-of, cache status, methodology version and warnings. Export does not recompute results or call an API, and never includes raw provider payloads. The setup share-link contract remains inputs-only.
+
 It compares a visitor-defined USD allocation of one to ten US-listed ETFs with SPY through a read-only EOD historical simulation. The browser submits the configuration only; the Pages Function validates ETF eligibility, retrieves and normalizes history server-side, and returns a versioned result without raw provider payloads.
 
 Every portfolio must allocate exactly 10,000 whole basis points. SPY is the fixed benchmark. Rebalancing may be none, monthly, quarterly, or annual and always occurs on the last shared completed EOD session of that period.
