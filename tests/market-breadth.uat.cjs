@@ -137,7 +137,9 @@ const readyPayload = (stale = false) => {
     await page.setViewport({ width: 1440, height: 1000, deviceScaleFactor: 1 });
     await page.goto(`${baseUrl}/#/market-lab`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => document.body.innerText.includes("S&P 500 Market Breadth"));
-    await clickButtonText(page, "S&P 500 Market Breadth");
+    const marketBreadthLink = await page.$('a[aria-label*="S&P 500 Market Breadth"]');
+    assert.ok(marketBreadthLink, "Market Breadth card must use a native link");
+    await marketBreadthLink.click();
     await page.waitForFunction(() => window.location.hash === "#/work/market-breadth");
     await page.waitForSelector("[data-testid='sector-performance-table']");
     assert.equal(await page.$$eval("table[data-testid]", (nodes) => nodes.length), 3);
@@ -190,7 +192,9 @@ const readyPayload = (stale = false) => {
     apiMode = "READY";
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForSelector("[data-testid='sector-performance-table']");
-    await clickButtonText(page, "Market Lab");
+    const marketLabLink = await page.$('a[href="#/market-lab"]');
+    assert.ok(marketLabLink, "Market Breadth must expose a native Market Lab return link");
+    await marketLabLink.click();
     await page.waitForFunction(() => window.location.hash === "#/market-lab");
     assert.equal(consoleErrors.length, 0, `console errors: ${consoleErrors.join("; ")}`);
     console.log(`Market breadth UAT passed. Screenshots: ${screenshotsDir}`);

@@ -168,7 +168,7 @@ export function SpxPriceActionCompass({
     try {
       const requestUrl = buildSpxPriceActionCompassRequestUrl(nextTimeframe, selectedDate);
       const response = await runSpxRequest((attemptSignal) => fetch(requestUrl, { signal: attemptSignal }), { onRetry: () => setReconnecting(true) });
-      const payload = await parseJsonResponse<SpxPriceActionCompassResponse & { warnings?: string[] }>(response, requestUrl);
+      const payload = await parseJsonResponse<SpxPriceActionCompassResponse & { warnings?: string[] }>(response, requestUrl, { allowHttpError: true });
       if (!response.ok) {
         setData(payload);
         setSelectedPattern(null);

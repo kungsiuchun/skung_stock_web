@@ -1,15 +1,16 @@
-import { useMemo, useState } from "react";
-import { ArrowLeft, BarChart3, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, BarChart3, Copy, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { PortfolioBacktestResult, PortfolioDividendPolicy, PortfolioRebalancePolicy } from "@/lib/portfolio-backtest";
-
-interface PortfolioBacktestPageProps {
-  onBackToWork: () => void;
-}
+import { decodePortfolioBacktestShareConfig, encodePortfolioBacktestShareConfig, type PortfolioBacktestShareConfigV1 } from "@/lib/portfolio-backtest-share";
+import { parseJsonResponse } from "@/lib/safe-json-response";
+import { getHashForView } from "@/lib/app-routes";
+import { serializePortfolioBacktestCsv } from "@/lib/portfolio-backtest-csv";
 
 type PositionDraft = { id: number; ticker: string; weight: string };
 type BacktestResponse = { data: PortfolioBacktestResult; cache: { status: "hit" | "refreshed" | "stale" | "bypassed" } };
 type TickerVerification = { ticker: string; displayName: string; eligibility: "verified_us_etf"; exchange: string };
+type PortfolioError = { kind: "backtest" | "verification"; message: string };
 
 const MAX_POSITIONS = 10;
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
@@ -29,46 +30,102 @@ export const portfolioBacktestInitialRange = (now = new Date()) => {
 const hasBasisPointPrecision = (value: string) => /^\d+(?:\.\d{1,2})?$/.test(value.trim());
 const basisPointsFor = (value: string) => hasBasisPointPrecision(value) ? Number(value) * 100 : Number.NaN;
 
-export function PortfolioBacktestPage({ onBackToWork }: PortfolioBacktestPageProps) {
+export function PortfolioBacktestPage() {
   const initialRange = useMemo(portfolioBacktestInitialRange, []);
-  const [positions, setPositions] = useState<PositionDraft[]>([{ id: 1, ticker: "", weight: "" }]);
-  const [startingCapital, setStartingCapital] = useState("10000");
-  const [startDate, setStartDate] = useState(initialRange.start);
-  const [endDate, setEndDate] = useState(initialRange.end);
-  const [rebalancePolicy, setRebalancePolicy] = useState<PortfolioRebalancePolicy>("none");
-  const [dividendPolicy, setDividendPolicy] = useState<PortfolioDividendPolicy>("reinvest");
+  const [routeHash, setRouteHash] = useState(() => typeof window === "undefined" ? "" : window.location.hash);
+  const sharedSetup = useMemo(() => {
+    if (!routeHash) return { config: null, error: null };
+    try {
+      return { config: decodePortfolioBacktestShareConfig(routeHash), error: null };
+    } catch (shareError) {
+      return { config: null, error: shareError instanceof Error ? shareError.message : String(shareError) };
+    }
+  }, [routeHash]);
+  const [positions, setPositions] = useState<PositionDraft[]>(() => sharedSetup.config
+    ? sharedSetup.config.positions.map((position, index) => ({ id: index + 1, ticker: position.ticker, weight: (position.basisPoints / 100).toFixed(2) }))
+    : [{ id: 1, ticker: "", weight: "" }]);
+  const [startingCapital, setStartingCapital] = useState(() => String(sharedSetup.config?.startingCapital ?? 10000));
+  const [startDate, setStartDate] = useState(() => sharedSetup.config?.startDate ?? initialRange.start);
+  const [endDate, setEndDate] = useState(() => sharedSetup.config?.endDate ?? initialRange.end);
+  const [rebalancePolicy, setRebalancePolicy] = useState<PortfolioRebalancePolicy>(() => sharedSetup.config?.rebalancePolicy ?? "none");
+  const [dividendPolicy, setDividendPolicy] = useState<PortfolioDividendPolicy>(() => sharedSetup.config?.dividendPolicy ?? "reinvest");
   const [result, setResult] = useState<BacktestResponse | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<PortfolioError | null>(null);
   const [tickerVerification, setTickerVerification] = useState<TickerVerification[] | null>(null);
   const [validatingTickers, setValidatingTickers] = useState(false);
+  const [shareStatus, setShareStatus] = useState<"idle" | "copied" | "manual">("idle");
+  const [shareError, setShareError] = useState<string | null>(null);
+  const [manualShareUrl, setManualShareUrl] = useState<string | null>(null);
+  const shareGenerationRef = useRef(0);
+  const verificationGenerationRef = useRef(0);
+  const backtestGenerationRef = useRef(0);
+  const operationRef = useRef<"verification" | "backtest" | null>(null);
+
+  const invalidateFormState = useCallback(() => {
+    shareGenerationRef.current += 1;
+    verificationGenerationRef.current += 1;
+    backtestGenerationRef.current += 1;
+    operationRef.current = null;
+    setResult(null);
+    setError(null);
+    setTickerVerification(null);
+    setLoading(false);
+    setValidatingTickers(false);
+    setShareStatus("idle");
+    setShareError(null);
+    setManualShareUrl(null);
+  }, []);
+
+  useEffect(() => {
+    const syncRouteHash = () => {
+      invalidateFormState();
+      setRouteHash(window.location.hash);
+    };
+    window.addEventListener("hashchange", syncRouteHash);
+    return () => window.removeEventListener("hashchange", syncRouteHash);
+  }, [invalidateFormState]);
+
+  useEffect(() => {
+    invalidateFormState();
+    setPositions(sharedSetup.config
+      ? sharedSetup.config.positions.map((position, index) => ({ id: index + 1, ticker: position.ticker, weight: (position.basisPoints / 100).toFixed(2) }))
+      : [{ id: 1, ticker: "", weight: "" }]);
+    setStartingCapital(String(sharedSetup.config?.startingCapital ?? 10000));
+    setStartDate(sharedSetup.config?.startDate ?? initialRange.start);
+    setEndDate(sharedSetup.config?.endDate ?? initialRange.end);
+    setRebalancePolicy(sharedSetup.config?.rebalancePolicy ?? "none");
+    setDividendPolicy(sharedSetup.config?.dividendPolicy ?? "reinvest");
+  }, [initialRange, invalidateFormState, sharedSetup]);
 
   const allocationBasisPoints = useMemo(() => positions.reduce((sum, position) => sum + (Number.isInteger(basisPointsFor(position.weight)) ? basisPointsFor(position.weight) : 0), 0), [positions]);
   const allocationPrecisionValid = positions.every((position) => Number.isInteger(basisPointsFor(position.weight)));
   const allocationValid = positions.length > 0 && positions.every((position) => /^[A-Za-z0-9.^-]{1,16}$/.test(position.ticker.trim()) && Number.isInteger(basisPointsFor(position.weight)) && basisPointsFor(position.weight) > 0) && allocationBasisPoints === 10_000;
+  const isOperationBusy = () => operationRef.current !== null || loading || validatingTickers;
   const updatePosition = (id: number, field: "ticker" | "weight", value: string) => {
     setPositions((current) => current.map((position) => position.id === id ? { ...position, [field]: field === "ticker" ? value.toUpperCase() : value } : position));
-    setResult(null);
-    setTickerVerification(null);
+    invalidateFormState();
   };
   const addPosition = () => {
     if (positions.length >= MAX_POSITIONS) return;
     setPositions((current) => [...current, { id: Math.max(0, ...current.map((position) => position.id)) + 1, ticker: "", weight: "" }]);
-    setResult(null);
-    setTickerVerification(null);
+    invalidateFormState();
   };
   const removePosition = (id: number) => {
     if (positions.length === 1) return;
     setPositions((current) => current.filter((position) => position.id !== id));
-    setResult(null);
-    setTickerVerification(null);
+    invalidateFormState();
   };
   const verifyTickers = async () => {
+    if (isOperationBusy()) return;
     const tickers = positions.map((position) => position.ticker.trim().toUpperCase());
     if (tickers.length === 0 || tickers.some((ticker) => !/^[A-Z0-9.^-]{1,16}$/.test(ticker)) || new Set(tickers).size !== tickers.length) {
-      setError("Enter unique, valid ETF tickers before requesting server-side ETF verification.");
+      setError({ kind: "verification", message: "Enter unique, valid ETF tickers before requesting server-side ETF verification." });
       return;
     }
+    operationRef.current = "verification";
+    const requestGeneration = verificationGenerationRef.current + 1;
+    verificationGenerationRef.current = requestGeneration;
     setError(null);
     setTickerVerification(null);
     setValidatingTickers(true);
@@ -78,31 +135,42 @@ export function PortfolioBacktestPage({ onBackToWork }: PortfolioBacktestPagePro
         headers: { "content-type": "application/json", accept: "application/json" },
         body: JSON.stringify({ operation: "validate", tickers }),
       });
-      const payload = await response.json() as { data?: { instruments?: TickerVerification[] }; error?: { message?: string } };
-      if (!response.ok || !payload.data?.instruments) throw new Error(payload.error?.message || `ETF verification returned HTTP ${response.status}.`);
-      setTickerVerification(payload.data.instruments);
+      const payload = await parseJsonResponse<{ data?: { instruments?: TickerVerification[] }; error?: { message?: string } }>(response, "/api/portfolio-backtest", { allowHttpError: true });
+      if ((response.status !== 200 && response.status !== 206) || !payload.data?.instruments) {
+        throw new Error(payload.error?.message || `ETF verification failed with HTTP ${response.status}.`);
+      }
+      if (verificationGenerationRef.current === requestGeneration) setTickerVerification(payload.data.instruments);
     } catch (verificationError) {
-      setError(verificationError instanceof Error ? verificationError.message : String(verificationError));
+      if (verificationGenerationRef.current === requestGeneration) {
+        setError({ kind: "verification", message: verificationError instanceof Error ? verificationError.message : String(verificationError) });
+      }
     } finally {
-      setValidatingTickers(false);
+      if (verificationGenerationRef.current === requestGeneration) {
+        setValidatingTickers(false);
+        if (operationRef.current === "verification") operationRef.current = null;
+      }
     }
   };
   const runBacktest = async () => {
+    if (isOperationBusy()) return;
+    const requestGeneration = backtestGenerationRef.current + 1;
+    backtestGenerationRef.current = requestGeneration;
     setError(null);
     setResult(null);
     if (!allocationValid) {
-      setError("Enter 1–10 US ETF tickers with positive weights in 0.01% increments totaling exactly 100.00%.");
+      setError({ kind: "backtest", message: "Enter 1–10 US ETF tickers with positive weights in 0.01% increments totaling exactly 100.00%." });
       return;
     }
     const capital = Number(startingCapital);
     if (!Number.isFinite(capital) || capital <= 0) {
-      setError("Starting capital must be a positive USD amount.");
+      setError({ kind: "backtest", message: "Starting capital must be a positive USD amount." });
       return;
     }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate) || startDate > endDate) {
-      setError("Choose a valid chronological date range.");
+      setError({ kind: "backtest", message: "Choose a valid chronological date range." });
       return;
     }
+    operationRef.current = "backtest";
     setLoading(true);
     try {
       const response = await fetch("/api/portfolio-backtest", {
@@ -117,24 +185,68 @@ export function PortfolioBacktestPage({ onBackToWork }: PortfolioBacktestPagePro
           dividendPolicy,
         }),
       });
-      const contentType = response.headers.get("content-type") || "";
-      if (!contentType.includes("json")) throw new Error("The backtest API returned a non-JSON response.");
-      const payload = await response.json() as BacktestResponse | { error?: { message?: string } };
-      if (!response.ok || !("data" in payload)) throw new Error((payload as { error?: { message?: string } }).error?.message || `Backtest API returned HTTP ${response.status}.`);
-      setResult(payload);
+      const payload = await parseJsonResponse<BacktestResponse | { error?: { message?: string } }>(response, "/api/portfolio-backtest", { allowHttpError: true });
+      if ((response.status !== 200 && response.status !== 206) || !("data" in payload)) {
+        throw new Error((payload as { error?: { message?: string } }).error?.message || `Backtest API failed with HTTP ${response.status}.`);
+      }
+      if (backtestGenerationRef.current === requestGeneration) setResult(payload);
     } catch (runError) {
-      setError(runError instanceof Error ? runError.message : String(runError));
+      if (backtestGenerationRef.current === requestGeneration) {
+        setError({ kind: "backtest", message: runError instanceof Error ? runError.message : String(runError) });
+      }
     } finally {
-      setLoading(false);
+      if (backtestGenerationRef.current === requestGeneration) {
+        setLoading(false);
+        if (operationRef.current === "backtest") operationRef.current = null;
+      }
+    }
+  };
+
+  const copySetupLink = async () => {
+    const shareGeneration = ++shareGenerationRef.current;
+    setShareError(null);
+    setShareStatus("idle");
+    setManualShareUrl(null);
+    try {
+      const config: PortfolioBacktestShareConfigV1 = {
+        version: 1,
+        startingCapital: Number(startingCapital),
+        startDate,
+        endDate,
+        rebalancePolicy,
+        dividendPolicy,
+        positions: positions.map((position) => ({ ticker: position.ticker.trim().toUpperCase(), basisPoints: basisPointsFor(position.weight) })),
+      };
+      const hash = encodePortfolioBacktestShareConfig(config);
+      const url = `${window.location.origin}${window.location.pathname}${hash}`;
+      if (!navigator.clipboard?.writeText) {
+        if (shareGenerationRef.current !== shareGeneration) return;
+        setManualShareUrl(url);
+        setShareStatus("manual");
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(url);
+        if (shareGenerationRef.current !== shareGeneration) return;
+        setShareStatus("copied");
+      } catch {
+        if (shareGenerationRef.current !== shareGeneration) return;
+        setManualShareUrl(url);
+        setShareStatus("manual");
+      }
+    } catch (shareError) {
+      if (shareGenerationRef.current !== shareGeneration) return;
+      setShareStatus("idle");
+      setShareError(shareError instanceof Error ? shareError.message : String(shareError));
     }
   };
 
   return <section className="h-full overflow-y-auto overscroll-contain bg-[#0d0f10] px-4 py-5 font-mono text-zinc-100 sm:px-7 lg:px-10">
     <div className="mx-auto w-full max-w-[1540px]">
       <header className="border-b border-zinc-700 pb-5">
-        <button type="button" onClick={onBackToWork} className="mb-5 inline-flex items-center gap-2 text-[0.68rem] font-bold uppercase tracking-[0.16em] text-zinc-500 transition-colors hover:text-emerald-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
+        <a href={getHashForView("work-gallery")} className="mb-5 inline-flex min-h-11 items-center gap-2 text-[0.68rem] font-bold uppercase tracking-[0.16em] text-zinc-500 transition-colors hover:text-emerald-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
           <ArrowLeft className="h-3.5 w-3.5" /> Market Lab
-        </button>
+        </a>
         <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <p className="text-[0.65rem] font-bold uppercase tracking-[0.22em] text-emerald-400">EOD historical simulation / USD</p>
@@ -147,33 +259,41 @@ export function PortfolioBacktestPage({ onBackToWork }: PortfolioBacktestPagePro
         </div>
       </header>
 
+      {sharedSetup.error && <div className="mt-5 border border-amber-500/50 bg-amber-500/10 p-4 text-sm text-amber-100" role="alert"><strong>Shared setup rejected.</strong> Nothing from the link was loaded: {sharedSetup.error}</div>}
+
       <main className="grid gap-5 py-6 xl:grid-cols-[420px_minmax(0,1fr)]">
-        <form onSubmit={(event) => { event.preventDefault(); void runBacktest(); }} className="h-fit border border-zinc-800 bg-[#111416] p-4 sm:p-5" noValidate>
+        <form name="portfolio-backtest" onSubmit={(event) => { event.preventDefault(); void runBacktest(); }} className="h-fit border border-zinc-800 bg-[#111416] p-4 sm:p-5" noValidate>
           <div className="flex items-center justify-between border-b border-zinc-800 pb-3"><div><p className="text-[0.62rem] font-bold uppercase tracking-[0.15em] text-zinc-500">Portfolio specification</p><h2 className="mt-1 text-lg font-black">US-listed ETFs</h2></div><BarChart3 className="h-5 w-5 text-emerald-400" /></div>
-          <label className="mt-5 block text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Starting capital (USD)<input value={startingCapital} onChange={(event) => { setStartingCapital(event.target.value); setResult(null); }} inputMode="decimal" className="mt-2 w-full border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-emerald-400" aria-label="Starting capital" /></label>
-          <div className="mt-5 grid grid-cols-2 gap-3"><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Start date<input type="date" value={startDate} onChange={(event) => { setStartDate(event.target.value); setResult(null); }} className="mt-2 w-full border border-zinc-700 bg-zinc-950 px-2 py-2 text-xs text-zinc-100 outline-none focus:border-emerald-400" aria-label="Start date" /></label><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">End date<input type="date" value={endDate} onChange={(event) => { setEndDate(event.target.value); setResult(null); }} className="mt-2 w-full border border-zinc-700 bg-zinc-950 px-2 py-2 text-xs text-zinc-100 outline-none focus:border-emerald-400" aria-label="End date" /></label></div>
-          <div className="mt-5 space-y-2"><div className="flex items-center justify-between"><p className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">ETF allocation</p><span className={allocationValid ? "text-xs font-black text-emerald-400" : "text-xs font-black text-rose-400"}>{allocationPrecisionValid ? `${(allocationBasisPoints / 100).toFixed(2)}%` : "Use 0.01% increments"}</span></div>{positions.map((position) => <div key={position.id} className="grid grid-cols-[1fr_96px_30px] gap-2"><input value={position.ticker} onChange={(event) => updatePosition(position.id, "ticker", event.target.value)} placeholder="VTI" className="min-w-0 border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm uppercase text-zinc-100 outline-none placeholder:text-zinc-700 focus:border-emerald-400" aria-label="ETF ticker" /><input value={position.weight} onChange={(event) => updatePosition(position.id, "weight", event.target.value)} inputMode="decimal" placeholder="60.00" className="min-w-0 border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none placeholder:text-zinc-700 focus:border-emerald-400" aria-label="ETF allocation percent" /><button type="button" disabled={positions.length === 1} onClick={() => removePosition(position.id)} aria-label={`Remove ${position.ticker || "ETF"}`} className="border border-zinc-800 text-zinc-500 hover:border-rose-400 hover:text-rose-400 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 className="mx-auto h-3.5 w-3.5" /></button></div>)}</div>
-          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2"><button type="button" disabled={positions.length >= MAX_POSITIONS} onClick={addPosition} className="inline-flex items-center gap-1.5 text-[0.65rem] font-bold uppercase tracking-[0.12em] text-zinc-400 hover:text-emerald-400 disabled:opacity-40"><Plus className="h-3.5 w-3.5" /> Add ETF</button><button type="button" disabled={validatingTickers} onClick={() => void verifyTickers()} className="text-[0.65rem] font-bold uppercase tracking-[0.12em] text-zinc-400 hover:text-emerald-400 disabled:opacity-40">{validatingTickers ? "Verifying ETF tickers..." : "Verify ETF tickers"}</button></div>
+          <label className="mt-5 block text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Starting capital (USD)<input name="capital" autoComplete="off" value={startingCapital} onChange={(event) => { setStartingCapital(event.target.value); invalidateFormState(); }} inputMode="decimal" className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="Starting capital" /></label>
+          <div className="mt-5 grid grid-cols-2 gap-3"><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Start date<input name="start-date" type="date" value={startDate} onChange={(event) => { setStartDate(event.target.value); invalidateFormState(); }} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-2 py-2 text-xs text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="Start date" /></label><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">End date<input name="end-date" type="date" value={endDate} onChange={(event) => { setEndDate(event.target.value); invalidateFormState(); }} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-2 py-2 text-xs text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="End date" /></label></div>
+          <div className="mt-5 space-y-2"><div className="flex items-center justify-between"><p className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">ETF allocation</p><span className={allocationValid ? "text-xs font-black text-emerald-400" : "text-xs font-black text-rose-400"}>{allocationPrecisionValid ? `${(allocationBasisPoints / 100).toFixed(2)}%` : "Use 0.01% increments"}</span></div>{positions.map((position, index) => <div key={position.id} className="grid grid-cols-[1fr_96px_44px] gap-2"><input name={`asset-${index + 1}-ticker`} autoComplete="off" spellCheck={false} value={position.ticker} onChange={(event) => updatePosition(position.id, "ticker", event.target.value)} placeholder="VTI…" className="min-h-11 min-w-0 border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm uppercase text-zinc-100 outline-none placeholder:text-zinc-700 focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label={`ETF ticker ${index + 1}`} /><input name={`asset-${index + 1}-weight`} autoComplete="off" value={position.weight} onChange={(event) => updatePosition(position.id, "weight", event.target.value)} inputMode="decimal" placeholder="60.00…" className="min-h-11 min-w-0 border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none placeholder:text-zinc-700 focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label={`ETF allocation percent ${index + 1}`} /><button type="button" disabled={positions.length === 1} onClick={() => removePosition(position.id)} aria-label={`Remove ${position.ticker || "ETF"}`} className="min-h-11 min-w-11 border border-zinc-800 text-zinc-500 hover:border-rose-400 hover:text-rose-400 focus-visible:ring-2 focus-visible:ring-rose-400 disabled:cursor-not-allowed disabled:opacity-30"><Trash2 className="mx-auto h-3.5 w-3.5" /></button></div>)}</div>
+          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2"><button type="button" disabled={positions.length >= MAX_POSITIONS} onClick={addPosition} className="inline-flex min-h-11 items-center gap-1.5 text-[0.65rem] font-bold uppercase tracking-[0.12em] text-zinc-400 hover:text-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400 disabled:opacity-40"><Plus className="h-3.5 w-3.5" /> Add ETF</button><button type="button" disabled={isOperationBusy()} onClick={() => void verifyTickers()} className="min-h-11 text-[0.65rem] font-bold uppercase tracking-[0.12em] text-zinc-400 hover:text-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400 disabled:opacity-40">{validatingTickers ? "Verifying ETF tickers…" : "Verify ETF tickers"}</button></div>
           {tickerVerification && <div className="mt-3 border border-emerald-500/30 bg-emerald-500/5 p-3 text-xs text-emerald-100" data-testid="verified-etf-tickers">{tickerVerification.map((instrument) => <p key={instrument.ticker}><span className="font-black">{instrument.ticker}</span> · {instrument.displayName} · {instrument.exchange} · verified US ETF</p>)}</div>}
-          <div className="mt-5 grid gap-3"><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Rebalancing<select value={rebalancePolicy} onChange={(event) => { setRebalancePolicy(event.target.value as PortfolioRebalancePolicy); setResult(null); }} className="mt-2 w-full border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-emerald-400" aria-label="Rebalancing policy"><option value="none">No rebalancing</option><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="annual">Annual</option></select></label><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Dividend policy<select value={dividendPolicy} onChange={(event) => { setDividendPolicy(event.target.value as PortfolioDividendPolicy); setResult(null); }} className="mt-2 w-full border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-emerald-400" aria-label="Dividend policy"><option value="reinvest">Reinvest dividends</option><option value="cash">Hold dividends as cash</option></select></label></div>
-          <button type="submit" disabled={loading} className="mt-6 inline-flex w-full items-center justify-center gap-2 border border-emerald-400/70 bg-emerald-400/10 px-4 py-3 text-[0.68rem] font-black uppercase tracking-[0.15em] text-emerald-300 transition-colors hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-50">{loading ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Fetching and simulating EOD history</> : "Run backtest"}</button>
+          <div className="mt-5 grid gap-3"><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Rebalancing<select name="rebalance-policy" value={rebalancePolicy} onChange={(event) => { setRebalancePolicy(event.target.value as PortfolioRebalancePolicy); invalidateFormState(); }} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="Rebalancing policy"><option value="none">No rebalancing</option><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="annual">Annual</option></select></label><label className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Dividend policy<select name="dividend-policy" value={dividendPolicy} onChange={(event) => { setDividendPolicy(event.target.value as PortfolioDividendPolicy); invalidateFormState(); }} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-emerald-400 focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="Dividend policy"><option value="reinvest">Reinvest dividends</option><option value="cash">Hold dividends as cash</option></select></label></div>
+          <button type="submit" disabled={isOperationBusy()} className="mt-6 inline-flex w-full items-center justify-center gap-2 border border-emerald-400/70 bg-emerald-400/10 px-4 py-3 text-[0.68rem] font-black uppercase tracking-[0.15em] text-emerald-300 transition-colors hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-50">{loading ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Fetching and simulating EOD history</> : "Run backtest"}</button>
+          <button type="button" onClick={() => void copySetupLink()} className="mt-3 inline-flex min-h-11 w-full items-center justify-center gap-2 border border-zinc-700 px-4 text-[0.68rem] font-black uppercase tracking-[0.15em] text-zinc-300 hover:border-emerald-400 hover:text-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-400"><Copy className="h-3.5 w-3.5" /> {shareStatus === "copied" ? "Setup link copied" : "Copy setup link"}</button>
+          <p className="mt-2 text-center text-[0.62rem] text-zinc-500" aria-live="polite">{shareStatus === "copied" ? "The link contains inputs only and will not run automatically." : shareStatus === "manual" ? "Clipboard unavailable. Copy the URL below." : "Shares inputs only — never results or provider data."}</p>
+          {manualShareUrl && <label className="mt-3 block text-[0.62rem] font-bold uppercase tracking-[0.12em] text-zinc-500">Setup URL<input name="share-url" readOnly value={manualShareUrl} onFocus={(event) => event.currentTarget.select()} className="mt-2 min-h-11 w-full border border-zinc-700 bg-zinc-950 px-3 text-xs normal-case text-zinc-200 focus-visible:ring-2 focus-visible:ring-emerald-400" /></label>}
+          {shareError && <div role="alert" className="mt-3 border border-rose-500/50 bg-rose-500/10 p-4 text-sm text-rose-100"><strong>Setup link unavailable</strong><p>{shareError}</p></div>}
           {loading && <p role="status" className="mt-2 text-center text-[0.62rem] text-zinc-500">Verifying US ETF eligibility, aligning completed sessions, and calculating the comparison.</p>}
           <p className="mt-4 text-[0.62rem] leading-4 text-zinc-600">Fractional shares. No taxes, trading costs, slippage, cash interest, or execution assumptions. Non-reinvested dividends remain zero-yield cash.</p>
         </form>
 
         <div className="min-w-0 space-y-5">
-          {error && <div className="border border-rose-500/50 bg-rose-500/10 p-4 text-sm leading-6 text-rose-100" role="alert"><span className="font-black uppercase tracking-[0.12em]">Backtest unavailable</span><p className="mt-1 text-rose-200/80">{error}</p><button type="button" onClick={() => void runBacktest()} disabled={loading} className="mt-3 border border-rose-400/60 px-3 py-1.5 text-[0.62rem] font-black uppercase tracking-[0.12em] text-rose-100 hover:bg-rose-400/10 disabled:opacity-50">Retry last backtest</button></div>}
+          {error && <div className="border border-rose-500/50 bg-rose-500/10 p-4 text-sm leading-6 text-rose-100" role="alert"><span className="font-black uppercase tracking-[0.12em]">{error.kind === "backtest" ? "Backtest unavailable" : error.kind === "verification" ? "ETF verification unavailable" : "Setup link unavailable"}</span><p className="mt-1 text-rose-200/80">{error.message}</p>{error.kind === "backtest" && <button type="button" onClick={() => void runBacktest()} disabled={isOperationBusy()} className="mt-3 border border-rose-400/60 px-3 py-1.5 text-[0.62rem] font-black uppercase tracking-[0.12em] text-rose-100 hover:bg-rose-400/10 disabled:opacity-50">Retry last backtest</button>}{error.kind === "verification" && <button type="button" onClick={() => void verifyTickers()} disabled={isOperationBusy()} className="mt-3 border border-rose-400/60 px-3 py-1.5 text-[0.62rem] font-black uppercase tracking-[0.12em] text-rose-100 hover:bg-rose-400/10 disabled:opacity-50">Retry ETF verification</button>}</div>}
           {!result && !error && <div className="flex min-h-[420px] items-center justify-center border border-dashed border-zinc-800 bg-[#111416] p-8 text-center"><div><BarChart3 className="mx-auto h-9 w-9 text-zinc-700" /><h2 className="mt-4 text-lg font-black text-zinc-300">Configure an ETF mix</h2><p className="mx-auto mt-2 max-w-sm text-xs leading-5 text-zinc-600">Add one or more US-listed ETFs whose weights total 100.00%. SPY is always the benchmark.</p></div></div>}
-          {result && <ResultsPanel result={result.data} />}
+          {result && <ResultsPanel result={result.data} cacheStatus={result.cache.status} />}
         </div>
       </main>
     </div>
   </section>;
 }
 
-function ResultsPanel({ result }: { result: PortfolioBacktestResult }) {
+function ResultsPanel({ result, cacheStatus }: { result: PortfolioBacktestResult; cacheStatus: BacktestResponse["cache"]["status"] }) {
   const chartData = result.curve.map((point) => ({ ...point, label: dateLabel(point.date) }));
+  const csvHref = useMemo(() => `data:text/csv;charset=utf-8,${encodeURIComponent(serializePortfolioBacktestCsv(result, cacheStatus))}`, [result, cacheStatus]);
   return <>
+    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"><p className="text-[0.62rem] text-zinc-500">Export USD values and base-100 series, including policies and data warnings.</p><a href={csvHref} download={`portfolio-vs-spy-${result.effectiveRange.start}-to-${result.effectiveRange.end}.csv`} className="inline-flex min-h-11 shrink-0 items-center justify-center border border-zinc-700 px-4 text-[0.68rem] font-bold text-zinc-200 hover:border-emerald-400 hover:text-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-400">Download comparison CSV</a></div>
     <div className="grid gap-px border border-zinc-800 bg-zinc-800 sm:grid-cols-2 xl:grid-cols-4"><Stat label="Portfolio ending value" value={usd.format(result.endingValue)} tone="text-emerald-300" /><Stat label="SPY ending value" value={usd.format(result.benchmarkEndingValue)} /><Stat label="Portfolio return" value={percent(result.metrics.cumulativeReturn)} tone={result.metrics.cumulativeReturn >= 0 ? "text-emerald-300" : "text-rose-300"} /><Stat label="Vs SPY" value={percent(result.excessCumulativeReturn)} tone={result.excessCumulativeReturn >= 0 ? "text-emerald-300" : "text-rose-300"} /></div>
     <section className="border border-zinc-800 bg-[#111416] p-4 sm:p-5"><div className="flex flex-col justify-between gap-2 border-b border-zinc-800 pb-4 sm:flex-row sm:items-end"><div><p className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Same-session comparison</p><h2 className="mt-1 text-lg font-black">Growth of capital</h2></div><p className="text-[0.62rem] text-zinc-500">Effective {result.effectiveRange.start} → {result.effectiveRange.end} · {result.effectiveRange.sessionCount} sessions</p></div><div className="mt-5 h-[310px] min-w-0" data-testid="portfolio-performance-chart"><ResponsiveContainer width="100%" height="100%"><LineChart data={chartData} margin={{ top: 8, right: 8, bottom: 2, left: -16 }}><CartesianGrid stroke="#27272a" strokeDasharray="3 3" /><XAxis dataKey="label" minTickGap={40} tick={{ fill: "#71717a", fontSize: 10 }} axisLine={false} tickLine={false} /><YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}`} tick={{ fill: "#71717a", fontSize: 10 }} axisLine={false} tickLine={false} /><Tooltip formatter={(value, name) => [`${Number(value ?? 0).toFixed(2)}`, name === "portfolioIndexed" ? "Portfolio" : "SPY"]} contentStyle={{ background: "#09090b", border: "1px solid #3f3f46", fontSize: 12 }} /><Legend formatter={(value) => value === "portfolioIndexed" ? "Portfolio" : "SPY"} /><Line type="monotone" dataKey="portfolioIndexed" stroke="#34d399" strokeWidth={2} dot={false} isAnimationActive={false} /><Line type="monotone" dataKey="benchmarkIndexed" stroke="#a1a1aa" strokeWidth={2} dot={false} isAnimationActive={false} /></LineChart></ResponsiveContainer></div></section>
     <div className="grid gap-5 lg:grid-cols-2"><section className="border border-zinc-800 bg-[#111416] p-4 sm:p-5"><p className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Risk and return</p><dl className="mt-4 grid grid-cols-2 gap-px border border-zinc-800 bg-zinc-800"><Metric label="CAGR" value={percent(result.metrics.cagr)} /><Metric label="Volatility" value={percent(result.metrics.annualizedVolatility)} /><Metric label="Max drawdown" value={percent(result.metrics.maxDrawdown)} /><Metric label="Sharpe (0% RF)" value={result.metrics.sharpeRatio === null ? "Unavailable" : result.metrics.sharpeRatio.toFixed(2)} /></dl></section><section className="border border-zinc-800 bg-[#111416] p-4 sm:p-5"><p className="text-[0.62rem] font-bold uppercase tracking-[0.14em] text-zinc-500">Methodology and provenance</p><div className="mt-4 space-y-2 text-xs leading-5 text-zinc-400"><p><span className="font-bold text-zinc-200">Policy:</span> {result.rebalancePolicy} rebalancing · {result.dividendPolicy === "reinvest" ? "dividends reinvested" : "dividends held as zero-yield cash"}</p><p><span className="font-bold text-zinc-200">Requested:</span> {result.requestedRange.start} → {result.requestedRange.end}</p><p><span className="font-bold text-zinc-200">Effective:</span> {result.effectiveRange.start} → {result.effectiveRange.end} · {result.effectiveRange.sessionCount} completed shared sessions</p><p><span className="font-bold text-zinc-200">Source:</span> {result.dataSource.provider} · {result.dataSource.role} · as of {result.sourceAsOf}</p><p><span className="font-bold text-zinc-200">Cash dividends:</span> reconstructed from Yahoo completed-EOD close and adjusted-close factors when a corporate-action event object is unavailable.</p><p><span className="font-bold text-zinc-200">Excluded sessions:</span> {result.excludedSessions.length ? result.excludedSessions.join(", ") : "None — incomplete shared sessions fail closed."}</p><p><span className="font-bold text-zinc-200">Rebalances:</span> {result.rebalancedOn.length ? result.rebalancedOn.join(", ") : "None"}</p><p className="text-zinc-600">No taxes, trading costs, slippage, cash interest, execution limits, or forecasts. Methodology {result.methodologyVersion}.</p></div></section></div>

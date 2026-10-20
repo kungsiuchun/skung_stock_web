@@ -71,9 +71,11 @@ const SettleUpPage = lazy(() =>
 );
 import {
   getHashForView,
+  getTitleForView,
   getViewFromHash,
   type ViewState,
 } from "@/lib/app-routes";
+import { RouteErrorBoundary } from "./components/route-error-boundary";
 import { ArrowLeft, Home, LineChart } from "lucide-react";
 
 function App() {
@@ -83,6 +85,9 @@ function App() {
     typeof window === "undefined"
       ? "home"
       : getViewFromHash(window.location.hash),
+  );
+  const [currentHash, setCurrentHash] = useState(() =>
+    typeof window === "undefined" ? "" : window.location.hash,
   );
   const isPortfolioView = [
     "home",
@@ -94,14 +99,7 @@ function App() {
   const mainRef = useRef<HTMLElement>(null);
   const previousView = useRef(currentView);
   useEffect(() => {
-    const names: Partial<Record<ViewState, string>> = {
-      home: "Code & Camera",
-      about: "About & résumé",
-      photography: "Photo journal",
-      contact: "Contact",
-      "work-gallery": "Market Lab",
-    };
-    document.title = (names[currentView] || "Market Lab") + " — Siu";
+    document.title = getTitleForView(currentView);
     if (previousView.current !== currentView) {
       window.scrollTo({ top: 0, behavior: "instant" });
       mainRef.current?.focus({ preventScroll: true });
@@ -120,7 +118,9 @@ function App() {
 
   useEffect(() => {
     const syncViewFromHash = () => {
-      setCurrentView(getViewFromHash(window.location.hash));
+      const hash = window.location.hash;
+      setCurrentHash(hash);
+      setCurrentView(getViewFromHash(hash));
     };
 
     syncViewFromHash();
@@ -128,14 +128,6 @@ function App() {
 
     return () => window.removeEventListener("hashchange", syncViewFromHash);
   }, []);
-
-  const navigateToView = (view: ViewState) => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.location.hash = getHashForView(view);
-  };
 
   return (
     <>
@@ -163,15 +155,14 @@ function App() {
           {/* Left App Navigation Component - ONLY active during Finance Dashboard */}
           {currentView === "finance-dashboard" && (
             <div className="w-16 h-full flex flex-col items-center py-8 border-r border-white/5 bg-[#0a0f16] z-50 shrink-0">
-              <button
-                type="button"
+              <a
                 title="Back to Market Lab"
                 aria-label="Back to Market Lab"
-                onClick={() => navigateToView("work-gallery")}
-                className="mb-5 rounded-lg border border-white/10 p-3 text-white/60 transition-colors hover:border-cyan-400/50 hover:bg-cyan-500/10 hover:text-cyan-300"
+                href={getHashForView("work-gallery")}
+                className="mb-5 inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg border border-white/10 p-3 text-white/60 transition-colors hover:border-cyan-400/50 hover:bg-cyan-500/10 hover:text-cyan-300"
               >
                 <ArrowLeft className="w-5 h-5" />
-              </button>
+              </a>
               <div className="flex flex-col gap-4 bg-white/5 rounded-full p-2 border border-white/10 shadow-xl">
                 <button
                   title="Dashboard view"
@@ -200,7 +191,8 @@ function App() {
                 : "min-w-0 flex-1 overflow-visible lg:h-full lg:overflow-hidden"
             }
           >
-            <Suspense
+            <RouteErrorBoundary routeKey={currentHash}>
+              <Suspense
               fallback={
                 <p role="status" className="portfolio-loading">
                   Opening {isPortfolioView ? "portfolio" : "tool"}…
@@ -216,29 +208,9 @@ function App() {
               ) : currentView === "contact" ? (
                 <ContactPage />
               ) : currentView === "work-gallery" ? (
-                <WorkGallery
-                  onOpenSettleUp={() => navigateToView("settle-up")}
-                  onOpenCaptionTool={() => setIsAIOpen(true)}
-                  onOpenFinanceTool={() => navigateToView("finance-dashboard")}
-                  onOpenTradingAgentTool={() =>
-                    navigateToView("trading-agent-dashboard")
-                  }
-                  onOpenSPXRecap={() => navigateToView("spx-recap")}
-                  onOpenSPXGexHeatmap={() => navigateToView("spx-gex-heatmap")}
-                  onOpenStocksWatcher={() =>
-                    navigateToView("stocks-intelligence-watcher")
-                  }
-                  onOpenFixedIncome={() => navigateToView("fixed-income")}
-                  onOpenMarketBreadth={() => navigateToView("market-breadth")}
-                  onOpenSectorRotation={() => navigateToView("sector-rotation")}
-                  onOpenPortfolioBacktest={() =>
-                    navigateToView("portfolio-backtest")
-                  }
-                />
+                <WorkGallery onOpenCaptionTool={() => setIsAIOpen(true)} />
               ) : currentView === "settle-up" ? (
-                <SettleUpPage
-                  onBackToWork={() => navigateToView("work-gallery")}
-                />
+                <SettleUpPage />
               ) : currentView === "finance-dashboard" ? (
                 <FinanceDashboard
                   showChat={isFinanceChatOpen}
@@ -249,33 +221,22 @@ function App() {
               ) : currentView === "spx-recap" ? (
                 <SPXRecapPage />
               ) : currentView === "spx-gex-heatmap" ? (
-                <SPXGexHeatmapPage
-                  onBackToWork={() => navigateToView("work-gallery")}
-                />
+                <SPXGexHeatmapPage />
               ) : currentView === "stocks-intelligence-watcher" ? (
-                <StocksIntelligenceWatcherPage
-                  onBackToWork={() => navigateToView("work-gallery")}
-                />
+                <StocksIntelligenceWatcherPage />
               ) : currentView === "fixed-income" ? (
-                <FixedIncomePage
-                  onBackToWork={() => navigateToView("work-gallery")}
-                />
+                <FixedIncomePage />
               ) : currentView === "market-breadth" ? (
-                <MarketBreadthPage
-                  onBackToWork={() => navigateToView("work-gallery")}
-                />
+                <MarketBreadthPage />
               ) : currentView === "sector-rotation" ? (
-                <SectorRotationPage
-                  onBackToWork={() => navigateToView("work-gallery")}
-                />
+                <SectorRotationPage />
               ) : currentView === "portfolio-backtest" ? (
-                <PortfolioBacktestPage
-                  onBackToWork={() => navigateToView("work-gallery")}
-                />
+                <PortfolioBacktestPage />
               ) : (
                 <HomeLandingPage />
               )}
-            </Suspense>
+              </Suspense>
+            </RouteErrorBoundary>
           </div>
         </div>
         {isAIOpen && (

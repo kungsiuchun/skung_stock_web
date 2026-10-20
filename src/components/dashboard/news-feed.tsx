@@ -31,7 +31,7 @@ export function NewsFeed({ news }: NewsFeedProps) {
           </div>
         ) : (
           news.map((item, i) => (
-            <div key={i} className="group p-4 rounded-2xl bg-gray-50 border border-gray-100 hover:border-blue-200 transition-all">
+        <div key={i} className="group p-4 rounded-2xl bg-gray-50 border border-gray-100 hover:border-blue-200 transition-colors">
               <div className="flex justify-between items-start gap-4">
                 <div className="flex-1">
                    <div className="flex items-center gap-2 mb-1">

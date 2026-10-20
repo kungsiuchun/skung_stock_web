@@ -3,26 +3,8 @@ import { ExternalLink, RefreshCw } from "lucide-react";
 import type { MarketCacheMetadata } from "@/lib/market-data-cache";
 import type { StocksWatcherMacroSnapshot } from "@/lib/stocks-watcher-macro";
 import { macroHeatClass } from "./stocks-watcher-macro-heat";
+import { loadStocksWatcherMacro } from "./stocks-watcher-panel-loaders";
 import "./stocks-watcher-macro-panel.css";
-
-interface MacroApiResponse {
-  data?: StocksWatcherMacroSnapshot;
-  cache?: MarketCacheMetadata;
-  error?: string;
-}
-
-const readPayload = async (response: Response, requestUrl: string) => {
-  const contentType = response.headers.get("content-type") || "";
-  const text = await response.text();
-  if (!contentType.toLowerCase().includes("application/json")) {
-    throw new Error(`Macro API returned ${contentType || "unknown content type"} for ${requestUrl}.`);
-  }
-  try {
-    return JSON.parse(text) as MacroApiResponse;
-  } catch (error) {
-    throw new Error(`Macro API returned invalid JSON for ${requestUrl}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-};
 
 const formatDate = (date: string) => new Intl.DateTimeFormat("en-US", {
   month: "short",
@@ -62,14 +44,10 @@ export function StocksWatcherMacroPanel() {
   const [error, setError] = useState<string | null>(null);
 
   const load = async (bypassBrowserCache = false) => {
-    const requestUrl = `/api/stocks-watcher-macro${bypassBrowserCache ? `?_=${Date.now()}` : ""}`;
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(requestUrl, bypassBrowserCache ? { cache: "no-store" } : undefined);
-      const payload = await readPayload(response, requestUrl);
-      if (!response.ok) throw new Error(payload.error || `Macro API failed with HTTP ${response.status}.`);
-      if (!payload.data) throw new Error("Macro API response did not include data.");
+      const payload = await loadStocksWatcherMacro(fetch, bypassBrowserCache);
       setData(payload.data);
       setCache(payload.cache || null);
     } catch (requestError) {

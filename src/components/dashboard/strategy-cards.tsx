@@ -85,7 +85,7 @@ export function StrategyCards({ quantStrategies, recommendedTrade }: StrategyCar
                   {expanded ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
                 </div>
                 <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-200">
-                  <div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${scoreWidth}%` }} />
+                    <div className="h-full rounded-full bg-blue-500 transition-[width]" style={{ width: `${scoreWidth}%` }} />
                 </div>
                 <p className="mt-2 truncate text-xs text-gray-600"><span className="font-bold text-gray-800">下一步：</span>{strategyInsight(strategy)}</p>
               </button>

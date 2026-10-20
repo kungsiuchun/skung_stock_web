@@ -1,5 +1,6 @@
 import type { CandlestickInterval, CandlestickPatternData } from "./candlestick-patterns";
 import type { MarketCacheMetadata } from "./market-data-cache";
+import { parseJsonResponse } from "./safe-json-response";
 
 export const CANDLESTICK_CLIENT_DEADLINE_MS = 12_000;
 
@@ -59,13 +60,7 @@ export async function fetchCandlestickAnalysis(input: {
       `/api/candlestick-patterns?symbol=${encodeURIComponent(input.symbol)}&interval=${input.interval}`,
       { signal: controller.signal },
     );
-    let payload: CandlestickApiResponse;
-    try {
-      payload = await response.json() as CandlestickApiResponse;
-    } catch {
-      const requestId = response.headers.get("X-Request-ID");
-      throw new Error(`K 線型態 API 回傳無效 JSON。${requestId ? ` Request ID: ${requestId}` : ""}`);
-    }
+    const payload = await parseJsonResponse<CandlestickApiResponse>(response, "/api/candlestick-patterns", { allowHttpError: true });
     const requestId = payload.requestId || response.headers.get("X-Request-ID") || undefined;
     if ((!response.ok && response.status !== 206) || !payload.data || !payload.cache) {
       throw new Error(`${payload.error || `K 線型態 API 回傳 HTTP ${response.status}。`}${requestId ? ` Request ID: ${requestId}` : ""}`);
