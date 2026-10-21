@@ -4,6 +4,7 @@ import { getHashForView } from "@/lib/app-routes";
 interface RouteErrorBoundaryProps {
   children: ReactNode;
   routeKey: string;
+  fallback?: ReactNode;
 }
 
 interface RouteErrorBoundaryState {
@@ -18,7 +19,7 @@ export class RouteErrorBoundary extends Component<RouteErrorBoundaryProps, Route
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error("Route render failed", { error, componentStack: info.componentStack });
+    console.error("UI render failed", { scope: this.props.routeKey, error, componentStack: info.componentStack });
   }
 
   componentDidUpdate(previousProps: RouteErrorBoundaryProps) {
@@ -29,6 +30,7 @@ export class RouteErrorBoundary extends Component<RouteErrorBoundaryProps, Route
 
   render() {
     if (!this.state.error) return this.props.children;
+    if (this.props.fallback) return this.props.fallback;
 
     return (
       <section className="flex min-h-[60vh] w-full items-center justify-center bg-[#0d0f10] p-6 text-zinc-100" role="alert">

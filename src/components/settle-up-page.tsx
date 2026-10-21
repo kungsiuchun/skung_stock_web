@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import "./settle-up-page.css";
 import {
   ArrowLeft,
   CalendarDays,
@@ -352,9 +353,39 @@ export function SettleUpPage() {
   const [newParticipantName, setNewParticipantName] = useState("");
   const [newEventName, setNewEventName] = useState("");
   const [shareStatus, setShareStatus] = useState<"idle" | "copied" | "failed">("idle");
+  const [confirmation, setConfirmation] = useState<{
+    title: string; message: string; confirm: (() => void) | null; nextFocus: HTMLElement | null;
+  } | null>(null);
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
+  const eventNameRef = useRef<HTMLInputElement>(null);
+  const personNameRef = useRef<HTMLInputElement>(null);
+  const addExpenseRef = useRef<HTMLButtonElement>(null);
+
+  const askConfirmation = (title: string, message: string, confirm: (() => void) | null, nextFocus: HTMLElement | null) => {
+    restoreFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setConfirmation({ title, message, confirm, nextFocus });
+  };
+  useEffect(() => {
+    if (!confirmation) return;
+    const dialog = dialogRef.current;
+    const overflow = document.body.style.overflow;
+    dialog?.showModal();
+    cancelRef.current?.focus();
+    document.body.style.overflow = "hidden";
+    return () => {
+      dialog?.close();
+      document.body.style.overflow = overflow;
+      const target = restoreFocusRef.current;
+      if (target?.isConnected) target.focus();
+      else eventNameRef.current?.focus();
+    };
+  }, [confirmation]);
 
   useEffect(() => {
     const syncBillFromHash = () => {
+      setConfirmation(null);
       const hashBill = readBillFromHash();
 
       if (hashBill) {
@@ -516,25 +547,24 @@ export function SettleUpPage() {
 
   const removeParticipant = (participantId: string) => {
     updateActiveEvent((event) => {
-      const participants = event.participants.filter((participant) => participant.id !== participantId);
-      const fallbackParticipantId = participants[0]?.id;
-
-      return {
-        ...event,
-        participants,
-        expenses: fallbackParticipantId
-          ? event.expenses.map((expense) => {
-              const participantIds = expense.participantIds.filter((id) => id !== participantId);
-
-              return {
-                ...expense,
-                payerId: expense.payerId === participantId ? fallbackParticipantId : expense.payerId,
-                participantIds: participantIds.length > 0 ? participantIds : [fallbackParticipantId],
-              };
-            })
-          : [],
-      };
+      if (event.expenses.some((expense) => expense.payerId === participantId || expense.participantIds.includes(participantId))) return event;
+      return { ...event, participants: event.participants.filter((participant) => participant.id !== participantId) };
     });
+  };
+
+  const requestRemoveParticipant = (participant: Participant) => {
+    const affected = activeEvent.expenses.filter((expense) => expense.payerId === participant.id || expense.participantIds.includes(participant.id)).length;
+    if (affected) {
+      askConfirmation(`Cannot remove ${participant.name || "Unnamed"}`, `${affected} expense(s) still reference this person. Change the payer and split participants, or remove those expenses first. No payment responsibility will be transferred.`, null, personNameRef.current);
+    } else {
+      askConfirmation(`Remove ${participant.name || "Unnamed"}?`, `Remove this person from “${activeEvent.name || "Untitled event"}”. This affects 0 expenses.`, () => removeParticipant(participant.id), personNameRef.current);
+    }
+  };
+
+  const requestRemoveExpense = (expenseId: string) => {
+    const expense = activeEvent.expenses.find((item) => item.id === expenseId);
+    if (!expense) return;
+    askConfirmation(`Remove ${expense.description || "Unnamed expense"}?`, `Delete 1 expense (${formatMoney(expense.amountCents)}) from “${activeEvent.name || "Untitled event"}”. Balances will be recalculated from the remaining expenses.`, () => removeExpense(expenseId), addExpenseRef.current);
   };
 
   const resetDemo = () => {
@@ -564,7 +594,7 @@ export function SettleUpPage() {
   };
 
   return (
-    <section className="h-full w-full overflow-y-auto px-4 pb-8 pt-6 text-white sm:px-8 lg:px-12">
+    <section className="settle-up-page h-full w-full overflow-y-auto px-4 pb-8 pt-6 text-white sm:px-8 lg:px-12">
       <div className="mx-auto flex max-w-7xl flex-col gap-5">
         <header className="flex flex-col gap-5 border-b border-white/10 pb-5 lg:flex-row lg:items-end lg:justify-between">
           <div>
@@ -590,6 +620,7 @@ export function SettleUpPage() {
 
           <div className="grid grid-cols-2 gap-3 sm:flex">
             <button
+              aria-label="Share bill"
               onClick={copyShareUrl}
               className="inline-flex items-center justify-center gap-2 rounded-full border border-emerald-300/25 bg-emerald-300/10 px-4 py-2 text-xs font-bold uppercase tracking-[0.16em] text-emerald-50 transition-colors hover:bg-emerald-300/20"
             >
@@ -597,7 +628,7 @@ export function SettleUpPage() {
               {shareStatus === "copied" ? "Copied" : "Share"}
             </button>
               <button
-                onClick={resetDemo}
+                onClick={() => askConfirmation("Replace all events with demo data?", `Replace ${bill.events.length} event(s) and ${bill.events.reduce((sum, event) => sum + event.expenses.length, 0)} expense(s). Existing entries will be removed from this session.`, resetDemo, eventNameRef.current)}
                 className="inline-flex items-center justify-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-bold uppercase tracking-[0.16em] text-white/60 transition-colors hover:bg-white/10"
               >
                 <RotateCcw className="h-4 w-4" />
@@ -607,7 +638,7 @@ export function SettleUpPage() {
         </header>
 
         {shareStatus === "failed" && (
-          <div className="rounded-xl border border-amber-300/25 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
+          <div role="status" className="rounded-xl border border-amber-300/25 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
             Share URL was created in the address bar, but clipboard access was blocked.
           </div>
         )}
@@ -618,15 +649,20 @@ export function SettleUpPage() {
               <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center justify-between">
-                    <label className="text-xs font-bold uppercase tracking-[0.16em] text-white/45">Current event</label>
+                    <label htmlFor="settle-event-name" className="text-xs font-bold uppercase tracking-[0.16em] text-white/45">Current event</label>
                     <button
-                      onClick={() => removeEvent(activeEvent.id)}
+                      aria-label="Remove current event"
+                      onClick={() => askConfirmation(`Remove ${activeEvent.name || "Untitled event"}?`, `Delete this event and its ${activeEvent.expenses.length} expense(s).${bill.events.length === 1 ? " An empty event will remain." : " Other events will not change."}`, () => removeEvent(activeEvent.id), eventNameRef.current)}
                       className="text-xs font-bold uppercase tracking-[0.16em] text-rose-400/70 transition-colors hover:text-rose-300"
                     >
                       Remove
                     </button>
                   </div>
                   <input
+                    ref={eventNameRef}
+                    id="settle-event-name"
+                    name="event-name"
+                    autoComplete="off"
                     value={activeEvent.name}
                     onChange={(event) => renameActiveEvent(event.target.value)}
                     placeholder="Name this split"
@@ -635,9 +671,12 @@ export function SettleUpPage() {
                   />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <label className="text-xs font-bold uppercase tracking-[0.16em] text-white/45">Add event</label>
+                  <label htmlFor="settle-new-event" className="text-xs font-bold uppercase tracking-[0.16em] text-white/45">Add event</label>
                   <div className="mt-3 flex gap-2">
                     <input
+                      id="settle-new-event"
+                      name="new-event"
+                      autoComplete="off"
                       value={newEventName}
                       onChange={(event) => setNewEventName(event.target.value)}
                       onKeyDown={(event) => {
@@ -680,9 +719,13 @@ export function SettleUpPage() {
 
             <div className="grid gap-4 rounded-2xl border border-white/10 bg-white/[0.035] p-4 lg:grid-cols-[18rem_1fr] lg:items-start">
               <div>
-                <label className="text-xs font-bold uppercase tracking-[0.16em] text-white/45">Add person</label>
+                <label htmlFor="settle-new-person" className="text-xs font-bold uppercase tracking-[0.16em] text-white/45">Add person</label>
                 <div className="mt-3 flex gap-2">
                   <input
+                    ref={personNameRef}
+                    id="settle-new-person"
+                    name="new-person"
+                    autoComplete="off"
                     value={newParticipantName}
                     onChange={(event) => setNewParticipantName(event.target.value)}
                     onKeyDown={(event) => {
@@ -713,13 +756,15 @@ export function SettleUpPage() {
                     {activeEvent.participants.map((participant) => (
                       <div key={participant.id} className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 p-2">
                         <input
+                          name={`person-${participant.id}`}
+                          autoComplete="off"
                           value={participant.name}
                           onChange={(event) => renameParticipant(participant.id, event.target.value)}
                           className="min-w-0 flex-1 rounded-lg border border-transparent bg-transparent px-2 py-1.5 text-sm font-bold text-white/75 outline-none transition-colors focus:border-emerald-200/40 focus:bg-black/25"
                           aria-label={`Rename ${participant.name || "Unnamed"}`}
                         />
                         <button
-                          onClick={() => removeParticipant(participant.id)}
+                          onClick={() => requestRemoveParticipant(participant)}
                           className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/10 text-white/40 transition-colors hover:border-rose-300/30 hover:bg-rose-300/10 hover:text-rose-100"
                           aria-label={`Remove ${participant.name || "Unnamed"}`}
                         >
@@ -740,6 +785,8 @@ export function SettleUpPage() {
                 </p>
               </div>
               <button
+                ref={addExpenseRef}
+                aria-label="Add expense"
                 onClick={addExpense}
                 disabled={activeEvent.participants.length === 0}
                 className="inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-xs font-black uppercase tracking-[0.16em] text-black transition-transform hover:scale-[1.02] disabled:cursor-not-allowed disabled:bg-white/20 disabled:text-white/35 disabled:hover:scale-100"
@@ -762,7 +809,7 @@ export function SettleUpPage() {
                     participants={activeEvent.participants}
                     onChange={updateExpense}
                     onToggleParticipant={toggleParticipant}
-                    onRemove={removeExpense}
+                    onRemove={requestRemoveExpense}
                   />
                 ))
               )}
@@ -828,6 +875,22 @@ export function SettleUpPage() {
           </aside>
         </div>
       </div>
+      <dialog ref={dialogRef} aria-labelledby="settle-confirm-title" aria-describedby="settle-confirm-message"
+        onCancel={(event) => { event.preventDefault(); setConfirmation(null); }}
+        className="m-auto max-h-[calc(100dvh_-_2rem)] w-[calc(100%_-_2rem)] max-w-lg overflow-y-auto overscroll-contain rounded-2xl border border-white/20 bg-[#101214] p-6 text-white shadow-2xl backdrop:bg-black/80">
+        {confirmation && <>
+          <h2 id="settle-confirm-title" className="break-words text-xl font-bold">{confirmation.title}</h2>
+          <p id="settle-confirm-message" className="mt-4 break-words text-sm leading-6 text-white/75">{confirmation.message}</p>
+          <div className="mt-6 flex flex-wrap justify-end gap-3">
+            <button ref={cancelRef} type="button" onClick={() => setConfirmation(null)} className="rounded-lg border border-white/30 px-4 py-2">{confirmation.confirm ? "Cancel" : "Close"}</button>
+            {confirmation.confirm && <button type="button" data-confirm onClick={() => {
+              confirmation.confirm?.();
+              restoreFocusRef.current = confirmation.nextFocus;
+              setConfirmation(null);
+            }} className="rounded-lg border border-rose-300/50 bg-rose-400/15 px-4 py-2 font-bold text-rose-100">Confirm</button>}
+          </div>
+        </>}
+      </dialog>
     </section>
   );
 }
@@ -864,11 +927,17 @@ const ExpenseEditor = ({ expense, participants, onChange, onToggleParticipant, o
     <article className="rounded-2xl border border-white/10 bg-[#101214]/90 p-4 shadow-xl backdrop-blur-md">
       <div className="grid gap-3 lg:grid-cols-[minmax(12rem,1.4fr)_8rem_10rem_auto] lg:items-center">
         <input
+          name={`description-${expense.id}`}
+          aria-label="Expense description"
+          autoComplete="off"
           value={expense.description}
           onChange={(event) => onChange(expense.id, { description: event.target.value })}
           className="min-w-0 rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm font-semibold text-white outline-none transition-colors placeholder:text-white/30 focus:border-emerald-200/50"
         />
         <input
+          name={`amount-${expense.id}`}
+          autoComplete="off"
+          inputMode="decimal"
           type="number"
           min="0"
           step="0.01"
@@ -879,6 +948,7 @@ const ExpenseEditor = ({ expense, participants, onChange, onToggleParticipant, o
           aria-label={`${expense.description} amount`}
         />
         <select
+          name={`payer-${expense.id}`}
           value={expense.payerId}
           onChange={(event) => onChange(expense.id, { payerId: event.target.value })}
           className="rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm font-bold text-white outline-none transition-colors focus:border-emerald-200/50"
@@ -905,6 +975,7 @@ const ExpenseEditor = ({ expense, participants, onChange, onToggleParticipant, o
 
           return (
             <button
+              aria-pressed={selected}
               key={participant.id}
               onClick={() => onToggleParticipant(expense, participant.id)}
               className={cn(

@@ -74,3 +74,8 @@ export const completeDashboardAnalysis = (current: DashboardSnapshotState): Dash
   loading: false,
   loadingPhase: null,
 });
+
+export const restoreDashboardHistory = (current: DashboardSnapshotState, activeData: FinanceDashboardSnapshotPayload["data"]): DashboardSnapshotState => ({
+  ...current, activeData, cache: null, technicalData: null, valuationData: null, vixData: null,
+  error: null, loading: false, loadingPhase: null,
+});

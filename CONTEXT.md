@@ -56,6 +56,8 @@ Settle Up should preserve the core expense concepts: payer, amount, participants
 
 Settle Up should not look like a spreadsheet clone; the spreadsheet is a workflow reference, not a visual design.
 
+Removing a person is blocked while any expense references them as payer or split participant; the visitor must edit or remove those expenses first. Person removal never transfers payment responsibility automatically. Removing an event, expense, unreferenced person, or replacing the bill with demo data requires explicit confirmation. Cancellation preserves the complete bill. Cent allocation and existing legacy/v2 share links remain unchanged; draft edits are still session-only until the visitor creates an updated share link.
+
 ## SPX GEX Heatmap
 
 SPX GEX Heatmap is a Work Item that turns a premarket SPX options gamma workflow into a date-selectable visual map.
