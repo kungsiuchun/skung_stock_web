@@ -6,6 +6,7 @@ import {
   completeDashboardAnalysis,
   EMPTY_DASHBOARD_SNAPSHOT_STATE,
   failDashboardAnalysis,
+  restoreDashboardHistory,
 } from "../src/lib/finance-dashboard-state";
 
 test("Dashboard snapshot state exposes loading, failure, and completion transitions", () => {
@@ -19,6 +20,16 @@ test("Dashboard snapshot state exposes loading, failure, and completion transiti
     loading: false, loadingPhase: null, error: "source timeout",
   });
   assert.deepEqual(completeDashboardAnalysis(loading), { ...loading, loading: false, loadingPhase: null });
+});
+
+test("Restoring history clears unrelated snapshot metadata without losing history", () => {
+  const data = { symbol: "SPY", price: 500 } as any;
+  const history = [{ symbol: "SPY", timestamp: "10:00", score: 50, fullData: data }];
+  const restored = restoreDashboardHistory({ ...EMPTY_DASHBOARD_SNAPSHOT_STATE, history,
+    cache: { status: "hit" } as any, technicalData: { symbol: "NVDA" }, valuationData: { symbol: "NVDA" }, vixData: { value: 20 },
+    error: "old error", loading: true, loadingPhase: "market",
+  }, data);
+  assert.deepEqual(restored, { ...EMPTY_DASHBOARD_SNAPSHOT_STATE, history, activeData: data });
 });
 
 test("Dashboard snapshot state updates related market payloads atomically and deduplicates history", () => {

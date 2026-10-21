@@ -96,13 +96,19 @@ function App() {
     "photography",
     "work-gallery",
   ].includes(currentView);
-  const mainRef = useRef<HTMLElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const captionOpenerRef = useRef<HTMLElement | null>(null);
+  const closeCaptionTool = () => {
+    setIsAIOpen(false);
+    captionOpenerRef.current?.focus();
+  };
   const previousView = useRef(currentView);
   useEffect(() => {
     document.title = getTitleForView(currentView);
     if (previousView.current !== currentView) {
       window.scrollTo({ top: 0, behavior: "instant" });
-      mainRef.current?.focus({ preventScroll: true });
+      setIsAIOpen(false);
+      contentRef.current?.focus({ preventScroll: true });
       previousView.current = currentView;
     }
   }, [currentView]);
@@ -131,12 +137,10 @@ function App() {
 
   return (
     <>
-      <button className="skip-link" onClick={() => mainRef.current?.focus()}>
+      <button className="skip-link" onClick={() => contentRef.current?.focus()}>
         Skip to content
       </button>
       <main
-        ref={mainRef}
-        tabIndex={-1}
         className={
           isPortfolioView
             ? "portfolio-shell"
@@ -185,6 +189,9 @@ function App() {
           )}
 
           <div
+            id="page-content"
+            ref={contentRef}
+            tabIndex={-1}
             className={
               isPortfolioView
                 ? "portfolio-content"
@@ -208,7 +215,10 @@ function App() {
               ) : currentView === "contact" ? (
                 <ContactPage />
               ) : currentView === "work-gallery" ? (
-                <WorkGallery onOpenCaptionTool={() => setIsAIOpen(true)} />
+                <WorkGallery onOpenCaptionTool={() => {
+                  captionOpenerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+                  setIsAIOpen(true);
+                }} />
               ) : currentView === "settle-up" ? (
                 <SettleUpPage />
               ) : currentView === "finance-dashboard" ? (
@@ -239,13 +249,28 @@ function App() {
             </RouteErrorBoundary>
           </div>
         </div>
-        {isAIOpen && (
-          <Suspense fallback={null}>
-            <AICaptionTool
-              isOpen={isAIOpen}
-              onClose={() => setIsAIOpen(false)}
-            />
-          </Suspense>
+        {isAIOpen && currentView === "work-gallery" && (
+          <RouteErrorBoundary routeKey="image-caption" fallback={
+            <section role="alert" className="flex min-h-[60vh] items-center justify-center bg-[#0d0f10] p-6 text-zinc-100">
+              <div className="max-w-lg border border-rose-500/50 p-6">
+                <h2 className="text-2xl font-bold">Image Caption could not open.</h2>
+                <p className="mt-3 text-sm leading-6">Your gallery is still available. Reload this page to try Image Caption again, or close this message.</p>
+                <div className="mt-5 flex flex-wrap gap-3">
+                  <button type="button" onClick={() => window.location.reload()} className="min-h-11 border border-zinc-600 px-4">Reload page</button>
+                  <button type="button" aria-label="Close Image Caption error" ref={(node) => node?.focus()} onClick={closeCaptionTool} className="min-h-11 border border-rose-300 px-4">Close message</button>
+                </div>
+              </div>
+            </section>
+          }>
+            <Suspense fallback={
+              <div role="status" className="fixed bottom-[calc(1rem_+_env(safe-area-inset-bottom))] left-4 right-4 z-[110] flex flex-wrap items-center justify-between gap-4 border border-[#d5d1c7] bg-[#f4f0e8] p-4 text-[#252620] shadow-lg">
+                <p>Opening Image Caption…</p>
+                <button type="button" aria-label="Cancel opening Image Caption" onClick={closeCaptionTool} className="min-h-11 border border-current px-4">Cancel opening</button>
+              </div>
+            }>
+              <AICaptionTool isOpen={isAIOpen} onClose={closeCaptionTool} />
+            </Suspense>
+          </RouteErrorBoundary>
         )}
 
         {/* Grid Pattern Overlay */}

@@ -1,0 +1,12 @@
+.settle-up-page :is(button, input, select) {
+  min-height: 44px;
+  min-width: 44px;
+}
+.settle-up-page :is(button, a, input, select):focus-visible {
+  outline: 2px solid #a7f3d0;
+  outline-offset: 3px;
+}
+.settle-up-page input,
+.settle-up-page select {
+  min-width: 0;
+}

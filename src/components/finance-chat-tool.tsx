@@ -11,6 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { parseJsonResponse } from "@/lib/safe-json-response";
+import { readBrowserJson, writeBrowserJson } from "@/lib/browser-storage";
 
 interface AgentStep {
   step: number;
@@ -72,7 +73,10 @@ export function FinanceChatPanel({
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [apiHistory, setApiHistory] = useState<HistoryMsg[]>([]);
   const [selectedStrategy, setSelectedStrategy] = useState<string>("default");
-  const [userMemories, setUserMemories] = useState<string[]>([]);
+  const [savedMemory] = useState(() => readBrowserJson("finance_agent_user_memory"));
+  const memoryValid = savedMemory.value === undefined || (Array.isArray(savedMemory.value) && savedMemory.value.every((item) => typeof item === "string"));
+  const [userMemories, setUserMemories] = useState<string[]>(() => memoryValid && Array.isArray(savedMemory.value) ? savedMemory.value : []);
+  const [storageWarning, setStorageWarning] = useState<string | null>(() => savedMemory.error || (!memoryValid ? "Saved agent memory is invalid and was not loaded. The original stored data has not been deleted." : null));
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const selectedStrategyMeta =
@@ -84,18 +88,6 @@ export function FinanceChatPanel({
     }
   }, [messages, loading]);
 
-  useEffect(() => {
-    const saved = localStorage.getItem("finance_agent_user_memory");
-    if (!saved) return;
-
-    try {
-      const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed)) setUserMemories(parsed);
-    } catch (e) {
-      console.error("Failed to parse user memory", e);
-    }
-  }, []);
-
   const handleSend = async () => {
     const msg = input.trim();
     if (!msg || loading) return;
@@ -105,6 +97,7 @@ export function FinanceChatPanel({
 
     const newMessages: ChatMsg[] = [...messages, { role: "user", content: msg }];
     setMessages(newMessages);
+    let memoriesToSave: string[] | null = null;
 
     try {
       const response = await fetch("/api/agent/chat", {
@@ -126,22 +119,26 @@ export function FinanceChatPanel({
         history?: HistoryMsg[];
       }>(response, "/api/agent/chat");
 
+      const newMemories = Array.isArray(data.new_memories) && data.new_memories.every((item) => typeof item === "string") ? data.new_memories : [];
+      if (data.new_memories !== undefined && (!Array.isArray(data.new_memories) || newMemories.length !== data.new_memories.length)) {
+        setStorageWarning("New agent memory is invalid and was not saved. Your answer is still available.");
+      }
       setMessages((prev) => [
         ...prev,
         {
           role: "assistant",
           content: data.reply || "No response.",
           steps: data.steps || [],
-          new_memories: data.new_memories || [],
+          new_memories: newMemories,
         },
       ]);
 
       setApiHistory(data.history || []);
 
-      if (data.new_memories && Array.isArray(data.new_memories)) {
-        const uniqueMemories = Array.from(new Set([...userMemories, ...data.new_memories]));
+      if (newMemories.length > 0) {
+        const uniqueMemories = Array.from(new Set([...userMemories, ...newMemories]));
         setUserMemories(uniqueMemories);
-        localStorage.setItem("finance_agent_user_memory", JSON.stringify(uniqueMemories));
+        memoriesToSave = uniqueMemories;
       }
     } catch (err: any) {
       setMessages((prev) => [
@@ -154,6 +151,8 @@ export function FinanceChatPanel({
     } finally {
       setLoading(false);
     }
+    // Persistence failure must not turn a successful answer into a failed API message.
+    if (memoriesToSave) setStorageWarning(writeBrowserJson("finance_agent_user_memory", memoriesToSave));
   };
 
   const handleClear = () => {
@@ -168,6 +167,7 @@ export function FinanceChatPanel({
       className={`flex h-full min-h-[640px] flex-col overflow-hidden bg-[#11151c] text-white ${className}`}
       aria-label="Finance Agent Chat"
     >
+      {storageWarning && <p role="alert" aria-label="Agent memory storage warning" className="shrink-0 border-b border-amber-400/30 bg-amber-400/10 p-4 text-sm text-amber-100">{storageWarning}</p>}
       <div className="flex shrink-0 flex-col gap-4 border-b border-white/10 px-4 py-4 sm:px-5 lg:px-6">
         <div className="flex items-start justify-between gap-4">
           <div className="flex min-w-0 items-center gap-3">

@@ -164,6 +164,10 @@ body:has(.portfolio-shell) {
 .skip-link:focus {
   transform: translateY(0);
 }
+#page-content:focus-visible {
+  outline: 2px solid #ac452b;
+  outline-offset: -2px;
+}
 .portfolio-shell .portfolio-button {
   display: inline-flex;
   align-items: center;

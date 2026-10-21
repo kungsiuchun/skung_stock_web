@@ -300,6 +300,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
   let compassMode = "live";
   let overlayMode = "live";
   let latestHeatmapPayload = firstPayload;
+  let latestPressurePayload = null;
   let recoveredExpectedMoveRequests = 0;
   let injectedServiceUnavailableResponses = 0;
   const overlayDates = [];
@@ -333,6 +334,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     if (url.pathname === "/api/spx-gex-pressure") {
       initialSpqRequestOrder.push("pressure");
       if (url.searchParams.get("date") === nextTradingDate) return request.respond(jsonResponse(rolloverPressurePayload));
+      if (latestPressurePayload && url.searchParams.get("date") === fixture.selectedDate) return request.respond(jsonResponse(latestPressurePayload));
     }
     if (url.pathname === "/api/spx-price-action-compass" && url.searchParams.get("view") === "price-overlay") initialSpqRequestOrder.push("overlay");
     if (url.pathname === "/api/spx-price-action-compass" && forceCompassTextFailure) {
@@ -860,6 +862,45 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     await latestModeResponse;
     await page.waitForFunction(() => document.querySelector('[data-spx-gex-navigation-mode="latest"]'));
     assert.match(page.url(), /\?mode=latest$/, "follow-latest mode must use a stable URL that does not pin one GEX date or frame");
+
+    await page.goto(`${APP_URL}/#/work/spx-gex-heatmap?mode=latest`, { waitUntil: "domcontentloaded", timeout: 20_000 });
+    await page.waitForFunction((minute) => document.querySelector('[data-spx-gex-pressure-matrix="true"]')?.textContent?.includes(`Latest ${minute} ET`), {}, formatMinute(firstMinute));
+    latestHeatmapPayload = secondPayload;
+    const lastPressureSlot = pressureFixture.pressure.timeline.at(-1);
+    assert.equal(pressureFixture.pressure.latest.snapshotMinuteEt, firstMinute, "UAT pressure fixture must start at the selected GEX frame");
+    latestPressurePayload = {
+      ...pressureFixture,
+      pressure: {
+        ...pressureFixture.pressure,
+        latest: {
+          ...pressureFixture.pressure.latest,
+          snapshotMinuteEt: secondMinute,
+          snapshotTimeEt: formatMinute(secondMinute),
+          collectedTimeEt: formatMinute(secondMinute + 15),
+        },
+        timeline: [
+          ...pressureFixture.pressure.timeline,
+          {
+            ...lastPressureSlot,
+            snapshotMinuteEt: secondMinute,
+            snapshotTimeEt: formatMinute(secondMinute),
+            collectedTimeEt: formatMinute(secondMinute + 15),
+            status: "READY",
+          },
+        ],
+      },
+    };
+    await page.evaluate((nextNow) => globalThis.__setSpxUatNow?.(nextNow), Date.parse(`${fixture.selectedDate}T19:00:00.000Z`));
+    const sameDayHeatmapResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === "/api/spx-gex-heatmap" && !url.searchParams.has("date") && !url.searchParams.has("snapshot");
+    });
+    await triggerVisibleCurrentSessionRefresh(page);
+    await sameDayHeatmapResponse;
+    await page.waitForFunction((minute) => document.querySelector('[data-spx-gex-pressure-matrix="true"]')?.textContent?.includes(`Latest ${minute} ET`)
+      && document.querySelector('[data-pressure-selected-slot="true"]')?.textContent?.includes(minute)
+      && document.querySelector('[data-spx-gex-pressure-matrix="true"]')?.getAttribute("aria-busy") === "false", {}, formatMinute(secondMinute));
+    assert.match(page.url(), /\?mode=latest$/, "same-day GEX and pressure refresh must keep the stable latest URL without reloading");
 
     latestHeatmapPayload = rolloverHeatmapPayload;
     overlayMode = "rollover";

@@ -56,6 +56,8 @@ Settle Up should preserve the core expense concepts: payer, amount, participants
 
 Settle Up should not look like a spreadsheet clone; the spreadsheet is a workflow reference, not a visual design.
 
+Removing a person is blocked while any expense references them as payer or split participant; the visitor must edit or remove those expenses first. Person removal never transfers payment responsibility automatically. Removing an event, expense, unreferenced person, or replacing the bill with demo data requires explicit confirmation. Cancellation preserves the complete bill. Cent allocation and existing legacy/v2 share links remain unchanged; draft edits are still session-only until the visitor creates an updated share link.
+
 ## SPX GEX Heatmap
 
 SPX GEX Heatmap is a Work Item that turns a premarket SPX options gamma workflow into a date-selectable visual map.
@@ -169,6 +171,8 @@ US ETF Portfolio Backtester is a standalone Market Lab Work Item at `#/work/port
 Its public share contract is a versioned hash link such as `#/work/portfolio-backtest?v=1&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:6000&asset=BND:4000`. Each `asset` value is a unique ETF ticker plus whole basis points. The complete setup must satisfy the same capital, date, policy, 1–10 position, uniqueness, and 10,000-basis-point validation as a submitted backtest; one invalid field rejects the entire shared setup. Links contain inputs only and never results, verification state, or provider payloads. Opening a link never starts an API request.
 
 Encoding sorts a copy of the assets by ticker for canonical links; decoding preserves the asset order present in the URL. Sharing never reorders the current form.
+
+Completed results offer a browser-only comparison CSV download containing the existing session curve's USD values and base-100 indexes, rebalancing/dividend policies, source-as-of, cache status, methodology version and warnings. Export does not recompute results or call an API, and never includes raw provider payloads. The setup share-link contract remains inputs-only.
 
 It compares a visitor-defined USD allocation of one to ten US-listed ETFs with SPY through a read-only EOD historical simulation. The browser submits the configuration only; the Pages Function validates ETF eligibility, retrieves and normalizes history server-side, and returns a versioned result without raw provider payloads.
 
