@@ -99,7 +99,6 @@ export const getStocksWatcherTopTabToolPlan = (
   if (tab === "Fixed Income") return [];
   if (tab === "Macro") return [];
   if (tab === "News") return [
-    { name: "morning_briefing", params: { ticker } },
     { name: "pre_event_brief", params: { ticker } },
   ];
   return [];

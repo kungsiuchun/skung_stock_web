@@ -531,6 +531,53 @@ export const rawNullableNumber = (value: unknown): number | null => {
 export const rawNullableString = (value: unknown): string | null =>
   typeof value === "string" && value.trim() ? value.trim() : null;
 
+export interface WatcherNewsArticle {
+  id: string;
+  title: string;
+  publisher: string | null;
+  link: string | null;
+  publishedAt: string | null;
+}
+
+export const newsArticlesFromResult = (result: NativeToolResult) => {
+  if (result.error) throw new Error(result.error);
+  const news = rawRecord(result.raw)?.news;
+  if (!Array.isArray(news)) throw new Error("The source did not return structured news. Retry news to check again.");
+  const articles: WatcherNewsArticle[] = [];
+  const links = new Set<string>();
+  let omittedCount = 0;
+  for (const [index, value] of news.entries()) {
+    const item = rawRecord(value);
+    const title = rawNullableString(item?.title);
+    if (!title) { omittedCount += 1; continue; }
+    let link: string | null = null;
+    try {
+      const url = new URL(rawNullableString(item?.link) || "");
+      if (["https:", "http:"].includes(url.protocol) && !url.username && !url.password) link = url.href;
+    } catch { /* Missing or unsafe URLs remain visible as non-linked headlines. */ }
+    if (link) {
+      const identity = link.split("#")[0];
+      if (links.has(identity)) continue;
+      links.add(identity);
+    }
+    const date = rawNullableString(item?.publishedAt);
+    const calendarDate = date?.slice(0, 10);
+    const calendarTime = calendarDate ? Date.parse(`${calendarDate}T00:00:00Z`) : NaN;
+    const validDate = date && /^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(date)
+      && Number.isFinite(Date.parse(date)) && Number.isFinite(calendarTime)
+      && new Date(calendarTime).toISOString().slice(0, 10) === calendarDate;
+    articles.push({
+      id: link || `unlinked-${index}`,
+      title,
+      publisher: rawNullableString(item?.publisher),
+      link,
+      publishedAt: validDate ? new Date(date).toISOString() : null,
+    });
+  }
+  articles.sort((a, b) => (b.publishedAt ? Date.parse(b.publishedAt) : -Infinity) - (a.publishedAt ? Date.parse(a.publishedAt) : -Infinity));
+  return { articles, omittedCount };
+};
+
 export const financialStatementsFromResult = (result: NativeToolResult | undefined): WatcherFinancialStatements | null => {
   const body = rawRecord(result?.raw);
   const financialSourceRaw = rawRecord(body?.financialSource);
@@ -686,7 +733,7 @@ export const parseMarketIndexCard = (definition: MarketIndexDefinition, result: 
 
 export const quotesFromResult = (result: NativeToolResult | undefined): RawQuoteRow[] => {
   const raw = rawRecord(result?.raw);
-  const quotes = raw?.quotes;
+  const quotes = raw?.quotes ?? raw?.briefingQuotes;
   if (!Array.isArray(quotes)) return [];
   return quotes
     .map((item) => rawRecord(item))
