@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Activity, AlertTriangle, TrendingUp } from "lucide-react";
 import { formatSpxGexCompactExposure } from "@/lib/spx-gex-heatmap";
-import { isFreshSpx0DteSample, SPX_0DTE_STALE_AFTER_MS } from "@/lib/spx-price-action-compass";
+import { isFreshSpx0DteSample, shouldRefreshSpxCurrentSession } from "@/lib/spx-price-action-compass";
 import { buildSpxFailureDetails, formatSpxFailureDetails, parseSpxBoardResponse, spxFailureMessage, type SpxFailureDetails } from "@/lib/spx-board-response";
 import { SafeJsonResponseError } from "@/lib/safe-json-response";
 import type { PressureOverview } from "./spx-board-overview";
@@ -132,18 +132,6 @@ const hasValidExpectedMove = (
   && typeof expectedMove.sampleAt === "string"
   && Number.isFinite(Date.parse(expectedMove.sampleAt)),
 );
-
-const overlayRefreshIdentity = (selectedDate: string, source: PriceOverlaySource) => [
-  selectedDate,
-  source.provider,
-  source.status || "READY",
-  source.sessionState || "UNAVAILABLE",
-  source.latestSampleAt || "",
-  source.expectedMove?.status || "UNAVAILABLE",
-  source.expectedMove?.sampleAt || "",
-  source.sharedCache?.cachedAt || "",
-  source.sharedCache?.refreshing ? "refreshing" : "settled",
-].join(":");
 
 const stateLabel: Record<SpxGexPressureState, string> = {
   POSITIVE_STRONGER: "POSITIVE STRONGER",
@@ -290,11 +278,13 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
   const [matrixRailWidth, setMatrixRailWidth] = useState(0);
   const [overlayNowMs, setOverlayNowMs] = useState(() => Date.now());
   const [overlayRefreshKey, setOverlayRefreshKey] = useState(0);
+  const [overlayLoading, setOverlayLoading] = useState(false);
   const matrixScrollRef = useRef<HTMLDivElement>(null);
   const dataRef = useRef(data);
   const activeCellRef = useRef(activeCell);
   const overlayRequestVersionRef = useRef(0);
-  const overlayAutoRefreshRef = useRef({ identity: "", attempts: 0 });
+  const overlayAutoRefreshRef = useRef({ date: "", attempts: 0 });
+  const overlayLoadingRef = useRef(false);
   const pressureRecoveryRef = useRef({ date: "", attempts: 0 });
   const hoverSuppressedAfterScrollRef = useRef(false);
   activeCellRef.current = activeCell;
@@ -328,59 +318,44 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
   useEffect(() => setStrikePanSteps(0), [selectedDate]);
 
   useEffect(() => {
-    if (!enabled) return undefined;
-    const source = priceOverlay?.data?.source;
-    const effectiveProvider = source?.provider || priceOverlay?.failureProvider;
-    const effectiveSessionState = priceOverlay?.failureSessionState || source?.sessionState;
-    if (effectiveProvider !== "0dtespx" || effectiveSessionState !== "LIVE") return undefined;
-
-    const identity = source
-      ? overlayRefreshIdentity(selectedDate, source)
-      : `${selectedDate}:0dtespx:${effectiveSessionState}:FAILED`;
-    if (overlayAutoRefreshRef.current.identity !== identity) {
-      overlayAutoRefreshRef.current = { identity, attempts: 0 };
+    if (!enabled || overlayLoading || !priceOverlay || priceOverlay.selectedDate !== selectedDate) return undefined;
+    if (overlayAutoRefreshRef.current.date !== selectedDate) {
+      overlayAutoRefreshRef.current = { date: selectedDate, attempts: 0 };
     }
-    const nowMs = Date.now();
-    const nextExpiryAt = (source ? [source.latestSampleAt, source.expectedMove?.sampleAt] : [])
-      .map((value) => typeof value === "string" ? Date.parse(value) : Number.NaN)
-      .filter((value) => Number.isFinite(value))
-      .map((value) => value + SPX_0DTE_STALE_AFTER_MS)
-      .sort((left, right) => left - right)[0];
-    const sourceExpired = Boolean(source && source.status === "READY" && !isFreshSpx0DteSample(source.latestSampleAt, nowMs));
-    const needsImmediateRevalidation = Boolean(
-      !source
-      || priceOverlay?.error
-      || source?.sharedCache?.refreshing
-      || source?.status === "STALE"
+    const source = priceOverlay?.data?.source;
+    const initialClock = etClock();
+    if (source?.sessionState === "CLOSED" || !shouldRefreshSpxCurrentSession({
+      selectedDate, ...initialClock, minuteEt: Math.max(570, initialClock.minuteEt), visible: true,
+    })) return undefined;
+    const needsRecovery = Boolean(!priceOverlay.data?.candles.length || priceOverlay.error
+      || source?.sharedCache?.refreshing || source?.status === "STALE" || source?.status === "UNAVAILABLE"
       || source?.expectedMove?.status === "UNAVAILABLE"
-      || sourceExpired,
-    );
+      || source?.provider === "0dtespx" && !isFreshSpx0DteSample(source.latestSampleAt));
+    if (!needsRecovery) overlayAutoRefreshRef.current.attempts = 0;
     const attempts = overlayAutoRefreshRef.current.attempts;
-    if (needsImmediateRevalidation && attempts >= OVERLAY_REVALIDATION_DELAYS_MS.length) return undefined;
-    if (!needsImmediateRevalidation && nextExpiryAt === undefined) return undefined;
-
-    const delayMs = needsImmediateRevalidation
-      ? OVERLAY_REVALIDATION_DELAYS_MS[attempts]
-      : Math.max(0, nextExpiryAt - nowMs) + 1;
-    const dueAt = nowMs + delayMs;
+    if (needsRecovery && attempts >= OVERLAY_REVALIDATION_DELAYS_MS.length) return undefined;
+    const delayMs = Math.max(needsRecovery ? OVERLAY_REVALIDATION_DELAYS_MS[attempts] : 60_000,
+      (570 - initialClock.minuteEt) * 60_000);
+    const dueAt = Date.now() + delayMs;
     let triggered = false;
-    const triggerRevalidation = () => {
-      if (triggered || document.visibilityState !== "visible") return;
+    const triggerRevalidation = (fromVisibility = false) => {
+      if (triggered || overlayLoadingRef.current) return;
+      const clock = etClock();
+      if (!shouldRefreshSpxCurrentSession({ selectedDate, ...clock, visible: document.visibilityState === "visible" })) return;
+      if (needsRecovery && fromVisibility && Date.now() < dueAt) return;
       triggered = true;
-      overlayAutoRefreshRef.current.attempts += 1;
+      if (needsRecovery) overlayAutoRefreshRef.current.attempts += 1;
       setOverlayNowMs(Date.now());
       setOverlayRefreshKey((current) => current + 1);
     };
-    const timer = window.setTimeout(triggerRevalidation, delayMs);
-    const revalidateOnVisible = () => {
-      if (Date.now() >= dueAt) triggerRevalidation();
-    };
+    const timer = window.setTimeout(() => triggerRevalidation(), delayMs);
+    const revalidateOnVisible = () => triggerRevalidation(true);
     document.addEventListener("visibilitychange", revalidateOnVisible);
     return () => {
       window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", revalidateOnVisible);
     };
-  }, [enabled, overlayRefreshKey, priceOverlay?.data?.source, priceOverlay?.error, priceOverlay?.failureProvider, priceOverlay?.failureSessionState, selectedDate]);
+  }, [enabled, overlayLoading, priceOverlay, selectedDate]);
 
   useEffect(() => {
     const rail = matrixScrollRef.current;
@@ -480,6 +455,8 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
     const requestVersion = ++overlayRequestVersionRef.current;
     const canCommit = () => !controller.signal.aborted && requestVersion === overlayRequestVersionRef.current;
     const load = async () => {
+      overlayLoadingRef.current = true;
+      setOverlayLoading(true);
       const requestUrl = `/api/spx-price-action-compass?timeframe=1m&view=price-overlay&date=${encodeURIComponent(selectedDate)}`;
       try {
         const response = await runSpxRequest((attemptSignal) => fetch(requestUrl, { signal: attemptSignal }), {
@@ -530,6 +507,8 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
           : { selectedDate, data: null, error: spxFailureMessage(failure.httpStatus), failure });
       } finally {
         if (canCommit()) {
+          overlayLoadingRef.current = false;
+          setOverlayLoading(false);
           // Re-evaluate freshness against the clock that completed this read.
           // Without this, an ET date rollover can leave the overlay comparing a
           // new-session sample against yesterday's memoized clock.
@@ -539,7 +518,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
       }
     };
     void load();
-    return () => controller.abort();
+    return () => { controller.abort(); overlayLoadingRef.current = false; };
   }, [enabled, overlayRefreshKey, selectedDate]);
 
   const pressure = data?.selectedDate === selectedDate ? data.pressure : null;
@@ -702,6 +681,10 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
           {priceOverlay?.data?.source.sharedCache && <span className="border border-cyan-300/30 bg-cyan-300/5 px-2 py-1 font-mono text-[10px] font-black text-cyan-100" data-spx-gex-pressure-shared-cache={priceOverlay.data.source.sharedCache.status}>{`CACHE ${priceOverlay.data.source.sharedCache.status}${priceOverlay.data.source.sharedCache.refreshing ? " · REFRESHING" : ""}`}</span>}
           {expectedMoveLabel && <span className={`${expectedMoveIsStale ? "border-amber-300/60 bg-amber-300/10 text-amber-100" : "border-violet-300/60 bg-violet-300/10 text-violet-100"} border px-2 py-1 font-mono text-[10px] font-black`} title="0DTESPX expected move risk corridor; it does not alter canonical GEX." data-spx-gex-pressure-expected-move="true" data-spx-gex-pressure-expected-move-status={expectedMoveIsStale ? "STALE" : "READY"}>{expectedMoveLabel}</span>}
           {controls}
+          <button type="button" data-spx-overlay-retry="true" disabled={overlayLoading} className="min-h-10 px-3 text-xs text-cyan-200 underline disabled:opacity-40" onClick={() => {
+            overlayAutoRefreshRef.current = { date: selectedDate, attempts: 0 };
+            setOverlayRefreshKey(k => k + 1);
+          }}>Retry price overlay</button>
         </div>
       </div>
 

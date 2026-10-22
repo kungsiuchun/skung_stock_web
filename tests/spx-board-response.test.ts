@@ -71,6 +71,33 @@ it("rejects inconsistent snapshot identity and bad numeric values before renderi
   await assert.rejects(parseSpxBoardResponse(Response.json(bad), "/api/spx-gex-heatmap", "heatmap"), /contract/);
 });
 
+it("requires error identity for application failures even on HTTP 200", async () => {
+  for (const status of ["ERROR", "BINDING_MISSING", "STORAGE_UNAVAILABLE"]) {
+    for (const kind of ["heatmap", "pressure"] as const) {
+      const payload = kind === "heatmap" ? { ...emptySpxBoard, status } : { ...pressureReady(), status, pressure: null };
+      await assert.rejects(parseSpxBoardResponse(Response.json(payload), "/api/spx-test", kind),
+        error => error instanceof SafeJsonResponseError && error.code === "SCHEMA_INVALID");
+      const identified = { ...payload, errorCode: "SPX_SOURCE_UNAVAILABLE" };
+      assert.deepEqual(await parseSpxBoardResponse(Response.json(identified), "/api/spx-test", kind), identified);
+    }
+  }
+});
+
+it("accepts the producer's zero-based lifecycle ordinal without accepting negative attempts", async () => {
+  const payload = { ...ready(), decision: {
+    runId: "fixture", scheduledAt: "2026-07-13T14:00:00Z", currentStage: "SCHEDULED",
+    councilTally: { CALL: 0, PUT: 0, HOLD: 0, INVALID: 0 }, councilAgents: [],
+    cio: { action: null, confidence: 0, modelStatus: "NOT_RUN", decisionStatus: "PIPELINE_FAILED" },
+    riskGate: { disposition: "NOT_RUN", reason: "", action: null }, finalAction: null,
+    degraded: true, degradedReason: "Fixture", replayGrade: "UNAVAILABLE",
+    delivery: { status: "NOT_QUEUED", attemptCount: 0, telegramMessageId: null, error: null },
+    lifecycle: [{ stage: "SCHEDULED", occurredAt: "2026-07-13T14:00:00Z", latencyMs: null, attempt: 0 }],
+  } };
+  assert.equal((await parseSpxBoardResponse<{ status: string }>(Response.json(payload), "/api/spx-test", "heatmap")).status, "READY");
+  payload.decision.lifecycle[0].attempt = -1;
+  await assert.rejects(parseSpxBoardResponse(Response.json(payload), "/api/spx-test", "heatmap"), /contract/);
+});
+
 it("rejects malformed nested pressure and Compass fields at the shared boundary", async () => {
   const pressure = pressureReady();
   assert.ok(pressure.pressure.movers.length > 0);

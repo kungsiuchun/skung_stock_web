@@ -496,8 +496,7 @@ const decision = (value: unknown) => {
       && oneOf(event.stage, ["SCHEDULED", "LOCK_ACQUIRED", "SNAPSHOT_READY", "COUNCIL_COMPLETED", "CIO_DECIDED", "RISK_GATED", "PERSISTED", "DELIVERY_ATTEMPTED", "DELIVERED", "DELIVERY_FAILED"])
       && dateTime(event.occurredAt)
       && (event.latencyMs === null || bounded(event.latencyMs, 0, Number.POSITIVE_INFINITY))
-      && nonNegativeInteger(event.attempt)
-      && (event.attempt as number) > 0)) return false;
+      && nonNegativeInteger(event.attempt))) return false;
   return true;
 };
 
@@ -545,6 +544,9 @@ export const formatSpxFailureDetails = (details: SpxFailureDetails | null) => de
 export async function parseSpxBoardResponse<T>(response: Response, url: string, kind: "heatmap" | "pressure" | "compass" | "overlay" | "detail"): Promise<T> {
   const value = await parseJsonResponse<unknown>(response, url, { allowHttpError: true });
   if (!record(value)) return invalidResponse(kind, response, url);
+  if (oneOf(value.status, ["ERROR", "BINDING_MISSING", "STORAGE_UNAVAILABLE"]) && !validErrorEnvelope(value)) {
+    return invalidResponse(kind, response, url);
+  }
   if (!response.ok) {
     if (!validErrorEnvelope(value)) return invalidResponse(kind, response, url);
     return value as T;

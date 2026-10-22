@@ -1,4 +1,4 @@
-import { isNyseTradingDay } from "./nyse-calendar";
+import { getEarlyCloseMarketHolidayKeys, isNyseTradingDay } from "./nyse-calendar";
 
 export type SpxPriceActionTimeframe = "1m" | "5m" | "15m" | "4h" | "1d";
 
@@ -50,7 +50,7 @@ export const shouldRefreshSpxCurrentSession = (input: {
   && isNyseTradingDay(input.tradingDate)
   && input.selectedDate === input.tradingDate
   && input.minuteEt >= 9 * 60 + 30
-  && input.minuteEt < 16 * 60;
+  && input.minuteEt < (getEarlyCloseMarketHolidayKeys(Number(input.tradingDate.slice(0, 4))).has(input.tradingDate) ? 13 : 16) * 60;
 
 export const isFreshSpx0DteSample = (sampleAt: string | number | null | undefined, nowMs = Date.now()) => {
   const sampleMs = typeof sampleAt === "number"

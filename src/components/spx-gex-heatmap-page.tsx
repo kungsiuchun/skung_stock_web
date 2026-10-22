@@ -463,7 +463,7 @@ export function SPXGexHeatmapPage() {
           </div>
         )}
         {reconnecting && <Notice tone="amber" text="Reconnecting SPX source…" />}
-        {requestState.phase === "EMPTY" && <Notice tone="amber" text={heatmap ? `Requested snapshot is unavailable. Showing last verified ${selectedDate} ${selectedSession?.snapshotTimeEt} ET.` : "No retained snapshot is available for this selection."} />}
+        {requestState.phase === "EMPTY" && <div><Notice tone="amber" text={heatmap ? `Requested snapshot is unavailable. Showing last verified ${selectedDate} ${selectedSession?.snapshotTimeEt} ET.` : "No retained snapshot is available for this selection."} /><button className="min-h-10 px-4 text-xs text-cyan-200 underline" onClick={() => void loadHeatmap(navigationMode === "latest" ? undefined : selectedDate, navigationMode === "latest" ? null : selectedMinute)}>Retry snapshot</button></div>}
         {requestState.phase === "ERROR" && <div role="alert"><Notice tone="red" text={`${spxFailureMessage(requestState.httpStatus)}${heatmap ? ` Last verified: ${selectedDate} ${selectedSession?.snapshotTimeEt} ET; refresh failed.` : ""}`} /><button className="min-h-10 px-4 text-xs text-cyan-200 underline" onClick={() => void loadHeatmap(navigationMode === "latest" ? undefined : selectedDate, navigationMode === "latest" ? null : selectedMinute)}>Retry snapshot</button></div>}
         {data.warnings.length > 0 && <Notice tone="amber" text={data.warnings.join(" ")} />}
         {heatmap && <SpxBoardOverview heatmap={heatmap} pressure={pressureOverview} stale={requestState.phase !== "READY"} onEvidence={() => {

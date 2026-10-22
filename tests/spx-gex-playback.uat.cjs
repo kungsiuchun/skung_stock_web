@@ -25,6 +25,23 @@ const triggerVisibleCurrentSessionRefresh = (page) => page.evaluate(() => {
   document.dispatchEvent(new Event("visibilitychange"));
 });
 
+const retryOverlay = (page) => page.click('[data-spx-overlay-retry="true"]');
+const reloadCompass = async (page) => {
+  const current = await page.$eval('[data-spx-price-action-compass]', e => e.getAttribute('data-pa-loaded-timeframe'));
+  const other = current === '5m' ? '1m' : '5m';
+  const select = async timeframe => {
+    const response = page.waitForResponse(r => { const u = new URL(r.url()); return u.pathname === '/api/spx-price-action-compass' && !u.searchParams.has('view') && u.searchParams.get('timeframe') === timeframe; });
+    await page.$$eval('[data-spx-price-action-compass] button', (buttons, value) => {
+      const target = buttons.find(b => b.textContent.trim() === value.toUpperCase());
+      if (!target) throw new Error(`Missing timeframe button ${value}`);
+      target.click();
+    }, timeframe);
+    await response;
+    await page.waitForFunction(tf => document.querySelector('[data-spx-price-action-compass]')?.getAttribute('data-pa-loaded-timeframe') === tf, {}, timeframe);
+  };
+  await select(other); await select(current);
+};
+
 const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, async (element) => {
   let scroller = element.parentElement;
   while (scroller) {
@@ -171,10 +188,11 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
   };
   const staleExpectedMovePayload = {
     ...closedOneMinutePayload,
+    candles: closedOneMinuteCandles.slice(0, 345),
     source: {
       ...closedOneMinutePayload.source,
       label: "0DTESPX LIVE SPX index series",
-      latestSampleAt: `${fixture.selectedDate}T20:14:00.000Z`,
+      latestSampleAt: `${fixture.selectedDate}T19:14:00.000Z`,
       priceAgeMs: 60_000,
       status: "READY",
       sessionState: "LIVE",
@@ -182,21 +200,21 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
       expectedMove: {
         status: "STALE",
         value: 25,
-        sampleAt: `${fixture.selectedDate}T19:15:00.000Z`,
+        sampleAt: `${fixture.selectedDate}T18:15:00.000Z`,
         ageMs: 60 * 60_000,
         lagMs: 45 * 60_000,
         errorCode: "ZERO_DTE_SPX_EXPECTED_MOVE_LAGGED",
       },
       sharedCache: {
         status: "STALE",
-        cachedAt: `${fixture.selectedDate}T20:14:00.000Z`,
+        cachedAt: `${fixture.selectedDate}T19:14:00.000Z`,
         ageMs: 60_000,
         refreshAfterMs: 60_000,
         refreshing: true,
       },
     },
   };
-  const liveOneMinuteCandles = Array.from({ length: 406 }, (_, index) => {
+  const liveOneMinuteCandles = Array.from({ length: 346 }, (_, index) => {
     const close = fixture.heatmap.quote.last + Math.sin(index / 11) * 9 + index * 0.015;
     return {
       time: Date.parse(`${fixture.selectedDate}T13:30:00.000Z`) + index * 60_000,
@@ -216,7 +234,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
       provider: "0dtespx",
       label: "0DTESPX LIVE SPX index series",
       interval: "1s->1m",
-      latestSampleAt: `${fixture.selectedDate}T20:15:00.000Z`,
+      latestSampleAt: `${fixture.selectedDate}T19:15:00.000Z`,
       priceAgeMs: 0,
       status: "READY",
       sessionState: "LIVE",
@@ -225,14 +243,14 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
       expectedMove: {
         status: "READY",
         value: 25,
-        sampleAt: `${fixture.selectedDate}T20:15:00.000Z`,
+        sampleAt: `${fixture.selectedDate}T19:15:00.000Z`,
         ageMs: 0,
         lagMs: 0,
         errorCode: null,
       },
       sharedCache: {
         status: "HIT",
-        cachedAt: `${fixture.selectedDate}T20:15:00.000Z`,
+        cachedAt: `${fixture.selectedDate}T19:15:00.000Z`,
         ageMs: 0,
         refreshAfterMs: 60_000,
         refreshing: false,
@@ -248,15 +266,15 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     })),
     source: {
       ...liveExpectedMovePayload.source,
-      latestSampleAt: `${nextTradingDate}T20:15:00.000Z`,
+      latestSampleAt: `${nextTradingDate}T19:15:00.000Z`,
       sessionDate: nextTradingDate,
       expectedMove: {
         ...liveExpectedMovePayload.source.expectedMove,
-        sampleAt: `${nextTradingDate}T20:15:00.000Z`,
+        sampleAt: `${nextTradingDate}T19:15:00.000Z`,
       },
       sharedCache: {
         ...liveExpectedMovePayload.source.sharedCache,
-        cachedAt: `${nextTradingDate}T20:15:00.000Z`,
+        cachedAt: `${nextTradingDate}T19:15:00.000Z`,
       },
     },
   };
@@ -274,7 +292,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
       },
       sharedCache: {
         status: "STALE",
-        cachedAt: `${fixture.selectedDate}T20:14:00.000Z`,
+        cachedAt: `${fixture.selectedDate}T19:14:00.000Z`,
         ageMs: 60_000,
         refreshAfterMs: 60_000,
         refreshing: true,
@@ -308,6 +326,11 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
   const initialSpqRequestOrder = [];
   const browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
   const page = await browser.newPage();
+  const nativeWaitForResponse = page.waitForResponse.bind(page);
+  page.waitForResponse = (...args) => {
+    const callsite = new Error("Response wait started here").stack;
+    return nativeWaitForResponse(...args).catch(error => { error.message += `\n${callsite}`; throw error; });
+  };
   const consoleErrors = [];
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(message.text());
@@ -325,7 +348,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
       }
       static now() { return currentNow; }
     };
-  }, Date.parse(`${fixture.selectedDate}T20:15:00.000Z`));
+  }, Date.parse(`${fixture.selectedDate}T19:15:00.000Z`));
   await page.setRequestInterception(true);
   page.on("request", (request) => {
     const url = new URL(request.url());
@@ -465,7 +488,8 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     }));
     assert.equal(pressureAfterTimeout.busy, "false", "a terminal pressure timeout must stop aria-busy");
     assert.equal(pressureAfterTimeout.matrixVisible, true, "a pressure timeout must retain the last verified matrix");
-    assert.match(pressureAfterTimeout.warning, /timed out after 8000ms/i);
+    assert.match(pressureAfterTimeout.warning, /last verified GEX matrix/i);
+    assert.match(pressureAfterTimeout.warning, /REQUEST_TIMEOUT/, "safe timeout identity stays in expandable diagnostics");
     await page.evaluate(() => window.__restoreSpxUatFetch?.());
     await page.$eval('[data-pa-chart-surface="true"]', (element) => element.scrollIntoView({ block: "center" }));
 
@@ -634,7 +658,10 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
       warning: document.querySelector('[data-spx-gex-pressure-expected-move-warning="true"]')?.textContent || "",
     }));
     assert.equal(missingExpectedMove.corridorLines, 0, "an unverified Expected Move must not fabricate a corridor");
-    assert.match(missingExpectedMove.warning, /ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE/);
+    assert.match(missingExpectedMove.warning, /Expected Move unavailable/);
+    assert.doesNotMatch(missingExpectedMove.warning, /ZERO_DTE_SPX_/);
+    await page.$eval('[data-spx-price-overlay-diagnostics]', e => { e.open = true; });
+    assert.match(await page.$eval('[data-spx-price-overlay-diagnostics]', e => e.innerText), /ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE/);
     await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-expected-move-status="READY"]'));
     const recoveredExpectedMove = await page.evaluate(() => ({
       label: document.querySelector('[data-spx-gex-pressure-expected-move-status="READY"]')?.textContent || "",
@@ -642,7 +669,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     }));
     assert.equal(page.url(), pageUrlBeforeExpectedMoveRecovery, "Expected Move recovery must not require a page reload");
     assert.ok(recoveredExpectedMoveRequests >= 2, "a shared-cache refresh must trigger a bounded overlay-only follow-up read");
-    assert.match(recoveredExpectedMove.label, /EM ±25\.00 · 16:15 ET/);
+    assert.match(recoveredExpectedMove.label, /EM ±25\.00 · 15:15 ET/);
     assert.equal(recoveredExpectedMove.corridorLines, 2, "a recovered Expected Move must render both corridor rails");
     await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
     const reducedMotionAnimation = await page.$eval('[data-spx-gex-pressure-spot-marker="true"]', (element) => getComputedStyle(element).animationName);
@@ -657,7 +684,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
       cache: document.querySelector('[data-spx-gex-pressure-shared-cache]')?.textContent || "",
       corridorLines: document.querySelectorAll('[data-spx-gex-pressure-expected-move-upper="true"], [data-spx-gex-pressure-expected-move-lower="true"]').length,
     }));
-    assert.match(staleExpectedMove.label, /STALE EM ±25\.00 · 15:15 ET/);
+    assert.match(staleExpectedMove.label, /STALE EM ±25\.00 · 14:15 ET/);
     assert.match(staleExpectedMove.warning, /Using stale 0DTESPX Expected Move sampled 60m ago/);
     assert.match(staleExpectedMove.warning, /context only/);
     assert.match(staleExpectedMove.cache, /CACHE STALE · REFRESHING/);
@@ -666,7 +693,9 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
 
     overlayMode = "closed";
     compassMode = "closed";
-    await triggerVisibleCurrentSessionRefresh(page);
+    await page.evaluate(now => globalThis.__setSpxUatNow(now), Date.parse(`${fixture.selectedDate}T20:15:00Z`));
+    await retryOverlay(page);
+    await reloadCompass(page);
     try {
       await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-spot-source="true"]')?.textContent?.includes("0DTESPX CLOSED"));
       await page.waitForFunction(() => document.querySelector('[data-spx-price-action-compass="true"]')?.textContent?.includes("0DTESPX CLOSED"));
@@ -839,7 +868,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.ok(consoleErrors.every((error) => /503 \(Service Unavailable\)/.test(error)));
     await page.evaluate((nextNow) => globalThis.__setSpxUatNow?.(nextNow), Date.parse(`${fixture.selectedDate}T20:16:00.000Z`));
     overlayMode = "closed-failure";
-    await triggerVisibleCurrentSessionRefresh(page);
+    await retryOverlay(page);
     await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-spot-warning="true"]')?.textContent?.includes("showing the last verified 1-minute SPX and stale Expected Move context"));
     const retainedClosedOverlay = await page.evaluate(() => ({
       source: document.querySelector('[data-spx-gex-pressure-spot-source="true"]')?.textContent || "",
@@ -859,10 +888,10 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.match(retainedClosedOverlay.diagnostics, /ZERO_DTE_SPX_UPSTREAM_UNAVAILABLE/, "technical failure remains inspectable in diagnostics");
     assert.equal(retainedClosedOverlay.pulseCount, 0, "retained CLOSED overlay must remain non-live");
     overlayMode = "closed";
-    await triggerVisibleCurrentSessionRefresh(page);
+    await retryOverlay(page);
     await page.waitForFunction(() => document.querySelector('[data-spx-gex-pressure-spot-source="true"]')?.textContent?.includes("0DTESPX CLOSED")
       && !document.querySelector('[data-spx-gex-pressure-spot-warning="true"]'));
-    assert.match(await page.$eval('[data-spx-gex-pressure-spot-source="true"]', (element) => element.textContent || ""), /0DTESPX CLOSED/, "post-close source must recover on the next automatic visibility revalidation");
+    assert.match(await page.$eval('[data-spx-gex-pressure-spot-source="true"]', (element) => element.textContent || ""), /0DTESPX CLOSED/, "post-close source must recover through explicit overlay retry");
 
     const latestModeResponse = page.waitForResponse((response) => {
       const url = new URL(response.url());
@@ -914,7 +943,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
 
     latestHeatmapPayload = rolloverHeatmapPayload;
     overlayMode = "rollover";
-    await page.evaluate((nextNow) => globalThis.__setSpxUatNow?.(nextNow), Date.parse(`${nextTradingDate}T20:15:00.000Z`));
+    await page.evaluate((nextNow) => globalThis.__setSpxUatNow?.(nextNow), Date.parse(`${nextTradingDate}T19:15:00.000Z`));
     const rolloverHeatmapResponse = page.waitForResponse((response) => {
       const url = new URL(response.url());
       return url.pathname === "/api/spx-gex-heatmap" && !url.searchParams.has("date") && !url.searchParams.has("snapshot");
@@ -946,7 +975,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
       navigationMode: "latest",
       selectedDate: nextTradingDate,
       source: "SPX 1M / 0DTESPX LIVE",
-      expectedMove: "EM ±25.00 · 16:15 ET",
+      expectedMove: "EM ±25.00 · 15:15 ET",
       corridorLines: 2,
     }, "follow-latest mode must cross the ET trading date and restore current-session Expected Move without a reload");
     assert.equal(overlayDates.at(-1), nextTradingDate, "the rollover overlay request must follow the new selected GEX date");

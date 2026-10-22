@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { emptySpxBoard, parseSpxBoardResponse, spxFailureMessage, type SpxGexHeatmapResponse } from "@/lib/spx-board-response";
 import { SafeJsonResponseError } from "@/lib/safe-json-response";
 import { runSpxRequest, SpxRequestTimeoutError } from "@/lib/spx-request-lane";
+import { getEarlyCloseMarketHolidayKeys, isNyseTradingDay } from "@/lib/nyse-calendar";
 type BoardRequestPhase = "LOADING" | "READY" | "EMPTY" | "ERROR";
 
 interface BoardRequestState {
@@ -106,6 +107,8 @@ export function useSpxGexBoard() {
   const requestVersionRef = useRef(0);
   const navigationModeRef = useRef<SpxGexBoardLoadMode>(initialSelection.mode);
   const postCloseGexRevalidationDateRef = useRef<string | null>(null);
+  const automaticReadRef = useRef({ date: "", failures: 0 });
+  const requestPendingRef = useRef(false);
   const playbackRunRef = useRef(0);
   const playbackStateRef = useRef({
     sessions: data.sessions,
@@ -129,13 +132,15 @@ export function useSpxGexBoard() {
   const loadHeatmap = useCallback(async (
     date?: string,
     snapshotMinute?: number | null,
-    options: { playback?: boolean; navigationMode?: SpxGexBoardLoadMode } = {},
+    options: { playback?: boolean; navigationMode?: SpxGexBoardLoadMode; automatic?: boolean } = {},
   ) => {
+    if (!options.automatic) automaticReadRef.current = { date: currentEtClock().tradingDate, failures: 0 };
     const requestedNavigationMode = options.navigationMode || navigationModeRef.current;
     activeRequestRef.current?.abort();
     const controller = new AbortController();
     activeRequestRef.current = controller;
     const requestVersion = ++requestVersionRef.current;
+    requestPendingRef.current = true;
     setLoading(true);
     try {
       const params = new URLSearchParams();
@@ -223,6 +228,7 @@ export function useSpxGexBoard() {
       return "FAILED";
     } finally {
       if (requestVersion === requestVersionRef.current) {
+        requestPendingRef.current = false;
         setLoading(false);
         setReconnecting(false);
       }
@@ -244,14 +250,19 @@ export function useSpxGexBoard() {
     if (!initialHeatmapSettled || navigationMode !== "latest" || playing) return undefined;
     const refreshVisibleCurrentSession = () => {
       const clock = currentEtClock();
-      if (document.visibilityState !== "visible") return;
-      const isLiveSession = clock.minuteEt >= 570 && clock.minuteEt <= 975;
-      const needsPostCloseRevalidation = clock.minuteEt > 975 && postCloseGexRevalidationDateRef.current !== clock.tradingDate;
+      if (document.visibilityState !== "visible" || requestPendingRef.current || !isNyseTradingDay(clock.tradingDate)) return;
+      if (automaticReadRef.current.date !== clock.tradingDate) automaticReadRef.current = { date: clock.tradingDate, failures: 0 };
+      if (automaticReadRef.current.failures >= 3) return;
+      const closeMinute = getEarlyCloseMarketHolidayKeys(Number(clock.tradingDate.slice(0, 4))).has(clock.tradingDate) ? 780 : 960;
+      const isLiveSession = clock.minuteEt >= 570 && clock.minuteEt <= closeMinute + 15;
+      const needsPostCloseRevalidation = clock.minuteEt > closeMinute + 15 && postCloseGexRevalidationDateRef.current !== clock.tradingDate;
       if (!isLiveSession && !needsPostCloseRevalidation) return;
       if (needsPostCloseRevalidation) postCloseGexRevalidationDateRef.current = clock.tradingDate;
       // An undated read is required here: a dated read can never discover the
       // first canonical GEX snapshot after an ET trading-date rollover.
-      void loadHeatmap(undefined, null, { navigationMode: "latest" }).then((result) => {
+      automaticReadRef.current.failures += 1;
+      void loadHeatmap(undefined, null, { navigationMode: "latest", automatic: true }).then((result) => {
+        if (result === "READY") automaticReadRef.current.failures = 0;
         // Pressure is canonical D1 GEX and follows only the latest-GEX path.
         // Current-session 0DTESPX revalidation is deliberately independent.
         if (result !== "STALE") setPressureRefreshKey((current) => current + 1);

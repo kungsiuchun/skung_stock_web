@@ -93,6 +93,16 @@ the scheduler Durable Object, D1 ledger, or Telegram delivery.
 - Technical response details and linked decision-run evidence are expandable;
   unavailable/stale data and snapshot quality remain visible. Per-cell evidence
   remains available through the exposure table.
+- The pressure component owns price-overlay refresh independently of Compass:
+  healthy current-session reads refresh every 60 seconds during NYSE hours,
+  including the early-close calendar. Recovery is limited to three reads per
+  failed sequence, even when an HTML/invalid response has no provider identity;
+  the overlay has its own explicit retry. Initial requests settle before timers
+  may refresh them. Historical and closed sessions require manual price retry.
+- Latest-GEX automatic failures/EMPTY reads stop after three attempts per ET
+  date; manual snapshot retry resets that budget. Full holidays do not poll;
+  canonical GEX retains its 15-minute collection window after regular or early
+  close. An automatic refresh never interrupts a pending snapshot request.
 
 - `npm run dev:spx-uat` uses the isolated `.wrangler/spx-uat` fixture.
 - `npm run test:spx-board:uat` verifies the compact overview, date/timeframe

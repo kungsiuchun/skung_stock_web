@@ -1,7 +1,7 @@
 # SPX Market Structure Board：本地改版與驗證
 
 日期：2026-10-22。分支：`codex/spx-board-redesign`，基底 `033dc5e7f529`。
-範圍是本地實作及驗證；沒有 commit、push、PR、merge 或 deploy。
+以下為首次本地 checkpoint（commit 前），不是目前 Git／部署狀態。發布前修正及新增驗證另列於文末；正式發布結果以獨立 release evidence 為準。
 
 ## 用途與設計選擇
 
@@ -129,3 +129,15 @@ UAT 在 1440×900 和 390×844 斷言整個 overview 底部位於首屏內，並
 新 UI／驗證增加少量 client code，沒有用縮小 payload 掩蓋錯誤，也沒有調高 timeout、retry、stale ceiling 或放寬金融品質 gate。Worker、CIO、Risk Gate、Telegram、canonical 計算及 production 資料不變。既有秘密檔案沒有修改。
 
 建議日後記憶：dated Yahoo history 的 ET 邊界；timeout boundary 必須先拒絕再觸發內部 abort；區分 request cancellation 與真實 timeout。未寫入 Obsidian 或 Codex 記憶。
+
+## 發布前補充驗證（2026-10-22）
+
+首次 checkpoint 後，修正了原測試漏掉的 nested schema、缺交易日、日線 UTC/ET 日期、錯誤身份、輪詢及恢復問題。真實 production heatmap 的 lifecycle ordinal 從 0 開始，shared parser 接受非負 event ordinal，model attempt 仍從 1 開始。
+
+- GEX 108/108、Price Action 40/40、Portfolio/shared JSON 24/24；lint、TypeScript/Vite production build 及 diff check 通過。
+- Playback UAT 通過，包含 CLOSED 保留、手動 overlay 恢復、tooltip、日期 rollover 和失敗 replay。
+- Redesign UAT 通過桌面／手機、首屏、證據鍵盤操作、快速切換、EMPTY、HTML 502/503、空 body、壞 JSON、schema、實際 timeout 與恢復。
+- 無 provider metadata 的 overlay HTML 503 實測：初始讀取＋3 次 recovery，每次最多 1 次 transport retry，共 8 次 HTTP 嘗試後停止；visibility 不會重設 budget；手動 retry 第 9 次成功，無 React error。
+- 獨立 read-only agent 以真實 production payload 驗證 heatmap、pressure、歷史 1m/5m/15m/4h/1d 及 overlay；確認並回驗 lifecycle 0、盤前轉開市與 NYSE 半日收市。沒有假裝進行使用者研究。
+
+本段是發布前驗證；commit、push、Pages/Worker 部署識別及 canonical production browser read-back 另存 release evidence，不由這份本地報告推斷上線成功。

@@ -23,7 +23,7 @@ const button = async (page,text) => {
   const evidence=[];
   const open=async(width=1440,height=900)=>{
     const page=await browser.newPage(); await page.setViewport({width,height,deviceScaleFactor:1});
-    const state={fault:null,requests:[],errors:[],warnings:[],delayTimeframe:null};
+    const state={fault:null,overlayFault:null,requests:[],errors:[],warnings:[],delayTimeframe:null};
     page.on('pageerror',e=>state.errors.push(e.message));
     page.on('console',m=>{if(m.type()==='warn')state.warnings.push(m.text());});
     await page.setRequestInterception(true);
@@ -50,6 +50,7 @@ const button = async (page,text) => {
         return req.respond(json(payload));
       }
       if(url.pathname==='/api/spx-price-action-compass'){
+        if(url.searchParams.get('view')==='price-overlay' && state.overlayFault) return req.respond(state.overlayFault);
         const tf=url.searchParams.get('timeframe')||'5m';
         const step=tf==='1m'?1:tf==='15m'?15:5;
         const candles=Array.from({length:Math.floor(390/step)+1},(_,i)=>{
@@ -136,6 +137,29 @@ const button = async (page,text) => {
     assert.equal(await page.$('[data-spx-board-overview]'),null);
     state.fault=null; await button(page,'Latest retained'); await waitReady(page); await page.close();
     evidence.push({name:'EMPTY',recovered:true});
+    const overlayCase=await open();
+    overlayCase.state.overlayFault={status:503,contentType:'text/html',body:'<html>injected overlay failure without source metadata</html>'};
+    await overlayCase.page.evaluateOnNewDocument(now=>{
+      const RealDate=Date;
+      globalThis.Date=class extends RealDate { constructor(...args){super(...(args.length?args:[now]));} static now(){return now;} };
+    },Date.parse(fixture.selectedDate+'T14:00:00Z'));
+    await overlayCase.page.goto(APP+'/#/work/spx-gex-heatmap?mode=latest',{waitUntil:'domcontentloaded'});
+    await waitReady(overlayCase.page);
+    const overlayAttempts=()=>overlayCase.state.requests.filter(p=>p.includes('view=price-overlay')).length;
+    const deadline=Date.now()+45_000;
+    while(overlayAttempts()<8 && Date.now()<deadline) await new Promise(r=>setTimeout(r,200));
+    assert.equal(overlayAttempts(),8,'initial read plus three recovery reads each permit one transport retry');
+    await overlayCase.page.waitForFunction(()=>!document.querySelector('[data-spx-overlay-retry]')?.disabled);
+    await overlayCase.page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+    await new Promise(r=>setTimeout(r,500));
+    assert.equal(overlayAttempts(),8,'visibility must not reset an exhausted recovery budget');
+    overlayCase.state.overlayFault=null;
+    await overlayCase.page.click('[data-spx-overlay-retry]');
+    await overlayCase.page.waitForFunction(()=>!document.querySelector('[data-spx-price-overlay-diagnostics]') && Number(document.querySelector('[data-spx-gex-pressure-spot-line]')?.getAttribute('data-spx-gex-pressure-spot-point-count'))>0);
+    assert.equal(overlayAttempts(),9,'explicit overlay retry must recover without reloading the board');
+    assert.deepEqual(overlayCase.state.errors,[]);
+    evidence.push({name:'overlay-without-provider-metadata',attempts:8,recovered:true});
+    await overlayCase.page.close();
     fs.writeFileSync(path.join(DIR,'uat.json'),JSON.stringify(evidence,null,2));
     console.log('SPX Board redesign UAT PASS: desktop/mobile overview, evidence keyboard/focus, latest/pinned dates, timeframe cancellation, stale retention, EMPTY, HTML 502/503, empty/malformed/schema errors, real timeout and recovery.');
   }finally{await browser.close();}

@@ -341,6 +341,8 @@ describe("SPX Price Action Compass detector", () => {
     assert.equal(shouldRefreshSpxCurrentSession({ selectedDate: "2026-07-13", tradingDate: "2026-07-13", minuteEt: 570, visible: true }), true);
     assert.equal(shouldRefreshSpxCurrentSession({ selectedDate: "2026-07-13", tradingDate: "2026-07-13", minuteEt: 959, visible: true }), true);
     assert.equal(shouldRefreshSpxCurrentSession({ selectedDate: "2026-07-13", tradingDate: "2026-07-13", minuteEt: 960, visible: true }), false);
+    assert.equal(shouldRefreshSpxCurrentSession({ selectedDate: "2026-11-27", tradingDate: "2026-11-27", minuteEt: 779, visible: true }), true);
+    assert.equal(shouldRefreshSpxCurrentSession({ selectedDate: "2026-11-27", tradingDate: "2026-11-27", minuteEt: 780, visible: true }), false);
     assert.equal(shouldRefreshSpxCurrentSession({ selectedDate: "2026-07-11", tradingDate: "2026-07-11", minuteEt: 600, visible: true }), false);
     assert.equal(shouldRefreshSpxCurrentSession({ selectedDate: "2026-12-25", tradingDate: "2026-12-25", minuteEt: 600, visible: true }), false);
     assert.equal(shouldRefreshSpxCurrentSession({ selectedDate: "2026-07-12", tradingDate: "2026-07-13", minuteEt: 600, visible: true }), false);
