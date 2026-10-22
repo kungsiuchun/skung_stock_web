@@ -40,14 +40,16 @@ const runAttempt = async <T extends Response>(
   let rejectBoundary!: (error: unknown) => void;
   const boundary = new Promise<never>((_resolve, reject) => { rejectBoundary = reject; });
   const onParentAbort = () => {
-    controller.abort();
     rejectBoundary(abortError());
+    controller.abort();
   };
   parentSignal?.addEventListener("abort", onParentAbort, { once: true });
   if (parentSignal?.aborted) onParentAbort();
   timer = globalThis.setTimeout(() => {
-    controller.abort();
     rejectBoundary(new SpxRequestTimeoutError(timeoutMs));
+    // Reject the timeout boundary first. A synchronous fetch abort rejection
+    // must not win Promise.race and misclassify this as caller cancellation.
+    controller.abort();
   }, timeoutMs);
   try {
     return await Promise.race([task(controller.signal), boundary]);

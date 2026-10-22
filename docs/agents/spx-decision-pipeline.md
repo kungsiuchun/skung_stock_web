@@ -77,6 +77,25 @@ the scheduler Durable Object, D1 ledger, or Telegram delivery.
 
 ## Local verification
 
+- Board request/navigation/playback state is owned by
+  `src/hooks/use-spx-gex-board.ts`; Board response validation lives in
+  `src/lib/spx-board-response.ts`. Presentation must not cast arbitrary JSON
+  directly into market models. EMPTY, transport, HTTP, non-JSON, malformed JSON,
+  and invalid response contracts remain distinct.
+- The overview compares canonical snapshot price with canonical levels. Its
+  session-pressure summary explicitly names both comparison times, independently
+  of the pinned GEX frame. Price charts disclose their own last-candle time and
+  remain independent of the replay minute. Only verified LIVE price context may
+  animate as live; a delayed canonical quote must not pulse.
+- Dated Yahoo chart reads exclude ET sessions after the requested date; dated
+  price-overlay reads include only that session. A rolling provider range that
+  does not cover the date produces an explicit empty result, never newer prices.
+- Technical response details and linked decision-run evidence are expandable;
+  unavailable/stale data and snapshot quality remain visible. Per-cell evidence
+  remains available through the exposure table.
+
 - `npm run dev:spx-uat` uses the isolated `.wrangler/spx-uat` fixture.
+- `npm run test:spx-board:uat` verifies the compact overview, date/timeframe
+  cancellation, fault classification, bounded retry, and explicit recovery.
 - `npm run dev:spx-live` proxies only the production GEX GET route read-only.
 - Vite is strict port 5173; Pages is 8788.

@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { Activity, AlertTriangle, TrendingUp } from "lucide-react";
 import { formatSpxGexCompactExposure } from "@/lib/spx-gex-heatmap";
 import { isFreshSpx0DteSample, SPX_0DTE_STALE_AFTER_MS } from "@/lib/spx-price-action-compass";
-import { parseJsonResponse } from "@/lib/safe-json-response";
+import { parseSpxBoardResponse, spxFailureMessage } from "@/lib/spx-board-response";
+import type { PressureOverview } from "./spx-board-overview";
 import { getSpxSpotLivePulseKey } from "@/lib/spx-spot-live-pulse";
 import { isSpxRequestAbort, runSpxRequest } from "@/lib/spx-request-lane";
 import {
@@ -54,6 +55,7 @@ interface SpxGexPressureMatrixProps {
   enabled?: boolean;
   controls: ReactNode;
   onSpotContextChange?: (spot: SpxGexZeroDteSpotContext | null) => void;
+  onSummaryChange?: (summary: PressureOverview) => void;
 }
 
 interface ActiveCell {
@@ -273,7 +275,7 @@ const MoverRow = ({ mover }: { mover: SpxGexPressureMover }) => {
   );
 };
 
-export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRefreshKey, priceOverlayRefreshKey, controls, enabled = true, onSpotContextChange }: SpxGexPressureMatrixProps) {
+export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRefreshKey, priceOverlayRefreshKey, controls, enabled = true, onSpotContextChange, onSummaryChange }: SpxGexPressureMatrixProps) {
   const [data, setData] = useState<PressureResponse | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
@@ -393,7 +395,9 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
           signal: controller.signal,
           onRetry: () => setReconnecting(true),
         });
-        const payload = await parseJsonResponse<PressureResponse>(response, "/api/spx-gex-pressure", { allowHttpError: true });
+        const payload = await parseSpxBoardResponse<PressureResponse>(response, "/api/spx-gex-pressure", "pressure");
+        if (controller.signal.aborted) return;
+        if (payload.selectedDate !== selectedDate && response.ok) throw new Error("Pressure response date does not match the requested session.");
         if (!response.ok || payload.status === "ERROR" || payload.status === "STORAGE_UNAVAILABLE" || payload.status === "BINDING_MISSING") {
           throw new Error(payload.error || `SPX GEX pressure API failed with HTTP ${response.status}`);
         }
@@ -459,7 +463,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
           signal: controller.signal,
           onRetry: () => setReconnecting(true),
         });
-        const payload = await parseJsonResponse<NonNullable<PriceOverlayState["data"]>>(response, "/api/spx-price-action-compass", { allowHttpError: true });
+        const payload = await parseSpxBoardResponse<NonNullable<PriceOverlayState["data"]>>(response, "/api/spx-price-action-compass", "overlay");
         if (!canCommit()) return;
         if (!response.ok) {
           const message = payload.warnings?.join(" ") || `SPX 1-minute API failed with HTTP ${response.status}`;
@@ -512,6 +516,9 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
   }, [enabled, overlayRefreshKey, priceOverlayRefreshKey, selectedDate]);
 
   const pressure = data?.selectedDate === selectedDate ? data.pressure : null;
+  useEffect(() => {
+    onSummaryChange?.({ model: pressure, stale: Boolean(refreshError), loading, error: data?.status === "ERROR" || Boolean(!loading && data && !pressure) });
+  }, [pressure, refreshError, loading, data?.status, onSummaryChange]);
   const openingAttempts = data?.selectedDate === selectedDate
     ? (data.collectionAttempts || []).filter((attempt) => attempt.snapshotMinuteEt === 9 * 60 + 30)
     : [];
@@ -603,7 +610,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
     : null;
   const zeroDteSpotContext = resolveSpxGexZeroDteSpotContext(effectivePriceSource, selectedDate, latestSpotPoint);
   const priceOverlayWarning = priceOverlay?.error
-    ? `0DTESPX refresh unavailable; showing the last verified ${usingOneMinuteSpot ? "1-minute SPX and stale Expected Move context" : "canonical 15-minute snapshot line"}. Current SPX is not live. ${priceOverlay.error}`
+    ? `Price refresh unavailable; showing the last verified ${usingOneMinuteSpot ? "1-minute SPX and stale Expected Move context" : "canonical 15-minute snapshot line"}. Current SPX is not live.`
     : effectivePriceSource?.status === "STALE"
       ? `0DTESPX refresh is stale; showing the last verified 1-minute SPX and Expected Move as context only. Current SPX is not live. ${(priceOverlay?.data?.warnings || []).join(" ")}`.trim()
     : !usingOneMinuteSpot && !oneMinuteOverlayPending
@@ -648,9 +655,8 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
     >
       <div className="flex flex-col gap-3 border-b border-[#123142] bg-[#06111a] p-3 xl:flex-row xl:items-end xl:justify-between">
         <div>
-          <div className="font-mono text-[10px] font-black uppercase tracking-[0.18em] text-cyan-300">Intraday GEX Movers</div>
           <h2 className="mt-1 text-xl font-black text-white">Strike Pressure Matrix</h2>
-          <p className="mt-1 text-xs text-zinc-400">0DTE GEX / 15-minute delayed snapshots / SPX 1-minute price context</p>
+          <p className="mt-1 text-xs text-zinc-400">Session change vs {pressure?.baseline.snapshotTimeEt || "opening baseline"} ET · 0DTE</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="border border-cyan-300/60 bg-cyan-300/10 px-2 py-1 font-mono text-[10px] font-black text-cyan-100">0DTE</span>
@@ -668,7 +674,9 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
       ) : !pressure ? (
         <div className="flex h-64 flex-col items-center justify-center gap-3 px-4 text-center text-zinc-400" role="alert" aria-live="assertive">
           <AlertTriangle aria-hidden="true" className="h-6 w-6 text-amber-300/70" />
-          <span className="text-sm">{data?.error || data?.warnings[0] || "No retained 0DTE pressure snapshots for this date."}</span>
+          <span className="text-sm">{data?.status === "ERROR" ? spxFailureMessage(null) : "No retained 0DTE pressure snapshots for this date."}</span>
+          <button className="min-h-10 px-3 text-xs text-cyan-200 underline" onClick={() => setPressureRecoveryTick(k => k + 1)}>Retry matrix</button>
+          {data?.error && <details className="max-w-full text-xs"><summary className="cursor-pointer">Matrix diagnostics</summary><p className="break-all p-2">{data.error}</p></details>}
           {selectedDate === etClock().tradingDate && <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-amber-200">Rechecking automatically</span>}
         </div>
       ) : (
@@ -683,7 +691,8 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
             </div>
             {pressure.warnings.length > 0 && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-warning="true">{pressure.warnings.join(" ")}</div>}
             {reconnecting && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status">Reconnecting SPX source…</div>}
-            {refreshError && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-refresh-stale="true">Refresh failed; showing the last verified GEX matrix. {refreshError}</div>}
+            {refreshError && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-refresh-stale="true">Refresh failed; showing the last verified GEX matrix from {pressure.tradingDate} {pressure.latest.snapshotTimeEt} ET.<details><summary className="cursor-pointer">Matrix diagnostics</summary><p className="break-all">{refreshError}</p></details></div>}
+            {priceOverlay?.error && <details data-spx-price-overlay-diagnostics="true" className="p-2 text-xs text-zinc-400"><summary className="cursor-pointer">Price overlay diagnostics</summary><p className="break-all">{priceOverlay.error}</p></details>}
            {priceOverlayWarning && <div className="border-b border-cyan-300/20 bg-cyan-300/5 px-3 py-2 text-xs text-cyan-100" role="status" data-spx-gex-pressure-spot-warning="true">{priceOverlayWarning}</div>}
             {outsideGexCoverage && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-coverage-warning="true">Displayed strikes extend beyond available 0DTE GEX coverage. Empty rows show price context only, not GEX data.</div>}
             {expectedMoveWarning && <div className={`${expectedMoveIsStale ? "border-amber-300/20 bg-amber-300/10 text-amber-100" : "border-violet-300/20 bg-violet-300/5 text-violet-100"} border-b px-3 py-2 text-xs`} role="status" data-spx-gex-pressure-expected-move-warning="true">{expectedMoveWarning}</div>}

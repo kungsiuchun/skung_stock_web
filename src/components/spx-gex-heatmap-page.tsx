@@ -1,67 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowLeft, CalendarDays, Gauge, Pause, Play, Waves } from "lucide-react";
-import { buildSpxGexHeatmapReadingContext, formatSpxGexCompactExposure, type SpxGexHeatmapCell, type SpxGexHeatmapModel, type SpxGexHeatmapReadingRule, type SpxGexSessionSummary, type SpxGexStrikeProfile } from "@/lib/spx-gex-heatmap";
-import type { SpxDecisionCockpitProjection } from "@/lib/spx-decision-ledger";
-import type { SpxGexCollectionRecord } from "@/lib/spx-gex-collection-lifecycle";
-import { parseJsonResponse, SafeJsonResponseError } from "@/lib/safe-json-response";
+import { buildSpxGexHeatmapReadingContext, formatSpxGexCompactExposure, type SpxGexHeatmapCell, type SpxGexHeatmapModel, type SpxGexHeatmapReadingRule, type SpxGexStrikeProfile } from "@/lib/spx-gex-heatmap";
+import { parseSpxBoardResponse, spxFailureMessage } from "@/lib/spx-board-response";
+import { useSpxGexBoard, currentEtClock, type SpxGexBoardNavigationMode } from "@/hooks/use-spx-gex-board";
+export { parseSpxGexBoardSelection, resolveSpxGexBoardNavigationMode } from "@/hooks/use-spx-gex-board";
 import { getSpxSpotLivePulseKey } from "@/lib/spx-spot-live-pulse";
 import type { SpxGexZeroDteSpotContext } from "@/lib/spx-gex-pressure-matrix";
 import { runSpxRequest } from "@/lib/spx-request-lane";
+import { SpxBoardOverview, type PressureOverview } from "./spx-board-overview";
 import { SpxPriceActionCompass } from "./spx-price-action-compass";
 import { SpxGexPressureMatrix } from "./spx-gex-pressure-matrix";
 import { SpxGexInlineTooltip, SpxGexTooltip, SpxGexTooltipSection } from "./spx-gex-tooltip";
-
-interface SpxGexHeatmapResponse {
-  status: "READY" | "EMPTY" | "BINDING_MISSING" | "STORAGE_UNAVAILABLE" | "ERROR";
-  errorCode: string | null;
-  error?: string;
-  availableDates: string[];
-  selectedDate: string | null;
-  sessions: SpxGexSessionSummary[];
-  selectedSnapshot: SpxGexSessionSummary | null;
-  heatmap: SpxGexHeatmapModel | null;
-  decision: SpxDecisionCockpitProjection | null;
-  collection: SpxGexCollectionRecord | null;
-  collectionHealth?: {
-    dueSlots: number;
-    persistedSlots: number;
-    provider: string | null;
-    stage: string | null;
-    failure: string | null;
-  } | null;
-  warnings: string[];
-}
-
-const emptyPayload: SpxGexHeatmapResponse = {
-  status: "EMPTY",
-  errorCode: null,
-  availableDates: [],
-  selectedDate: null,
-  sessions: [],
-  selectedSnapshot: null,
-  heatmap: null,
-  decision: null,
-  collection: null,
-  warnings: [],
-};
-
-type BoardRequestPhase = "LOADING" | "READY" | "EMPTY" | "ERROR";
-
-interface BoardRequestState {
-  phase: BoardRequestPhase;
-  requestUrl: string;
-  httpStatus: number | null;
-  errorCode: string | null;
-  message: string | null;
-}
-
-interface FailedPlaybackSnapshot {
-  date: string;
-  snapshotMinuteEt: number;
-}
-
-type SpxGexBoardNavigationMode = "latest" | "pinned";
-type SpxGexBoardLoadMode = SpxGexBoardNavigationMode | "legacy";
 
 interface ActiveGexAuditCell {
   key: string;
@@ -202,80 +151,9 @@ const formatSnapshotMinuteEt = (minute: number) => {
   return `${hours}:${minutes}`;
 };
 
-const parseHeatmapResponse = (response: Response, requestUrl: string) => parseJsonResponse<SpxGexHeatmapResponse & { error?: string }>(response, requestUrl, { allowHttpError: true });
-
-export const parseSpxGexBoardSelection = (hash: string) => {
-  const query = hash.split("?", 2)[1] || "";
-  const params = new URLSearchParams(query);
-  const rawSnapshot = params.get("snapshot");
-  const snapshot = rawSnapshot === null || rawSnapshot.trim() === "" ? Number.NaN : Number(rawSnapshot);
-  const requestedMode = params.get("mode");
-  const date = params.get("date") || "";
-  const mode: SpxGexBoardLoadMode = requestedMode === "latest" || requestedMode === "pinned"
-    ? requestedMode
-    : date || Number.isInteger(snapshot) ? "legacy" : "latest";
-  return {
-    date,
-    snapshot: Number.isInteger(snapshot) ? snapshot : null,
-    mode,
-  };
-};
-
-export const resolveSpxGexBoardNavigationMode = (
-  requestedMode: SpxGexBoardLoadMode,
-  payload: Pick<SpxGexHeatmapResponse, "availableDates" | "selectedDate" | "selectedSnapshot" | "sessions">,
-): SpxGexBoardNavigationMode => {
-  if (requestedMode !== "legacy") return requestedMode;
-  const latestDate = payload.availableDates.reduce<string | null>(
-    (latest, date) => latest === null || date > latest ? date : latest,
-    null,
-  );
-  const latestSnapshotMinute = payload.sessions.reduce<number | null>(
-    (latest, session) => latest === null || session.snapshotMinuteEt > latest ? session.snapshotMinuteEt : latest,
-    null,
-  );
-  return latestDate !== null
-    && payload.selectedDate === latestDate
-    && latestSnapshotMinute !== null
-    && payload.selectedSnapshot?.snapshotMinuteEt === latestSnapshotMinute
-    ? "latest"
-    : "pinned";
-};
-
-const spxGexBoardHash = (mode: SpxGexBoardNavigationMode, date: string, snapshotMinuteEt: number) => mode === "latest"
-  ? "#/work/spx-gex-heatmap?mode=latest"
-  : `#/work/spx-gex-heatmap?mode=pinned&date=${encodeURIComponent(date)}&snapshot=${snapshotMinuteEt}`;
-
-const initialBoardSelection = () => {
-  if (typeof window === "undefined") {
-    return { date: "", snapshot: null as number | null, mode: "latest" as const };
-  }
-  return parseSpxGexBoardSelection(window.location.hash);
-};
-
-const currentEtClock = () => {
-  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-  }).formatToParts(new Date()).map((part) => [part.type, part.value]));
-  return { tradingDate: `${parts.year}-${parts.month}-${parts.day}`, minuteEt: Number(parts.hour) * 60 + Number(parts.minute) };
-};
-
 export function SPXGexHeatmapPage() {
-  const initialSelection = useMemo(initialBoardSelection, []);
-  const [data, setData] = useState<SpxGexHeatmapResponse>(emptyPayload);
-  const [selectedDate, setSelectedDate] = useState(initialSelection.date);
-  const [selectedMinute, setSelectedMinute] = useState<number | null>(initialSelection.snapshot);
-  const [loading, setLoading] = useState(true);
-  const [requestState, setRequestState] = useState<BoardRequestState>({
-    phase: "LOADING",
-    requestUrl: "/api/spx-gex-heatmap",
-    httpStatus: null,
-    errorCode: null,
-    message: null,
-  });
-  const [playing, setPlaying] = useState(false);
-  const [speedMs, setSpeedMs] = useState(900);
+  const {data, selectedDate, selectedMinute, loading, requestState, playing, setPlaying, speedMs, setSpeedMs, pressureRefreshKey, initialHeatmapSettled, reconnecting, navigationMode, failedPlayback, loadHeatmap, commitNavigationMode, activeRequestRef} = useSpxGexBoard();
+  const [pressureOverview, setPressureOverview] = useState<PressureOverview | null>(null);
   const [rowRangeMode, setRowRangeMode] = useState<RowRangeMode>("auto");
   const [activeAuditCell, setActiveAuditCell] = useState<ActiveGexAuditCell | null>(null);
   const [auditDetail, setAuditDetail] = useState<SpxGexHeatmapCell | null>(null);
@@ -285,156 +163,16 @@ export function SPXGexHeatmapPage() {
   const activeAuditCellRef = useRef(activeAuditCell);
   const auditHoverSuppressedAfterScrollRef = useRef(false);
   activeAuditCellRef.current = activeAuditCell;
-  const [pressureRefreshKey, setPressureRefreshKey] = useState(0);
   const [zeroDteRefreshKey, setZeroDteRefreshKey] = useState(0);
-  const [initialHeatmapSettled, setInitialHeatmapSettled] = useState(false);
   const [initialCompassSettled, setInitialCompassSettled] = useState(false);
-  const [reconnecting, setReconnecting] = useState(false);
-  const [navigationMode, setNavigationMode] = useState<SpxGexBoardNavigationMode | "resolving">(
-    initialSelection.mode === "legacy" ? "resolving" : initialSelection.mode,
-  );
-  const [failedPlayback, setFailedPlayback] = useState<FailedPlaybackSnapshot | null>(null);
-  const activeRequestRef = useRef<AbortController | null>(null);
-  const requestVersionRef = useRef(0);
-  const navigationModeRef = useRef<SpxGexBoardLoadMode>(initialSelection.mode);
-  const postCloseGexRevalidationDateRef = useRef<string | null>(null);
-  const playbackRunRef = useRef(0);
-  const playbackStateRef = useRef({
-    sessions: data.sessions,
-    selectedDate,
-    selectedMinute,
-    speedMs,
-  });
-  playbackStateRef.current = {
-    sessions: data.sessions,
-    selectedDate,
-    selectedMinute,
-    speedMs,
-  };
-
-  const commitNavigationMode = useCallback((mode: SpxGexBoardNavigationMode) => {
-    navigationModeRef.current = mode;
-    setNavigationMode(mode);
-  }, []);
-
-  const loadHeatmap = useCallback(async (
-    date?: string,
-    snapshotMinute?: number | null,
-    options: { playback?: boolean; navigationMode?: SpxGexBoardLoadMode } = {},
-  ) => {
-    const requestedNavigationMode = options.navigationMode || navigationModeRef.current;
-    activeRequestRef.current?.abort();
-    const controller = new AbortController();
-    activeRequestRef.current = controller;
-    const requestVersion = ++requestVersionRef.current;
-    setLoading(true);
-    try {
-      const params = new URLSearchParams();
-      if (date) params.set("date", date);
-      if (snapshotMinute !== null && snapshotMinute !== undefined) params.set("snapshot", String(snapshotMinute));
-      const requestUrl = `/api/spx-gex-heatmap${params.toString() ? `?${params.toString()}` : ""}`;
-      setRequestState({ phase: "LOADING", requestUrl, httpStatus: null, errorCode: null, message: null });
-      const response = await runSpxRequest((attemptSignal) => fetch(requestUrl, { signal: attemptSignal }), {
-        signal: controller.signal,
-        onRetry: () => setReconnecting(true),
-      });
-      const payload = await parseHeatmapResponse(response, requestUrl);
-      if (requestVersion !== requestVersionRef.current) return "STALE";
-
-      if (!response.ok) {
-        setRequestState({
-          phase: "ERROR",
-          requestUrl,
-          httpStatus: response.status,
-          errorCode: payload.errorCode,
-          message: payload.error || "SPX GEX heatmap API failed",
-        });
-        if (options.playback && date && snapshotMinute !== null && snapshotMinute !== undefined) {
-          setFailedPlayback({ date, snapshotMinuteEt: snapshotMinute });
-        }
-        setPlaying(false);
-        return "FAILED";
-      }
-
-      if (payload.status !== "READY" || !payload.heatmap) {
-        setRequestState({
-          phase: "EMPTY",
-          requestUrl,
-          httpStatus: response.status,
-          errorCode: payload.errorCode,
-          message: "No retained canonical SPX GEX snapshot was returned.",
-        });
-        if (options.playback && date && snapshotMinute !== null && snapshotMinute !== undefined) {
-          setFailedPlayback({ date, snapshotMinuteEt: snapshotMinute });
-        }
-        setPlaying(false);
-        return "FAILED";
-      }
-
-      setData(payload);
-      setRequestState({
-        phase: "READY",
-        requestUrl,
-        httpStatus: response.status,
-        errorCode: payload.errorCode,
-        message: null,
-      });
-      setFailedPlayback(null);
-      setSelectedDate(payload.selectedDate || "");
-      setSelectedMinute(payload.selectedSnapshot?.snapshotMinuteEt ?? null);
-      if (payload.selectedDate && payload.selectedSnapshot?.snapshotMinuteEt !== undefined) {
-        const resolvedNavigationMode = resolveSpxGexBoardNavigationMode(requestedNavigationMode, payload);
-        commitNavigationMode(resolvedNavigationMode);
-        window.history.replaceState(
-          null,
-          "",
-          spxGexBoardHash(resolvedNavigationMode, payload.selectedDate, payload.selectedSnapshot.snapshotMinuteEt),
-        );
-      }
-      return "READY";
-    } catch (err) {
-      if (controller.signal.aborted || requestVersion !== requestVersionRef.current) return "STALE";
-      const httpStatus = err instanceof SafeJsonResponseError ? err.httpStatus : null;
-      setRequestState({
-        phase: "ERROR",
-        requestUrl: `/api/spx-gex-heatmap${date ? `?date=${encodeURIComponent(date)}${snapshotMinute !== null && snapshotMinute !== undefined ? `&snapshot=${snapshotMinute}` : ""}` : ""}`,
-        httpStatus,
-        errorCode: null,
-        message: err instanceof Error ? err.message : "SPX GEX heatmap failed",
-      });
-      if (options.playback && date && snapshotMinute !== null && snapshotMinute !== undefined) {
-        setFailedPlayback({ date, snapshotMinuteEt: snapshotMinute });
-      }
-      setPlaying(false);
-      return "FAILED";
-    } finally {
-      if (requestVersion === requestVersionRef.current) {
-        setLoading(false);
-        setReconnecting(false);
-      }
-    }
-  }, [commitNavigationMode]);
-
-  useEffect(() => {
-    const loadLatest = initialSelection.mode === "latest";
-    void loadHeatmap(
-      loadLatest ? undefined : initialSelection.date || undefined,
-      loadLatest ? null : initialSelection.snapshot,
-      { navigationMode: initialSelection.mode },
-    ).finally(() => setInitialHeatmapSettled(true));
-    return () => activeRequestRef.current?.abort();
-  }, [initialSelection.date, initialSelection.mode, initialSelection.snapshot, loadHeatmap]);
-
   useEffect(() => {
     if (!initialCompassSettled) return undefined;
     const refreshVisibleCurrentSessionSources = () => {
       const clock = currentEtClock();
       if (document.visibilityState !== "visible") return;
-      // Keep retrying through the ET day. FINALIZING and transient provider
-      // failures must recover without bringing back a manual refresh button.
-      // Compass follows the current session even while the latest GEX date is
-      // waiting for its first canonical snapshot of a new trading day.
-      if (clock.minuteEt < 570) return;
+      // Only the current ET session needs live/finalizing recovery. Completed
+      // historical price windows must not trigger duplicate polling reads.
+      if (clock.minuteEt < 570 || selectedDate !== clock.tradingDate) return;
       setZeroDteRefreshKey((current) => current + 1);
     };
     // Revalidate once after the initial render so a URL-selected GEX snapshot
@@ -448,68 +186,6 @@ export function SPXGexHeatmapPage() {
       document.removeEventListener("visibilitychange", refreshVisibleCurrentSessionSources);
     };
   }, [initialCompassSettled, selectedDate]);
-
-  useEffect(() => {
-    if (!initialHeatmapSettled || navigationMode !== "latest" || playing) return undefined;
-    const refreshVisibleCurrentSession = () => {
-      const clock = currentEtClock();
-      if (document.visibilityState !== "visible") return;
-      const isLiveSession = clock.minuteEt >= 570 && clock.minuteEt <= 975;
-      const needsPostCloseRevalidation = clock.minuteEt > 975 && postCloseGexRevalidationDateRef.current !== clock.tradingDate;
-      if (!isLiveSession && !needsPostCloseRevalidation) return;
-      // An undated read is required here: a dated read can never discover the
-      // first canonical GEX snapshot after an ET trading-date rollover.
-      void loadHeatmap(undefined, null, { navigationMode: "latest" }).then((result) => {
-        if (needsPostCloseRevalidation && result === "READY" && selectedDate === clock.tradingDate) {
-          postCloseGexRevalidationDateRef.current = clock.tradingDate;
-        }
-        // Pressure is canonical D1 GEX and follows only the latest-GEX path.
-        // Current-session 0DTESPX revalidation is deliberately independent.
-        if (result !== "STALE") setPressureRefreshKey((current) => current + 1);
-      });
-    };
-    const interval = window.setInterval(refreshVisibleCurrentSession, 60_000);
-    document.addEventListener("visibilitychange", refreshVisibleCurrentSession);
-    // The live interval is intentionally not fired on mount. After close,
-    // however, a background tab must obtain the completed same-day snapshot.
-    if (currentEtClock().minuteEt > 975) refreshVisibleCurrentSession();
-    return () => {
-      window.clearInterval(interval);
-      document.removeEventListener("visibilitychange", refreshVisibleCurrentSession);
-    };
-  }, [initialHeatmapSettled, loadHeatmap, navigationMode, playing, selectedDate]);
-
-  useEffect(() => {
-    if (!playing) return undefined;
-    const runId = ++playbackRunRef.current;
-    let cancelled = false;
-    const runPlayback = async () => {
-      while (!cancelled && playbackRunRef.current === runId) {
-        const current = playbackStateRef.current;
-        if (current.sessions.length <= 1 || !current.selectedDate) {
-          setPlaying(false);
-          return;
-        }
-        await new Promise<void>((resolve) => window.setTimeout(resolve, current.speedMs));
-        if (cancelled || playbackRunRef.current !== runId) return;
-
-        const state = playbackStateRef.current;
-        const currentIndex = Math.max(0, state.sessions.findIndex((session) => session.snapshotMinuteEt === state.selectedMinute));
-        const next = state.sessions[(currentIndex + 1) % state.sessions.length];
-        if (!next) {
-          setPlaying(false);
-          return;
-        }
-        const result = await loadHeatmap(state.selectedDate, next.snapshotMinuteEt, { playback: true, navigationMode: "pinned" });
-        if (result !== "READY" || playbackRunRef.current !== runId) return;
-      }
-    };
-    void runPlayback();
-    return () => {
-      cancelled = true;
-      if (playbackRunRef.current === runId) playbackRunRef.current += 1;
-    };
-  }, [loadHeatmap, playing]);
 
   useEffect(() => {
     const dismissAuditTooltip = (event: KeyboardEvent) => {
@@ -557,8 +233,8 @@ export function SPXGexHeatmapPage() {
       });
       void (async () => {
         try {
-          const response = await fetch(`/api/spx-gex-cell-detail?${params.toString()}`, { signal: controller.signal });
-          const payload = await parseJsonResponse<{ status: string; detail: SpxGexHeatmapCell | null; error?: string }>(response, "/api/spx-gex-cell-detail", { allowHttpError: true });
+          const response = await runSpxRequest(signal => fetch(`/api/spx-gex-cell-detail?${params.toString()}`, { signal }), { signal: controller.signal });
+          const payload = await parseSpxBoardResponse<{ status: string; detail: SpxGexHeatmapCell | null; error?: string }>(response, "/api/spx-gex-cell-detail", "detail");
           if (!response.ok || payload.status !== "READY" || !payload.detail) throw new Error(payload.error || "GEX audit detail is unavailable.");
           if (!controller.signal.aborted) {
             setAuditDetailKey(activeAuditCell.key);
@@ -631,7 +307,7 @@ export function SPXGexHeatmapPage() {
   const displayedSpotPulseKey = currentSpotContext
     ? getSpxSpotLivePulseKey({ price: currentSpotContext.price, timeEt: currentSpotContext.timeEt, resolution: "1m" })
     : heatmapSpotPulseKey;
-  const pulseSpot = currentSpotContext?.sessionState !== "CLOSED" && currentSpotContext?.sessionState !== "FINALIZING";
+  const pulseSpot = currentSpotContext?.sessionState === "LIVE";
   const spotContextLabel = currentSpotContext?.sessionState === "CLOSED" ? "0DTE close"
     : currentSpotContext?.sessionState === "FINALIZING" ? "0DTE last" : "0DTE spot";
   const headerSpot = currentSpotContext
@@ -700,40 +376,35 @@ export function SPXGexHeatmapPage() {
   );
 
   return (
-    <section className="h-full w-full overflow-y-auto bg-[#02070d] px-3 pb-8 pt-4 text-white sm:px-5 lg:px-7" data-spx-gex-navigation-mode={navigationMode}>
+    <section className="h-full min-w-0 w-full overflow-x-hidden overflow-y-auto bg-[#060d16] px-3 pb-8 pt-4 text-white sm:px-5 lg:px-7" data-spx-gex-navigation-mode={navigationMode}>
       <div className="mx-auto flex w-full max-w-[1800px] flex-col gap-4">
-        <header className="flex flex-col gap-4 border-b border-cyan-400/20 pb-4 xl:flex-row xl:items-end xl:justify-between">
-          <div>
-            <a
-              href="#/market-lab"
-              className="mb-4 inline-flex min-h-11 items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-cyan-200/70 transition-colors hover:text-cyan-100"
-            >
-              <ArrowLeft className="h-4 w-4" />
-              Work gallery
-            </a>
-            <div className="flex flex-wrap items-center gap-3">
-              <h1 className="text-2xl font-black tracking-normal text-white sm:text-4xl">SPX Market Structure Board</h1>
-              <span className="border border-amber-300/30 bg-amber-300/10 px-2 py-1 font-mono text-[10px] font-black tracking-[0.12em] text-amber-100">
-                {sourceModeLabel()}
-              </span>
-              {headerSpot && (
-                <span key={displayedSpotPulseKey || "heatmap-spot"} className={`${pulseSpot ? "spx-spot-live-pulse " : ""}inline-flex items-center gap-1.5 border border-cyan-300/25 bg-cyan-300/10 px-2 py-1 font-mono text-xs font-black text-cyan-100`} data-spx-gex-heatmap-spot-badge="true" data-spx-gex-heatmap-spot-source={headerSpot.source} data-spx-gex-heatmap-spot-session-state={currentSpotContext?.sessionState}>
-                  <span className="h-1.5 w-1.5 rounded-full bg-cyan-200 shadow-[0_0_7px_rgba(34,211,238,.9)]" aria-hidden="true" />
-                  {headerSpot.label} ${headerSpot.price.toFixed(2)}
-                </span>
-              )}
-            </div>
-            <p className="mt-2 max-w-3xl text-sm leading-6 text-zinc-500">
-              Source-backed price action, signal structure, and intraday GEX exposure in one board.
-            </p>
+        <header className="flex flex-col gap-3 border-b border-slate-700/60 pb-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <a href="#/market-lab" className="inline-flex min-h-9 items-center gap-2 text-xs text-slate-400 hover:text-white"><ArrowLeft className="h-4 w-4" />Market lab</a>
+            <span className="text-xs text-slate-400">{sourceModeLabel() === "LOCAL FIXTURE" ? "Local fixture" : "Canonical GEX · D1"}</span>
           </div>
-
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">SPX Market Structure</h1>
+              <p className="mt-1 text-sm text-slate-400">Key levels. Pressure changes. Verifiable context.</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {snapshotControls}
+              <button type="button" aria-pressed={navigationMode === "latest"} disabled={loading} onClick={() => { setPlaying(false); commitNavigationMode("latest"); void loadHeatmap(undefined, null, {navigationMode: "latest"}); }} className="min-h-10 rounded-md border border-cyan-300/30 bg-cyan-300/10 px-3 text-xs font-semibold text-cyan-100 disabled:opacity-40">Latest retained</button>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs" data-spx-board-session="true">
+            <span className="font-mono text-cyan-100">{selectedDate || "Selecting session"} · {selectedSession?.snapshotTimeEt || "—"} ET</span>
+            <span className="text-amber-200">{selectedDate && selectedDate < currentEtClock().tradingDate ? "Historical session" : "Delayed GEX"} · 15m delay · collected {selectedSession?.collectedTimeEt || "—"} ET</span>
+            <span className="text-slate-400">{navigationMode === "pinned" ? "Pinned snapshot" : "Following latest retained"}</span>
+            {headerSpot && <span key={displayedSpotPulseKey || "heatmap-spot"} className={pulseSpot ? "spx-spot-live-pulse text-cyan-100" : "text-slate-300"} data-spx-gex-heatmap-spot-badge="true" data-spx-gex-heatmap-spot-source={headerSpot.source} data-spx-gex-heatmap-spot-session-state={currentSpotContext?.sessionState}>{headerSpot.label} ${headerSpot.price.toFixed(2)}</span>}
+          </div>
         </header>
 
         {failedPlayback && requestState.phase === "ERROR" && (
           <div className="flex flex-wrap items-center justify-between gap-3 border border-red-300/30 bg-red-300/10 px-3 py-2 text-sm text-red-100" role="alert" data-spx-gex-playback-error="true">
             <span>
-              Timeline paused at {formatSnapshotMinuteEt(failedPlayback.snapshotMinuteEt)} ET · HTTP {requestState.httpStatus ?? "network"}. Last verified board remains on screen.
+              Timeline paused at {formatSnapshotMinuteEt(failedPlayback.snapshotMinuteEt)} ET. Source unavailable; last verified board remains on screen.
             </span>
             <button
               onClick={() => {
@@ -748,32 +419,55 @@ export function SPXGexHeatmapPage() {
           </div>
         )}
         {reconnecting && <Notice tone="amber" text="Reconnecting SPX source…" />}
-        {requestState.phase === "ERROR" && requestState.message && <Notice tone="red" text={requestState.message} />}
+        {requestState.phase === "EMPTY" && <Notice tone="amber" text={heatmap ? `Requested snapshot is unavailable. Showing last verified ${selectedDate} ${selectedSession?.snapshotTimeEt} ET.` : "No retained snapshot is available for this selection."} />}
+        {requestState.phase === "ERROR" && <div role="alert"><Notice tone="red" text={`${spxFailureMessage(requestState.httpStatus)}${heatmap ? ` Last verified: ${selectedDate} ${selectedSession?.snapshotTimeEt} ET; refresh failed.` : ""}`} /><button className="min-h-10 px-4 text-xs text-cyan-200 underline" onClick={() => void loadHeatmap(navigationMode === "latest" ? undefined : selectedDate, navigationMode === "latest" ? null : selectedMinute)}>Retry snapshot</button></div>}
         {data.warnings.length > 0 && <Notice tone="amber" text={data.warnings.join(" ")} />}
-        <div className="flex flex-wrap gap-x-4 gap-y-1 border border-white/10 bg-black/20 px-3 py-2 font-mono text-[10px] text-zinc-500" data-spx-gex-request-state={requestState.phase}>
+        {heatmap && <SpxBoardOverview heatmap={heatmap} pressure={pressureOverview} stale={requestState.phase !== "READY"} onEvidence={() => {
+          const panel = document.getElementById("spx-board-evidence") as HTMLDetailsElement | null;
+          if (panel) { panel.open = true; panel.scrollIntoView({block: "start"}); panel.querySelector("summary")?.focus(); }
+        }} />}
+        <nav aria-label="Board sections" className="flex flex-wrap gap-2">
+          {[["spx-board-price", "Price chart"], ["spx-board-pressure", "Pressure matrix"], ["spx-board-exposure", "Snapshot & replay"], ["spx-board-evidence", "Evidence"]].map(([id, label]) => <button key={id} type="button" aria-controls={id} className="min-h-10 rounded-md border border-slate-700 px-3 text-xs text-slate-300 hover:border-cyan-200 focus-visible:ring-2 focus-visible:ring-cyan-200" onClick={() => { const el = document.getElementById(id); if (el instanceof HTMLDetailsElement) el.open = true; el?.scrollIntoView({block: "start"}); }}>{label}</button>)}
+        </nav>
+        <details id="spx-board-evidence" className="rounded-lg border border-slate-700/70 bg-[#08131e] text-xs text-slate-400">
+          <summary className="cursor-pointer px-4 py-3 font-semibold text-slate-200">Data evidence & diagnostics</summary>
+          <div className="space-y-3 p-3">
+            <p>{sourceText || "No verified snapshot loaded."}</p>
+            <p className="break-all font-mono">Snapshot {heatmap?.canonical?.snapshotId || "unavailable"} · {heatmap?.canonical?.payloadHash || "hash unavailable"}</p>
+            <p>Per-cell inputs: select an expiry cell in Snapshot & replay.</p>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 border border-white/10 bg-black/20 px-3 py-2 font-mono text-[10px] text-zinc-500" data-spx-gex-request-state={requestState.phase}>
           <span>STATE <strong className="text-zinc-200">{requestState.phase}</strong></span>
           <span>SOURCE <strong className="text-zinc-200">{sourceModeLabel()}</strong></span>
           <span>HTTP <strong className="text-zinc-200">{requestState.httpStatus ?? "PENDING"}</strong></span>
           <span>CODE <strong className="text-zinc-200">{requestState.errorCode || "NONE"}</strong></span>
           <span className="break-all">REQUEST <strong className="text-zinc-200">{requestState.requestUrl}</strong></span>
         </div>
+            {requestState.message && <p className="break-all text-amber-200">{requestState.message}</p>}
+          </div>
+        </details>
 
+        <div id="spx-board-price" className="min-w-0">
         <SpxPriceActionCompass
-          enabled={initialHeatmapSettled}
+          enabled={initialHeatmapSettled && Boolean(selectedDate)}
           refreshKey={zeroDteRefreshKey}
           selectedDate={selectedDate}
           onInitialLoadSettled={() => setInitialCompassSettled(true)}
         />
 
+        </div>
+        <div id="spx-board-pressure" className="min-w-0">
         <SpxGexPressureMatrix
           selectedDate={selectedDate}
           selectedMinute={selectedMinute}
           pressureRefreshKey={pressureRefreshKey}
           priceOverlayRefreshKey={zeroDteRefreshKey}
           enabled={initialHeatmapSettled}
-          controls={snapshotControls}
+          controls={null}
+          onSummaryChange={setPressureOverview}
           onSpotContextChange={onSpotContextChange}
         />
+
+        </div>
 
         {loading && !heatmap ? (
           <div className="flex h-72 items-center justify-center border border-white/10 bg-white/[0.03] text-sm uppercase tracking-[0.2em] text-zinc-500">
@@ -781,20 +475,19 @@ export function SPXGexHeatmapPage() {
           </div>
         ) : heatmap ? (
           <>
-            <section className="overflow-hidden border border-[#123142] bg-[#030910]" data-spx-gex-board-shell="true">
+            <section id="spx-board-exposure" className="min-w-0 overflow-hidden rounded-xl border border-[#123142] bg-[#030910]" data-spx-gex-board-shell="true">
             <header className="border-b border-[#123142] bg-[#04101a] p-3">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
                 <div className="max-w-2xl">
-                  <div className="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200/70">Exposure board</div>
-                  <h2 className="mt-1 text-xl font-black tracking-normal text-white">SPX Intraday GEX Board</h2>
+                  <h2 className="mt-1 text-xl font-black tracking-normal text-white">Snapshot & replay</h2>
                   <p className="mt-2 text-sm leading-6 text-zinc-500">
-                    Strike-by-expiry GEX matrix with deterministic structure labels and DEX/VEX/CEX exposure lanes.
+                    Select a cell to inspect its inputs. GEX, DEX, VEX and CEX share one model.
                   </p>
                 </div>
               </div>
             </header>
 
-            <div className="border-b border-[#123142] bg-[#06111a] p-3" data-spx-decision-cockpit="true">
+            <details className="border-b border-[#123142] bg-[#06111a] p-3" data-spx-decision-cockpit="true"><summary className="cursor-pointer text-xs text-slate-400">Linked decision run & collection evidence</summary>
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <div className="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200/70">Decision cockpit</div>
@@ -867,11 +560,10 @@ export function SPXGexHeatmapPage() {
               <div className="mt-2 break-all font-mono text-[9px] leading-4 text-zinc-600">
                 Snapshot {heatmap.canonical?.snapshotId || "legacy/no-id"} · {heatmap.canonical?.payloadHash || "hash unavailable"} · provider {heatmap.canonical?.provider || "unknown"}
               </div>
-            </div>
-
+            </details>
             <div className="border-b border-[#123142] bg-[#06111a] p-3" data-spx-gex-playback-controls="true">
               <div
-                className="mb-4 flex snap-x snap-mandatory gap-2 overflow-x-auto overscroll-x-contain pb-2 [scrollbar-width:thin] sm:mb-3 sm:grid sm:grid-cols-2 sm:overflow-visible sm:pb-0 lg:grid-cols-5"
+                className="mb-3 grid grid-cols-2 gap-2 lg:grid-cols-5"
                 aria-label="SPX GEX summary metrics"
               >
                 <Metric label="Snapshot" value={heatmap.session?.snapshotTimeEt || "n/a"} />
@@ -1082,7 +774,7 @@ export function SPXGexHeatmapPage() {
             </div>
             </section>
 
-            <section className="grid gap-3 text-xs text-zinc-400 lg:grid-cols-[1fr_360px]">
+            <details className="rounded-lg border border-slate-700 p-3 text-xs text-zinc-400"><summary className="cursor-pointer font-semibold text-slate-200">Model interpretation & methodology</summary><section className="mt-3 grid gap-3 lg:grid-cols-[1fr_360px]">
               {readingContext && (
                 <div className="border border-[#123142] bg-[#050c14] p-3" data-gex-reading-context="true">
                   <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1115,18 +807,14 @@ export function SPXGexHeatmapPage() {
                 </div>
                 <div className="leading-6">{sourceText}</div>
               </div>
-            </section>
+            </section></details>
           </>
         ) : (
           <div className="flex h-72 flex-col items-center justify-center gap-3 border border-white/10 bg-white/[0.03] text-center">
             <Waves className="h-8 w-8 text-zinc-600" />
             <p className="text-sm text-zinc-500">
-              {requestState.phase === "ERROR" ? requestState.message || "SPX GEX request failed." : "No retained canonical SPX GEX snapshots found."}
+              {requestState.phase === "ERROR" ? "Snapshot unavailable. Retry above or open diagnostics." : "No retained canonical SPX GEX snapshots found."}
             </p>
-            {snapshotControls}
-            <div className="max-w-4xl break-all font-mono text-[10px] leading-5 text-zinc-600">
-              {sourceModeLabel()} · {requestState.requestUrl} · HTTP {requestState.httpStatus ?? "n/a"} · {requestState.errorCode || "no error code"}
-            </div>
           </div>
         )}
       </div>
@@ -1195,7 +883,7 @@ const Notice = ({ tone, text }: { tone: "red" | "amber"; text: string }) => (
 );
 
 const Metric = ({ label, value }: { label: string; value: string }) => (
-  <div className="w-[42vw] min-w-[150px] max-w-[190px] shrink-0 snap-start border border-[#123142] bg-black/20 px-3 py-2 sm:w-auto sm:min-w-0 sm:max-w-none sm:shrink">
+  <div className="min-w-0 border border-[#123142] bg-black/20 px-3 py-2">
     <div className="text-[10px] font-black uppercase tracking-[0.16em] text-zinc-500">{label}</div>
     <div className="mt-1 truncate font-mono text-lg font-black text-white">{value}</div>
   </div>

@@ -250,7 +250,16 @@ async function onRequestUncached(context: Context) {
 }
 
 export async function onRequest(context: Context) {
-  const cached = await readSpxEdgeCache(context.request);
-  if (cached) return cached;
-  return coalesceSpxEdgeRequest(context.request, () => onRequestUncached(context));
+  try {
+    const cached = await readSpxEdgeCache(context.request);
+    if (cached) return cached;
+    return await coalesceSpxEdgeRequest(context.request, () => onRequestUncached(context));
+  } catch (error) {
+    console.error("SPX heatmap edge response failed.", error instanceof Error ? error.name : "UnknownError");
+    return json({
+      status: "ERROR", errorCode: "SPX_GEX_HEATMAP_EDGE_FAILED", error: "Snapshot service is temporarily unavailable. Retrying is safe.",
+      availableDates: [], selectedDate: null, sessions: [], selectedSnapshot: null,
+      heatmap: null, decision: null, collection: null, collectionAttempts: [], warnings: [],
+    }, { status: 503 });
+  }
 }

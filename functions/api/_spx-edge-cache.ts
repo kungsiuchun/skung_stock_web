@@ -79,12 +79,13 @@ export const readSpxEdgeCache = async (request: Request) => {
 };
 
 export const writeSpxEdgeCache = async (context: SpxCacheContext, response: Response) => {
-  const cache = getSpxEdgeCache();
-  if (!cache || context.request.method !== "GET") return;
   try {
+    const cache = getSpxEdgeCache();
+    if (!cache || context.request.method !== "GET") return;
     await cache.put(canonicalSpxCacheRequest(context.request), response.clone());
-  } catch {
+  } catch (error) {
     // Cache is an optimization only; a verified origin response remains valid.
+    console.error("SPX edge cache write failed.", error instanceof Error ? error.name : "UnknownError");
   }
 };
 

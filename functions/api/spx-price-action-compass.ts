@@ -259,6 +259,16 @@ async function onRequestUncached(context: Context) {
         note: "Historical and higher-timeframe SPX OHLCV use the native Yahoo chart source path; Cboe remains reserved for options/GEX source truth.",
       };
     }
+    if (requestedDate && source.provider === "yahoo") {
+      // Yahoo returns a rolling range, not the requested Board session. A dated
+      // view must not leak candles from later sessions into historical review.
+      const dateFormatter = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" });
+      rawCandles = rawCandles.filter(candle => {
+        const parts = Object.fromEntries(dateFormatter.formatToParts(new Date(candle.time)).map(p => [p.type, p.value]));
+        const date = `${parts.year}-${parts.month}-${parts.day}`;
+        return isPriceOverlay ? date === requestedDate : date <= requestedDate;
+      });
+    }
     const candles = source.provider === "0dtespx"
       ? aggregateSpxOneMinutePriceActionCandles(rawCandles, targetTimeframe as "1m" | "5m" | "15m")
       : aggregateSpxPriceActionCandles(rawCandles, config.aggregateTo || timeframe);

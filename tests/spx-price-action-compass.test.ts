@@ -413,6 +413,23 @@ describe("SPX Price Action Compass detector", () => {
 });
 
 describe("SPX Price Action Compass API", () => {
+  it("bounds dated Yahoo history to the selected ET session and excludes later candles", async () => {
+    const priorFetch = globalThis.fetch;
+    const times = ["2026-07-09T14:00:00Z", "2026-07-10T14:00:00Z", "2026-07-13T14:00:00Z"].map(t => Date.parse(t) / 1000);
+    globalThis.fetch = (async () => Response.json({chart:{result:[{
+      timestamp:times, indicators:{quote:[{open:[6000,6001,6002],high:[6002,6003,6004],low:[5998,5999,6000],close:[6001,6002,6003],volume:[10,20,30]}]},
+    }]}})) as typeof fetch;
+    try {
+      for (const view of ["timeframe=5m", "view=price-overlay"]) {
+        const response = await getSpxPriceActionCompassApi({request:new Request(`https://example.com/api/spx-price-action-compass?${view}&date=2026-07-10`),env:{SPX_PRICE_ACTION_TEST_NOW_MS:Date.parse("2026-07-14T14:00:00Z")}});
+        const payload = await response.json() as {candles:SpxPriceActionCandle[]};
+        assert.equal(response.status,200);
+        assert.ok(payload.candles.length>0);
+        assert.ok(payload.candles.every(c => c.time < Date.parse("2026-07-11T04:00:00Z")));
+        if(view.startsWith("view=")) assert.equal(payload.candles.length,1);
+      }
+    } finally {globalThis.fetch=priorFetch;}
+  });
   it("builds a Compass request for the Board-selected session date", () => {
     assert.equal(
       buildSpxPriceActionCompassRequestUrl("5m", "2026-09-25"),

@@ -414,7 +414,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.deepEqual(initialSpqRequestOrder.slice(0, 4), ["heatmap", "compass", "pressure", "overlay"], "initial SPX Page reads must use the stable request lane order");
     const monitorOrder = await page.$$eval('[data-pa-side-pattern="true"]', (nodes) => nodes.map((node) => ({
       text: node.textContent || "",
-      index: Number((node.textContent || "").match(/idx\s+\d+-(\d+)/)?.[1] || -1),
+      index: Number(node.getAttribute("data-pa-pattern-end-index")),
     })));
     assert.deepEqual(monitorOrder.map((row) => row.index), [280, 280, 240, 120], "Signal Monitor must be latest-first");
     assert.match(monitorOrder[0].text, /Latest A/, "signal ties must use the deterministic id tie-break");
@@ -427,8 +427,13 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     const snapshotLabelBeforeAutoRefresh = await page.$eval('button[class*="text-yellow-300"]', (node) => node.textContent || "");
     forceCompassTextFailure = true;
     await triggerVisibleCurrentSessionRefresh(page);
-    await page.waitForFunction(() => document.querySelector('[data-spx-price-action-compass="true"]')?.textContent?.includes("Refresh failed; showing the last verified Price Action Compass."));
-    const compassFailure = await page.$eval('[data-spx-price-action-compass="true"]', (element) => element.textContent || "");
+    // Capture one coherent error render: the independent initial revalidation
+    // may immediately begin another read and clear the transient error notice.
+    const compassFailureHandle = await page.waitForFunction(() => {
+      const text = document.querySelector('[data-spx-price-action-compass="true"]')?.textContent || "";
+      return text.includes("Last verified candle:") && text.includes("HTTP 503") ? text : false;
+    });
+    const compassFailure = await compassFailureHandle.jsonValue();
     assert.match(compassFailure, /HTTP 503/);
     assert.ok(!compassFailure.includes("Unexpected token"), "Compass must not expose a JSON syntax error for HTML failures");
     assert.ok(await page.$('[data-pa-chart-surface="true"]'), "Compass must retain its last verified chart after refresh failure");
@@ -608,7 +613,8 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     assert.equal(pressureLayout.spotCallout, false, "chart body must not contain an SPX price card that obscures the line");
     assert.equal(pressureLayout.selectedHeaderCount, 1, "exactly one pressure time header must identify the selected slot");
     assert.equal(pressureLayout.selectedBodyRingCount, 0, "selected pressure slot must not add a border to every matrix cell");
-    assert.deepEqual(pressureLayout.pulseTargets.filter((target) => !target.pulses), [], "every current-spot marker must use the live pulse surface");
+    assert.deepEqual(pressureLayout.pulseTargets.filter((target) => target.selector.includes("pressure") && !target.pulses), [], "every injected live pressure marker must use the live pulse surface");
+    assert.deepEqual(pressureLayout.pulseTargets.filter((target) => target.selector.includes("heatmap") && target.pulses), [], "delayed canonical snapshot markers must never imply a live quote");
     assert.equal(pressureLayout.stickyStrike, "sticky", "strike rail must remain sticky");
     assert.equal(pressureLayout.stickyCurrentGex, "sticky", "Current GEX rail must remain sticky");
     assert.equal(pressureLayout.moverUsesOrderedList, true, "Mover Tape ranks must use an ordered list");
@@ -807,7 +813,7 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
     await page.waitForSelector('[data-spx-gex-playback-error="true"]', { timeout: 10_000 });
 
     const paused = await page.evaluate(() => ({
-      boardVisible: document.body.innerText.includes("SPX Intraday GEX Board"),
+      boardVisible: Boolean(document.querySelector('[data-spx-gex-heatmap-board="true"]')?.checkVisibility()),
       pausedText: document.querySelector('[data-spx-gex-playback-error="true"]')?.textContent || "",
       activeSnapshot: document.querySelector('button[class*="text-yellow-300"]')?.textContent || "",
     }));
@@ -840,13 +846,16 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
       corridorLines: document.querySelectorAll('[data-spx-gex-pressure-expected-move-upper="true"], [data-spx-gex-pressure-expected-move-lower="true"]').length,
       pointCount: Number(document.querySelector('[data-spx-gex-pressure-spot-line="true"]')?.getAttribute("data-spx-gex-pressure-spot-point-count") || 0),
       warning: document.querySelector('[data-spx-gex-pressure-spot-warning="true"]')?.textContent || "",
+      diagnostics: document.querySelector('[data-spx-price-overlay-diagnostics]')?.textContent || "",
       pulseCount: document.querySelectorAll('[data-spx-gex-pressure-matrix="true"] .spx-spot-live-pulse').length,
     }));
     assert.match(retainedClosedOverlay.source, /0DTESPX STALE/);
     assert.match(retainedClosedOverlay.expectedMove, /STALE EM ±25\.00 · 16:00 ET/, "an unavailable refresh must retain the last verified EM with a stale label");
     assert.equal(retainedClosedOverlay.corridorLines, 2, "an unavailable refresh must retain both visibly stale EM corridor lines");
     assert.ok(retainedClosedOverlay.pointCount >= 250, "post-close failure must retain the last verified 1-minute overlay");
-    assert.match(retainedClosedOverlay.warning, /ZERO_DTE_SPX_UPSTREAM_UNAVAILABLE/);
+    assert.match(retainedClosedOverlay.warning, /Current SPX is not live/);
+    assert.ok(!retainedClosedOverlay.warning.includes("ZERO_DTE_SPX_"), "normal warning must not leak internal codes");
+    assert.match(retainedClosedOverlay.diagnostics, /ZERO_DTE_SPX_UPSTREAM_UNAVAILABLE/, "technical failure remains inspectable in diagnostics");
     assert.equal(retainedClosedOverlay.pulseCount, 0, "retained CLOSED overlay must remain non-live");
     overlayMode = "closed";
     await triggerVisibleCurrentSessionRefresh(page);
