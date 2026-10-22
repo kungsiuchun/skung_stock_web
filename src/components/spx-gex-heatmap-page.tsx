@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowLeft, CalendarDays, Gauge, Pause, Play, Waves } from "lucide-react";
 import { buildSpxGexHeatmapReadingContext, formatSpxGexCompactExposure, type SpxGexHeatmapCell, type SpxGexHeatmapModel, type SpxGexHeatmapReadingRule, type SpxGexStrikeProfile } from "@/lib/spx-gex-heatmap";
-import { parseSpxBoardResponse, spxFailureMessage } from "@/lib/spx-board-response";
+import { buildSpxFailureDetails, formatSpxFailureDetails, parseSpxBoardResponse, spxFailureMessage, type SpxFailureDetails } from "@/lib/spx-board-response";
 import { useSpxGexBoard, currentEtClock, type SpxGexBoardNavigationMode } from "@/hooks/use-spx-gex-board";
 export { parseSpxGexBoardSelection, resolveSpxGexBoardNavigationMode } from "@/hooks/use-spx-gex-board";
 import { getSpxSpotLivePulseKey } from "@/lib/spx-spot-live-pulse";
 import type { SpxGexZeroDteSpotContext } from "@/lib/spx-gex-pressure-matrix";
-import { runSpxRequest } from "@/lib/spx-request-lane";
+import { runSpxRequest, SpxRequestTimeoutError } from "@/lib/spx-request-lane";
 import { SpxBoardOverview, type PressureOverview } from "./spx-board-overview";
 import { SpxPriceActionCompass } from "./spx-price-action-compass";
 import { SpxGexPressureMatrix } from "./spx-gex-pressure-matrix";
@@ -158,7 +158,7 @@ export function SPXGexHeatmapPage() {
   const [activeAuditCell, setActiveAuditCell] = useState<ActiveGexAuditCell | null>(null);
   const [auditDetail, setAuditDetail] = useState<SpxGexHeatmapCell | null>(null);
   const [auditDetailKey, setAuditDetailKey] = useState<string | null>(null);
-  const [auditDetailError, setAuditDetailError] = useState<string | null>(null);
+  const [auditDetailFailure, setAuditDetailFailure] = useState<SpxFailureDetails | null>(null);
   const [zeroDteSpotContext, setZeroDteSpotContext] = useState<SpxGexZeroDteSpotContext | null>(null);
   const activeAuditCellRef = useRef(activeAuditCell);
   const auditHoverSuppressedAfterScrollRef = useRef(false);
@@ -218,12 +218,13 @@ export function SPXGexHeatmapPage() {
     if (!activeAuditCell || !selectedDate || selectedMinute === null) {
       setAuditDetail(null);
       setAuditDetailKey(null);
-      setAuditDetailError(null);
+      setAuditDetailFailure(null);
       return undefined;
     }
     const controller = new AbortController();
     setAuditDetail(null);
     setAuditDetailKey(null);
+    setAuditDetailFailure(null);
     const timer = window.setTimeout(() => {
       const params = new URLSearchParams({
         date: selectedDate,
@@ -231,20 +232,33 @@ export function SPXGexHeatmapPage() {
         strike: String(activeAuditCell.cell.strike),
         expiry: activeAuditCell.cell.expdate,
       });
+      const requestUrl = `/api/spx-gex-cell-detail?${params.toString()}`;
       void (async () => {
         try {
-          const response = await runSpxRequest(signal => fetch(`/api/spx-gex-cell-detail?${params.toString()}`, { signal }), { signal: controller.signal });
-          const payload = await parseSpxBoardResponse<{ status: string; detail: SpxGexHeatmapCell | null; error?: string }>(response, "/api/spx-gex-cell-detail", "detail");
-          if (!response.ok || payload.status !== "READY" || !payload.detail) throw new Error(payload.error || "GEX audit detail is unavailable.");
+          const response = await runSpxRequest(signal => fetch(requestUrl, { signal }), { signal: controller.signal });
+          const payload = await parseSpxBoardResponse<{ status: string; detail: SpxGexHeatmapCell | null; error?: string; errorCode?: string | null }>(response, requestUrl, "detail");
+          if (!response.ok || payload.status !== "READY" || !payload.detail) {
+            const failure = buildSpxFailureDetails({ response, requestUrl, responseCode: payload.errorCode, fallbackCode: "SPX_GEX_CELL_DETAIL_UNAVAILABLE" });
+            if (!controller.signal.aborted) {
+              setAuditDetail(null);
+              setAuditDetailFailure(failure);
+            }
+            return;
+          }
           if (!controller.signal.aborted) {
             setAuditDetailKey(activeAuditCell.key);
             setAuditDetail(payload.detail);
-            setAuditDetailError(null);
+            setAuditDetailFailure(null);
           }
         } catch (error) {
           if (!controller.signal.aborted) {
+            const failure = buildSpxFailureDetails({
+              error,
+              requestUrl,
+              fallbackCode: error instanceof SpxRequestTimeoutError ? "REQUEST_TIMEOUT" : "TRANSPORT_ERROR",
+            });
             setAuditDetail(null);
-            setAuditDetailError(error instanceof Error ? error.message : String(error));
+            setAuditDetailFailure(failure);
           }
         }
       })();
@@ -763,11 +777,11 @@ export function SPXGexHeatmapPage() {
                   surface="board"
                   interactive={activeAuditCell.locked}
                 >
-                  <GexAuditCellDetail activeCell={activeAuditCell} detail={auditDetailKey === activeAuditCell.key ? auditDetail : null} detailError={auditDetailError} />
+                  <GexAuditCellDetail activeCell={activeAuditCell} detail={auditDetailKey === activeAuditCell.key ? auditDetail : null} detailFailure={auditDetailFailure} />
                 </SpxGexTooltip>
               )}
               <SpxGexInlineTooltip surface="board">
-                {activeAuditCell ? <GexAuditCellDetail activeCell={activeAuditCell} detail={auditDetailKey === activeAuditCell.key ? auditDetail : null} detailError={auditDetailError} /> : (
+                {activeAuditCell ? <GexAuditCellDetail activeCell={activeAuditCell} detail={auditDetailKey === activeAuditCell.key ? auditDetail : null} detailFailure={auditDetailFailure} /> : (
                   <div className="text-zinc-500">Tap a priced expiry cell for complete GEX audit evidence.</div>
                 )}
               </SpxGexInlineTooltip>
@@ -822,10 +836,10 @@ export function SPXGexHeatmapPage() {
   );
 }
 
-const GexAuditCellDetail = ({ activeCell, detail, detailError }: {
+const GexAuditCellDetail = ({ activeCell, detail, detailFailure }: {
   activeCell: ActiveGexAuditCell;
   detail: SpxGexHeatmapCell | null;
-  detailError: string | null;
+  detailFailure: SpxFailureDetails | null;
 }) => {
   const cell = detail || activeCell.cell;
   const priced = typeof cell.netGex === "number" && Number.isFinite(cell.netGex);
@@ -841,8 +855,8 @@ const GexAuditCellDetail = ({ activeCell, detail, detailError }: {
         <div className="text-zinc-500">Model {cell.model || "none"}</div>
         <div className="text-cyan-200">Included {(cell.activeSeries || []).join(", ") || "legacy / unavailable"}</div>
         {(cell.inactiveSeries || []).map((series) => <div key={series} className="text-amber-200">Inactive {series} / AM-settled after 09:30 ET</div>)}
-        {!detail && !detailError && <div className="text-zinc-500">Loading full audit evidence…</div>}
-        {detailError && <div className="text-amber-200">Full audit unavailable: {detailError}</div>}
+        {!detail && !detailFailure && <div className="text-zinc-500">Loading full audit evidence…</div>}
+        {detailFailure && <div className="text-amber-200">Full audit unavailable: {formatSpxFailureDetails(detailFailure)}</div>}
       </SpxGexTooltipSection>
       <SpxGexTooltipSection label="Exposure">
         {priced ? (

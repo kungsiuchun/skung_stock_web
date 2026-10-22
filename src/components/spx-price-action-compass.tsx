@@ -28,7 +28,8 @@ import {
   type SpxPriceActionTrend,
   type SpxPriceActionZone,
 } from "@/lib/spx-price-action-compass";
-import { parseSpxBoardResponse, spxFailureMessage } from "@/lib/spx-board-response";
+import { buildSpxFailureDetails, formatSpxFailureDetails, parseSpxBoardResponse, spxFailureMessage, type SpxFailureDetails } from "@/lib/spx-board-response";
+import { SafeJsonResponseError } from "@/lib/safe-json-response";
 import { isSpxRequestAbort, runSpxRequest } from "@/lib/spx-request-lane";
 type SignalDirectionFilter = "all" | SpxPriceActionPattern["direction"];
 
@@ -146,6 +147,7 @@ export function SpxPriceActionCompass({
   const [data, setData] = useState<SpxPriceActionCompassResponse>(emptyCompass);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [failureDetails, setFailureDetails] = useState<SpxFailureDetails | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
   const [selectedPattern, setSelectedPattern] = useState<SpxPriceActionPattern | null>(null);
@@ -174,24 +176,36 @@ export function SpxPriceActionCompass({
     const loadCompass = async () => {
       setLoading(true);
       setError(null);
+      setFailureDetails(null);
+      const requestUrl = buildSpxPriceActionCompassRequestUrl(timeframe, selectedDate);
       try {
-        const requestUrl = buildSpxPriceActionCompassRequestUrl(timeframe, selectedDate);
         const response = await runSpxRequest((attemptSignal) => fetch(requestUrl, { signal: attemptSignal }), { signal: controller.signal, onRetry: () => { if (!controller.signal.aborted) setReconnecting(true); } });
         const payload = await parseSpxBoardResponse<SpxPriceActionCompassResponse>(response, requestUrl, "compass");
         if (controller.signal.aborted) return;
         if (!response.ok) {
-          setError(payload.warnings?.join(" ") || "SPX Price Action Compass API failed");
+          const failure = buildSpxFailureDetails({ response, requestUrl, responseCode: (payload as unknown as { errorCode?: unknown }).errorCode, fallbackCode: "SPX_PRICE_ACTION_COMPASS_REQUEST_FAILED" });
+          setFailureDetails(failure);
+          setError(spxFailureMessage(failure.httpStatus));
           return;
         }
-        if (payload.timeframe !== timeframe) throw new Error("Price response timeframe does not match the requested chart.");
+        if (payload.timeframe !== timeframe) {
+          throw new SafeJsonResponseError("Price response does not match the requested chart.", response.status, response.headers.get("content-type") || "", response.headers.get("cf-ray"), "SCHEMA_INVALID");
+        }
         setData(payload);
+        setFailureDetails(null);
         setSelectedPattern(payload.summary.latestPattern || payload.patterns[0] || null);
         setModalPattern(null);
         setPracticeChoice(null);
         setPracticeRevealed(false);
       } catch (err) {
         if (controller.signal.aborted || isSpxRequestAbort(err)) return;
-        setError(err instanceof Error ? err.message : "SPX Price Action Compass failed");
+        const failure = buildSpxFailureDetails({
+          error: err,
+          requestUrl,
+          fallbackCode: err instanceof Error && err.name === "SpxRequestTimeoutError" ? "REQUEST_TIMEOUT" : "TRANSPORT_ERROR",
+        });
+        setFailureDetails(failure);
+        setError(spxFailureMessage(failure.httpStatus));
       } finally {
         if (!controller.signal.aborted) {
           setLoading(false);
@@ -361,7 +375,7 @@ export function SpxPriceActionCompass({
         </div>
 
         {reconnecting && <Notice tone="amber" text="Reconnecting SPX source…" />}
-        {error && <div role="alert"><Notice tone="red" text={`${spxFailureMessage(null)}${data.candles.length ? ` Last verified candle: ${formatEtTime(data.candles[data.candles.length - 1].time, true)}.` : " Price chart unavailable."}`} /><button className="min-h-10 px-3 text-xs text-cyan-200 underline" onClick={() => setRetryKey(k => k + 1)}>Retry price chart</button><details className="p-2 text-xs text-zinc-400"><summary className="cursor-pointer">Price diagnostics</summary><p className="break-all">{error}</p></details></div>}
+        {error && <div role="alert"><Notice tone="red" text={`${spxFailureMessage(failureDetails?.httpStatus ?? null)}${data.candles.length ? ` Last verified candle: ${formatEtTime(data.candles[data.candles.length - 1].time, true)}.` : " Price chart unavailable."}`} /><button className="min-h-10 px-3 text-xs text-cyan-200 underline" onClick={() => setRetryKey(k => k + 1)}>Retry price chart</button><details className="p-2 text-xs text-zinc-400"><summary className="cursor-pointer">Price diagnostics</summary><p className="break-all">{formatSpxFailureDetails(failureDetails)}</p></details></div>}
         {data.warnings.length > 0 && <Notice tone="amber" text={data.warnings.join(" ")} />}
 
         <div className="grid gap-2 xl:grid-cols-[minmax(0,1fr)_360px]">

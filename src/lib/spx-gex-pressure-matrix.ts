@@ -11,6 +11,12 @@ const PRICE_VIEW_CENTER_STEP = 25;
 const PRICE_VIEW_PAN_STEP = 50;
 const MOVER_LIMIT = 10;
 
+export const SPX_GEX_PRESSURE_RECOVERY_DELAYS_MS = [3_000, 15_000, 60_000] as const;
+
+export const getSpxGexPressureRecoveryDelay = (attempt: number) => Number.isInteger(attempt) && attempt >= 0
+  ? SPX_GEX_PRESSURE_RECOVERY_DELAYS_MS[attempt] ?? null
+  : null;
+
 export type SpxGexPressureState =
   | "POSITIVE_STRONGER"
   | "POSITIVE_WEAKER"

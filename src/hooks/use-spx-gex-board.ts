@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { emptySpxBoard, parseSpxBoardResponse, type SpxGexHeatmapResponse } from "@/lib/spx-board-response";
+import { emptySpxBoard, parseSpxBoardResponse, spxFailureMessage, type SpxGexHeatmapResponse } from "@/lib/spx-board-response";
 import { SafeJsonResponseError } from "@/lib/safe-json-response";
 import { runSpxRequest, SpxRequestTimeoutError } from "@/lib/spx-request-lane";
 type BoardRequestPhase = "LOADING" | "READY" | "EMPTY" | "ERROR";
@@ -160,7 +160,7 @@ export function useSpxGexBoard() {
           requestUrl,
           httpStatus: response.status,
           errorCode: payload.errorCode,
-          message: payload.error || "SPX GEX heatmap API failed",
+          message: spxFailureMessage(response.status),
         });
         if (options.playback && date && snapshotMinute !== null && snapshotMinute !== undefined) {
           setFailedPlayback({ date, snapshotMinuteEt: snapshotMinute });
@@ -214,7 +214,7 @@ export function useSpxGexBoard() {
         requestUrl: `/api/spx-gex-heatmap${date ? `?date=${encodeURIComponent(date)}${snapshotMinute !== null && snapshotMinute !== undefined ? `&snapshot=${snapshotMinute}` : ""}` : ""}`,
         httpStatus,
         errorCode: err instanceof SafeJsonResponseError ? err.code : err instanceof SpxRequestTimeoutError ? "REQUEST_TIMEOUT" : "TRANSPORT_ERROR",
-        message: err instanceof Error ? err.message : "SPX GEX heatmap failed",
+        message: spxFailureMessage(httpStatus),
       });
       if (options.playback && date && snapshotMinute !== null && snapshotMinute !== undefined) {
         setFailedPlayback({ date, snapshotMinuteEt: snapshotMinute });
@@ -248,12 +248,10 @@ export function useSpxGexBoard() {
       const isLiveSession = clock.minuteEt >= 570 && clock.minuteEt <= 975;
       const needsPostCloseRevalidation = clock.minuteEt > 975 && postCloseGexRevalidationDateRef.current !== clock.tradingDate;
       if (!isLiveSession && !needsPostCloseRevalidation) return;
+      if (needsPostCloseRevalidation) postCloseGexRevalidationDateRef.current = clock.tradingDate;
       // An undated read is required here: a dated read can never discover the
       // first canonical GEX snapshot after an ET trading-date rollover.
       void loadHeatmap(undefined, null, { navigationMode: "latest" }).then((result) => {
-        if (needsPostCloseRevalidation && result === "READY" && selectedDate === clock.tradingDate) {
-          postCloseGexRevalidationDateRef.current = clock.tradingDate;
-        }
         // Pressure is canonical D1 GEX and follows only the latest-GEX path.
         // Current-session 0DTESPX revalidation is deliberately independent.
         if (result !== "STALE") setPressureRefreshKey((current) => current + 1);
@@ -268,7 +266,7 @@ export function useSpxGexBoard() {
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", refreshVisibleCurrentSession);
     };
-  }, [initialHeatmapSettled, loadHeatmap, navigationMode, playing, selectedDate]);
+  }, [initialHeatmapSettled, loadHeatmap, navigationMode, playing]);
 
   useEffect(() => {
     if (!playing) return undefined;

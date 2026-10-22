@@ -263,11 +263,14 @@ async function onRequestUncached(context: Context) {
       // Yahoo returns a rolling range, not the requested Board session. A dated
       // view must not leak candles from later sessions into historical review.
       const dateFormatter = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" });
+      let selectedDateCovered = false;
       rawCandles = rawCandles.filter(candle => {
         const parts = Object.fromEntries(dateFormatter.formatToParts(new Date(candle.time)).map(p => [p.type, p.value]));
         const date = `${parts.year}-${parts.month}-${parts.day}`;
+        if (date === requestedDate) selectedDateCovered = true;
         return isPriceOverlay ? date === requestedDate : date <= requestedDate;
       });
+      if (!selectedDateCovered) rawCandles = [];
     }
     const candles = source.provider === "0dtespx"
       ? aggregateSpxOneMinutePriceActionCandles(rawCandles, targetTimeframe as "1m" | "5m" | "15m")
