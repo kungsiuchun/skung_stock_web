@@ -362,7 +362,8 @@ const scrollNearestVerticalAncestor = (page, selector) => page.$eval(selector, a
           ...closedOneMinutePayload,
           candles: [],
           source: { ...closedOneMinutePayload.source, status: "UNAVAILABLE" },
-          warnings: ["ZERO_DTE_SPX_UPSTREAM_UNAVAILABLE"],
+          errorCode: "ZERO_DTE_SPX_UPSTREAM_UNAVAILABLE",
+          warnings: ["SPX source is unavailable; no verified candles are available."],
         }),
       });
       return request.respond(jsonResponse(oneMinutePayload));

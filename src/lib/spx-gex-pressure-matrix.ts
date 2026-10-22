@@ -204,15 +204,12 @@ export const resolveSpxGexExpectedMoveOverlay = (input: {
     && Date.parse(expectedMove.sampleAt) <= nowMs
     && (!source.sessionDate || source.sessionDate === input.selectedDate)) {
     const ageMinutes = Math.max(0, Math.floor((nowMs - Date.parse(expectedMove.sampleAt)) / 60_000));
-    const errorCode = expectedMove.errorCode || "ZERO_DTE_SPX_EXPECTED_MOVE_STALE";
     return {
       expectedMove: expectedMove.value,
-      warning: `Using stale 0DTESPX Expected Move sampled ${ageMinutes}m ago (${errorCode}); context only.`,
+      warning: `Using stale 0DTESPX Expected Move sampled ${ageMinutes}m ago; context only.`,
     };
   }
-  const errorCode = expectedMove?.errorCode
-    || (expectedMove?.sampleAt ? "ZERO_DTE_SPX_EXPECTED_MOVE_STALE" : "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE");
-  return { expectedMove: null, warning: `0DTESPX Expected Move unavailable (${errorCode}).` };
+  return { expectedMove: null, warning: "0DTESPX Expected Move unavailable; no expected-move corridor is shown." };
 };
 
 export interface SpxGexPressureFrame {

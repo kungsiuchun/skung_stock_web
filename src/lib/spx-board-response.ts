@@ -75,6 +75,14 @@ const patternDirections = ["bullish", "bearish", "neutral"] as const;
 const timeframes = ["1m", "5m", "15m", "4h", "1d"] as const;
 const pressureStatuses = ["READY", "DEGRADED", "EMPTY", "BINDING_MISSING", "STORAGE_UNAVAILABLE", "ERROR"] as const;
 const heatmapStatuses = ["READY", "EMPTY", "BINDING_MISSING", "STORAGE_UNAVAILABLE", "ERROR"] as const;
+const expectedMoveErrorCodes = [
+  null,
+  "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE",
+  "ZERO_DTE_SPX_EXPECTED_MOVE_STALE",
+  "ZERO_DTE_SPX_EXPECTED_MOVE_INVALID",
+  "ZERO_DTE_SPX_EXPECTED_MOVE_FUTURE",
+  "ZERO_DTE_SPX_EXPECTED_MOVE_LAGGED",
+] as const;
 
 const session = (value: Record<string, unknown>) => isIsoDate(value.tradingDate)
   && minuteEt(value.snapshotMinuteEt)
@@ -91,8 +99,8 @@ const candle = (value: Record<string, unknown>) => finite(value.time)
   && bounded(value.low, 0, Number.POSITIVE_INFINITY)
   && bounded(value.close, 0, Number.POSITIVE_INFINITY)
   && bounded(value.volume, 0, Number.POSITIVE_INFINITY)
-  && value.high >= Math.max(value.open as number, value.close as number, value.low as number)
-  && value.low <= Math.min(value.open as number, value.close as number, value.high as number);
+  && (value.high as number) >= Math.max(value.open as number, value.close as number, value.low as number)
+  && (value.low as number) <= Math.min(value.open as number, value.close as number, value.high as number);
 
 const pattern = (value: Record<string, unknown>, candleCount: number) => {
   const fromIndex = value.fromIndex;
@@ -143,7 +151,7 @@ const priceActionSource = (value: unknown) => {
       || !nullableDateTime(value.expectedMove.sampleAt)
       || !optional(value.expectedMove, "ageMs", item => item === null || finite(item))
       || !optional(value.expectedMove, "lagMs", item => item === null || finite(item))
-      || !optional(value.expectedMove, "errorCode", item => item === null || typeof item === "string")) return false;
+      || !optional(value.expectedMove, "errorCode", item => oneOf(item, expectedMoveErrorCodes))) return false;
   }
   if (value.sharedCache !== undefined) {
     if (!record(value.sharedCache)
@@ -188,6 +196,18 @@ const pressureCell = (value: Record<string, unknown>) => minuteEt(value.snapshot
   && bounded(value.intensityPct, 0, 100)
   && nullableNumber(value.spot);
 
+const pressureMover = (value: Record<string, unknown>) => finite(value.strike)
+  && oneOf(value.state, pressureStates)
+  && finite(value.baselineGex)
+  && finite(value.currentGex)
+  && finite(value.deltaGex)
+  && nullableNumber(value.strengthPct)
+  && bounded(value.intensityPct, 0, 100);
+
+const pressureMovers = (value: unknown) => Array.isArray(value)
+  && value.length <= 10
+  && value.every((item, index) => record(item) && item.rank === index + 1 && pressureMover(item));
+
 const pressure = (value: unknown) => {
   if (!record(value)
     || !isIsoDate(value.tradingDate)
@@ -213,9 +233,7 @@ const pressure = (value: unknown) => {
     || !bounded(value.strikeRange.step, 0, Number.POSITIVE_INFINITY)
     || (value.strikeRange.step as number) <= 0
     || !list(value.rows, row => finite(row.strike) && nullableNumber(row.currentGex) && list(row.cells, pressureCell))
-    || !list(value.movers, mover => nonNegativeInteger(mover.rank) && (mover.rank as number) > 0 && finite(mover.strike)
-      && oneOf(mover.state, pressureStates) && finite(mover.baselineGex) && finite(mover.currentGex)
-      && finite(mover.deltaGex) && nullableNumber(mover.strengthPct) && bounded(mover.intensityPct, 0, 100))
+    || !pressureMovers(value.movers)
     || !record(value.source)
     || typeof value.source.provider !== "string"
     || !nullableString(value.source.fallbackFrom)
@@ -253,6 +271,25 @@ const heatmapCell = (value: Record<string, unknown>) => {
   return true;
 };
 
+const dataQualitySummary = (value: unknown): value is Record<string, unknown> => record(value)
+  && nonNegativeInteger(value.total)
+  && nonNegativeInteger(value.priced)
+  && nonNegativeInteger(value.repaired)
+  && nonNegativeInteger(value.partial)
+  && nonNegativeInteger(value.unpriced)
+  && nonNegativeInteger(value.excluded)
+  && (value.priced as number) + (value.repaired as number) + (value.partial as number) + (value.unpriced as number) === (value.total as number);
+
+const dataQualityMatchesCells = (value: unknown, cells: Record<string, unknown>[]) => {
+  if (!dataQualitySummary(value)) return false;
+  return value.total === cells.length
+    && value.priced === cells.filter(cell => cell.pricingQuality === "priced").length
+    && value.repaired === cells.filter(cell => cell.pricingQuality === "repaired").length
+    && value.partial === cells.filter(cell => cell.pricingQuality === "partial").length
+    && value.unpriced === cells.filter(cell => cell.pricingQuality === "unpriced" || cell.pricingQuality === undefined).length
+    && value.excluded === cells.filter(cell => cell.callIvSource === "excluded_low_time_value" || cell.putIvSource === "excluded_low_time_value").length;
+};
+
 const heatmap = (value: unknown) => {
   if (!record(value)
     || !dateTime(value.generatedAt)
@@ -286,7 +323,7 @@ const heatmap = (value: unknown) => {
       && nonNegativeInteger(profile.totalOpenInterest) && nonNegativeInteger(profile.totalVolume)
       && nullableIsoDate(profile.dominantExpiry)
       && list(profile.tags, tag => oneOf(tag.type, ["now", "pin", "gamma_flip", "upper_shelf", "near_resistance", "minor_resistance", "big_call_wall", "resistance_zone", "lower_shelf", "air_gap", "oi_spike", "key_support", "structural_support"])
-        && typeof tag.label === "string" && oneOf(tag.severity, ["info", "watch", "major"]) && typeof tag.source === "string")) return false;
+       && typeof tag.label === "string" && oneOf(tag.severity, ["info", "watch", "major"]) && typeof tag.source === "string"))) return false;
   if (!record(value.zeroDte)
     || !isIsoDate(value.zeroDte.expiry)
     || !nullableString(value.zeroDte.sessionPhase)
@@ -320,13 +357,7 @@ const heatmap = (value: unknown) => {
     || !optional(value.source, "fallbackFrom", nullableString)
     || !optional(value.source, "sourceTimestamp", nullableDateTime)
     || !optional(value.source, "calculationEngineVersion", nonNegativeInteger)) return false;
-  if (value.dataQuality !== undefined && (!record(value.dataQuality)
-    || !nonNegativeInteger(value.dataQuality.total)
-    || !nonNegativeInteger(value.dataQuality.priced)
-    || !nonNegativeInteger(value.dataQuality.repaired)
-    || !nonNegativeInteger(value.dataQuality.partial)
-    || !nonNegativeInteger(value.dataQuality.unpriced)
-    || !nonNegativeInteger(value.dataQuality.excluded))) return false;
+  if (value.dataQuality !== undefined && !dataQualityMatchesCells(value.dataQuality, value.cells as Record<string, unknown>[])) return false;
   if (value.canonical !== undefined && value.canonical !== null && (!record(value.canonical)
     || typeof value.canonical.snapshotId !== "string"
     || value.canonical.schemaVersion !== 1
@@ -341,13 +372,7 @@ const heatmap = (value: unknown) => {
     || !nullableString(value.canonical.fallbackFrom)
     || !nullableDateTime(value.canonical.sourceTimestamp)
     || typeof value.canonical.payloadHash !== "string"
-    || !(value.canonical.dataQuality === null || record(value.canonical.dataQuality)
-      && nonNegativeInteger(value.canonical.dataQuality.total)
-      && nonNegativeInteger(value.canonical.dataQuality.priced)
-      && nonNegativeInteger(value.canonical.dataQuality.repaired)
-      && nonNegativeInteger(value.canonical.dataQuality.partial)
-      && nonNegativeInteger(value.canonical.dataQuality.unpriced)
-      && nonNegativeInteger(value.canonical.dataQuality.excluded))
+    || !(value.canonical.dataQuality === null || dataQualityMatchesCells(value.canonical.dataQuality, value.cells as Record<string, unknown>[]))
     || !optional(value.canonical, "calculationEngineVersion", nonNegativeInteger))) return false;
   return true;
 };
@@ -391,9 +416,14 @@ const collectionRecord = (value: unknown) => record(value)
 const collectionHealth = (value: unknown) => value === null || record(value)
   && nonNegativeInteger(value.dueSlots)
   && nonNegativeInteger(value.persistedSlots)
+  && (value.persistedSlots as number) <= (value.dueSlots as number)
   && Array.isArray(value.missingSnapshotMinutesEt) && value.missingSnapshotMinutesEt.every(minuteEt)
+  && (value.missingSnapshotMinutesEt as unknown[]).length <= (value.dueSlots as number)
   && strings(value.incompleteSlotIds)
+  && (value.incompleteSlotIds as string[]).length <= (value.dueSlots as number)
   && strings(value.failedSlotIds)
+  && value.failedSlotIds.length <= (value.incompleteSlotIds as string[]).length
+  && value.failedSlotIds.every(slotId => (value.incompleteSlotIds as string[]).includes(slotId))
   && nullableString(value.provider)
   && nullableString(value.fallbackFrom)
   && nullableString(value.stage)
@@ -437,7 +467,7 @@ const decision = (value: unknown) => {
       && typeof agent.valid === "boolean"
       && typeof agent.modelStatus === "string"
       && Array.isArray(agent.attempts)
-      && agent.attempts.every(item => record(item) && modelAttempt(item))) return false;
+     && agent.attempts.every(item => record(item) && modelAttempt(item)))) return false;
   const action = (item: unknown) => item === null || oneOf(item, ["OPEN_CALL", "OPEN_PUT", "HOLD", "CLOSE"]);
   const cio = value.cio;
   const riskGate = value.riskGate;
@@ -475,11 +505,15 @@ const invalidResponse = (kind: string, response: Response, url: string): never =
   throw new SafeJsonResponseError(`Invalid ${kind} response contract: ${url}`, response.status, response.headers.get("content-type") || "", response.headers.get("cf-ray"), "SCHEMA_INVALID");
 };
 
-const validErrorEnvelope = (value: Record<string, unknown>) => (value.error === undefined || typeof value.error === "string")
-  && (value.errorCode === undefined || value.errorCode === null || typeof value.errorCode === "string")
-  && (value.status === undefined || typeof value.status === "string")
-  && (value.warnings === undefined || strings(value.warnings))
-  && (typeof value.error === "string" || typeof value.errorCode === "string" || strings(value.warnings));
+const validErrorEnvelope = (value: Record<string, unknown>) => {
+  const hasError = typeof value.error === "string" && value.error.trim() !== "";
+  const hasErrorCode = typeof value.errorCode === "string" && value.errorCode.trim() !== "";
+  return (value.error === undefined || typeof value.error === "string")
+    && (value.errorCode === undefined || value.errorCode === null || typeof value.errorCode === "string")
+    && (value.status === undefined || typeof value.status === "string")
+    && (value.warnings === undefined || strings(value.warnings))
+    && (hasError || hasErrorCode);
+};
 
 export interface SpxFailureDetails {
   httpStatus: number | null;
@@ -551,18 +585,19 @@ export async function parseSpxBoardResponse<T>(response: Response, url: string, 
         ? record(value.pressure) && pressure(value.pressure) && value.pressure.tradingDate === value.selectedDate
         : value.pressure === null);
   } else if (kind === "compass") {
+    const candleCount = Array.isArray(value.candles) ? value.candles.length : -1;
     valid = value.ticker === "SPX"
       && oneOf(value.timeframe, timeframes)
       && Array.isArray(value.availableTimeframes) && value.availableTimeframes.every(item => oneOf(item, timeframes))
       && Array.isArray(value.candles) && value.candles.every(item => record(item) && candle(item))
-      && Array.isArray(value.patterns) && value.patterns.every(item => record(item) && pattern(item, value.candles.length))
+      && Array.isArray(value.patterns) && value.patterns.every(item => record(item) && pattern(item, candleCount))
       && Array.isArray(value.zones) && value.zones.every(item => record(item) && zone(item))
       && record(value.trend)
       && oneOf(value.trend.direction, ["UP", "DOWN", "SIDEWAYS"])
       && bounded(value.trend.strength, 0, 100)
       && Array.isArray(value.trend.labels)
-      && value.trend.labels.every(label => record(label) && integer(label.index) && (label.index as number) >= 0 && (label.index as number) < value.candles.length && oneOf(label.label, ["HH", "HL", "LH", "LL"]) && finite(label.price))
-      && priceActionSummary(value.summary, value.patterns as Record<string, unknown>[], value.candles.length)
+      && value.trend.labels.every(label => record(label) && integer(label.index) && (label.index as number) >= 0 && (label.index as number) < candleCount && oneOf(label.label, ["HH", "HL", "LH", "LL"]) && finite(label.price))
+      && priceActionSummary(value.summary, value.patterns as Record<string, unknown>[], candleCount)
       && priceActionSource(value.source)
       && strings(value.warnings);
   } else if (kind === "overlay") {

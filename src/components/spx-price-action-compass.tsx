@@ -141,7 +141,7 @@ export function SpxPriceActionCompass({
   refreshKey?: number;
   /** Board-selected session date; historical sessions must use Yahoo OHLCV. */
   selectedDate?: string | null;
-  onInitialLoadSettled?: () => void;
+  onInitialLoadSettled?: (result: "READY" | "FAILED") => void;
 }) {
   const [timeframe, setTimeframe] = useState<SpxPriceActionTimeframe>("5m");
   const [data, setData] = useState<SpxPriceActionCompassResponse>(emptyCompass);
@@ -174,6 +174,8 @@ export function SpxPriceActionCompass({
       selectionRef.current = selection;
     }
     const loadCompass = async () => {
+      let result: "READY" | "FAILED" = "FAILED";
+      let notify = true;
       setLoading(true);
       setError(null);
       setFailureDetails(null);
@@ -197,8 +199,12 @@ export function SpxPriceActionCompass({
         setModalPattern(null);
         setPracticeChoice(null);
         setPracticeRevealed(false);
+        result = payload.candles.length > 0 ? "READY" : "FAILED";
       } catch (err) {
-        if (controller.signal.aborted || isSpxRequestAbort(err)) return;
+        if (controller.signal.aborted || isSpxRequestAbort(err)) {
+          notify = false;
+          return;
+        }
         const failure = buildSpxFailureDetails({
           error: err,
           requestUrl,
@@ -210,7 +216,7 @@ export function SpxPriceActionCompass({
         if (!controller.signal.aborted) {
           setLoading(false);
           setReconnecting(false);
-          settledCallbackRef.current?.();
+          if (notify) settledCallbackRef.current?.(result);
         }
       }
     };
@@ -1192,6 +1198,9 @@ const SourcePanel = ({ data }: { data: SpxPriceActionCompassResponse }) => (
     </div>
     {data.source.latestSampleAt && <div className="font-mono text-[10px] text-zinc-600">
       Latest sample {formatEtTime(data.source.latestSampleAt, true)} / {formatUtcTime(data.source.latestSampleAt, true)}
+    </div>}
+    {data.source.expectedMove?.errorCode && <div className="font-mono text-[10px] text-zinc-600">
+      Expected Move diagnostic code {data.source.expectedMove.errorCode}
     </div>}
   </details>
 );

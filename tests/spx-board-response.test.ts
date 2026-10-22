@@ -49,6 +49,19 @@ it("classifies empty, HTML and malformed JSON separately from a JSON schema fail
   assert.equal((await parseSpxBoardResponse<{status:string}>(Response.json(ready()), "/api/spx-gex-heatmap", "heatmap")).status, "READY");
 });
 
+it("requires a real non-2xx error identity instead of warnings alone", async () => {
+  await assert.rejects(
+    parseSpxBoardResponse(Response.json({ warnings: [] }, { status: 503 }), "/api/spx-gex-pressure?date=2026-07-13", "pressure"),
+    error => error instanceof SafeJsonResponseError && error.code === "SCHEMA_INVALID",
+  );
+  const parsed = await parseSpxBoardResponse<{ errorCode: string }>(
+    Response.json({ errorCode: "SPX_GEX_PRESSURE_REQUEST_FAILED", warnings: [] }, { status: 503 }),
+    "/api/spx-gex-pressure?date=2026-07-13",
+    "pressure",
+  );
+  assert.equal(parsed.errorCode, "SPX_GEX_PRESSURE_REQUEST_FAILED");
+});
+
 it("rejects inconsistent snapshot identity and bad numeric values before rendering", async () => {
   const mismatched = ready();
   mismatched.selectedDate = "2026-07-14";
@@ -73,6 +86,45 @@ it("rejects malformed nested pressure and Compass fields at the shared boundary"
   const invalidPattern = { id: "invalid", type: "DOJI", name: "Doji", label: "Doji", category: "candle", direction: "neutral", candleIndices: [2], fromIndex: 2, toIndex: 2, price: 100, confidence: 2, description: "invalid" };
   const malformedCompass = { ...compass, patterns: [...compass.patterns, invalidPattern], summary: { ...compass.summary, latestPattern: invalidPattern } };
   await assert.rejects(parseSpxBoardResponse(Response.json(malformedCompass), "/api/spx-price-action-compass?timeframe=5m", "compass"), error => error instanceof SafeJsonResponseError && error.code === "SCHEMA_INVALID");
+
+  const malformedExpectedMove = {
+    ...compass,
+    source: {
+      ...compass.source,
+      expectedMove: { status: "UNAVAILABLE" as const, value: null, sampleAt: null, errorCode: "UNSAFE_CODE" },
+    },
+  };
+  await assert.rejects(parseSpxBoardResponse(Response.json(malformedExpectedMove), "/api/spx-price-action-compass?timeframe=5m", "compass"), error => error instanceof SafeJsonResponseError && error.code === "SCHEMA_INVALID");
+});
+
+it("rejects impossible pressure ranks, quality counters, and collection coverage", async () => {
+  const outOfRangeRank = pressureReady();
+  outOfRangeRank.pressure.movers[0].rank = 999;
+  await assert.rejects(parseSpxBoardResponse(Response.json(outOfRangeRank), "/api/spx-gex-pressure?date=2026-07-13", "pressure"), /contract/);
+
+  const duplicateRank = pressureReady();
+  duplicateRank.pressure.movers.push({ ...duplicateRank.pressure.movers[0] });
+  await assert.rejects(parseSpxBoardResponse(Response.json(duplicateRank), "/api/spx-gex-pressure?date=2026-07-13", "pressure"), /contract/);
+
+  const badQuality = ready();
+  assert.ok(badQuality.heatmap.dataQuality);
+  badQuality.heatmap.dataQuality!.priced += 1;
+  await assert.rejects(parseSpxBoardResponse(Response.json(badQuality), "/api/spx-gex-heatmap", "heatmap"), /contract/);
+
+  const badCoverage = ready();
+  badCoverage.collectionHealth = {
+    dueSlots: 1,
+    persistedSlots: 2,
+    missingSnapshotMinutesEt: [],
+    incompleteSlotIds: [],
+    failedSlotIds: [],
+    provider: "d1",
+    fallbackFrom: null,
+    stage: "PERSISTED",
+    failure: null,
+    updatedAt: "2026-07-13T14:00:00.000Z",
+  };
+  await assert.rejects(parseSpxBoardResponse(Response.json(badCoverage), "/api/spx-gex-heatmap", "heatmap"), /contract/);
 });
 
 it("stops automatic pressure recovery after the explicit attempt budget", () => {

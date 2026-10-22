@@ -1,3 +1,5 @@
+import { isNyseTradingDay } from "./nyse-calendar";
+
 export type SpxPriceActionTimeframe = "1m" | "5m" | "15m" | "4h" | "1d";
 
 export const buildSpxPriceActionCompassRequestUrl = (
@@ -11,6 +13,44 @@ export const buildSpxPriceActionCompassRequestUrl = (
 
 export const SPX_0DTE_STALE_AFTER_MS = 10 * 60 * 1_000;
 export const SPX_0DTE_FUTURE_SKEW_TOLERANCE_MS = 5_000;
+export const SPX_PRICE_ACTION_REFRESH_INTERVAL_MS = 60_000;
+export const SPX_PRICE_ACTION_REFRESH_RECOVERY_DELAYS_MS = [3_000, 15_000, 60_000] as const;
+
+export type SpxPriceActionRefreshResult = "READY" | "FAILED";
+export type SpxPriceActionRefreshState = {
+  result: SpxPriceActionRefreshResult | "IDLE";
+  recoveryAttempts: number;
+};
+
+export const advanceSpxPriceActionRefreshState = (
+  state: SpxPriceActionRefreshState,
+  result: SpxPriceActionRefreshResult,
+): SpxPriceActionRefreshState => result === "READY"
+  ? { result, recoveryAttempts: 0 }
+  : {
+    result,
+    recoveryAttempts: state.result === "FAILED" ? Math.min(3, state.recoveryAttempts + 1) : 0,
+  };
+
+export const getSpxPriceActionRefreshDelay = (
+  result: SpxPriceActionRefreshResult | "IDLE",
+  recoveryAttempts: number,
+) => {
+  if (result === "READY") return SPX_PRICE_ACTION_REFRESH_INTERVAL_MS;
+  if (result !== "FAILED" || !Number.isInteger(recoveryAttempts) || recoveryAttempts < 0) return null;
+  return SPX_PRICE_ACTION_REFRESH_RECOVERY_DELAYS_MS[recoveryAttempts] ?? null;
+};
+
+export const shouldRefreshSpxCurrentSession = (input: {
+  selectedDate: string;
+  tradingDate: string;
+  minuteEt: number;
+  visible: boolean;
+}) => input.visible
+  && isNyseTradingDay(input.tradingDate)
+  && input.selectedDate === input.tradingDate
+  && input.minuteEt >= 9 * 60 + 30
+  && input.minuteEt < 16 * 60;
 
 export const isFreshSpx0DteSample = (sampleAt: string | number | null | undefined, nowMs = Date.now()) => {
   const sampleMs = typeof sampleAt === "number"

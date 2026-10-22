@@ -5,6 +5,8 @@ import { buildSpxFailureDetails, formatSpxFailureDetails, parseSpxBoardResponse,
 import { useSpxGexBoard, currentEtClock, type SpxGexBoardNavigationMode } from "@/hooks/use-spx-gex-board";
 export { parseSpxGexBoardSelection, resolveSpxGexBoardNavigationMode } from "@/hooks/use-spx-gex-board";
 import { getSpxSpotLivePulseKey } from "@/lib/spx-spot-live-pulse";
+import { isNyseTradingDay } from "@/lib/nyse-calendar";
+import { advanceSpxPriceActionRefreshState, getSpxPriceActionRefreshDelay, shouldRefreshSpxCurrentSession, type SpxPriceActionRefreshResult } from "@/lib/spx-price-action-compass";
 import type { SpxGexZeroDteSpotContext } from "@/lib/spx-gex-pressure-matrix";
 import { runSpxRequest, SpxRequestTimeoutError } from "@/lib/spx-request-lane";
 import { SpxBoardOverview, type PressureOverview } from "./spx-board-overview";
@@ -164,28 +166,56 @@ export function SPXGexHeatmapPage() {
   const auditHoverSuppressedAfterScrollRef = useRef(false);
   activeAuditCellRef.current = activeAuditCell;
   const [zeroDteRefreshKey, setZeroDteRefreshKey] = useState(0);
-  const [initialCompassSettled, setInitialCompassSettled] = useState(false);
+  const [refreshStateVersion, setRefreshStateVersion] = useState(0);
+  const currentSessionRefreshRef = useRef<{
+    date: string;
+    result: SpxPriceActionRefreshResult | "IDLE";
+    recoveryAttempts: number;
+  }>({ date: "", result: "IDLE", recoveryAttempts: 0 });
+  const handleCompassRequestSettled = useCallback((result: SpxPriceActionRefreshResult) => {
+    if (!selectedDate) return;
+    const current = currentSessionRefreshRef.current;
+    const nextState = advanceSpxPriceActionRefreshState(
+      current.date === selectedDate ? current : { result: "IDLE", recoveryAttempts: 0 },
+      result,
+    );
+    const next = { date: selectedDate, ...nextState };
+    currentSessionRefreshRef.current = next;
+    setRefreshStateVersion((currentVersion) => currentVersion + 1);
+  }, [selectedDate]);
   useEffect(() => {
-    if (!initialCompassSettled) return undefined;
+    if (currentSessionRefreshRef.current.date !== selectedDate) {
+      currentSessionRefreshRef.current = { date: selectedDate, result: "IDLE", recoveryAttempts: 0 };
+    }
+    const refreshState = currentSessionRefreshRef.current;
+    const delay = getSpxPriceActionRefreshDelay(refreshState.result, refreshState.recoveryAttempts);
+    if (delay === null) return undefined;
+    const initialClock = currentEtClock();
+    const scheduleDelay = initialClock.tradingDate === selectedDate && initialClock.minuteEt < 9 * 60 + 30
+      ? 60_000
+      : delay;
     const refreshVisibleCurrentSessionSources = () => {
       const clock = currentEtClock();
-      if (document.visibilityState !== "visible") return;
-      // Only the current ET session needs live/finalizing recovery. Completed
-      // historical price windows must not trigger duplicate polling reads.
-      if (clock.minuteEt < 570 || selectedDate !== clock.tradingDate) return;
+      if (!shouldRefreshSpxCurrentSession({
+        selectedDate,
+        tradingDate: clock.tradingDate,
+        minuteEt: clock.minuteEt,
+        visible: document.visibilityState === "visible",
+      })) {
+        if (isNyseTradingDay(clock.tradingDate) && clock.tradingDate === selectedDate && clock.minuteEt < 16 * 60) {
+          setRefreshStateVersion((currentVersion) => currentVersion + 1);
+        }
+        return;
+      }
       setZeroDteRefreshKey((current) => current + 1);
     };
-    // Revalidate once after the initial render so a URL-selected GEX snapshot
-    // cannot leave current-session 0DTESPX context stuck behind browser cache.
-    const initialTimer = window.setTimeout(refreshVisibleCurrentSessionSources, 1_000);
-    const interval = window.setInterval(refreshVisibleCurrentSessionSources, 60_000);
+    const timer = window.setTimeout(refreshVisibleCurrentSessionSources, scheduleDelay);
     document.addEventListener("visibilitychange", refreshVisibleCurrentSessionSources);
     return () => {
-      window.clearTimeout(initialTimer);
-      window.clearInterval(interval);
+      window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", refreshVisibleCurrentSessionSources);
     };
-  }, [initialCompassSettled, selectedDate]);
+  }, [refreshStateVersion, selectedDate]);
 
   useEffect(() => {
     const dismissAuditTooltip = (event: KeyboardEvent) => {
@@ -465,7 +495,7 @@ export function SPXGexHeatmapPage() {
           enabled={initialHeatmapSettled && Boolean(selectedDate)}
           refreshKey={zeroDteRefreshKey}
           selectedDate={selectedDate}
-          onInitialLoadSettled={() => setInitialCompassSettled(true)}
+          onInitialLoadSettled={handleCompassRequestSettled}
         />
 
         </div>
@@ -474,7 +504,6 @@ export function SPXGexHeatmapPage() {
           selectedDate={selectedDate}
           selectedMinute={selectedMinute}
           pressureRefreshKey={pressureRefreshKey}
-          priceOverlayRefreshKey={zeroDteRefreshKey}
           enabled={initialHeatmapSettled}
           controls={null}
           onSummaryChange={setPressureOverview}

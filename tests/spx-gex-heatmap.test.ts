@@ -2575,7 +2575,7 @@ describe("SPX 0DTE pressure matrix", () => {
       selectedDate: "2026-05-27",
       currentTradingDate: "2026-05-27",
       nowMs,
-    }), { expectedMove: null, warning: "0DTESPX Expected Move unavailable (ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE)." });
+    }), { expectedMove: null, warning: "0DTESPX Expected Move unavailable; no expected-move corridor is shown." });
     assert.deepEqual(resolveSpxGexExpectedMoveOverlay({
       source: {
         ...source,
@@ -2585,7 +2585,7 @@ describe("SPX 0DTE pressure matrix", () => {
       selectedDate: "2026-05-27",
       currentTradingDate: "2026-05-27",
       nowMs: nowMs + 10 * 60 * 1_000 + 1,
-    }), { expectedMove: null, warning: "0DTESPX Expected Move unavailable (ZERO_DTE_SPX_EXPECTED_MOVE_STALE)." });
+    }), { expectedMove: null, warning: "0DTESPX Expected Move unavailable; no expected-move corridor is shown." });
     assert.deepEqual(resolveSpxGexExpectedMoveOverlay({
       source: {
         ...source,
@@ -2596,7 +2596,7 @@ describe("SPX 0DTE pressure matrix", () => {
       selectedDate: "2026-05-27",
       currentTradingDate: "2026-05-27",
       nowMs: nowMs + 36 * 60_000,
-    }), { expectedMove: 25, warning: "Using stale 0DTESPX Expected Move sampled 36m ago (ZERO_DTE_SPX_EXPECTED_MOVE_LAGGED); context only." });
+    }), { expectedMove: 25, warning: "Using stale 0DTESPX Expected Move sampled 36m ago; context only." });
     assert.deepEqual(resolveSpxGexExpectedMoveOverlay({
       source: {
         ...source,
@@ -2608,7 +2608,7 @@ describe("SPX 0DTE pressure matrix", () => {
       selectedDate: "2026-05-27",
       currentTradingDate: "2026-05-27",
       nowMs: nowMs + 36 * 60_000,
-    }), { expectedMove: 25, warning: "Using stale 0DTESPX Expected Move sampled 36m ago (ZERO_DTE_SPX_EXPECTED_MOVE_STALE); context only." });
+    }), { expectedMove: 25, warning: "Using stale 0DTESPX Expected Move sampled 36m ago; context only." });
     assert.deepEqual(resolveSpxGexExpectedMoveOverlay({
       source: {
         ...source,
@@ -2620,7 +2620,7 @@ describe("SPX 0DTE pressure matrix", () => {
       selectedDate: "2026-05-27",
       currentTradingDate: "2026-05-27",
       nowMs: nowMs + 36 * 60_000,
-    }), { expectedMove: null, warning: "0DTESPX Expected Move unavailable (ZERO_DTE_SPX_EXPECTED_MOVE_STALE)." });
+    }), { expectedMove: null, warning: "0DTESPX Expected Move unavailable; no expected-move corridor is shown." });
     assert.deepEqual(resolveSpxGexExpectedMoveOverlay({
       source: {
         ...source,

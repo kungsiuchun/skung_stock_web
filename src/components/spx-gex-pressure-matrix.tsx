@@ -53,7 +53,6 @@ interface SpxGexPressureMatrixProps {
   selectedDate: string;
   selectedMinute: number | null;
   pressureRefreshKey: number;
-  priceOverlayRefreshKey: number;
   enabled?: boolean;
   controls: ReactNode;
   onSpotContextChange?: (spot: SpxGexZeroDteSpotContext | null) => void;
@@ -278,7 +277,7 @@ const MoverRow = ({ mover }: { mover: SpxGexPressureMover }) => {
   );
 };
 
-export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRefreshKey, priceOverlayRefreshKey, controls, enabled = true, onSpotContextChange, onSummaryChange }: SpxGexPressureMatrixProps) {
+export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRefreshKey, controls, enabled = true, onSpotContextChange, onSummaryChange }: SpxGexPressureMatrixProps) {
   const [data, setData] = useState<PressureResponse | null>(null);
   const [refreshError, setRefreshError] = useState<SpxFailureDetails | null>(null);
   const [pressureFailure, setPressureFailure] = useState<SpxFailureDetails | null>(null);
@@ -331,24 +330,29 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
   useEffect(() => {
     if (!enabled) return undefined;
     const source = priceOverlay?.data?.source;
+    const effectiveProvider = source?.provider || priceOverlay?.failureProvider;
     const effectiveSessionState = priceOverlay?.failureSessionState || source?.sessionState;
-    if (source?.provider !== "0dtespx" || effectiveSessionState !== "LIVE") return undefined;
+    if (effectiveProvider !== "0dtespx" || effectiveSessionState !== "LIVE") return undefined;
 
-    const identity = overlayRefreshIdentity(selectedDate, source);
+    const identity = source
+      ? overlayRefreshIdentity(selectedDate, source)
+      : `${selectedDate}:0dtespx:${effectiveSessionState}:FAILED`;
     if (overlayAutoRefreshRef.current.identity !== identity) {
       overlayAutoRefreshRef.current = { identity, attempts: 0 };
     }
     const nowMs = Date.now();
-    const nextExpiryAt = [source.latestSampleAt, source.expectedMove?.sampleAt]
+    const nextExpiryAt = (source ? [source.latestSampleAt, source.expectedMove?.sampleAt] : [])
       .map((value) => typeof value === "string" ? Date.parse(value) : Number.NaN)
       .filter((value) => Number.isFinite(value))
       .map((value) => value + SPX_0DTE_STALE_AFTER_MS)
       .sort((left, right) => left - right)[0];
-    const sourceExpired = source.status === "READY" && !isFreshSpx0DteSample(source.latestSampleAt, nowMs);
+    const sourceExpired = Boolean(source && source.status === "READY" && !isFreshSpx0DteSample(source.latestSampleAt, nowMs));
     const needsImmediateRevalidation = Boolean(
-      source.sharedCache?.refreshing
-      || source.status === "STALE"
-      || source.expectedMove?.status === "UNAVAILABLE"
+      !source
+      || priceOverlay?.error
+      || source?.sharedCache?.refreshing
+      || source?.status === "STALE"
+      || source?.expectedMove?.status === "UNAVAILABLE"
       || sourceExpired,
     );
     const attempts = overlayAutoRefreshRef.current.attempts;
@@ -376,7 +380,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
       window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", revalidateOnVisible);
     };
-  }, [enabled, overlayRefreshKey, priceOverlay?.data?.source, priceOverlay?.failureSessionState, selectedDate]);
+  }, [enabled, overlayRefreshKey, priceOverlay?.data?.source, priceOverlay?.error, priceOverlay?.failureProvider, priceOverlay?.failureSessionState, selectedDate]);
 
   useEffect(() => {
     const rail = matrixScrollRef.current;
@@ -536,7 +540,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
     };
     void load();
     return () => controller.abort();
-  }, [enabled, overlayRefreshKey, priceOverlayRefreshKey, selectedDate]);
+  }, [enabled, overlayRefreshKey, selectedDate]);
 
   const pressure = data?.selectedDate === selectedDate ? data.pressure : null;
   useEffect(() => {
@@ -640,6 +644,15 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
       ? `No SPX 1-minute candles are available for ${selectedDate}; showing the canonical 15-minute snapshot line.`
       : null;
   const expectedMoveWarning = expectedMoveOverlay.warning;
+  const expectedMoveCode = effectivePriceSource?.expectedMove?.errorCode || null;
+  const priceOverlayDiagnostic = priceOverlay?.failure || (expectedMoveCode
+    ? {
+      httpStatus: 200,
+      code: expectedMoveCode,
+      requestUrl: `/api/spx-price-action-compass?timeframe=1m&view=price-overlay&date=${encodeURIComponent(selectedDate)}`,
+      rayId: null,
+    }
+    : null);
   const expectedMoveIsStale = effectivePriceSource?.expectedMove?.status === "STALE";
   const expectedMoveLabel = chartGeometry?.expectedMoveRange
     ? `${expectedMoveIsStale ? "STALE EM" : "EM"} ±${spotFormatter.format(chartGeometry.expectedMoveRange.value)} · ${effectivePriceSource?.expectedMove?.sampleAt ? formatEtTime(effectivePriceSource.expectedMove.sampleAt) : "current"} ET`
@@ -715,7 +728,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
             {pressure.warnings.length > 0 && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-warning="true">{pressure.warnings.join(" ")}</div>}
             {reconnecting && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status">Reconnecting SPX source…</div>}
             {refreshError && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-refresh-stale="true">Refresh failed; showing the last verified GEX matrix from {pressure.tradingDate} {pressure.latest.snapshotTimeEt} ET.<details><summary className="cursor-pointer">Matrix diagnostics</summary><p className="break-all">{formatSpxFailureDetails(refreshError)}</p></details></div>}
-            {priceOverlay?.error && <details data-spx-price-overlay-diagnostics="true" className="p-2 text-xs text-zinc-400"><summary className="cursor-pointer">Price overlay diagnostics</summary><p className="break-all">{formatSpxFailureDetails(priceOverlay.failure || null)}</p></details>}
+            {(priceOverlay?.error || expectedMoveCode) && <details data-spx-price-overlay-diagnostics="true" className="p-2 text-xs text-zinc-400"><summary className="cursor-pointer">Price overlay diagnostics</summary><p className="break-all">{formatSpxFailureDetails(priceOverlayDiagnostic)}</p></details>}
            {priceOverlayWarning && <div className="border-b border-cyan-300/20 bg-cyan-300/5 px-3 py-2 text-xs text-cyan-100" role="status" data-spx-gex-pressure-spot-warning="true">{priceOverlayWarning}</div>}
             {outsideGexCoverage && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-coverage-warning="true">Displayed strikes extend beyond available 0DTE GEX coverage. Empty rows show price context only, not GEX data.</div>}
             {expectedMoveWarning && <div className={`${expectedMoveIsStale ? "border-amber-300/20 bg-amber-300/10 text-amber-100" : "border-violet-300/20 bg-violet-300/5 text-violet-100"} border-b px-3 py-2 text-xs`} role="status" data-spx-gex-pressure-expected-move-warning="true">{expectedMoveWarning}</div>}

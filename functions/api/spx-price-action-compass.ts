@@ -263,10 +263,13 @@ async function onRequestUncached(context: Context) {
       // Yahoo returns a rolling range, not the requested Board session. A dated
       // view must not leak candles from later sessions into historical review.
       const dateFormatter = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" });
+      const usesDateBasedYahooCandles = targetTimeframe === "4h" || targetTimeframe === "1d";
       let selectedDateCovered = false;
       rawCandles = rawCandles.filter(candle => {
         const parts = Object.fromEntries(dateFormatter.formatToParts(new Date(candle.time)).map(p => [p.type, p.value]));
-        const date = `${parts.year}-${parts.month}-${parts.day}`;
+        const date = usesDateBasedYahooCandles
+          ? candle.date_iso
+          : `${parts.year}-${parts.month}-${parts.day}`;
         if (date === requestedDate) selectedDateCovered = true;
         return isPriceOverlay ? date === requestedDate : date <= requestedDate;
       });
@@ -277,7 +280,7 @@ async function onRequestUncached(context: Context) {
       : aggregateSpxPriceActionCandles(rawCandles, config.aggregateTo || timeframe);
     const warnings = candles.length === 0 ? ["No SPX OHLCV candles returned from source."] : [];
     if (source.provider === "0dtespx" && source.status === "STALE") {
-      warnings.push("ZERO_DTE_SPX_STALE: showing last verified shared-cache SPX and any valid Expected Move as context only; current SPX is not live.");
+      warnings.push("SPX refresh is stale; showing the last verified shared-cache SPX and any valid Expected Move as context only; current SPX is not live.");
     }
     const payload = isPriceOverlay
       ? {
@@ -375,7 +378,8 @@ async function onRequestUncached(context: Context) {
           routingReason: failureRoutingReason,
           note: zeroDteFailure ? "0DTESPX same-day source is unavailable; Yahoo fallback is disabled for a live, finalizing, or completed current-date session." : "SPX Price Action source is unavailable.",
         },
-        warnings: [failureCode],
+        errorCode: failureCode,
+        warnings: ["SPX source is unavailable; no verified candles are available."],
       },
       { status: 502, headers: { "Cache-Control": "no-store" } },
     );
