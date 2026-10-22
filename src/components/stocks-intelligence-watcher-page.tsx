@@ -70,6 +70,8 @@ import type { WatcherValuationBands, WatcherValuationMetric } from "@/lib/stocks
 import { StocksWatcherFearGreedPanel } from "./stocks-watcher-fear-greed-panel";
 import { StocksWatcherFixedIncomePanel } from "./stocks-watcher-fixed-income-panel";
 import { StocksWatcherMacroPanel } from "./stocks-watcher-macro-panel";
+import { StocksWatcherNewsPanel } from "./stocks-watcher-news-panel";
+import type { NewsToolLoader, NewsToolValue } from "./stocks-watcher-news-panel";
 import { MarketBreadthPanel } from "./market-breadth-page";
 import { parseJsonResponse } from "@/lib/safe-json-response";
 
@@ -271,6 +273,7 @@ export function StocksIntelligenceWatcherPage() {
   const [earningsQuarterLimit, setEarningsQuarterLimit] = useState<4 | 8 | 12>(8);
   const [activeSubTab, setActiveSubTab] = useState<OptionsSubTab>("Overview");
   const tabDataCache = useRef<Map<string, TabCacheEntry>>(new Map());
+  const newsRequests = useRef<Map<string, Promise<NewsToolValue>>>(new Map());
   const [tabPanelState, setTabPanelState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
   const [fearGreedState, setFearGreedState] = useState<FearGreedPanelState>({ loading: false, error: null, data: null, cache: null });
   const fearGreedLoadedRef = useRef(false);
@@ -680,8 +683,28 @@ export function StocksIntelligenceWatcherPage() {
     return request;
   }, [callNativeTool, loadYahooExpiryChain]);
 
+  const loadNewsTool = useCallback<NewsToolLoader>(async (tool, symbol, force = false) => {
+    const cacheKey = `${getStocksWatcherTopTabCacheKey(symbol, "News")}:${tool}`;
+    const pending = newsRequests.current.get(cacheKey);
+    if (pending) return pending;
+    const cached = force ? null : tabDataCache.current.get(cacheKey);
+    if (cached) return { result: cached.data[tool], fetchedAt: cached.fetchedAt };
+    const request = callNativeTool(tool, { ticker: symbol }).then(result => {
+      if (result.tool !== tool) throw new Error("News response does not match the requested tool. Retry news.");
+      const quoteSymbol = rawRecord(rawRecord(rawRecord(result.raw)?.stats)?.quote)?.symbol;
+      if (typeof quoteSymbol === "string" && normalizeSymbol(quoteSymbol) !== normalizeSymbol(symbol)) {
+        throw new Error("News context belongs to a different ticker. Retry news.");
+      }
+      const fetchedAt = Date.now();
+      tabDataCache.current.set(cacheKey, { data: { [tool]: result }, fetchedAt });
+      return { result, fetchedAt };
+    }).finally(() => { newsRequests.current.delete(cacheKey); });
+    newsRequests.current.set(cacheKey, request);
+    return request;
+  }, [callNativeTool]);
+
   const loadTopTab = useCallback(async (tab: TopTab, force = false) => {
-    if (tab === "Options" || tab === "Overview" || tab === "F/G Index") return;
+    if (tab === "Options" || tab === "Overview" || tab === "F/G Index" || tab === "News") return;
     const symbol = normalizeSymbol(selectedSymbol);
     const cacheKey = getStocksWatcherTopTabCacheKey(symbol, tab, priceRange);
     const cached = force ? null : tabDataCache.current.get(cacheKey);
@@ -964,7 +987,7 @@ export function StocksIntelligenceWatcherPage() {
 
   useEffect(() => {
     if (activeTab === "F/G Index") void loadFearGreed();
-    else if (activeTab !== "Options" && activeTab !== "Overview" && activeTab !== "Fixed Income" && activeTab !== "Macro") void loadTopTab(activeTab);
+    else if (activeTab !== "Options" && activeTab !== "Overview" && activeTab !== "Fixed Income" && activeTab !== "Macro" && activeTab !== "News") void loadTopTab(activeTab);
   }, [activeTab, loadFearGreed, loadTopTab]);
 
   useEffect(() => {
@@ -1485,32 +1508,6 @@ export function StocksIntelligenceWatcherPage() {
       </section>
     );
   };
-
-  const renderGenericPanel = (state: AsyncPanelState, retry: () => void) => (
-    <div className="siw-generic-content">
-      {state.loading && (
-        <div className="space-y-3">
-          <SkeletonBlock className="h-8 w-48" />
-          <SkeletonBlock className="h-64 w-full" />
-          <SkeletonBlock className="h-24 w-full" />
-        </div>
-      )}
-      {state.error && <ErrorBanner message={state.error} onRetry={retry} />}
-      {state.data && (
-          <div className={`siw-tool-result-grid ${activeTab === "Chart" ? "is-chart" : ""}`}>
-            {Object.values(state.data).map((result) => (
-            <div key={result.tool} className={`siw-tool-result-card ${activeTab === "Chart" ? "is-chart" : ""}`}>
-              <div className="siw-tool-result-head">
-                <h3 className="text-sm font-black text-blue-100">{result.tool}</h3>
-                <span className="rounded border border-slate-700 px-2 py-1 text-[0.65rem] uppercase text-slate-400">Native</span>
-              </div>
-              <ToolResultBlock result={result} />
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
 
   const renderChartPanel = () => {
     const priceResult = tabPanelState.data?.get_stock_history;
@@ -3138,6 +3135,7 @@ export function StocksIntelligenceWatcherPage() {
   const renderPrimaryPanel = () => {
     if (activeTab === "Overview") return renderOverviewPanel();
     if (activeTab === "Chart") return renderChartPanel();
+    if (activeTab === "News") return <StocksWatcherNewsPanel key={selectedSymbol} symbol={selectedSymbol} loadTool={loadNewsTool} />;
 
     if (activeTab === "F/G Index") {
       return (
@@ -3151,21 +3149,10 @@ export function StocksIntelligenceWatcherPage() {
       );
     }
 
-    if (activeTab !== "Options") {
-      if (activeTab === "Fundamentals") return renderStatsReferencePanel();
-      if (activeTab === "Earnings") return renderEarningsPanel();
-      if (activeTab === "Fixed Income") {
-        return <section className="siw-panel siw-primary-panel siw-fixed-income-panel" data-primary-tab-panel="Fixed Income"><StocksWatcherFixedIncomePanel /></section>;
-      }
-      if (activeTab === "Macro") {
-        return <section className="siw-panel siw-primary-panel siw-macro-panel" data-primary-tab-panel="Macro"><StocksWatcherMacroPanel /></section>;
-      }
-      return (
-        <section className={`siw-panel siw-primary-panel siw-${activeTab.toLowerCase().replace(/\s+/g, "-")}-panel`} data-primary-tab-panel={activeTab}>
-          {renderGenericPanel(tabPanelState, () => void loadTopTab(activeTab, true))}
-        </section>
-      );
-    }
+    if (activeTab === "Fundamentals") return renderStatsReferencePanel();
+    if (activeTab === "Earnings") return renderEarningsPanel();
+    if (activeTab === "Fixed Income") return <section className="siw-panel siw-primary-panel siw-fixed-income-panel" data-primary-tab-panel="Fixed Income"><StocksWatcherFixedIncomePanel /></section>;
+    if (activeTab === "Macro") return <section className="siw-panel siw-primary-panel siw-macro-panel" data-primary-tab-panel="Macro"><StocksWatcherMacroPanel /></section>;
 
     return (
       <section className="siw-options-stage" data-primary-tab-panel="Options">

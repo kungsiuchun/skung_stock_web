@@ -420,6 +420,11 @@ let treasuryApiMode = "FRESH";
 let fomcApiMode = "FRESH";
 
 const buildToolResponse = (tool, params = {}) => {
+  if (tool === "pre_event_brief") {
+    const symbol = params.ticker || "NVDA";
+    const fixture = buildSnapshot(symbol);
+    return { ok: true, tool, params, text: "Native report for source details", raw: { source: "native_yahoo", news: fixture.recentNews, stats: { quote: fixture.quote }, oneMonthReturn: -5.42 } };
+  }
   if (tool === "get_watchlist") {
     return { ok: true, tool, params, text: "watchlist", raw: { stocks: stockRecords }, calledAt: "2026-07-08T21:33:01.000Z" };
   }
@@ -1440,13 +1445,11 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
     assert.equal(await visibleEarningsQuarterRows(), 12, "Earnings quarter selector must reveal the cached 12-quarter report");
     assert.equal(apiCalls.filter((call) => call.tool === "get_financial_statements").length, financialCallsBeforeQuarterChange, "Earnings quarter selector must not refetch the report");
 
-    for (const [topTab, expectedTool] of [["News", "morning_briefing"]]) {
-      await clickText(page, topTab, true);
-      await wait(350);
-      const panelText = await page.$eval(`[data-primary-tab-panel='${topTab}']`, (node) => node.textContent || "");
-      assert.match(panelText, new RegExp(expectedTool), `${topTab} must render its source-backed tool result instead of a dead placeholder`);
-      assert.ok(apiCalls.some((call) => call.tool === expectedTool), `${topTab} must execute its declared native tool plan`);
-    }
+    await clickText(page, "News", true);
+    await page.waitForSelector("[data-newsroom] [data-news-article]");
+    assert.equal(await page.$$eval("[data-news-article]", nodes => nodes.length), 3, "News must render the supplied article cards rather than a raw report");
+    assert.ok(apiCalls.some(call => call.tool === "pre_event_brief"), "News must load its source-backed article context");
+    assert.equal(apiCalls.some(call => call.tool === "morning_briefing"), false, "Universe briefing stays on demand");
 
     await clickText(page, "Macro", true);
     await page.waitForSelector("[data-macro-panel] [data-macro-markets]");
