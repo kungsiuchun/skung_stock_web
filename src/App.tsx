@@ -224,6 +224,7 @@ function App() {
               ) : currentView === "finance-dashboard" ? (
                 <FinanceDashboard
                   showChat={isFinanceChatOpen}
+                  onOpenChat={() => setIsFinanceChatOpen(true)}
                   onCloseChat={() => setIsFinanceChatOpen(false)}
                 />
               ) : currentView === "trading-agent-dashboard" ? (

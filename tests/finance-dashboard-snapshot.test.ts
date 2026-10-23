@@ -7,7 +7,7 @@ const agent = {
   reply: "## 即時行情\nAAPL 測試報告\n## 期權鏈分析\n資料\n## 量化策略分析\n資料\n## 綜合分析結論\n資料\n## 交易建議\n資料",
   dashboardDecision: { trend: "bullish", action: "buy", confidence: 70, evidence: ["quote", "options"] },
   steps: [
-    { type: "tool_call", tool_name: "get_realtime_quote", tool_result: JSON.stringify({ price: 200, change_pct: 1.5, chart_data: [{ date: "2026-07-14", price: 200, volume: 100 }] }) },
+    { type: "tool_call", tool_name: "get_realtime_quote", tool_result: JSON.stringify({ price: 200, change_pct: 1.5, chart_data: [{ date: "2026-07-14", date_iso: "2026-07-14", price: 200, open: 199, high: 201, low: 198, volume: 100 }] }) },
     { type: "tool_call", tool_name: "get_options_chain", tool_result: JSON.stringify({ underlying_price: 200, calls: [{ strike: 200, open_interest: 10 }], puts: [{ strike: 195, open_interest: 5 }] }) },
     {
       type: "tool_call",
@@ -132,4 +132,26 @@ test("finance dashboard snapshot refuses to substitute option volume for missing
 
   assert.match(snapshot.data.optionsFlow?.error || "", /Yahoo/);
   assert.deepEqual(snapshot.data.optionsFlow?.topStrikes, []);
+});
+
+test("unavailable quotes never use an invented reference price for option walls", () => {
+  for (const underlying of [null, "200", 200]) {
+    const snapshot = buildFinanceDashboardSnapshot({
+      symbol: "AAPL",
+      agent: { success: true, steps: [
+        { type: "tool_call", tool_name: "get_realtime_quote", tool_result: JSON.stringify({ price: null, quote_status: "unavailable" }) },
+        { type: "tool_call", tool_name: "get_options_chain", tool_result: JSON.stringify({
+          underlying_price: underlying,
+          calls: [{ strike: 205, open_interest: 100 }],
+          puts: [{ strike: 195, open_interest: 100 }],
+        }) },
+      ] },
+      news: {}, vix: null, fundamentals: null, technical: null, sentiment: null,
+    });
+    assert.equal(snapshot.data.price, null);
+    assert.equal(snapshot.data.quoteStatus, "unavailable");
+    assert.equal(snapshot.data.optionsFlow?.putWall, underlying === 200 ? 195 : undefined);
+    assert.equal(snapshot.data.optionsFlow?.callWall, underlying === 200 ? 205 : undefined);
+    assert.equal(snapshot.data.optionsFlow?.totalCallOI, 100);
+  }
 });

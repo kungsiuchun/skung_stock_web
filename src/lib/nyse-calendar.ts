@@ -88,3 +88,10 @@ export const isNyseTradingDay = (value: string) => {
   if (date.getUTCDay() === 0 || date.getUTCDay() === 6) return false;
   return !getFullMarketHolidayKeys(date.getUTCFullYear()).has(value);
 };
+
+export const getNyseSessionCloseMinuteEt = (tradingDate: string): number | null => {
+  if (!isNyseTradingDay(tradingDate)) return null;
+  return getEarlyCloseMarketHolidayKeys(Number(tradingDate.slice(0, 4))).has(tradingDate)
+    ? 13 * 60
+    : 16 * 60;
+};

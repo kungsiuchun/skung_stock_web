@@ -9,6 +9,9 @@ interface TechnicalData {
   rsi_status?: "oversold" | "overbought" | "neutral";
   position_percent?: number;
   error?: string;
+  partial?: boolean;
+  rejected_bar_count?: number;
+  last_valid_date?: string | null;
 }
 
 export function TechnicalRadar({ data, loading }: { data: TechnicalData | null, loading: boolean }) {
@@ -61,6 +64,7 @@ export function TechnicalRadar({ data, loading }: { data: TechnicalData | null, 
         <Crosshair className="w-4 h-4 text-blue-500" />
         技術指標雷達 (Tech Radar)
       </h3>
+      {data.partial && <p role="status" className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">資料部分被拒絕：{data.rejected_bar_count || 0} 筆；最後有效日期 {data.last_valid_date || "未提供"}。</p>}
 
       <div className="space-y-4">
         {/* MA Alignment */}

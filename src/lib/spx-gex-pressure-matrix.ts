@@ -1,5 +1,6 @@
 import type { SpxGexHeatmapModel } from "./spx-gex-heatmap";
 import { isFreshSpx0DteSample } from "./spx-price-action-compass";
+import { getNyseSessionCloseMinuteEt } from "./nyse-calendar";
 
 const OPEN_MINUTE_ET = 9 * 60 + 30;
 const CLOSE_MINUTE_ET = 16 * 60;
@@ -10,6 +11,12 @@ const PRICE_VIEW_HALF_RANGE = 50;
 const PRICE_VIEW_CENTER_STEP = 25;
 const PRICE_VIEW_PAN_STEP = 50;
 const MOVER_LIMIT = 10;
+
+export const SPX_GEX_PRESSURE_RECOVERY_DELAYS_MS = [3_000, 15_000, 60_000] as const;
+
+export const getSpxGexPressureRecoveryDelay = (attempt: number) => Number.isInteger(attempt) && attempt >= 0
+  ? SPX_GEX_PRESSURE_RECOVERY_DELAYS_MS[attempt] ?? null
+  : null;
 
 export type SpxGexPressureState =
   | "POSITIVE_STRONGER"
@@ -198,15 +205,12 @@ export const resolveSpxGexExpectedMoveOverlay = (input: {
     && Date.parse(expectedMove.sampleAt) <= nowMs
     && (!source.sessionDate || source.sessionDate === input.selectedDate)) {
     const ageMinutes = Math.max(0, Math.floor((nowMs - Date.parse(expectedMove.sampleAt)) / 60_000));
-    const errorCode = expectedMove.errorCode || "ZERO_DTE_SPX_EXPECTED_MOVE_STALE";
     return {
       expectedMove: expectedMove.value,
-      warning: `Using stale 0DTESPX Expected Move sampled ${ageMinutes}m ago (${errorCode}); context only.`,
+      warning: `Using stale 0DTESPX Expected Move sampled ${ageMinutes}m ago; context only.`,
     };
   }
-  const errorCode = expectedMove?.errorCode
-    || (expectedMove?.sampleAt ? "ZERO_DTE_SPX_EXPECTED_MOVE_STALE" : "ZERO_DTE_SPX_EXPECTED_MOVE_UNAVAILABLE");
-  return { expectedMove: null, warning: `0DTESPX Expected Move unavailable (${errorCode}).` };
+  return { expectedMove: null, warning: "0DTESPX Expected Move unavailable; no expected-move corridor is shown." };
 };
 
 export interface SpxGexPressureFrame {
@@ -276,10 +280,12 @@ export const extendSpxGexPressureForSession = (
   pressure: SpxGexPressureMatrixModel,
   clock: { tradingDate: string; minuteEt: number },
 ): SpxGexPressureMatrixModel => {
+  const closeMinuteEt = getNyseSessionCloseMinuteEt(pressure.tradingDate);
+  if (closeMinuteEt === null) return pressure;
   const existingSlots = new Map(pressure.timeline.map((slot) => [slot.snapshotMinuteEt, slot]));
   const isCurrentDate = pressure.tradingDate === clock.tradingDate;
   const timeline: SpxGexPressureTimelineSlot[] = [];
-  for (let minute = OPEN_MINUTE_ET; minute <= CLOSE_MINUTE_ET; minute += SLOT_MINUTES) {
+  for (let minute = OPEN_MINUTE_ET; minute <= closeMinuteEt; minute += SLOT_MINUTES) {
     const existing = existingSlots.get(minute);
     if (existing) {
       timeline.push(existing);

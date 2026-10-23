@@ -78,13 +78,13 @@ export function WorkGallery({ onOpenCaptionTool }: WorkGalleryProps) {
       view: "spx-recap",
     },
     {
-      title: "SPX GEX Heatmap",
+      title: "SPX Market Structure",
       category: "Options Map",
       description:
         "Explore retained SPX NetGEX snapshots by strike, expiry, and trading session.",
       buildNote:
         "Automates the Stocks Intelligence workflow into a date-selectable gamma map without storing raw HTML.",
-      action: "Open heatmap",
+      action: "Open board",
       icon: <Waves className="h-5 w-5" />,
       view: "spx-gex-heatmap",
     },
@@ -162,7 +162,7 @@ export function WorkGallery({ onOpenCaptionTool }: WorkGalleryProps) {
 
   const priority = [
     "Stocks Intelligence Watcher",
-    "SPX GEX Heatmap",
+    "SPX Market Structure",
     "S&P 500 Market Breadth",
     "SPY Sector Rotation",
     "Portfolio vs SPY",

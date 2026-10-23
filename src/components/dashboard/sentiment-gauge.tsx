@@ -84,7 +84,7 @@ export function SentimentGauge({
       </div>
 
       <div className="flex items-start gap-4">
-        <div className="relative h-[110px] w-[110px] flex-shrink-0">
+        <div className="relative h-[90px] w-[90px] flex-shrink-0 sm:h-[110px] sm:w-[110px]">
           <svg viewBox="0 0 130 130" className="h-full w-full">
             <defs>
               <linearGradient id="sentimentGaugeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
@@ -110,10 +110,10 @@ export function SentimentGauge({
           {components.length > 0 ? (
             components.map((component) => (
               <div key={component.id} className="rounded-xl border border-gray-100 bg-gray-50 px-3 py-2">
-                <div className="flex items-center justify-between gap-3">
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
                   <div className="min-w-0">
-                    <div className="truncate text-[11px] font-black text-gray-900">{component.label}</div>
-                    <div className="mt-0.5 truncate text-[10px] font-semibold text-gray-500">{component.detail}</div>
+                    <div className="text-[11px] font-black text-gray-900">{component.label}</div>
+                    <div title={component.detail} className="mt-0.5 break-words text-[10px] font-semibold text-gray-500">{component.detail}</div>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     <span className={`rounded-full px-2 py-1 text-[9px] font-black uppercase ${statusClass(component.status)}`}>

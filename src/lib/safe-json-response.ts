@@ -4,6 +4,7 @@ export class SafeJsonResponseError extends Error {
     readonly httpStatus: number,
     readonly contentType: string,
     readonly rayId: string | null,
+    readonly code: "HTTP_ERROR" | "EMPTY_RESPONSE" | "NON_JSON_RESPONSE" | "INVALID_JSON" | "SCHEMA_INVALID" = "HTTP_ERROR",
   ) {
     super(message);
     this.name = "SafeJsonResponseError";
@@ -35,6 +36,7 @@ export const parseJsonResponse = async <T>(
       response.status,
       contentType,
       rayId,
+      "EMPTY_RESPONSE",
     );
   }
   if (!contentType.toLowerCase().includes("application/json")) {
@@ -49,6 +51,7 @@ export const parseJsonResponse = async <T>(
       response.status,
       contentType,
       rayId,
+      "NON_JSON_RESPONSE",
     );
   }
   try {
@@ -70,6 +73,7 @@ export const parseJsonResponse = async <T>(
       response.status,
       contentType,
       rayId,
+      "INVALID_JSON",
     );
   }
 };

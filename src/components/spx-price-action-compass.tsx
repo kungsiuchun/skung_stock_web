@@ -28,8 +28,11 @@ import {
   type SpxPriceActionTrend,
   type SpxPriceActionZone,
 } from "@/lib/spx-price-action-compass";
-import { parseJsonResponse } from "@/lib/safe-json-response";
+import { buildSpxFailureDetails, formatSpxFailureDetails, parseSpxBoardResponse, spxFailureMessage, type SpxFailureDetails } from "@/lib/spx-board-response";
+import { SafeJsonResponseError } from "@/lib/safe-json-response";
 import { isSpxRequestAbort, runSpxRequest } from "@/lib/spx-request-lane";
+import { projectSpxDisplaySource } from "@/lib/spx-display-freshness";
+import { useSpxDisplayClock } from "@/hooks/use-spx-display-clock";
 type SignalDirectionFilter = "all" | SpxPriceActionPattern["direction"];
 
 interface SignalFilterState {
@@ -140,13 +143,17 @@ export function SpxPriceActionCompass({
   refreshKey?: number;
   /** Board-selected session date; historical sessions must use Yahoo OHLCV. */
   selectedDate?: string | null;
-  onInitialLoadSettled?: () => void;
+  onInitialLoadSettled?: (result: "READY" | "FAILED") => void;
 }) {
   const [timeframe, setTimeframe] = useState<SpxPriceActionTimeframe>("5m");
-  const [data, setData] = useState<SpxPriceActionCompassResponse>(emptyCompass);
+  const [loadedData, setData] = useState<SpxPriceActionCompassResponse>(emptyCompass);
+  const displayNowMs = useSpxDisplayClock(loadedData.source);
+  const data = useMemo(() => ({ ...loadedData, source: projectSpxDisplaySource(loadedData.source, displayNowMs) }), [loadedData, displayNowMs]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [failureDetails, setFailureDetails] = useState<SpxFailureDetails | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
   const [selectedPattern, setSelectedPattern] = useState<SpxPriceActionPattern | null>(null);
   const [modalPattern, setModalPattern] = useState<SpxPriceActionPattern | null>(null);
   const [signalFilter, setSignalFilter] = useState<SignalFilterState>(defaultSignalFilter);
@@ -158,45 +165,68 @@ export function SpxPriceActionCompass({
   const [showVolume, setShowVolume] = useState(true);
   const [practiceChoice, setPracticeChoice] = useState<"LONG" | "SHORT" | "SKIP" | null>(null);
   const [practiceRevealed, setPracticeRevealed] = useState(false);
-  const refreshInFlightRef = useRef(false);
-
-  const loadCompass = async (nextTimeframe = timeframe) => {
-    if (refreshInFlightRef.current) return;
-    refreshInFlightRef.current = true;
-    setLoading(true);
-    setError(null);
-    try {
-      const requestUrl = buildSpxPriceActionCompassRequestUrl(nextTimeframe, selectedDate);
-      const response = await runSpxRequest((attemptSignal) => fetch(requestUrl, { signal: attemptSignal }), { onRetry: () => setReconnecting(true) });
-      const payload = await parseJsonResponse<SpxPriceActionCompassResponse & { warnings?: string[] }>(response, requestUrl, { allowHttpError: true });
-      if (!response.ok) {
+  const settledCallbackRef = useRef(onInitialLoadSettled);
+  settledCallbackRef.current = onInitialLoadSettled;
+  const selectionRef = useRef("");
+  useEffect(() => {
+    if (!enabled) return;
+    const controller = new AbortController();
+    const selection = `${selectedDate}:${timeframe}`;
+    if (selectionRef.current !== selection) {
+      setData(emptyCompass);
+      setSelectedPattern(null);
+      selectionRef.current = selection;
+    }
+    const loadCompass = async () => {
+      let result: "READY" | "FAILED" = "FAILED";
+      let notify = true;
+      setLoading(true);
+      setError(null);
+      setFailureDetails(null);
+      const requestUrl = buildSpxPriceActionCompassRequestUrl(timeframe, selectedDate);
+      try {
+        const response = await runSpxRequest((attemptSignal) => fetch(requestUrl, { signal: attemptSignal }), { signal: controller.signal, onRetry: () => { if (!controller.signal.aborted) setReconnecting(true); } });
+        const payload = await parseSpxBoardResponse<SpxPriceActionCompassResponse>(response, requestUrl, "compass");
+        if (controller.signal.aborted) return;
+        if (!response.ok) {
+          const failure = buildSpxFailureDetails({ response, requestUrl, responseCode: (payload as unknown as { errorCode?: unknown }).errorCode, fallbackCode: "SPX_PRICE_ACTION_COMPASS_REQUEST_FAILED" });
+          setFailureDetails(failure);
+          setError(spxFailureMessage(failure.httpStatus));
+          return;
+        }
+        if (payload.timeframe !== timeframe) {
+          throw new SafeJsonResponseError("Price response does not match the requested chart.", response.status, response.headers.get("content-type") || "", response.headers.get("cf-ray"), "SCHEMA_INVALID");
+        }
         setData(payload);
-        setSelectedPattern(null);
+        setFailureDetails(null);
+        setSelectedPattern(payload.summary.latestPattern || payload.patterns[0] || null);
         setModalPattern(null);
         setPracticeChoice(null);
         setPracticeRevealed(false);
-        setError(payload.warnings?.join(" ") || "SPX Price Action Compass API failed");
-        return;
+        result = payload.candles.length > 0 ? "READY" : "FAILED";
+      } catch (err) {
+        if (controller.signal.aborted || isSpxRequestAbort(err)) {
+          notify = false;
+          return;
+        }
+        const failure = buildSpxFailureDetails({
+          error: err,
+          requestUrl,
+          fallbackCode: err instanceof Error && err.name === "SpxRequestTimeoutError" ? "REQUEST_TIMEOUT" : "TRANSPORT_ERROR",
+        });
+        setFailureDetails(failure);
+        setError(spxFailureMessage(failure.httpStatus));
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+          setReconnecting(false);
+          if (notify) settledCallbackRef.current?.(result);
+        }
       }
-      setData(payload);
-      setSelectedPattern(payload.summary.latestPattern || payload.patterns[0] || null);
-      setModalPattern(null);
-      setPracticeChoice(null);
-      setPracticeRevealed(false);
-    } catch (err) {
-      if (isSpxRequestAbort(err)) return;
-      setError(err instanceof Error ? err.message : "SPX Price Action Compass failed");
-    } finally {
-      refreshInFlightRef.current = false;
-      setLoading(false);
-      setReconnecting(false);
-    }
-  };
-
-  useEffect(() => {
-    if (!enabled) return;
-    void loadCompass(timeframe).finally(onInitialLoadSettled);
-  }, [enabled, refreshKey, selectedDate, timeframe]);
+    };
+    void loadCompass();
+    return () => controller.abort();
+  }, [enabled, refreshKey, retryKey, selectedDate, timeframe]);
 
   const availablePatternTypes = useMemo(() => {
     return Array.from(new Set(data.patterns.map((pattern) => pattern.type))).sort();
@@ -302,28 +332,28 @@ export function SpxPriceActionCompass({
     <section
       className="border border-[#123142] bg-[#04101a] p-3 text-white"
       data-spx-price-action-compass="true"
+      data-pa-loaded-timeframe={data.timeframe}
       data-pa-candle-count={data.candles.length}
       data-pa-volume-count={data.candles.filter((candle) => candle.volume > 0).length}
       data-pa-zone-count={data.zones.length}
       data-pa-pattern-count={data.patterns.length}
       data-pa-filtered-pattern-count={filteredPatterns.length}
+      data-pa-source-status={data.source.status}
     >
       <div className="flex flex-col gap-2">
         <div className="flex flex-col gap-2 border-b border-cyan-300/15 pb-2 xl:flex-row xl:items-end xl:justify-between">
           <div>
             <div className="flex flex-wrap items-center gap-2">
-              <span className="border border-emerald-300/30 bg-emerald-300/10 px-2 py-1 font-mono text-[10px] font-black uppercase tracking-[0.16em] text-emerald-100">
-                Source-backed
-              </span>
-              <h2 className="text-xl font-black tracking-normal text-white sm:text-2xl">SPX Price Action Compass</h2>
+              <h2 className="text-xl font-semibold text-white">Price action</h2>
             </div>
             <p className="mt-1 text-xs leading-5 text-zinc-500">
-              Current RTH uses 0DTESPX price context; historical and higher-timeframe OHLCV stay on Yahoo.
+              {data.source.label} · {data.source.interval} · Last candle {data.candles.length ? formatEtTime(data.candles[data.candles.length - 1].time, true) : "unavailable"}
             </p>
+            <p className="text-[11px] text-slate-400">Price window is independent of the GEX replay minute.</p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <SegmentedMode value={mode} onChange={setMode} />
+            <details className="relative text-xs text-zinc-300"><summary className="min-h-9 cursor-pointer py-2">Learn & practice</summary><SegmentedMode value={mode} onChange={setMode} /></details>
             {mode === "review" && <SignalDensityControl value={signalDensity} onChange={setSignalDensity} />}
             <div className="inline-flex h-9 items-center border border-cyan-300/20 bg-cyan-300/10 p-0.5">
               {data.availableTimeframes.map((item) => (
@@ -356,7 +386,8 @@ export function SpxPriceActionCompass({
         </div>
 
         {reconnecting && <Notice tone="amber" text="Reconnecting SPX source…" />}
-        {error && <Notice tone="red" text={`${data.candles.length > 0 ? "Refresh failed; showing the last verified Price Action Compass. " : ""}${error}`} />}
+        {data.source.status === "STALE" && <div role="status"><Notice tone="amber" text="STALE price context · Last verified candles remain visible. Current SPX is not live." />{!error && <button className="min-h-10 px-3 text-xs text-cyan-200 underline" onClick={() => setRetryKey(k => k + 1)}>Retry price chart</button>}</div>}
+        {error && <div role="alert"><Notice tone="red" text={`${spxFailureMessage(failureDetails?.httpStatus ?? null)}${data.candles.length ? ` Last verified candle: ${formatEtTime(data.candles[data.candles.length - 1].time, true)}.` : " Price chart unavailable."}`} /><button className="min-h-10 px-3 text-xs text-cyan-200 underline" onClick={() => setRetryKey(k => k + 1)}>Retry price chart</button><details className="p-2 text-xs text-zinc-400"><summary className="cursor-pointer">Price diagnostics</summary><p className="break-all">{formatSpxFailureDetails(failureDetails)}</p></details></div>}
         {data.warnings.length > 0 && <Notice tone="amber" text={data.warnings.join(" ")} />}
 
         <div className="grid gap-2 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -408,14 +439,14 @@ export function SpxPriceActionCompass({
                 }}
               />
             ) : (
-              <LearningPanel
+              <details><summary className="cursor-pointer text-xs text-zinc-400">Pattern guide</summary><LearningPanel
                 selectedPattern={selectedPattern}
                 onOpen={() => {
                   const next = selectedPattern || data.summary.latestPattern || topPatterns[0] || null;
                   setSelectedPattern(next);
                   setModalPattern(next);
                 }}
-              />
+              /></details>
             )}
 
             <section className="border border-[#123142] bg-black/20 p-3">
@@ -437,15 +468,16 @@ export function SpxPriceActionCompass({
                     }}
                     className={`border px-3 py-2 text-left transition-colors hover:border-white/40 ${selectedPattern?.id === pattern.id ? toneClasses(pattern) : "border-white/10 bg-white/[0.03] text-zinc-300"}`}
                     data-pa-side-pattern="true"
+                    data-pa-pattern-end-index={pattern.toIndex}
                     data-pa-side-pattern-active={selectedPattern?.id === pattern.id ? "true" : undefined}
                   >
                     <div className="flex items-center justify-between gap-2">
                       <span className="truncate text-xs font-black text-white">{pattern.label}</span>
-                      <span className="font-mono text-[10px]">{Math.round(pattern.confidence * 100)}%</span>
+                      <span className="font-mono text-[10px]" title="Pattern match score, not a probability of profit">Match {Math.round(pattern.confidence * 100)}/100</span>
                     </div>
                     {signalDensity === "actionable" && <ActionableMeta candidate={actionableById.get(pattern.id)} rank={topPatterns.findIndex((item) => item.id === pattern.id) + 1} />}
                     <div className="mt-1 font-mono text-[10px] text-zinc-500">
-                      {data.candles[pattern.toIndex] ? formatEtTime(data.candles[pattern.toIndex].time) : "time n/a"} / idx {pattern.fromIndex}-{pattern.toIndex} / ${formatPrice(pattern.price)}
+                      {data.candles[pattern.toIndex] ? formatEtTime(data.candles[pattern.toIndex].time) : "time n/a"} · ${formatPrice(pattern.price)}
                     </div>
                   </button>
                 ))}
@@ -1143,7 +1175,7 @@ const SelectedSignalCard = ({
           </div>
           <div className="mt-1 flex flex-wrap gap-3 font-mono text-[11px] text-zinc-300">
             <span>Price ${formatPrice(pattern.price)}</span>
-            <span>Confidence {Math.round(pattern.confidence * 100)}%</span>
+            <span title="Pattern recognition score, not a win rate">Match {Math.round(pattern.confidence * 100)}/100</span>
             <span>Window {pattern.fromIndex}-{pattern.toIndex}</span>
             <span>{candle ? formatEtTime(candle.time) : "time n/a"}</span>
           </div>
@@ -1162,8 +1194,8 @@ const SelectedSignalCard = ({
 );
 
 const SourcePanel = ({ data }: { data: SpxPriceActionCompassResponse }) => (
-  <section className="border border-[#123142] bg-black/20 p-3 text-xs leading-5 text-zinc-400" data-pa-source-panel="true">
-    <div className="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200">Source</div>
+  <details className="border border-[#123142] bg-black/20 p-3 text-xs leading-5 text-zinc-400" data-pa-source-panel="true">
+    <summary className="cursor-pointer text-cyan-200">Price source & timestamps</summary>
     <div className="mt-2">{data.source.label} / {data.source.interval} / {data.source.range}</div>
     <div className="font-mono text-[10px] text-cyan-200">Status {data.source.status || "READY"}</div>
     <div className="font-mono text-[10px] text-zinc-500">Candle time: America/New_York (ET)</div>
@@ -1173,7 +1205,10 @@ const SourcePanel = ({ data }: { data: SpxPriceActionCompassResponse }) => (
     {data.source.latestSampleAt && <div className="font-mono text-[10px] text-zinc-600">
       Latest sample {formatEtTime(data.source.latestSampleAt, true)} / {formatUtcTime(data.source.latestSampleAt, true)}
     </div>}
-  </section>
+    {data.source.expectedMove?.errorCode && <div className="font-mono text-[10px] text-zinc-600">
+      Expected Move diagnostic code {data.source.expectedMove.errorCode}
+    </div>}
+  </details>
 );
 
 const LearningPanel = ({ selectedPattern, onOpen }: { selectedPattern: SpxPriceActionPattern | null; onOpen: () => void }) => (
@@ -1274,7 +1309,7 @@ const PatternModal = ({ pattern, candles, onClose }: { pattern: SpxPriceActionPa
         <div className="space-y-4 p-4">
           <div className="grid grid-cols-3 gap-2">
             <MetricChip label="Price" value={formatPrice(pattern.price)} />
-            <MetricChip label="Confidence" value={`${Math.round(pattern.confidence * 100)}%`} />
+            <MetricChip label="Pattern match (not win rate)" value={`${Math.round(pattern.confidence * 100)}/100`} />
             <MetricChip label="Window" value={`${pattern.fromIndex}-${pattern.toIndex}`} />
           </div>
           <PatternDiagram pattern={pattern} candles={patternCandles} />

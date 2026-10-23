@@ -1,3 +1,5 @@
+import { getEarlyCloseMarketHolidayKeys, getNyseSessionCloseMinuteEt, isNyseTradingDay } from "./nyse-calendar";
+
 export type SpxPriceActionTimeframe = "1m" | "5m" | "15m" | "4h" | "1d";
 
 export const buildSpxPriceActionCompassRequestUrl = (
@@ -11,6 +13,44 @@ export const buildSpxPriceActionCompassRequestUrl = (
 
 export const SPX_0DTE_STALE_AFTER_MS = 10 * 60 * 1_000;
 export const SPX_0DTE_FUTURE_SKEW_TOLERANCE_MS = 5_000;
+export const SPX_PRICE_ACTION_REFRESH_INTERVAL_MS = 60_000;
+export const SPX_PRICE_ACTION_REFRESH_RECOVERY_DELAYS_MS = [3_000, 15_000, 60_000] as const;
+
+export type SpxPriceActionRefreshResult = "READY" | "FAILED";
+export type SpxPriceActionRefreshState = {
+  result: SpxPriceActionRefreshResult | "IDLE";
+  recoveryAttempts: number;
+};
+
+export const advanceSpxPriceActionRefreshState = (
+  state: SpxPriceActionRefreshState,
+  result: SpxPriceActionRefreshResult,
+): SpxPriceActionRefreshState => result === "READY"
+  ? { result, recoveryAttempts: 0 }
+  : {
+    result,
+    recoveryAttempts: state.result === "FAILED" ? Math.min(3, state.recoveryAttempts + 1) : 0,
+  };
+
+export const getSpxPriceActionRefreshDelay = (
+  result: SpxPriceActionRefreshResult | "IDLE",
+  recoveryAttempts: number,
+) => {
+  if (result === "READY") return SPX_PRICE_ACTION_REFRESH_INTERVAL_MS;
+  if (result !== "FAILED" || !Number.isInteger(recoveryAttempts) || recoveryAttempts < 0) return null;
+  return SPX_PRICE_ACTION_REFRESH_RECOVERY_DELAYS_MS[recoveryAttempts] ?? null;
+};
+
+export const shouldRefreshSpxCurrentSession = (input: {
+  selectedDate: string;
+  tradingDate: string;
+  minuteEt: number;
+  visible: boolean;
+}) => input.visible
+  && isNyseTradingDay(input.tradingDate)
+  && input.selectedDate === input.tradingDate
+  && input.minuteEt >= 9 * 60 + 30
+  && input.minuteEt < (getEarlyCloseMarketHolidayKeys(Number(input.tradingDate.slice(0, 4))).has(input.tradingDate) ? 13 : 16) * 60;
 
 export const isFreshSpx0DteSample = (sampleAt: string | number | null | undefined, nowMs = Date.now()) => {
   const sampleMs = typeof sampleAt === "number"
@@ -333,27 +373,46 @@ export const toSpxPriceActionCandles = (
     .sort((a, b) => a.time - b.time);
 };
 
+const spxRthDateTimeFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/New_York",
+  year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+});
+
 export const aggregateSpxPriceActionCandles = (
   candles: SpxPriceActionCandle[],
   timeframe: SpxPriceActionTimeframe,
 ): SpxPriceActionCandle[] => {
   if (timeframe !== "4h") return candles;
   const sorted = [...candles].sort((a, b) => a.time - b.time);
-  const aggregated: SpxPriceActionCandle[] = [];
-  for (let index = 0; index < sorted.length; index += 4) {
-    const chunk = sorted.slice(index, index + 4);
-    if (chunk.length === 0) continue;
-    aggregated.push({
-      time: chunk[0].time,
-      date_iso: chunk[0].date_iso,
-      open: chunk[0].open,
-      high: round(Math.max(...chunk.map((row) => row.high))),
-      low: round(Math.min(...chunk.map((row) => row.low))),
-      close: chunk[chunk.length - 1].close,
-      volume: chunk.reduce((sum, row) => sum + row.volume, 0),
-    });
+  const sessionCloses = new Map<string, number | null>();
+  const buckets = new Map<number, { date: string; rows: SpxPriceActionCandle[] }>();
+  for (const candle of sorted) {
+    const parts = Object.fromEntries(spxRthDateTimeFormatter.formatToParts(candle.time).map((part) => [part.type, part.value]));
+    const date = `${parts.year}-${parts.month}-${parts.day}`;
+    if (!sessionCloses.has(date)) {
+      sessionCloses.set(date, getNyseSessionCloseMinuteEt(date));
+    }
+    const minuteEt = Number(parts.hour) * 60 + Number(parts.minute);
+    const minutesFromOpen = minuteEt - (9 * 60 + 30);
+    const sessionClose = sessionCloses.get(date)!;
+    if (sessionClose === null || minutesFromOpen < 0 || minuteEt >= sessionClose) continue;
+    // Anchor each bucket to its own RTH open, including the shorter closing bucket.
+    // Using ET wall time also keeps 09:30/13:30 anchors stable across DST changes.
+    const time = candle.time - (minutesFromOpen % 240) * 60_000 - (candle.time % 60_000);
+    const bucket = buckets.get(time) || { date, rows: [] };
+    bucket.rows.push(candle);
+    buckets.set(time, bucket);
   }
-  return aggregated;
+  return [...buckets.entries()].map(([time, { date, rows: chunk }]) => ({
+    time,
+    date_iso: date,
+    open: chunk[0].open,
+    high: round(Math.max(...chunk.map((row) => row.high))),
+    low: round(Math.min(...chunk.map((row) => row.low))),
+    close: chunk[chunk.length - 1].close,
+    volume: chunk.reduce((sum, row) => sum + row.volume, 0),
+  }));
 };
 
 export const aggregateSpxOneMinutePriceActionCandles = (

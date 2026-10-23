@@ -16,6 +16,11 @@ import {
   deriveSupportResistanceAnalysis,
   type SupportResistanceAnalysis,
 } from "./support-resistance";
+import {
+  isYahooDailyBarForming,
+  normalizeYahooChartResult,
+  reportYahooChartValidation,
+} from "./yahoo-finance-normalizer";
 
 export const CANDLESTICK_SCHEMA_VERSION = "v2" as const;
 export const CANDLESTICK_INTERVALS = ["1d", "1wk", "1mo"] as const;
@@ -271,11 +276,6 @@ export const analyzeCandlestickBars = (
   };
 };
 
-const finiteNumber = (value: unknown): number | null => {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-};
-
 const dateKeyInTimeZone = (date: Date, timeZone: string) => {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone,
@@ -298,16 +298,16 @@ const weekKey = (dateKey: string) => {
 
 const isFormingBar = (input: {
   barDate: Date;
+  barDateKey: string;
   interval: CandlestickInterval;
   now: Date;
   timeZone: string;
-  regularSessionEnd?: number;
+  payload: unknown;
 }) => {
   const barKey = dateKeyInTimeZone(input.barDate, input.timeZone);
   const nowKey = dateKeyInTimeZone(input.now, input.timeZone);
   if (input.interval === "1d") {
-    if (barKey !== nowKey) return false;
-    return !input.regularSessionEnd || input.now.getTime() < input.regularSessionEnd * 1_000;
+    return isYahooDailyBarForming(input.payload, input.barDateKey, input.now);
   }
   if (input.interval === "1wk") return weekKey(barKey) === weekKey(nowKey);
   return barKey.slice(0, 7) === nowKey.slice(0, 7);
@@ -332,46 +332,32 @@ export const buildCandlestickPatternData = (input: {
     const upstreamMessage = payload?.chart?.error?.description;
     throw new CandlestickDataError("NO_RESULT", upstreamMessage || "Yahoo Finance did not return chart data.");
   }
-  const timestamps = result.timestamp;
-  const quote = result.indicators?.quote?.[0];
-  if (!Array.isArray(timestamps) || !quote || !Array.isArray(quote.open) || !Array.isArray(quote.high)
-    || !Array.isArray(quote.low) || !Array.isArray(quote.close) || !Array.isArray(quote.volume)) {
-    throw new CandlestickDataError("MALFORMED_PAYLOAD", "Yahoo Finance returned a malformed OHLCV payload.");
-  }
-
   const timeZone = typeof result.meta?.exchangeTimezoneName === "string"
     ? result.meta.exchangeTimezoneName
     : "UTC";
-  const regularSessionEnd = finiteNumber(result.meta?.currentTradingPeriod?.regular?.end) || undefined;
-  const now = input.now || new Date();
-  const byTime = new Map<string, CandlestickBar>();
-  let rejectedBarCount = 0;
-
-  for (let index = 0; index < timestamps.length; index += 1) {
-    const timestamp = finiteNumber(timestamps[index]);
-    const open = finiteNumber(quote.open[index]);
-    const high = finiteNumber(quote.high[index]);
-    const low = finiteNumber(quote.low[index]);
-    const close = finiteNumber(quote.close[index]);
-    const volume = finiteNumber(quote.volume[index]);
-    if (timestamp === null || open === null || high === null || low === null || close === null || volume === null
-      || timestamp <= 0 || volume < 0 || low > Math.min(open, close) || high < Math.max(open, close) || low > high) {
-      rejectedBarCount += 1;
-      continue;
-    }
-    const time = new Date(timestamp * 1_000).toISOString().slice(0, 10);
-    if (byTime.has(time)) rejectedBarCount += 1;
-    byTime.set(time, { time, open, high, low, close, volume });
+  const normalized = normalizeYahooChartResult(input.payload);
+  reportYahooChartValidation(input.symbol, normalized);
+  if (normalized.malformedPayload) {
+    throw new CandlestickDataError("MALFORMED_PAYLOAD", "Yahoo Finance returned a malformed OHLCV payload.");
   }
-
-  let bars = [...byTime.values()].sort((left, right) => left.time.localeCompare(right.time));
+  const now = input.now || new Date();
+  let bars: CandlestickBar[] = normalized.bars.map((bar) => ({
+    time: bar.date,
+    open: bar.open,
+    high: bar.high,
+    low: bar.low,
+    close: bar.close,
+    volume: bar.volume,
+  }));
+  const rejectedBarCount = normalized.rejectedBarCount;
   const beforePartialFilter = bars.length;
   bars = bars.filter((bar) => !isFormingBar({
     barDate: new Date(`${bar.time}T12:00:00.000Z`),
+    barDateKey: bar.time,
     interval: input.interval,
     now,
     timeZone,
-    regularSessionEnd,
+    payload: input.payload,
   }));
   const partialBarExcluded = bars.length < beforePartialFilter;
   bars = bars.slice(-120);

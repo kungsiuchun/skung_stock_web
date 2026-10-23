@@ -14,6 +14,12 @@ import {
   type DashboardNarrativeStatus,
 } from "./finance-dashboard-narrative";
 import type { SentimentApiResult } from "./market-sentiment";
+import {
+  isStrictFiniteNumber,
+  isValidIsoDate,
+  isValidIsoTimestamp,
+  normalizeFinanceChartData,
+} from "./yahoo-finance-normalizer";
 
 export interface FinanceDashboardNewsItem {
   title: string;
@@ -26,7 +32,7 @@ export interface FinanceDashboardNewsItem {
 export interface FinanceDashboardData {
   quantStrategySchemaVersion: "v3";
   symbol: string;
-  price: number;
+  price: number | null;
   change: string;
   algoRating: number;
   marketSentiment: number | null;
@@ -35,7 +41,12 @@ export interface FinanceDashboardData {
   decision: DashboardDecision;
   strategyPoints: { entry?: number; stopLoss?: number; takeProfit?: number };
   news: FinanceDashboardNewsItem[];
-  chartData: { date: string; date_iso?: string; price: number; open?: number; high?: number; low?: number; volume: number }[];
+  chartData: { date: string; date_iso: string; price: number; open: number; high: number; low: number; volume: number }[];
+  quoteStatus?: "available" | "unavailable";
+  quoteSourceAsOf?: string | null;
+  chartDataRejectedCount?: number;
+  chartDataLastValidDate?: string | null;
+  chartDataPartial?: boolean;
   optionsFlow?: {
     totalCallOI: number;
     totalPutOI: number;
@@ -126,32 +137,50 @@ export const buildFinanceDashboardSnapshot = (input: {
     throw new Error(typeof input.agent.error === "string" && input.agent.error ? input.agent.error : "Finance dashboard AI analysis failed.");
   }
 
-  let price = 0;
-  let change = "0.00%";
+  let price: number | null = null;
+  let change = "未提供";
+  let quoteStatus: FinanceDashboardData["quoteStatus"] = "unavailable";
+  let quoteSourceAsOf: string | null = null;
   let algoScore = 50;
   let chartData: FinanceDashboardData["chartData"] = [];
+  let chartDataRejectedCount = 0;
+  let chartDataLastValidDate: string | null = null;
+  let chartDataPartial = false;
   let optionsFlow: FinanceDashboardData["optionsFlow"] = undefined;
+  let optionsUnderlyingPrice: number | null = null;
 
   for (const step of input.agent.steps || []) {
     if (step.type !== "tool_call") continue;
     const result = parseToolResult(step.tool_result);
     if (!result) continue;
 
+    const reportedRejectedCount = isStrictFiniteNumber(result.rejected_bar_count)
+      && Number.isInteger(result.rejected_bar_count) && result.rejected_bar_count >= 0
+      ? result.rejected_bar_count
+      : 0;
+    const reportedLastValidDate = isValidIsoDate(result.last_valid_date) ? result.last_valid_date : null;
+    chartDataRejectedCount = Math.max(chartDataRejectedCount, reportedRejectedCount);
+    if (reportedLastValidDate) chartDataLastValidDate = reportedLastValidDate;
+    chartDataPartial = chartDataPartial || result.partial === true;
+
     if (step.tool_name === "get_realtime_quote") {
-      price = finiteNumber(result.price ?? result.current_price);
-      const changePercent = Number(result.change_pct ?? result.change_percent);
-      if (Number.isFinite(changePercent)) change = `${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%`;
+      const rawPrice = result.price !== undefined ? result.price : result.current_price;
+      const quotePrice = isStrictFiniteNumber(rawPrice) && rawPrice > 0 ? rawPrice : null;
+      const quoteAvailable = quotePrice !== null && (result.quote_status === undefined || result.quote_status === "available");
+      price = quoteAvailable ? quotePrice : null;
+      quoteStatus = quoteAvailable ? "available" : "unavailable";
+      const rawChangePercent = result.change_pct !== undefined ? result.change_pct : result.change_percent;
+      if (quoteAvailable && isStrictFiniteNumber(rawChangePercent)) {
+        change = `${rawChangePercent >= 0 ? "+" : ""}${rawChangePercent.toFixed(2)}%`;
+      }
+      quoteSourceAsOf = isValidIsoTimestamp(result.source_as_of) ? result.source_as_of : null;
     }
 
     if (Array.isArray(result.chart_data)) {
-      chartData = result.chart_data.map((point: any) => ({
-        ...point,
-        price: finiteNumber(point.price),
-        open: finiteNumber(point.open ?? point.price),
-        high: finiteNumber(point.high ?? point.price),
-        low: finiteNumber(point.low ?? point.price),
-        volume: finiteNumber(point.volume),
-      }));
+      const normalized = normalizeFinanceChartData(result.chart_data);
+      chartData = normalized.bars;
+      chartDataRejectedCount = Math.max(chartDataRejectedCount, normalized.rejectedBarCount, reportedRejectedCount);
+      chartDataLastValidDate = reportedLastValidDate || normalized.lastValidDate || chartDataLastValidDate;
     }
 
     if (result.score !== undefined) algoScore = finiteNumber(result.score, algoScore);
@@ -181,6 +210,8 @@ export const buildFinanceDashboardSnapshot = (input: {
         strikeMap.set(strike, existing);
       }
       const underlyingPrice = finiteNumber(result.underlying_price);
+      optionsUnderlyingPrice = isStrictFiniteNumber(result.underlying_price) && result.underlying_price > 0
+        ? result.underlying_price : null;
       const topStrikes = [...strikeMap.entries()]
         .map(([strike, data]) => ({ strike, ...data }))
         .filter((row) => row.callOI + row.putOI > 0)
@@ -208,10 +239,8 @@ export const buildFinanceDashboardSnapshot = (input: {
     }
   }
 
-  if (optionsFlow && optionsFlow.topStrikes.length > 0) {
-    const optionsPrice = price > 0
-      ? price
-      : optionsFlow.topStrikes.reduce((total, row) => total + row.strike, 0) / optionsFlow.topStrikes.length;
+  const optionsPrice = price ?? optionsUnderlyingPrice;
+  if (optionsFlow && optionsFlow.topStrikes.length > 0 && optionsPrice !== null) {
     const putWall = nearestDominantWall(optionsFlow.topStrikes, optionsPrice, "put");
     const callWall = nearestDominantWall(optionsFlow.topStrikes, optionsPrice, "call");
     optionsFlow = {
@@ -240,6 +269,11 @@ export const buildFinanceDashboardSnapshot = (input: {
       symbol: input.symbol.toUpperCase(),
       price,
       change,
+      quoteStatus,
+      quoteSourceAsOf,
+      chartDataRejectedCount,
+      chartDataLastValidDate,
+      chartDataPartial,
       algoRating: algoScore,
       marketSentiment: typeof sentiment?.score === "number" && Number.isFinite(sentiment.score) ? sentiment.score : null,
       ...(sentiment?.sourceLabel ? { sentimentSource: sentiment.sourceLabel } : {}),
@@ -266,6 +300,6 @@ export const buildFinanceDashboardSnapshot = (input: {
     },
     vixData: input.vix && typeof input.vix === "object" && !(input.vix as any).error ? input.vix : null,
     valuationData: input.fundamentals && typeof input.fundamentals === "object" && !(input.fundamentals as any).error ? input.fundamentals : null,
-    technicalData: input.technical && typeof input.technical === "object" && !(input.technical as any).error ? input.technical : null,
+    technicalData: input.technical && typeof input.technical === "object" ? input.technical : null,
   };
 };

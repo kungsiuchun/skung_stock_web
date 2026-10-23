@@ -7,6 +7,13 @@ import {
   unavailableSentiment,
   type SentimentApiResult,
 } from "../../src/lib/market-sentiment";
+import {
+  filterYahooFormingDailyBars,
+  getYahooLatestBar,
+  normalizeYahooChartResult,
+  reportYahooChartValidation,
+  yahooChartQuality,
+} from "../../src/lib/yahoo-finance-normalizer";
 
 const retailTool = ALL_RETAIL_TOOLS.find((tool) => tool.name === "get_retail_sentiment");
 const quoteTool = ALL_STOCK_TOOLS.find((tool) => tool.name === "get_realtime_quote");
@@ -20,8 +27,7 @@ function jsonResponse(payload: SentimentApiResult | Record<string, unknown>, sta
 }
 
 function finiteNumber(value: unknown): number | null {
-  const numberValue = Number(value);
-  return Number.isFinite(numberValue) ? numberValue : null;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function deriveCallPutRatio(optionsPayload: any): number | null {
@@ -42,11 +48,18 @@ async function fetchTechnical(symbol: string) {
   if (!res.ok) throw new Error(`Yahoo technical chart returned ${res.status}`);
 
   const data = await res.json() as any;
-  const result = data.chart?.result?.[0];
-  const quote = result?.indicators?.quote?.[0] || {};
-  const closes: number[] = (quote.close || []).filter((close: unknown) => Number.isFinite(Number(close))).map(Number);
-
-  if (closes.length < 30) throw new Error("Not enough data to calculate technical proxy");
+  const normalized = normalizeYahooChartResult(data);
+  reportYahooChartValidation(symbol, normalized);
+  if (normalized.malformedPayload) throw new Error("Yahoo technical chart data is unavailable.");
+  const completed = filterYahooFormingDailyBars(data, normalized.bars);
+  const latestBar = getYahooLatestBar(data, normalized);
+  const quality = yahooChartQuality(normalized, completed.partialBarExcluded, completed.bars.at(-1)?.date || null);
+  const qualityMessage = `Rejected bars: ${quality.rejected_bar_count}; last valid date: ${quality.last_valid_date || "unavailable"}.`;
+  if (!latestBar || completed.bars.at(-1)?.index !== latestBar.index) {
+    throw new Error(`Latest Yahoo technical bar is unavailable; older data was not used as current. ${qualityMessage}`);
+  }
+  const closes = completed.bars.map((bar) => bar.close);
+  if (closes.length < 30) throw new Error(`Not enough data to calculate technical proxy. ${qualityMessage}`);
 
   const currentPrice = closes[closes.length - 1];
   const ma5 = TechnicalIndicators.SMA(closes, 5);
@@ -62,6 +75,7 @@ async function fetchTechnical(symbol: string) {
     is_bearish: Boolean(currentPrice < ma5 && ma5 < ma10 && ma10 < ma20) || Boolean(ma5 < ma20),
     rsi_14: Number(rsi14.toFixed(2)),
     position_percent: Number(positionPercent.toFixed(1)),
+    ...quality,
   };
 }
 
@@ -134,6 +148,10 @@ export async function onRequest(context: any) {
     technicalPromise,
     newsPromise,
   ]);
+
+  if (technical?.partial) {
+    warnings.push(`Technical proxy is partial: rejected ${technical.rejected_bar_count} bar(s); last valid date ${technical.last_valid_date || "unavailable"}.`);
+  }
 
   const proxy = deriveMarketMoodProxy({
     symbol,

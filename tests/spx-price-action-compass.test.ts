@@ -16,8 +16,10 @@ import {
   SPX_0DTE_SHARED_REFRESH_MS,
 } from "../functions/api/_spx-0dte-shared-cache";
 import type { D1DatabaseLike } from "../src/lib/spx-recap-d1";
+import { fetchNativeYahooHistory } from "../src/lib/stocks-native-yahoo";
 import {
   aggregateSpxOneMinutePriceActionCandles,
+  aggregateSpxPriceActionCandles,
   buildSpxPriceActionCompassRequestUrl,
   buildSpxPriceActionCompassResponse,
   deriveSpxSupportResistanceZones,
@@ -26,11 +28,115 @@ import {
   projectSpxChartClientPoint,
   selectActionablePatterns,
   sortSpxPriceActionPatternsLatestFirst,
+  advanceSpxPriceActionRefreshState,
+  getSpxPriceActionRefreshDelay,
+  shouldRefreshSpxCurrentSession,
   SPX_0DTE_FUTURE_SKEW_TOLERANCE_MS,
+  toSpxPriceActionCandles,
   type SpxPriceActionCandle,
   type SpxPriceActionPattern,
   type SpxPriceActionZone,
 } from "../src/lib/spx-price-action-compass";
+
+const hourlySession = (start: string, count = 7, base = 6000): SpxPriceActionCandle[] =>
+  Array.from({ length: count }, (_, index) => ({
+    time: Date.parse(start) + index * 3_600_000,
+    date_iso: start.slice(0, 10),
+    open: base + index, high: base + index + 2, low: base + index - 1,
+    close: base + index + 0.5, volume: index + 1,
+  }));
+
+describe("Yahoo hourly timestamps and SPX RTH 4h aggregation", () => {
+  it("preserves all fourteen hourly timestamps through the public Yahoo mapper and produces four same-session candles", async (t) => {
+    const source = [...hourlySession("2026-10-20T13:30:00Z"), ...hourlySession("2026-10-21T13:30:00Z", 7, 6100)];
+    t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+      assert.match(String(input), /interval=1h/);
+      return Response.json({ chart: { result: [{
+        timestamp: source.map((row) => row.time / 1000),
+        indicators: { quote: [{
+          open: source.map((row) => row.open), high: source.map((row) => row.high), low: source.map((row) => row.low),
+          close: source.map((row) => row.close), volume: source.map((row) => row.volume),
+        }] },
+      }] } });
+    });
+    const rows = await fetchNativeYahooHistory("SPX", "1y", "1h");
+    assert.deepEqual(rows.map((row) => Date.parse(row.date)), source.map((row) => row.time));
+    assert.equal(new Set(rows.map((row) => row.date)).size, 14);
+    const aggregated = aggregateSpxPriceActionCandles(toSpxPriceActionCandles(rows), "4h");
+    assert.deepEqual(aggregated, [
+      { time: source[0].time, date_iso: "2026-10-20", open: 6000, high: 6005, low: 5999, close: 6003.5, volume: 10 },
+      { time: source[4].time, date_iso: "2026-10-20", open: 6004, high: 6008, low: 6003, close: 6006.5, volume: 18 },
+      { time: source[7].time, date_iso: "2026-10-21", open: 6100, high: 6105, low: 6099, close: 6103.5, volume: 10 },
+      { time: source[11].time, date_iso: "2026-10-21", open: 6104, high: 6108, low: 6103, close: 6106.5, volume: 18 },
+    ]);
+    assert.ok(aggregated.every((row, index) => index === 0 || row.time > aggregated[index - 1].time));
+    const response = await getSpxPriceActionCompassApi({
+      request: new Request("https://example.com/api/spx-price-action-compass?timeframe=4h&date=2026-10-21"),
+      env: { SPX_PRICE_ACTION_TEST_NOW_MS: Date.parse("2026-10-22T21:00:00Z") },
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json() as { candles: SpxPriceActionCandle[] }).candles, aggregated);
+  });
+
+  it("anchors missing-hour buckets to 09:30 and never borrows the next session's bars", () => {
+    const first = hourlySession("2026-10-20T13:30:00Z").filter((_, index) => index !== 0 && index !== 2);
+    const next = hourlySession("2026-10-21T13:30:00Z", 7, 6100);
+    const result = aggregateSpxPriceActionCandles([...next, ...first].reverse(), "4h");
+    assert.deepEqual(result.map((row) => new Date(row.time).toISOString()), [
+      "2026-10-20T13:30:00.000Z", "2026-10-20T17:30:00.000Z", "2026-10-21T13:30:00.000Z", "2026-10-21T17:30:00.000Z",
+    ]);
+    assert.equal(result[0].open, first[0].open);
+    assert.equal(result[0].close, first[1].close);
+    assert.equal(result[0].volume, first[0].volume + first[1].volume);
+    assert.equal(result[1].close, 6006.5);
+    assert.equal(result[2].open, 6100);
+  });
+
+  it("keeps a 13:00 early close in one shortened bucket and excludes pre/postmarket, holidays and UTC-next-day rows", () => {
+    const early = hourlySession("2026-11-27T14:30:00Z", 7);
+    const result = aggregateSpxPriceActionCandles([
+      ...early,
+      ...hourlySession("2026-11-27T14:00:00Z", 1, 7000),
+      ...hourlySession("2026-11-27T18:00:00Z", 1, 7000),
+      ...hourlySession("2026-11-28T00:30:00Z", 1, 7000),
+      ...hourlySession("2026-11-26T14:30:00Z", 7, 7000),
+    ], "4h");
+    assert.deepEqual(result, [{
+      time: early[0].time, date_iso: "2026-11-27", open: 6000, high: 6005, low: 5999, close: 6003.5, volume: 10,
+    }]);
+  });
+
+  it("uses the correct UTC anchors on both sides of spring and autumn DST without joining ET dates", () => {
+    const starts = ["2026-03-06T14:30:00Z", "2026-03-09T13:30:00Z", "2026-10-30T13:30:00Z", "2026-11-02T14:30:00Z"];
+    const source = starts.flatMap((start, index) => hourlySession(start, 7, 6000 + index * 100));
+    const result = aggregateSpxPriceActionCandles(source, "4h");
+    assert.deepEqual(result.map((row) => row.time), starts.flatMap((start) => [Date.parse(start), Date.parse(start) + 4 * 3_600_000]));
+    assert.deepEqual(result.map((row) => row.date_iso), starts.flatMap((start) => [start.slice(0, 10), start.slice(0, 10)]));
+    assert.equal(result.reduce((sum, row) => sum + row.volume, 0), source.reduce((sum, row) => sum + row.volume, 0));
+  });
+
+  it("keeps July 2 2026 as a normal 16:00 session and excludes the observed July 3 holiday", () => {
+    const regular = hourlySession("2026-07-02T13:30:00Z");
+    const result = aggregateSpxPriceActionCandles([...regular, ...hourlySession("2026-07-03T13:30:00Z", 7, 7000)], "4h");
+    assert.deepEqual(result.map((row) => row.time), [regular[0].time, regular[4].time]);
+    assert.equal(result[1].close, regular[6].close);
+    assert.equal(result.reduce((sum, row) => sum + row.volume, 0), 28);
+  });
+
+  it("preserves existing minute timestamps, daily dates and non-4h aggregation", async (t) => {
+    const source = hourlySession("2026-10-20T13:30:00Z", 1);
+    t.mock.method(globalThis, "fetch", async () => Response.json({ chart: { result: [{
+      timestamp: [source[0].time / 1000], indicators: { quote: [{ open: [6000], high: [6002], low: [5999], close: [6000.5], volume: [1] }] },
+    }] } }));
+    for (const interval of ["1m", "5m", "15m", "1d", "1wk"]) {
+      const rows = await fetchNativeYahooHistory("SPX", "1y", interval);
+      assert.equal(rows[0].date, interval.endsWith("m") ? "2026-10-20T13:30:00.000Z" : "2026-10-20");
+    }
+    for (const timeframe of ["1m", "5m", "15m", "1d"] as const) {
+      assert.equal(aggregateSpxPriceActionCandles(source, timeframe), source);
+    }
+  });
+});
 
 const candle = (
   index: number,
@@ -322,6 +428,30 @@ describe("SPX shared 0DTESPX cache", () => {
 });
 
 describe("SPX Price Action Compass detector", () => {
+  it("keeps current-session polling healthy and recovery bounded", () => {
+    let state = { result: "IDLE" as const, recoveryAttempts: 0 };
+    state = advanceSpxPriceActionRefreshState(state, "FAILED");
+    assert.deepEqual(state, { result: "FAILED", recoveryAttempts: 0 });
+    state = advanceSpxPriceActionRefreshState(state, "FAILED");
+    state = advanceSpxPriceActionRefreshState(state, "FAILED");
+    state = advanceSpxPriceActionRefreshState(state, "FAILED");
+    assert.deepEqual(state, { result: "FAILED", recoveryAttempts: 3 });
+    assert.deepEqual(advanceSpxPriceActionRefreshState(state, "READY"), { result: "READY", recoveryAttempts: 0 });
+    assert.equal(getSpxPriceActionRefreshDelay("READY", 0), 60_000);
+    assert.deepEqual([0, 1, 2].map(attempt => getSpxPriceActionRefreshDelay("FAILED", attempt)), [3_000, 15_000, 60_000]);
+    assert.equal(getSpxPriceActionRefreshDelay("FAILED", 3), null);
+    assert.equal(getSpxPriceActionRefreshDelay("IDLE", 0), null);
+    assert.equal(shouldRefreshSpxCurrentSession({ selectedDate: "2026-07-13", tradingDate: "2026-07-13", minuteEt: 570, visible: true }), true);
+    assert.equal(shouldRefreshSpxCurrentSession({ selectedDate: "2026-07-13", tradingDate: "2026-07-13", minuteEt: 959, visible: true }), true);
+    assert.equal(shouldRefreshSpxCurrentSession({ selectedDate: "2026-07-13", tradingDate: "2026-07-13", minuteEt: 960, visible: true }), false);
+    assert.equal(shouldRefreshSpxCurrentSession({ selectedDate: "2026-11-27", tradingDate: "2026-11-27", minuteEt: 779, visible: true }), true);
+    assert.equal(shouldRefreshSpxCurrentSession({ selectedDate: "2026-11-27", tradingDate: "2026-11-27", minuteEt: 780, visible: true }), false);
+    assert.equal(shouldRefreshSpxCurrentSession({ selectedDate: "2026-07-11", tradingDate: "2026-07-11", minuteEt: 600, visible: true }), false);
+    assert.equal(shouldRefreshSpxCurrentSession({ selectedDate: "2026-12-25", tradingDate: "2026-12-25", minuteEt: 600, visible: true }), false);
+    assert.equal(shouldRefreshSpxCurrentSession({ selectedDate: "2026-07-12", tradingDate: "2026-07-13", minuteEt: 600, visible: true }), false);
+    assert.equal(shouldRefreshSpxCurrentSession({ selectedDate: "2026-07-13", tradingDate: "2026-07-13", minuteEt: 600, visible: false }), false);
+  });
+
   it("sorts Signal Monitor patterns latest-first with deterministic ties without mutating input", () => {
     const pattern = (id: string, toIndex: number, fromIndex: number, confidence: number): SpxPriceActionPattern => ({
       id, type: "DOJI", name: id, label: id, category: "candle", direction: "neutral",
@@ -413,6 +543,39 @@ describe("SPX Price Action Compass detector", () => {
 });
 
 describe("SPX Price Action Compass API", () => {
+  it("bounds dated Yahoo history to the selected ET session and excludes later candles", async () => {
+    const priorFetch = globalThis.fetch;
+    const times = ["2026-07-09T14:00:00Z", "2026-07-10T14:00:00Z", "2026-07-13T14:00:00Z"].map(t => Date.parse(t) / 1000);
+    globalThis.fetch = (async () => Response.json({chart:{result:[{
+      timestamp:times, indicators:{quote:[{open:[6000,6001,6002],high:[6002,6003,6004],low:[5998,5999,6000],close:[6001,6002,6003],volume:[10,20,30]}]},
+    }]}})) as typeof fetch;
+    try {
+      for (const view of ["timeframe=5m", "view=price-overlay"]) {
+        const response = await getSpxPriceActionCompassApi({request:new Request(`https://example.com/api/spx-price-action-compass?${view}&date=2026-07-10`),env:{SPX_PRICE_ACTION_TEST_NOW_MS:Date.parse("2026-07-14T14:00:00Z")}});
+        const payload = await response.json() as {candles:SpxPriceActionCandle[]};
+        assert.equal(response.status,200);
+        assert.ok(payload.candles.length>0);
+        assert.ok(payload.candles.every(c => c.time < Date.parse("2026-07-11T04:00:00Z")));
+        if(view.startsWith("view=")) assert.equal(payload.candles.length,1);
+      }
+    } finally {globalThis.fetch=priorFetch;}
+  });
+  it("returns an explicit empty window when Yahoo has no candle for the selected ET session", async () => {
+    const priorFetch = globalThis.fetch;
+    const times = ["2026-07-09T14:00:00Z", "2026-07-10T14:00:00Z", "2026-07-13T14:00:00Z"].map(t => Date.parse(t) / 1000);
+    globalThis.fetch = (async () => Response.json({chart:{result:[{
+      timestamp:times, indicators:{quote:[{open:[6000,6001,6002],high:[6002,6003,6004],low:[5998,5999,6000],close:[6001,6002,6003],volume:[10,20,30]}]},
+    }]}})) as typeof fetch;
+    try {
+      for (const query of ["timeframe=1m", "timeframe=5m", "timeframe=15m", "timeframe=4h", "timeframe=1d", "timeframe=5m&view=price-overlay"]) {
+        const response = await getSpxPriceActionCompassApi({request:new Request(`https://example.com/api/spx-price-action-compass?${query}&date=2026-07-12`),env:{SPX_PRICE_ACTION_TEST_NOW_MS:Date.parse("2026-07-14T14:00:00Z")}});
+        const payload = await response.json() as {candles:SpxPriceActionCandle[]; warnings:string[]};
+        assert.equal(response.status,200);
+        assert.deepEqual(payload.candles,[]);
+        assert.ok(payload.warnings.some(warning => /No SPX OHLCV candles/.test(warning)));
+      }
+    } finally {globalThis.fetch=priorFetch;}
+  });
   it("builds a Compass request for the Board-selected session date", () => {
     assert.equal(
       buildSpxPriceActionCompassRequestUrl("5m", "2026-09-25"),
@@ -683,12 +846,13 @@ describe("SPX Price Action Compass API", () => {
         request: new Request(`https://example.com/api/spx-price-action-compass?view=price-overlay&date=${sessionDate}`),
         env: { ZERO_DTE_SPX_API_TOKEN: "secret-token", MARKET_CACHE_DB: db, SPX_PRICE_ACTION_TEST_NOW_MS: nowMs },
       });
-      const payload = await response.json() as { candles: SpxPriceActionCandle[]; source: { status: string }; warnings: string[] };
+      const payload = await response.json() as { errorCode: string; candles: SpxPriceActionCandle[]; source: { status: string }; warnings: string[] };
       assert.equal(response.status, 502);
       assert.equal(response.headers.get("cache-control"), "no-store");
       assert.equal(payload.source.status, "STALE");
       assert.deepEqual(payload.candles, []);
-      assert.deepEqual(payload.warnings, ["ZERO_DTE_SPX_STALE"]);
+      assert.equal(payload.errorCode, "ZERO_DTE_SPX_STALE");
+      assert.deepEqual(payload.warnings, ["SPX source is unavailable; no verified candles are available."]);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -732,14 +896,15 @@ describe("SPX Price Action Compass API", () => {
         request: new Request("https://example.com/api/spx-price-action-compass?timeframe=1m"),
         env: { ZERO_DTE_SPX_API_TOKEN: "secret-token", SPX_PRICE_ACTION_TEST_NOW_MS: now },
       });
-      const payload = await response.json() as { source: { provider: string; status: string; range: string; interval: string }; warnings: string[] };
+      const payload = await response.json() as { errorCode: string; source: { provider: string; status: string; range: string; interval: string }; warnings: string[] };
       assert.equal(response.status, 502);
       assert.equal(response.headers.get("cache-control"), "no-store");
       assert.equal(payload.source.provider, "0dtespx");
       assert.equal(payload.source.status, "UNAVAILABLE");
       assert.equal(payload.source.range, "current RTH session");
       assert.equal(payload.source.interval, "1s->1m");
-      assert.deepEqual(payload.warnings, ["ZERO_DTE_SPX_RATE_LIMITED"]);
+      assert.equal(payload.errorCode, "ZERO_DTE_SPX_RATE_LIMITED");
+      assert.deepEqual(payload.warnings, ["SPX source is unavailable; no verified candles are available."]);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -816,14 +981,15 @@ describe("SPX Price Action Compass API", () => {
         request: new Request(`https://example.com/api/spx-price-action-compass?view=price-overlay&date=${date}`),
         env: { ZERO_DTE_SPX_API_TOKEN: "secret-token", SPX_PRICE_ACTION_TEST_NOW_MS: nowMs },
       });
-      const payload = await response.json() as { source: { provider: string; sessionState: string; sessionEndAt: string; routingReason: string }; warnings: string[] };
+      const payload = await response.json() as { errorCode: string; source: { provider: string; sessionState: string; sessionEndAt: string; routingReason: string }; warnings: string[] };
       assert.equal(response.status, 502);
       assert.equal(response.headers.get("cache-control"), "no-store");
       assert.equal(payload.source.provider, "0dtespx");
       assert.equal(payload.source.sessionState, "CLOSED");
       assert.equal(payload.source.sessionEndAt, new Date(endMs).toISOString());
       assert.equal(payload.source.routingReason, "CURRENT_ET_SESSION_CLOSED_HISTORICAL");
-      assert.deepEqual(payload.warnings, ["ZERO_DTE_SPX_UPSTREAM_UNAVAILABLE"]);
+      assert.equal(payload.errorCode, "ZERO_DTE_SPX_UPSTREAM_UNAVAILABLE");
+      assert.deepEqual(payload.warnings, ["SPX source is unavailable; no verified candles are available."]);
       assert.equal(calls.length, 2);
     } finally {
       globalThis.fetch = originalFetch;
@@ -846,12 +1012,13 @@ describe("SPX Price Action Compass API", () => {
         request: new Request(`https://example.com/api/spx-price-action-compass?view=price-overlay&date=${date}`),
         env: { ZERO_DTE_SPX_API_TOKEN: "secret-token", SPX_PRICE_ACTION_TEST_NOW_MS: nowMs },
       });
-      const payload = await response.json() as { source: { provider: string; sessionState: string }; warnings: string[] };
+      const payload = await response.json() as { errorCode: string; source: { provider: string; sessionState: string }; warnings: string[] };
       assert.equal(response.status, 502);
       assert.equal(response.headers.get("cache-control"), "no-store");
       assert.equal(payload.source.provider, "0dtespx");
       assert.equal(payload.source.sessionState, "UNAVAILABLE");
-      assert.deepEqual(payload.warnings, ["ZERO_DTE_SPX_RESPONSE_INVALID"]);
+      assert.equal(payload.errorCode, "ZERO_DTE_SPX_RESPONSE_INVALID");
+      assert.deepEqual(payload.warnings, ["SPX source is unavailable; no verified candles are available."]);
       assert.equal(calls.length, 1);
     } finally {
       globalThis.fetch = originalFetch;
@@ -903,13 +1070,14 @@ describe("SPX Price Action Compass API", () => {
         request: new Request(`https://example.com/api/spx-price-action-compass?view=price-overlay&date=${date}`),
         env: { ZERO_DTE_SPX_API_TOKEN: "secret-token", SPX_PRICE_ACTION_TEST_NOW_MS: nowMs },
       });
-      const payload = await response.json() as { source: { provider: string; sessionState: string; routingReason: string }; warnings: string[] };
+      const payload = await response.json() as { errorCode: string; source: { provider: string; sessionState: string; routingReason: string }; warnings: string[] };
       assert.equal(response.status, 502);
       assert.equal(response.headers.get("cache-control"), "no-store");
       assert.equal(payload.source.provider, "0dtespx");
       assert.equal(payload.source.sessionState, "FINALIZING");
       assert.equal(payload.source.routingReason, "CURRENT_ET_SESSION_FINALIZING");
-      assert.deepEqual(payload.warnings, ["ZERO_DTE_SPX_FINALIZING"]);
+      assert.equal(payload.errorCode, "ZERO_DTE_SPX_FINALIZING");
+      assert.deepEqual(payload.warnings, ["SPX source is unavailable; no verified candles are available."]);
     } finally {
       globalThis.fetch = originalFetch;
     }

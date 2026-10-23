@@ -177,6 +177,37 @@ test("Yahoo normalization fails closed for malformed or insufficient data", () =
   );
 });
 
+test("daily candlestick data shares the conservative forming-bar rule", () => {
+  const dates = ["2026-07-16", "2026-07-17", "2026-07-18", "2026-07-19", "2026-07-20", "2026-07-21"];
+  const makePayload = (end: unknown) => ({
+    chart: {
+      result: [{
+        meta: { exchangeTimezoneName: "America/New_York", currentTradingPeriod: { regular: { end } } },
+        timestamp: dates.map((date) => Date.parse(`${date}T13:30:00.000Z`) / 1_000),
+        indicators: { quote: [{
+          open: dates.map((_, index) => 10 + index),
+          high: dates.map((_, index) => 11 + index),
+          low: dates.map((_, index) => 9 + index),
+          close: dates.map((_, index) => 10.5 + index),
+          volume: dates.map((_, index) => 100 + index),
+        }] },
+      }],
+    },
+  });
+
+  for (const end of [undefined, "invalid"]) {
+    const result = buildCandlestickPatternData({
+      symbol: "AAPL",
+      interval: "1d",
+      payload: makePayload(end),
+      now: new Date("2026-07-21T18:00:00.000Z"),
+    });
+    assert.equal(result.partialBarExcluded, true);
+    assert.equal(result.sourceAsOf, "2026-07-20");
+    assert.equal(result.bars.length, 5);
+  }
+});
+
 test("Yahoo normalization removes every row in the current weekly or monthly bucket", () => {
   const makePayload = (dates: string[]) => ({
     chart: {

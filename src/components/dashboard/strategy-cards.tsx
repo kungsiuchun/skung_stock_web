@@ -49,14 +49,13 @@ export function StrategyCards({ quantStrategies, recommendedTrade }: StrategyCar
   };
 
   return (
-    <div className="flex h-full flex-col rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+    <div className="flex flex-col rounded-xl border border-slate-200 bg-white p-4">
       <div className="mb-5 flex items-start justify-between gap-4">
         <div>
-          <p className="mb-1 text-[10px] font-bold uppercase tracking-[0.2em] text-blue-500">Deterministic Quant Engine</p>
-          <h3 className="text-lg font-bold text-gray-900">量化策略結果與交易計劃</h3>
+          <h3 className="text-sm font-bold text-gray-900">量化策略與交易計劃</h3>
         </div>
         <span className="shrink-0 rounded-full bg-gray-100 px-2.5 py-1 text-[10px] font-black text-gray-500">
-          Top {displayedStrategies.length} of {quantStrategies.length}
+          {displayedStrategies.length} / {quantStrategies.length}
         </span>
       </div>
 

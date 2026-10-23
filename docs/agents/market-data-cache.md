@@ -14,6 +14,10 @@ snapshot caching, or migration `0009_market_data_cache.sql`.
   reason. Curated Watcher `get_watchlist` is stricter: an unavailable or empty
   expired refresh fails closed and never serves a stale list.
 - Do not recreate demo fallbacks for market-source failures.
+- Finance caches the complete dashboard snapshot under its versioned identity.
+  Validate loaded, fresh and stale snapshot values, and validate the same contract
+  before browser state ingestion. An invalid entry cannot be a stale fallback;
+  a typed unavailable quote remains valid and preserves its quality metadata.
 - Reserve the shared D1 safety budget atomically only before a refresh/write.
   Cache hits and other read-only paths consume no reservation. Include the
   guard's D1 work and bounded maintenance, fail closed at the 70% threshold or

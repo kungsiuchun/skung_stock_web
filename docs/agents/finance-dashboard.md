@@ -11,6 +11,12 @@ Read this file only for Finance Analyzer UI, its Pages Functions, or related UAT
 - The dashboard uses React `currentView` state rather than URL routing.
 - Current portfolio navigation is the Work Gallery flow documented in `CONTEXT.md`;
   the old AI VISION navigation no longer exists.
+- Finance Analyzer is a chart-first research workspace. Search, recent research,
+  quote and chart remain primary; technicals, options, fundamentals, news and AI
+  interpretation live in research tabs. AI chat and source/method details are secondary.
+- `use-finance-workspace` owns snapshot requests, request supersession and existing
+  browser persistence. Research tabs consume the selected snapshot without starting
+  another analysis. Existing APIs and model-call budgets are unchanged.
 
 ## Display and data rules
 
@@ -22,6 +28,18 @@ Read this file only for Finance Analyzer UI, its Pages Functions, or related UAT
 - The sentiment gauge receives `news[]` from its parent and derives insights from
   headlines. Keep the compact gauge-left/insights-right layout.
 - Format numeric `change_pct` values with `%` explicitly.
+- Distinguish source time, cache creation and restored history. Never substitute
+  cache creation or the browser clock for a missing quote timestamp. Source maps
+  describe provenance, not successful connectivity; do not hardcode healthy states.
+- Invalid OHLC rows are visibly excluded from the chart, and invalidate derived
+  risk metrics rather than substituting an older row. The Finance Agent's Yahoo
+  normalization rejects null/non-numeric or impossible OHLC and invalid dates
+  before both strategy context and chart construction, with a scoped
+  rejection-count log. A missing latest quote remains unavailable rather than
+  becoming a zero price or zero change; snapshots expose partial state and the
+  actual last valid date.
+- Option walls use a validated quote or the options chain's numeric underlying
+  price; missing prices never use an average strike as a market-price substitute.
 - Browser persistence is optional: blocked/full/corrupt storage produces a visible warning, not a route failure or a synthetic API error. Initial hydration must never write empty history over saved data. Invalid saved payloads are not silently deleted.
 - Only validated history metadata and render-safe saved results may be restored. History analysis passes its selected ticker explicitly; restored results clear valuation, technical, VIX and cache metadata that were not saved with that history entry.
 - Never use `height="100%"` for Recharts in a flex container; use an explicit
@@ -33,6 +51,8 @@ Read this file only for Finance Analyzer UI, its Pages Functions, or related UAT
 
 ```powershell
 npm run dev:all
+npm run test:finance-ui
+npm run test:finance-ui:uat
 npm run test:finance-agent-tools-smoke
 npm run build
 ```
@@ -43,6 +63,9 @@ npm run build
 - In Puppeteer, replace `waitForTimeout` with a Promise-based wait helper.
 - Use the feature-specific package scripts instead of the removed root
   `run_pup.cjs` script.
+- For Yahoo OHLC normalization changes, also run `npm run test:quant-strategies`.
+  For risk/chart client changes, run the related `trader-risk-snapshot` and
+  `candlestick-pattern-client` tests with `node --import tsx --test`.
 
 ## Runtime secrets
 

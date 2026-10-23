@@ -4,8 +4,13 @@ import {
 } from "./finance-analyzer-contract";
 import { normalizeDashboardDecision } from "./finance-dashboard-ai-decision";
 import { getDashboardNarrativeStatus } from "./finance-dashboard-narrative";
-import type { FinanceDashboardData } from "./finance-dashboard-snapshot";
+import type { FinanceDashboardData, FinanceDashboardSnapshotPayload } from "./finance-dashboard-snapshot";
 import { readBrowserJson } from "./browser-storage";
+import {
+  isValidIsoDate,
+  isValidIsoTimestamp,
+  normalizeFinanceChartPoint,
+} from "./yahoo-finance-normalizer";
 
 export interface DashboardHistoryItem {
   symbol: string;
@@ -20,6 +25,33 @@ const finite = (value: unknown): value is number => typeof value === "number" &&
 const text = (value: unknown): value is string => typeof value === "string";
 const optionalText = (value: unknown) => value === undefined || text(value);
 const optionalNumber = (value: unknown) => value === undefined || finite(value);
+const optionalNonNegativeInteger = (value: unknown) => value === undefined || typeof value === "number" && Number.isInteger(value) && value >= 0;
+const validQualityFields = (value: Record<string, unknown>) => (value.partial === undefined || typeof value.partial === "boolean")
+  && optionalNonNegativeInteger(value.rejected_bar_count)
+  && (value.last_valid_date === undefined || value.last_valid_date === null || isValidIsoDate(value.last_valid_date));
+const validTechnicalSnapshot = (value: unknown) => {
+  if (value === undefined || value === null) return true;
+  if (!record(value) || !validQualityFields(value)) return false;
+  if (value.error !== undefined) return text(value.error);
+  return optionalText(value.ma_alignment) && optionalText(value.rsi_signal)
+    && (value.is_bullish === undefined || typeof value.is_bullish === "boolean")
+    && (value.is_bearish === undefined || typeof value.is_bearish === "boolean")
+    && optionalNumber(value.rsi_14) && optionalNumber(value.position_percent)
+    && optionalNumber(value.ma5) && optionalNumber(value.ma20);
+};
+const validVixSnapshot = (value: unknown) => {
+  if (value === undefined || value === null) return true;
+  if (!record(value) || value.error !== undefined || !validQualityFields(value)) return false;
+  return finite(value.value) && value.value > 0 && finite(value.change_pct)
+    && Array.isArray(value.history) && value.history.length >= 2 && value.history.every((item) => finite(item) && item > 0);
+};
+const validValuationSnapshot = (value: unknown) => {
+  if (value === undefined || value === null) return true;
+  return record(value) && optionalText(value.symbol) && optionalText(value.error)
+    && (value.rateLimited === undefined || typeof value.rateLimited === "boolean")
+    && ["pe_ratio", "peg_ratio", "eps", "analyst_target_price"]
+      .every((key) => value[key] === undefined || value[key] === null || text(value[key]) || finite(value[key]));
+};
 const validStoredStrategy = (item: unknown) => {
   if (!record(item) || !finite(item.score) || !["entry", "stopLoss", "target"].every((key) => optionalNumber(item[key]))) return false;
   const setup = item.tradeSetup || item.trade_setup;
@@ -32,19 +64,25 @@ const validStoredStrategy = (item: unknown) => {
 };
 
 const validRenderData = (data: Record<string, unknown>) => {
-  if (!text(data.symbol) || !data.symbol.trim() || !finite(data.price) || !text(data.change) || !finite(data.algoRating)
+  const validQuote = data.price === null
+    ? data.quoteStatus === "unavailable" && data.change === "未提供"
+    : finite(data.price) && data.price > 0 && (data.quoteStatus === undefined || data.quoteStatus === "available");
+  if (!text(data.symbol) || !data.symbol.trim() || !validQuote || !text(data.change) || !finite(data.algoRating)
     || !(data.marketSentiment === null || finite(data.marketSentiment)) || !optionalText(data.sentimentSource)
     || !optionalText(data.finalAnalysis) || !record(data.strategyPoints)
     || !["entry", "stopLoss", "takeProfit"].every((key) => optionalNumber((data.strategyPoints as Record<string, unknown>)[key]))) return false;
+  if ((data.quoteStatus !== undefined && data.quoteStatus !== "available" && data.quoteStatus !== "unavailable")
+    || (data.quoteSourceAsOf !== undefined && data.quoteSourceAsOf !== null && !isValidIsoTimestamp(data.quoteSourceAsOf))
+    || !optionalNonNegativeInteger(data.chartDataRejectedCount)
+    || (data.chartDataPartial !== undefined && typeof data.chartDataPartial !== "boolean")
+    || (data.chartDataLastValidDate !== undefined && data.chartDataLastValidDate !== null && !isValidIsoDate(data.chartDataLastValidDate))) return false;
   if (!Array.isArray(data.news) || !data.news.every((item) => record(item)
     && ["title", "publisher", "publish_time", "link"].every((key) => text(item[key])) && optionalText(item.source))) return false;
-  if (!Array.isArray(data.chartData) || !data.chartData.every((item) => record(item) && text(item.date)
-    && finite(item.price) && finite(item.volume) && optionalText(item.date_iso) && optionalText(item.time)
-    && ["open", "high", "low", "close"].every((key) => optionalNumber(item[key])))) return false;
+  if (!Array.isArray(data.chartData) || !data.chartData.every((item) => record(item) && text(item.date) && normalizeFinanceChartPoint(item))) return false;
   let previousTime = "";
   for (const point of data.chartData) {
-    const time = point.time || point.date_iso;
-    if (!text(time) || !/^\d{4}-\d{2}-\d{2}$/.test(time)) return false;
+    const time = point.date_iso || point.time;
+    if (!isValidIsoDate(time)) return false;
     const timestamp = Date.parse(`${time}T00:00:00Z`);
     if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== time || time <= previousTime) return false;
     previousTime = time;
@@ -98,6 +136,19 @@ export const normalizeStoredDashboardData = (data: unknown): FinanceDashboardDat
     tradeSetup: { actionability: "PENDING_TRIGGER" as const, nextStep: "Legacy cache needs a fresh analysis before it can publish a trade plan.", optionsStatus: "PENDING" as const },
   }));
   return { ...(stored as FinanceDashboardData), quantStrategySchemaVersion: "v3", decision: normalizeDashboardDecision((stored as { decision?: unknown }).decision), quantStrategies, recommendedTrade: hasCurrentQuantSchema ? selectRecommendedQuantTrade(quantStrategies) : null, dashboardNarrative: stored.dashboardNarrative || getDashboardNarrativeStatus(stored.finalAnalysis) };
+};
+
+export const normalizeStoredDashboardSnapshot = (value: unknown): FinanceDashboardSnapshotPayload | null => {
+  if (!record(value)) return null;
+  const data = normalizeStoredDashboardData(value.data);
+  if (!data || !validTechnicalSnapshot(value.technicalData) || !validVixSnapshot(value.vixData)
+    || !validValuationSnapshot(value.valuationData)) return null;
+  return {
+    data,
+    vixData: value.vixData ?? null,
+    valuationData: value.valuationData ?? null,
+    technicalData: value.technicalData ?? null,
+  };
 };
 
 export const sanitizeDashboardHistory = (items: unknown): DashboardHistoryItem[] => !Array.isArray(items) ? [] : items

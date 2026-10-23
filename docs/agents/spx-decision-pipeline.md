@@ -77,6 +77,41 @@ the scheduler Durable Object, D1 ledger, or Telegram delivery.
 
 ## Local verification
 
+- Board request/navigation/playback state is owned by
+  `src/hooks/use-spx-gex-board.ts`; Board response validation lives in
+  `src/lib/spx-board-response.ts`. Presentation must not cast arbitrary JSON
+  directly into market models. EMPTY, transport, HTTP, non-JSON, malformed JSON,
+  and invalid response contracts remain distinct.
+- The overview compares canonical snapshot price with canonical levels. Its
+  session-pressure summary explicitly names both comparison times, independently
+  of the pinned GEX frame. Price charts disclose their own last-candle time and
+  remain independent of the replay minute. Only verified LIVE price context may
+  animate as live; a delayed canonical quote must not pulse.
+- Dated Yahoo chart reads exclude ET sessions after the requested date; dated
+  price-overlay reads include only that session. A rolling provider range that
+  does not cover the date produces an explicit empty result, never newer prices.
+- Technical response details and linked decision-run evidence are expandable;
+  unavailable/stale data and snapshot quality remain visible. Per-cell evidence
+  remains available through the exposure table.
+- The pressure component owns price-overlay refresh independently of Compass:
+  healthy current-session reads refresh every 60 seconds during NYSE hours,
+  including the early-close calendar. Recovery is limited to three reads per
+  failed sequence, even when an HTML/invalid response has no provider identity;
+  the overlay has its own explicit retry. Initial requests settle before timers
+  may refresh them. Historical and closed sessions require manual price retry.
+- A display-only expiry clock keeps Compass and pressure spot/EM source states,
+  overview context and live pulse in agreement after network polling stops.
+  It preserves the 10-minute stale ceiling and 5-second future-skew tolerance.
+- Yahoo intraday bars retain timestamps. Four-hour candles aggregate within each
+  ET NYSE session from 09:30, never across trading dates; session extension and
+  aggregation share the NYSE regular/early-close calendar.
+- Latest-GEX automatic failures/EMPTY reads stop after three attempts per ET
+  date; manual snapshot retry resets that budget. Full holidays do not poll;
+  canonical GEX retains its 15-minute collection window after regular or early
+  close. An automatic refresh never interrupts a pending snapshot request.
+
 - `npm run dev:spx-uat` uses the isolated `.wrangler/spx-uat` fixture.
+- `npm run test:spx-board:uat` verifies the compact overview, date/timeframe
+  cancellation, fault classification, bounded retry, and explicit recovery.
 - `npm run dev:spx-live` proxies only the production GEX GET route read-only.
 - Vite is strict port 5173; Pages is 8788.

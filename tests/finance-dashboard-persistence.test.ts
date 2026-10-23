@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeStoredDashboardData, sanitizeDashboardHistory } from "../src/lib/finance-dashboard-persistence";
+import { loadDashboardPersistence, normalizeStoredDashboardData, normalizeStoredDashboardSnapshot, sanitizeDashboardHistory } from "../src/lib/finance-dashboard-persistence";
+import { applyDashboardSnapshot, EMPTY_DASHBOARD_SNAPSHOT_STATE } from "../src/lib/finance-dashboard-state";
+import { buildFinanceDashboardSnapshot } from "../src/lib/finance-dashboard-snapshot";
+import { writeBrowserJson } from "../src/lib/browser-storage";
 
 test("Dashboard persistence removes legacy DeepEar payloads without deleting the history entry", () => {
   const history = sanitizeDashboardHistory([{ symbol: "SPY", timestamp: "10:00", score: 50, fullData: { financialSignals: { stale: true } } }]);
@@ -24,10 +27,95 @@ const validData = {
 
 test("Stored dashboard data rejects malformed render fields without manufacturing values", () => {
   assert.equal(normalizeStoredDashboardData(validData)?.price, 500);
-  for (const patch of [{ price: null }, { price: "500" }, { change: {} }, { news: [null] }, { chartData: [{}] }, { optionsFlow: { topStrikes: [null] } }, { sentimentData: { components: {} } }, { strategyPoints: { entry: "10" } }, { quantStrategies: "bad" }, { quantStrategies: [{}] }, { dashboardNarrative: { status: "unavailable", reason: {} } }]) {
+  for (const patch of [{ price: null }, { price: null, quoteStatus: "unavailable", change: "+1.00%" }, { price: "500" }, { change: {} }, { news: [null] }, { chartData: [{}] }, { optionsFlow: { topStrikes: [null] } }, { sentimentData: { components: {} } }, { strategyPoints: { entry: "10" } }, { quantStrategies: "bad" }, { quantStrategies: [{}] }, { dashboardNarrative: { status: "unavailable", reason: {} } }]) {
     assert.equal(normalizeStoredDashboardData({ ...validData, ...patch }), null, JSON.stringify(patch));
   }
   assert.equal(normalizeStoredDashboardData({}), null);
+});
+
+test("Cached snapshot validation preserves typed unavailable quotes and rejects legacy values", () => {
+  const unavailable = {
+    ...validData,
+    price: null,
+    change: "未提供",
+    quoteStatus: "unavailable" as const,
+    chartDataLastValidDate: "2026-10-20",
+    chartDataRejectedCount: 1,
+    chartDataPartial: true,
+  };
+  const snapshot = { data: unavailable, vixData: null, valuationData: null, technicalData: null };
+  const validPoint = { date: "2026-10-20", date_iso: "2026-10-20", price: 100, open: 99, high: 101, low: 98, volume: 1_000 };
+  assert.equal(normalizeStoredDashboardSnapshot(snapshot)?.data.price, null);
+  assert.equal(normalizeStoredDashboardSnapshot({ ...snapshot, data: { ...unavailable, price: 0 } }), null);
+  assert.equal(normalizeStoredDashboardSnapshot({ ...snapshot, data: { ...unavailable, chartData: [{ ...validPoint, price: "100" }] } }), null);
+  assert.equal(normalizeStoredDashboardSnapshot({ ...snapshot, vixData: { value: "18", change_pct: 1, history: [17, 18] } }), null);
+  assert.equal(normalizeStoredDashboardSnapshot({ ...snapshot, technicalData: { rsi_14: "50" } }), null);
+});
+
+test("snapshot validation rejects valuation values that cannot be rendered", () => {
+  const snapshot = { data: validData, vixData: null, technicalData: null, valuationData: null as unknown };
+  for (const field of ["pe_ratio", "peg_ratio", "eps", "analyst_target_price", "error", "symbol"]) {
+    for (const value of [{ bad: true }, ["bad"], true]) {
+      assert.equal(normalizeStoredDashboardSnapshot({ ...snapshot, valuationData: { [field]: value } }), null);
+    }
+  }
+  for (const pe of ["25.00", 25, null, undefined, "N/A"]) {
+    assert.ok(normalizeStoredDashboardSnapshot({ ...snapshot, valuationData: { pe_ratio: pe, eps: "None", analyst_target_price: null } }));
+  }
+  assert.ok(normalizeStoredDashboardSnapshot({ ...snapshot, valuationData: { error: "Provider unavailable", rateLimited: true } }));
+});
+
+test("mapped unavailable snapshots survive active and history persistence", () => {
+  const snapshot = buildFinanceDashboardSnapshot({
+    symbol: "AAPL",
+    agent: {
+      success: true,
+      steps: [
+        { type: "tool_call", tool_name: "get_realtime_quote", tool_result: JSON.stringify({ price: null, change_pct: null, quote_status: "unavailable", source_as_of: null }) },
+        { type: "tool_call", tool_name: "run_algorithmic_strategy", tool_result: JSON.stringify({
+          partial: true,
+          rejected_bar_count: 2,
+          last_valid_date: "2026-10-20",
+          chart_data: [{ date: "Oct 20", date_iso: "2026-10-20", price: 100, open: 99, high: 101, low: 98, volume: 1_000 }],
+        }) },
+      ],
+    },
+    news: {}, vix: null, fundamentals: null, technical: null, sentiment: null,
+  });
+  const state = applyDashboardSnapshot(
+    EMPTY_DASHBOARD_SNAPSHOT_STATE,
+    snapshot,
+    {} as Parameters<typeof applyDashboardSnapshot>[2],
+    "AAPL",
+    "10:00",
+  );
+  const previousWindow = globalThis.window;
+  const values = new Map<string, string>();
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { localStorage: {
+      getItem: (key: string) => values.get(key) || null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+    } },
+  });
+  try {
+    assert.equal(writeBrowserJson("finance_dashboard_active_data", state.activeData), null);
+    assert.equal(writeBrowserJson("finance_dashboard_history", state.history), null);
+    const restored = loadDashboardPersistence();
+    assert.equal(restored.activeData?.price, null);
+    assert.equal(restored.activeData?.quoteStatus, "unavailable");
+    assert.equal(restored.activeData?.change, "未提供");
+    assert.equal(restored.activeData?.chartDataLastValidDate, "2026-10-20");
+    assert.equal(restored.activeData?.chartDataRejectedCount, 2);
+    assert.equal(restored.activeData?.chartDataPartial, true);
+    assert.equal(restored.history[0].fullData?.price, null);
+    assert.equal(restored.history[0].fullData?.chartDataLastValidDate, "2026-10-20");
+    assert.equal(restored.warnings.active, null);
+    assert.equal(restored.warnings.history, null);
+  } finally {
+    if (previousWindow === undefined) Reflect.deleteProperty(globalThis, "window");
+    else Object.defineProperty(globalThis, "window", { configurable: true, value: previousWindow });
+  }
 });
 
 test("History keeps valid metadata but never restores malformed or mismatched results", () => {
@@ -44,7 +132,7 @@ test("An available narrative cannot smuggle an object reason into unavailable re
 });
 
 test("Restored charts require real, unique and ascending effective chart dates", () => {
-  const point = (date_iso: string) => ({ date: date_iso, date_iso, price: 500, volume: 100 });
+  const point = (date_iso: string) => ({ date: date_iso, date_iso, price: 500, open: 495, high: 505, low: 490, volume: 100 });
   for (const chartData of [[point("invalid")], [point("2026-02-30")], [point("2026-10-19"), point("2026-10-19")],
     [point("2026-10-20"), point("2026-10-19")], [{ ...point("2026-10-19"), time: "invalid" }]]) {
     assert.equal(normalizeStoredDashboardData({ ...validData, chartData }), null);

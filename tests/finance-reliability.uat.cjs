@@ -147,7 +147,8 @@ const result = (symbol) => ({ symbol, price: 500, change: "+1.00%", algoRating: 
     assert.equal(automaticRequests, 0);
     assert.equal(await cached.$("[aria-label='Browser storage warning']"), null, "A valid cached result must survive reload without a warning");
     await cached.close();
-    console.log("Finance reliability UAT passed: history, request ticker, blocked/quota/corrupt storage, and successful chat despite persistence failure.");
+    await require("./helpers/finance-workspace-uat.cjs")(browser, baseUrl, path.join(rootDir, "uat_screenshots", "finance-workspace", "after"));
+    console.log("Finance reliability UAT passed: storage, history, chat, responsive research workflow, tabs, request ordering, partial/stale/error recovery.");
   } finally {
     if (browser) await browser.close();
     await stopProcessTree(server);
