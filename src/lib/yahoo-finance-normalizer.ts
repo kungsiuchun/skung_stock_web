@@ -120,7 +120,7 @@ export const normalizeYahooChartResult = (payload: unknown): YahooChartNormaliza
   return {
     bars,
     rejectedBarCount,
-    lastValidDate: bars.at(-1)?.date || null,
+    lastValidDate: bars[bars.length - 1]?.date || null,
     malformedPayload: false,
   };
 };
@@ -218,5 +218,5 @@ export const normalizeFinanceChartData = (value: unknown) => {
     previousDate = normalized.date_iso;
     bars.push(normalized);
   }
-  return { bars, rejectedBarCount, lastValidDate: bars.at(-1)?.date_iso || null };
+  return { bars, rejectedBarCount, lastValidDate: bars[bars.length - 1]?.date_iso || null };
 };

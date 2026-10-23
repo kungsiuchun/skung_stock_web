@@ -147,6 +147,7 @@ export const buildFinanceDashboardSnapshot = (input: {
   let chartDataLastValidDate: string | null = null;
   let chartDataPartial = false;
   let optionsFlow: FinanceDashboardData["optionsFlow"] = undefined;
+  let optionsUnderlyingPrice: number | null = null;
 
   for (const step of input.agent.steps || []) {
     if (step.type !== "tool_call") continue;
@@ -209,6 +210,8 @@ export const buildFinanceDashboardSnapshot = (input: {
         strikeMap.set(strike, existing);
       }
       const underlyingPrice = finiteNumber(result.underlying_price);
+      optionsUnderlyingPrice = isStrictFiniteNumber(result.underlying_price) && result.underlying_price > 0
+        ? result.underlying_price : null;
       const topStrikes = [...strikeMap.entries()]
         .map(([strike, data]) => ({ strike, ...data }))
         .filter((row) => row.callOI + row.putOI > 0)
@@ -236,10 +239,8 @@ export const buildFinanceDashboardSnapshot = (input: {
     }
   }
 
-  if (optionsFlow && optionsFlow.topStrikes.length > 0) {
-    const optionsPrice = price > 0
-      ? price
-      : optionsFlow.topStrikes.reduce((total, row) => total + row.strike, 0) / optionsFlow.topStrikes.length;
+  const optionsPrice = price ?? optionsUnderlyingPrice;
+  if (optionsFlow && optionsFlow.topStrikes.length > 0 && optionsPrice !== null) {
     const putWall = nearestDominantWall(optionsFlow.topStrikes, optionsPrice, "put");
     const callWall = nearestDominantWall(optionsFlow.topStrikes, optionsPrice, "call");
     optionsFlow = {

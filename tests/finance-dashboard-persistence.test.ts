@@ -52,6 +52,19 @@ test("Cached snapshot validation preserves typed unavailable quotes and rejects 
   assert.equal(normalizeStoredDashboardSnapshot({ ...snapshot, technicalData: { rsi_14: "50" } }), null);
 });
 
+test("snapshot validation rejects valuation values that cannot be rendered", () => {
+  const snapshot = { data: validData, vixData: null, technicalData: null, valuationData: null as unknown };
+  for (const field of ["pe_ratio", "peg_ratio", "eps", "analyst_target_price", "error", "symbol"]) {
+    for (const value of [{ bad: true }, ["bad"], true]) {
+      assert.equal(normalizeStoredDashboardSnapshot({ ...snapshot, valuationData: { [field]: value } }), null);
+    }
+  }
+  for (const pe of ["25.00", 25, null, undefined, "N/A"]) {
+    assert.ok(normalizeStoredDashboardSnapshot({ ...snapshot, valuationData: { pe_ratio: pe, eps: "None", analyst_target_price: null } }));
+  }
+  assert.ok(normalizeStoredDashboardSnapshot({ ...snapshot, valuationData: { error: "Provider unavailable", rateLimited: true } }));
+});
+
 test("mapped unavailable snapshots survive active and history persistence", () => {
   const snapshot = buildFinanceDashboardSnapshot({
     symbol: "AAPL",

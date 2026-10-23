@@ -5,7 +5,7 @@ import { ALL_ANALYSIS_TOOLS } from "../functions/api/agent/tools/analysis-tools"
 import { ALL_STOCK_TOOLS } from "../functions/api/agent/tools/stock-tools";
 import { ToolRegistry } from "../functions/api/agent/registry";
 import { buildFinanceDashboardSnapshot } from "../src/lib/finance-dashboard-snapshot";
-import { normalizeStoredDashboardData } from "../src/lib/finance-dashboard-persistence";
+import { normalizeStoredDashboardData, normalizeStoredDashboardSnapshot } from "../src/lib/finance-dashboard-persistence";
 import { deriveTraderRiskSnapshot } from "../src/lib/trader-risk-snapshot";
 import { filterYahooFormingDailyBars, normalizeFinanceChartData, normalizeYahooChartResult } from "../src/lib/yahoo-finance-normalizer";
 import { onRequest as getTechnicalRadar } from "../functions/api/technical-radar";
@@ -168,6 +168,22 @@ test("public technical and VIX endpoints preserve valid controls", async () => {
   assert.equal(vixResponse.status, 200);
   assert.equal(vix.partial, false);
   assert.equal(typeof vix.value, "number");
+});
+
+test("a flat but valid price history keeps the dashboard available with an explicit technical error", async () => {
+  const rows = Array.from({ length: 35 }, (_, index) => ({ ...rowFor(index), open: 100, high: 101, low: 99, close: 100 }));
+  setYahooPayload(yahooPayload(rows, 100));
+  const response = await getTechnicalRadar({ request: new Request("https://example.test/api/technical-radar?symbol=AAPL") });
+  const technical = await response.json() as { error: string; last_valid_date: string };
+  assert.equal(response.status, 502);
+  assert.match(technical.error, /價格區間/);
+  assert.equal(technical.last_valid_date, dateFor(34));
+  const snapshot = buildFinanceDashboardSnapshot({
+    symbol: "AAPL", agent: { success: true, steps: [{ type: "tool_call", tool_name: "get_realtime_quote", tool_result: JSON.stringify({ price: 100, change_pct: 0 }) }] },
+    news: {}, vix: null, fundamentals: null, technical, sentiment: null,
+  });
+  assert.equal(normalizeStoredDashboardSnapshot(snapshot)?.data.price, 100);
+  assert.equal((normalizeStoredDashboardSnapshot(snapshot)?.technicalData as typeof technical).error, technical.error);
 });
 
 test("public quote tool uses regularMarketTime instead of a daily interval timestamp", async () => {

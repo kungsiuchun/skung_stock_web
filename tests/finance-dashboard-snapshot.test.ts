@@ -133,3 +133,25 @@ test("finance dashboard snapshot refuses to substitute option volume for missing
   assert.match(snapshot.data.optionsFlow?.error || "", /Yahoo/);
   assert.deepEqual(snapshot.data.optionsFlow?.topStrikes, []);
 });
+
+test("unavailable quotes never use an invented reference price for option walls", () => {
+  for (const underlying of [null, "200", 200]) {
+    const snapshot = buildFinanceDashboardSnapshot({
+      symbol: "AAPL",
+      agent: { success: true, steps: [
+        { type: "tool_call", tool_name: "get_realtime_quote", tool_result: JSON.stringify({ price: null, quote_status: "unavailable" }) },
+        { type: "tool_call", tool_name: "get_options_chain", tool_result: JSON.stringify({
+          underlying_price: underlying,
+          calls: [{ strike: 205, open_interest: 100 }],
+          puts: [{ strike: 195, open_interest: 100 }],
+        }) },
+      ] },
+      news: {}, vix: null, fundamentals: null, technical: null, sentiment: null,
+    });
+    assert.equal(snapshot.data.price, null);
+    assert.equal(snapshot.data.quoteStatus, "unavailable");
+    assert.equal(snapshot.data.optionsFlow?.putWall, underlying === 200 ? 195 : undefined);
+    assert.equal(snapshot.data.optionsFlow?.callWall, underlying === 200 ? 205 : undefined);
+    assert.equal(snapshot.data.optionsFlow?.totalCallOI, 100);
+  }
+});

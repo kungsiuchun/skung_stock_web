@@ -1,5 +1,6 @@
 import type { SpxGexHeatmapModel } from "./spx-gex-heatmap";
 import { isFreshSpx0DteSample } from "./spx-price-action-compass";
+import { getNyseSessionCloseMinuteEt } from "./nyse-calendar";
 
 const OPEN_MINUTE_ET = 9 * 60 + 30;
 const CLOSE_MINUTE_ET = 16 * 60;
@@ -279,10 +280,12 @@ export const extendSpxGexPressureForSession = (
   pressure: SpxGexPressureMatrixModel,
   clock: { tradingDate: string; minuteEt: number },
 ): SpxGexPressureMatrixModel => {
+  const closeMinuteEt = getNyseSessionCloseMinuteEt(pressure.tradingDate);
+  if (closeMinuteEt === null) return pressure;
   const existingSlots = new Map(pressure.timeline.map((slot) => [slot.snapshotMinuteEt, slot]));
   const isCurrentDate = pressure.tradingDate === clock.tradingDate;
   const timeline: SpxGexPressureTimelineSlot[] = [];
-  for (let minute = OPEN_MINUTE_ET; minute <= CLOSE_MINUTE_ET; minute += SLOT_MINUTES) {
+  for (let minute = OPEN_MINUTE_ET; minute <= closeMinuteEt; minute += SLOT_MINUTES) {
     const existing = existingSlots.get(minute);
     if (existing) {
       timeline.push(existing);

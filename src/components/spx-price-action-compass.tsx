@@ -31,6 +31,8 @@ import {
 import { buildSpxFailureDetails, formatSpxFailureDetails, parseSpxBoardResponse, spxFailureMessage, type SpxFailureDetails } from "@/lib/spx-board-response";
 import { SafeJsonResponseError } from "@/lib/safe-json-response";
 import { isSpxRequestAbort, runSpxRequest } from "@/lib/spx-request-lane";
+import { projectSpxDisplaySource } from "@/lib/spx-display-freshness";
+import { useSpxDisplayClock } from "@/hooks/use-spx-display-clock";
 type SignalDirectionFilter = "all" | SpxPriceActionPattern["direction"];
 
 interface SignalFilterState {
@@ -144,7 +146,9 @@ export function SpxPriceActionCompass({
   onInitialLoadSettled?: (result: "READY" | "FAILED") => void;
 }) {
   const [timeframe, setTimeframe] = useState<SpxPriceActionTimeframe>("5m");
-  const [data, setData] = useState<SpxPriceActionCompassResponse>(emptyCompass);
+  const [loadedData, setData] = useState<SpxPriceActionCompassResponse>(emptyCompass);
+  const displayNowMs = useSpxDisplayClock(loadedData.source);
+  const data = useMemo(() => ({ ...loadedData, source: projectSpxDisplaySource(loadedData.source, displayNowMs) }), [loadedData, displayNowMs]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [failureDetails, setFailureDetails] = useState<SpxFailureDetails | null>(null);
@@ -334,6 +338,7 @@ export function SpxPriceActionCompass({
       data-pa-zone-count={data.zones.length}
       data-pa-pattern-count={data.patterns.length}
       data-pa-filtered-pattern-count={filteredPatterns.length}
+      data-pa-source-status={data.source.status}
     >
       <div className="flex flex-col gap-2">
         <div className="flex flex-col gap-2 border-b border-cyan-300/15 pb-2 xl:flex-row xl:items-end xl:justify-between">
@@ -381,6 +386,7 @@ export function SpxPriceActionCompass({
         </div>
 
         {reconnecting && <Notice tone="amber" text="Reconnecting SPX source…" />}
+        {data.source.status === "STALE" && <div role="status"><Notice tone="amber" text="STALE price context · Last verified candles remain visible. Current SPX is not live." />{!error && <button className="min-h-10 px-3 text-xs text-cyan-200 underline" onClick={() => setRetryKey(k => k + 1)}>Retry price chart</button>}</div>}
         {error && <div role="alert"><Notice tone="red" text={`${spxFailureMessage(failureDetails?.httpStatus ?? null)}${data.candles.length ? ` Last verified candle: ${formatEtTime(data.candles[data.candles.length - 1].time, true)}.` : " Price chart unavailable."}`} /><button className="min-h-10 px-3 text-xs text-cyan-200 underline" onClick={() => setRetryKey(k => k + 1)}>Retry price chart</button><details className="p-2 text-xs text-zinc-400"><summary className="cursor-pointer">Price diagnostics</summary><p className="break-all">{formatSpxFailureDetails(failureDetails)}</p></details></div>}
         {data.warnings.length > 0 && <Notice tone="amber" text={data.warnings.join(" ")} />}
 

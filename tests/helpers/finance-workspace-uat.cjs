@@ -16,7 +16,9 @@ module.exports = async function verifyWorkspace(browser, baseUrl, screenshots) {
       const payload = snapshot(symbol === 'WRONG' ? 'OTHER' : symbol);
       if (symbol === 'STALE') { payload.cache.status = 'stale'; payload.cache.ageSeconds = 180; payload.cache.refreshError = 'UAT source timeout'; }
       if (symbol === 'PARTIAL') { payload.data.technicalData = { error: 'UAT technical unavailable' }; payload.data.valuationData = { error: 'UAT valuation unavailable' }; }
+      if (symbol === 'UNAVAILABLE') Object.assign(payload.data.data, {price:null, change:'未提供', quoteStatus:'unavailable'});
       if (symbol === 'BADBAR') payload.data.data.chartData[payload.data.data.chartData.length-1].price = 0;
+      if (symbol === 'BADVALUE') payload.data.valuationData = {pe_ratio:{bad:true}};
       setTimeout(() => { void request.respond({ status: symbol === 'FAIL' ? 503 : symbol === 'PARTIAL' ? 206 : 200, contentType: 'application/json',
         body: JSON.stringify(symbol === 'FAIL' ? { error: 'UAT controlled failure' } : payload) }).catch(error => { if (!/invalid|closed|interception|Target/i.test(error.message)) errors.push(error.message); }); }, symbol === 'MSFT' ? 400 : 20);
     } else if (url.pathname === '/api/candlestick-patterns') {
@@ -115,10 +117,14 @@ module.exports = async function verifyWorkspace(browser, baseUrl, screenshots) {
   assert.match(await page.$eval('#research-panel-technical',node=>node.textContent),/UAT technical unavailable/);
   await page.click('#research-tab-fundamentals');
   assert.match(await page.$eval('#research-panel-fundamentals',node=>node.textContent),/UAT valuation unavailable/);
-  await search('BADBAR'); await selected('BADBAR');
-  assert.match(await page.$eval('[aria-label="研究快覽"]',node=>node.textContent),/風險指標已停止計算/);
-  assert.match(await page.$eval('[aria-label="BADBAR 價格與成交量"]',node=>node.textContent),/1 筆日線價量資料無效/);
-  assert.doesNotMatch(await page.$eval('[aria-label="研究快覽"]',node=>node.textContent),/\$0|-[0-9]+%/);
+  await search('UNAVAILABLE'); await selected('UNAVAILABLE');
+  assert.equal(await page.$eval('[aria-label="標的摘要"] .font-mono.text-2xl',node=>node.textContent),'報價未提供');
+  assert.match(await page.$eval('[aria-label="標的摘要"]',node=>node.textContent),/變動未提供/);
+  for (const symbol of ['BADBAR','BADVALUE']) {
+    await search(symbol); await page.waitForFunction(()=>document.body.textContent.includes('回傳快照資料無效'));
+    assert.equal(await page.$('[aria-label="標的摘要"]'),null,'Invalid snapshots must not reach rendered state');
+    assert.doesNotMatch(await page.$eval('[data-finance-workspace]',node=>node.textContent),/\$0\.00/);
+  }
   await search('WRONG'); await page.waitForFunction(()=>document.body.textContent.includes('回傳標的與查詢不符'));
   assert.equal(await page.$('[aria-label="標的摘要"]'),null,'Mismatched ticker must not render');
   await search('FAIL'); await page.waitForFunction(()=>document.body.textContent.includes('UAT controlled failure'));
@@ -126,6 +132,6 @@ module.exports = async function verifyWorkspace(browser, baseUrl, screenshots) {
   await page.click('a[aria-label="Back to Market Lab"]');
   await page.waitForFunction(()=>location.hash==='#/market-lab');
   assert.deepEqual(errors,[],'No uncaught page errors');
-  fs.writeFileSync(path.join(screenshots,'evidence.json'),JSON.stringify({fixture:true,viewports:[390,768,1159,1440],requests,uncaughtErrors:errors,verified:['success','tabs-no-analysis','chart-retained','keyboard-focus','news-provenance','deferred-feed','chart-interval','chat-return','request-race','pending-deduplication','history','refresh','stale','partial','invalid-bar-visible-no-risk-metrics','mismatch','failure-retry','gallery-return']},null,2));
+  fs.writeFileSync(path.join(screenshots,'evidence.json'),JSON.stringify({fixture:true,viewports:[390,768,1159,1440],requests,uncaughtErrors:errors,verified:['success','tabs-no-analysis','chart-retained','keyboard-focus','news-provenance','deferred-feed','chart-interval','chat-return','request-race','pending-deduplication','history','refresh','stale','partial','typed-unavailable','invalid-snapshot-rejected','valuation-boundary','mismatch','failure-retry','gallery-return']},null,2));
   await page.close();
 };

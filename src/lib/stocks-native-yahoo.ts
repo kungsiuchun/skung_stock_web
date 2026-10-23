@@ -317,7 +317,7 @@ const fetchHistory = async (symbol: string, range = "1y", interval = "1d"): Prom
 
   return timestamps
     .map((timestamp, index) => ({
-      date: interval.includes("m") ? new Date(timestamp * 1000).toISOString() : dateFromSeconds(timestamp),
+      date: interval.includes("m") || interval.endsWith("h") ? new Date(timestamp * 1000).toISOString() : dateFromSeconds(timestamp),
       open: round(toNumber(opens[index])),
       high: round(toNumber(highs[index])),
       low: round(toNumber(lows[index])),

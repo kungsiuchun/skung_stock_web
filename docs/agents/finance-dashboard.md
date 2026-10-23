@@ -38,6 +38,8 @@ Read this file only for Finance Analyzer UI, its Pages Functions, or related UAT
   rejection-count log. A missing latest quote remains unavailable rather than
   becoming a zero price or zero change; snapshots expose partial state and the
   actual last valid date.
+- Option walls use a validated quote or the options chain's numeric underlying
+  price; missing prices never use an average strike as a market-price substitute.
 - Browser persistence is optional: blocked/full/corrupt storage produces a visible warning, not a route failure or a synthetic API error. Initial hydration must never write empty history over saved data. Invalid saved payloads are not silently deleted.
 - Only validated history metadata and render-safe saved results may be restored. History analysis passes its selected ticker explicitly; restored results clear valuation, technical, VIX and cache metadata that were not saved with that history entry.
 - Never use `height="100%"` for Recharts in a flex container; use an explicit

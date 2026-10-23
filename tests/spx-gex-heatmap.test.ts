@@ -2499,6 +2499,49 @@ describe("SPX 0DTE pressure matrix", () => {
     assert.equal(live.timeline.at(-1)?.snapshotTimeEt, "16:00");
   });
 
+  it("extends early-close pressure only through the actual 13:00 session end", () => {
+    const frame = toSpxGexPressureFrame(buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, baselineValues));
+    for (const tradingDate of ["2026-11-27", "2026-12-24"]) {
+      const pressure = buildSpxGexPressureMatrixFromFrames([{ ...frame, tradingDate, expiry: tradingDate }]);
+      for (const clock of [
+        { tradingDate, minuteEt: 13 * 60 + 7 },
+        { tradingDate, minuteEt: 13 * 60 + 15 },
+        { tradingDate: "2026-12-28", minuteEt: 10 * 60 },
+      ]) {
+        const extended = extendSpxGexPressureForSession(pressure, clock);
+        assert.equal(extended.timeline.length, 15);
+        assert.equal(extended.timeline.at(-1)?.snapshotTimeEt, "13:00");
+        assert.equal(extended.timeline.at(-1)?.status, clock.tradingDate === tradingDate && clock.minuteEt < 13 * 60 + 15 ? "PENDING" : "MISSING");
+        assert.deepEqual(extended.timeline[0], pressure.timeline[0], "verified opening slot is retained");
+        for (const row of extended.rows) {
+          assert.deepEqual(row.cells.map(cell => cell.snapshotMinuteEt), extended.timeline.map(slot => slot.snapshotMinuteEt));
+          assert.ok(row.cells.every(cell => cell.snapshotMinuteEt <= 13 * 60));
+        }
+      }
+      assert.equal(pressure.timeline.length, 1, "extension does not mutate canonical input");
+    }
+  });
+
+  it("retains a normal 16:00 close even when today's calendar is an early close", () => {
+    const frame = toSpxGexPressureFrame(buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, baselineValues));
+    for (const tradingDate of ["2026-05-27", "2026-07-02"]) {
+      const pressure = buildSpxGexPressureMatrixFromFrames([{ ...frame, tradingDate, expiry: tradingDate }]);
+      const extended = extendSpxGexPressureForSession(pressure, { tradingDate: "2026-11-27", minuteEt: 13 * 60 + 15 });
+      assert.equal(extended.timeline.length, 27);
+      assert.equal(extended.timeline.at(-1)?.snapshotTimeEt, "16:00");
+      assert.equal(extended.timeline.at(-1)?.status, "MISSING");
+      assert.ok(extended.rows.every(row => row.cells.length === 27));
+    }
+  });
+
+  it("does not invent pressure session slots for holidays, weekends or invalid dates", () => {
+    const frame = toSpxGexPressureFrame(buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, baselineValues));
+    for (const tradingDate of ["2026-11-26", "2026-11-28", "2026-02-30"]) {
+      const pressure = buildSpxGexPressureMatrixFromFrames([{ ...frame, tradingDate, expiry: tradingDate }]);
+      assert.equal(extendSpxGexPressureForSession(pressure, { tradingDate, minuteEt: 12 * 60 }), pressure);
+    }
+  });
+
   it("resets pressure baseline at the latest compatible calculation engine segment", () => {
     const legacy = buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, baselineValues);
     const currentA = buildPressureSnapshot("2026-05-27T14:00:00.000Z", 6002, currentValues);

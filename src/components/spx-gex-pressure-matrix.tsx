@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { Activity, AlertTriangle, TrendingUp } from "lucide-react";
 import { formatSpxGexCompactExposure } from "@/lib/spx-gex-heatmap";
 import { isFreshSpx0DteSample, shouldRefreshSpxCurrentSession } from "@/lib/spx-price-action-compass";
+import { projectSpxDisplaySource } from "@/lib/spx-display-freshness";
+import { useSpxDisplayClock } from "@/hooks/use-spx-display-clock";
 import { buildSpxFailureDetails, formatSpxFailureDetails, parseSpxBoardResponse, spxFailureMessage, type SpxFailureDetails } from "@/lib/spx-board-response";
 import { SafeJsonResponseError } from "@/lib/safe-json-response";
 import type { PressureOverview } from "./spx-board-overview";
@@ -276,7 +278,6 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
   const [activeCell, setActiveCell] = useState<ActiveCell | null>(null);
   const [strikePanSteps, setStrikePanSteps] = useState(0);
   const [matrixRailWidth, setMatrixRailWidth] = useState(0);
-  const [overlayNowMs, setOverlayNowMs] = useState(() => Date.now());
   const [overlayRefreshKey, setOverlayRefreshKey] = useState(0);
   const [overlayLoading, setOverlayLoading] = useState(false);
   const matrixScrollRef = useRef<HTMLDivElement>(null);
@@ -345,7 +346,6 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
       if (needsRecovery && fromVisibility && Date.now() < dueAt) return;
       triggered = true;
       if (needsRecovery) overlayAutoRefreshRef.current.attempts += 1;
-      setOverlayNowMs(Date.now());
       setOverlayRefreshKey((current) => current + 1);
     };
     const timer = window.setTimeout(() => triggerRevalidation(), delayMs);
@@ -509,10 +509,6 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
         if (canCommit()) {
           overlayLoadingRef.current = false;
           setOverlayLoading(false);
-          // Re-evaluate freshness against the clock that completed this read.
-          // Without this, an ET date rollover can leave the overlay comparing a
-          // new-session sample against yesterday's memoized clock.
-          setOverlayNowMs(Date.now());
           setReconnecting(false);
         }
       }
@@ -533,32 +529,13 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
     ? getLatestSpxGexSpotPoint(priceOverlay.data.candles, pressure.tradingDate)
     : null, [pressure, priceOverlay?.data]);
   const sessionPressure = useMemo(() => pressure ? extendSpxGexPressureForSession(pressure, etClock()) : null, [pressure, pressureRefreshKey]);
+  const overlayNowMs = useSpxDisplayClock(priceOverlay?.data?.source);
   const overlayClock = useMemo(() => etClock(new Date(overlayNowMs)), [overlayNowMs]);
   const effectivePriceSource = useMemo(() => priceOverlay?.data?.source
     ? (() => {
       const source = priceOverlay.data.source;
       const effectiveSessionState = priceOverlay.failureSessionState || source.sessionState;
-      const isLiveZeroDteSource = source.provider === "0dtespx" && effectiveSessionState === "LIVE";
-      const sourceFreshnessExpired = isLiveZeroDteSource
-        && source.status === "READY"
-        && !isFreshSpx0DteSample(source.latestSampleAt, overlayNowMs);
-      const expectedMoveFreshnessExpired = isLiveZeroDteSource
-        && source.expectedMove?.status === "READY"
-        && !isFreshSpx0DteSample(source.expectedMove.sampleAt, overlayNowMs);
-      const retainLastVerified = Boolean(priceOverlay.error && source.provider === "0dtespx");
-      const expectedMove = source.expectedMove;
-      return {
-        ...source,
-        status: retainLastVerified || sourceFreshnessExpired ? "STALE" as const : source.status,
-        sessionState: effectiveSessionState,
-        expectedMove: (retainLastVerified || expectedMoveFreshnessExpired) && expectedMove
-          ? {
-            ...expectedMove,
-            status: "STALE" as const,
-            errorCode: expectedMove.errorCode || "ZERO_DTE_SPX_EXPECTED_MOVE_STALE" as const,
-          }
-          : expectedMove,
-      };
+      return projectSpxDisplaySource({ ...source, sessionState: effectiveSessionState }, overlayNowMs, Boolean(priceOverlay.error));
     })()
     : undefined, [overlayNowMs, priceOverlay?.data?.source, priceOverlay?.error, priceOverlay?.failureSessionState]);
   const expectedMoveOverlay = useMemo(() => resolveSpxGexExpectedMoveOverlay({

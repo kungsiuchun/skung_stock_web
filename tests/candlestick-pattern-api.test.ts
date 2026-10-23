@@ -42,6 +42,21 @@ class MemoryD1 implements D1DatabaseLike {
         return statement;
       },
       first: async <T>() => {
+        if (query.includes("RETURNING payload_json") && query.includes("'market-cache-quota'")) {
+          const [cacheKey, initialPayload, cachedAt, expiresAt, , dayUtc, readReserve, readLimit, writeReserve, writeLimit] = values;
+          const existing = this.rows.get(String(cacheKey));
+          const usage = JSON.parse(existing?.payload_json || String(initialPayload));
+          if (existing) {
+            if (usage.dayUtc !== dayUtc || !Number.isInteger(usage.rowsRead) || !Number.isInteger(usage.rowsWritten)
+              || usage.rowsRead < 0 || usage.rowsWritten < 0 || usage.rowsRead >= Number(readLimit) || usage.rowsWritten >= Number(writeLimit)) return null;
+            usage.rowsRead = Math.min(usage.rowsRead + Number(readReserve), Number(readLimit));
+            usage.rowsWritten = Math.min(usage.rowsWritten + Number(writeReserve), Number(writeLimit));
+          }
+          const row: CacheRow = { cache_key: String(cacheKey), payload_json: JSON.stringify(usage), source_as_of: null,
+            cached_at: String(cachedAt), expires_at: String(expiresAt), last_refresh_error: null };
+          this.rows.set(row.cache_key, row);
+          return { payload_json: row.payload_json } as T;
+        }
         if (!query.includes("SELECT")) return null;
         return (this.rows.get(String(values[0])) || null) as T | null;
       },

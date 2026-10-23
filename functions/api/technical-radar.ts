@@ -75,6 +75,9 @@ export async function onRequest(context: any) {
 
     const high60 = Math.max(...closes);
     const low60 = Math.min(...closes);
+    if (high60 === low60) {
+      return json({ error: "價格區間為零，無法計算技術位置；技術摘要暫不可用。", ...quality }, 502);
+    }
     const posPercent = (((currentPrice - low60) / (high60 - low60)) * 100);
 
     return json({

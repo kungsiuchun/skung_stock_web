@@ -6,7 +6,7 @@ const chartData = Array.from({ length: 45 }, (_, index) => {
 });
 const result = (symbol) => ({
   symbol, price: 212.84, change: '+1.24%', algoRating: 67, marketSentiment: null,
-  quantStrategySchemaVersion: 'v3', strategyPoints: {}, chartData, quantStrategies: [], recommendedTrade: null,
+  quantStrategySchemaVersion: 'v3', strategyPoints: {}, chartData: chartData.map(bar => ({...bar})), quantStrategies: [], recommendedTrade: null,
   decision: { status: 'unavailable', reason: 'UAT fixture: no AI trading decision.' },
   dashboardNarrative: { status: 'unavailable', reason: 'UAT fixture: no generated narrative.' },
   news: [

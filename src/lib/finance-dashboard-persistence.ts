@@ -45,6 +45,13 @@ const validVixSnapshot = (value: unknown) => {
   return finite(value.value) && value.value > 0 && finite(value.change_pct)
     && Array.isArray(value.history) && value.history.length >= 2 && value.history.every((item) => finite(item) && item > 0);
 };
+const validValuationSnapshot = (value: unknown) => {
+  if (value === undefined || value === null) return true;
+  return record(value) && optionalText(value.symbol) && optionalText(value.error)
+    && (value.rateLimited === undefined || typeof value.rateLimited === "boolean")
+    && ["pe_ratio", "peg_ratio", "eps", "analyst_target_price"]
+      .every((key) => value[key] === undefined || value[key] === null || text(value[key]) || finite(value[key]));
+};
 const validStoredStrategy = (item: unknown) => {
   if (!record(item) || !finite(item.score) || !["entry", "stopLoss", "target"].every((key) => optionalNumber(item[key]))) return false;
   const setup = item.tradeSetup || item.trade_setup;
@@ -134,7 +141,8 @@ export const normalizeStoredDashboardData = (data: unknown): FinanceDashboardDat
 export const normalizeStoredDashboardSnapshot = (value: unknown): FinanceDashboardSnapshotPayload | null => {
   if (!record(value)) return null;
   const data = normalizeStoredDashboardData(value.data);
-  if (!data || !validTechnicalSnapshot(value.technicalData) || !validVixSnapshot(value.vixData)) return null;
+  if (!data || !validTechnicalSnapshot(value.technicalData) || !validVixSnapshot(value.vixData)
+    || !validValuationSnapshot(value.valuationData)) return null;
   return {
     data,
     vixData: value.vixData ?? null,

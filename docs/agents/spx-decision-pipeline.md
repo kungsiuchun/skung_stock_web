@@ -99,6 +99,12 @@ the scheduler Durable Object, D1 ledger, or Telegram delivery.
   failed sequence, even when an HTML/invalid response has no provider identity;
   the overlay has its own explicit retry. Initial requests settle before timers
   may refresh them. Historical and closed sessions require manual price retry.
+- A display-only expiry clock keeps Compass and pressure spot/EM source states,
+  overview context and live pulse in agreement after network polling stops.
+  It preserves the 10-minute stale ceiling and 5-second future-skew tolerance.
+- Yahoo intraday bars retain timestamps. Four-hour candles aggregate within each
+  ET NYSE session from 09:30, never across trading dates; session extension and
+  aggregation share the NYSE regular/early-close calendar.
 - Latest-GEX automatic failures/EMPTY reads stop after three attempts per ET
   date; manual snapshot retry resets that budget. Full holidays do not poll;
   canonical GEX retains its 15-minute collection window after regular or early
