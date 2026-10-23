@@ -35,13 +35,23 @@ async function handleAnalyzeTrend(args: Record<string, any>): Promise<Record<str
 
   const normalized = normalizeYahooChartResult(data);
   reportYahooChartValidation(symbol, normalized);
-  if (normalized.malformedPayload) return { error: `Yahoo returned malformed chart data for ${symbol}` };
+  if (normalized.malformedPayload) return {
+    error: `Yahoo returned malformed chart data for ${symbol}`,
+    partial: true,
+    rejected_bar_count: normalized.rejectedBarCount,
+    last_valid_date: normalized.lastValidDate,
+  };
   const completed = filterYahooFormingDailyBars(data, normalized.bars);
   const bars = completed.bars;
   const closes = bars.map((bar) => bar.close);
   const volumes = bars.map((bar) => bar.volume);
 
-  if (closes.length < 30) return { error: "Insufficient data for trend analysis (need at least 30 days)" };
+  if (closes.length < 30) return {
+    error: "Insufficient data for trend analysis (need at least 30 days)",
+    partial: normalized.rejectedBarCount > 0 || completed.partialBarExcluded,
+    rejected_bar_count: normalized.rejectedBarCount,
+    last_valid_date: bars.at(-1)?.date || null,
+  };
 
   // --- 1.5 Volume Analysis (Current vs 30d Avg) ---
   const currentVolume = volumes[volumes.length - 1];
@@ -156,13 +166,20 @@ async function handleRunAlgorithmicStrategy(args: Record<string, any>): Promise<
   const toCompletedBars = (payload: any, ticker: string) => {
     const normalized = normalizeYahooChartResult(payload);
     reportYahooChartValidation(ticker, normalized);
-    if (normalized.malformedPayload) return { bars: [] as StrategyBar[], rejectedBarCount: normalized.rejectedBarCount, lastValidDate: null as string | null, partialSessionExcluded: false };
+    if (normalized.malformedPayload) return {
+      bars: [] as StrategyBar[],
+      rejectedBarCount: normalized.rejectedBarCount,
+      lastValidDate: null as string | null,
+      partialSessionExcluded: false,
+      malformedPayload: true,
+    };
     const completed = filterYahooFormingDailyBars(payload, normalized.bars);
     return {
       bars: completed.bars.map(({ date, open, high, low, close, volume }) => ({ date, open, high, low, close, volume })),
       rejectedBarCount: normalized.rejectedBarCount,
       lastValidDate: completed.bars.at(-1)?.date || null,
       partialSessionExcluded: completed.partialBarExcluded,
+      malformedPayload: false,
     };
   };
 
@@ -172,11 +189,41 @@ async function handleRunAlgorithmicStrategy(args: Record<string, any>): Promise<
   const benchmarkData = benchmarkPayload ? toCompletedBars(benchmarkPayload, "SPY") : null;
   const bars = stockData.bars;
   const benchmarkBars = benchmarkData?.bars || [];
+  const benchmarkDates = new Set(benchmarkBars.map((bar) => bar.date));
+  const benchmarkWindowAligned = Boolean(
+    benchmarkData
+    && bars.at(-1)?.date
+    && bars.at(-21)?.date
+    && benchmarkDates.has(bars.at(-1)!.date)
+    && benchmarkDates.has(bars.at(-21)!.date),
+  );
+  const stockPartial = stockData.malformedPayload || stockData.rejectedBarCount > 0 || stockData.partialSessionExcluded;
+  const benchmarkPartial = !benchmarkData || benchmarkData.malformedPayload || benchmarkData.bars.length === 0
+    || !benchmarkWindowAligned || benchmarkData.rejectedBarCount > 0 || benchmarkData.partialSessionExcluded;
+  const quality = {
+    partial: stockPartial,
+    rejected_bar_count: stockData.rejectedBarCount,
+    last_valid_date: stockData.lastValidDate,
+    benchmark_data_available: Boolean(benchmarkData && benchmarkData.bars.length > 0),
+    benchmark_partial: benchmarkPartial,
+    benchmark_rejected_bar_count: benchmarkData?.rejectedBarCount || 0,
+    benchmark_last_valid_date: benchmarkData?.lastValidDate || null,
+  };
+  const marketQuality = {
+    partial_session_excluded: stockData.partialSessionExcluded,
+    data_partial: stockPartial || benchmarkPartial,
+    rejected_bar_count: stockData.rejectedBarCount,
+    last_valid_date: stockData.lastValidDate,
+    benchmark_data_available: quality.benchmark_data_available,
+    benchmark_partial: benchmarkPartial,
+    benchmark_rejected_bar_count: quality.benchmark_rejected_bar_count,
+    benchmark_last_valid_date: quality.benchmark_last_valid_date,
+  };
   let context;
   try {
     context = buildStrategyContext({ symbol, bars, benchmarkBars });
   } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) };
+    return { error: error instanceof Error ? error.message : String(error), ...quality };
   }
 
   const chartData = bars.slice(-30).map((bar) => ({
@@ -213,14 +260,9 @@ async function handleRunAlgorithmicStrategy(args: Record<string, any>): Promise<
         atr14: Number(context.atr14?.toFixed(2)),
         relative_volume_20d: Number(context.volumeRatio?.toFixed(2)),
         relative_strength_vs_spy_20d: context.relativeStrength20 === null ? null : Number(context.relativeStrength20.toFixed(2)),
-        partial_session_excluded: stockData.partialSessionExcluded,
-        data_partial: stockData.rejectedBarCount > 0 || stockData.partialSessionExcluded,
-        rejected_bar_count: stockData.rejectedBarCount,
-        last_valid_date: stockData.lastValidDate,
+        ...marketQuality,
       },
-      partial: stockData.rejectedBarCount > 0 || stockData.partialSessionExcluded,
-      rejected_bar_count: stockData.rejectedBarCount,
-      last_valid_date: stockData.lastValidDate,
+      ...quality,
       timestamp: new Date().toISOString(),
       chart_data: chartData,
     };
@@ -228,7 +270,7 @@ async function handleRunAlgorithmicStrategy(args: Record<string, any>): Promise<
 
   const strategyResult = runAlgorithmicStrategy(strategyName, context);
   if (!strategyResult) {
-    return { error: `Strategy '${strategyName}' is not implemented in the engine.` };
+    return { error: `Strategy '${strategyName}' is not implemented in the engine.`, ...quality };
   }
 
   return {
@@ -239,14 +281,9 @@ async function handleRunAlgorithmicStrategy(args: Record<string, any>): Promise<
       atr14: Number(context.atr14?.toFixed(2)),
       relative_volume_20d: Number(context.volumeRatio?.toFixed(2)),
       relative_strength_vs_spy_20d: context.relativeStrength20 === null ? null : Number(context.relativeStrength20.toFixed(2)),
-      partial_session_excluded: stockData.partialSessionExcluded,
-      data_partial: stockData.rejectedBarCount > 0 || stockData.partialSessionExcluded,
-      rejected_bar_count: stockData.rejectedBarCount,
-      last_valid_date: stockData.lastValidDate,
+      ...marketQuality,
     },
-    partial: stockData.rejectedBarCount > 0 || stockData.partialSessionExcluded,
-    rejected_bar_count: stockData.rejectedBarCount,
-    last_valid_date: stockData.lastValidDate,
+    ...quality,
     timestamp: new Date().toISOString(),
     chart_data: chartData,
   };

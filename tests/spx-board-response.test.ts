@@ -71,6 +71,12 @@ it("rejects inconsistent snapshot identity and bad numeric values before renderi
   await assert.rejects(parseSpxBoardResponse(Response.json(bad), "/api/spx-gex-heatmap", "heatmap"), /contract/);
 });
 
+it("rejects impossible calendar dates in every shared datetime field", async () => {
+  const bad = structuredClone(ready());
+  (bad.selectedSnapshot as Record<string, unknown>).generatedAt = "2026-02-30T14:00:00.000Z";
+  await assert.rejects(parseSpxBoardResponse(Response.json(bad), "/api/spx-gex-heatmap", "heatmap"), /contract/);
+});
+
 it("requires error identity for application failures even on HTTP 200", async () => {
   for (const status of ["ERROR", "BINDING_MISSING", "STORAGE_UNAVAILABLE"]) {
     for (const kind of ["heatmap", "pressure"] as const) {

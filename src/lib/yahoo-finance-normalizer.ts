@@ -125,18 +125,20 @@ export const reportYahooChartValidation = (symbol: string, result: YahooChartNor
   }
 };
 
-export const filterYahooFormingDailyBars = (payload: unknown, bars: YahooOhlcvBar[], now = new Date()) => {
+export const isYahooDailyBarForming = (payload: unknown, barDate: string, now = new Date()) => {
   const result = (payload as { chart?: { result?: unknown[] } } | null)?.chart?.result?.[0] as {
     meta?: { currentTradingPeriod?: { regular?: { end?: unknown } } };
   } | undefined;
+  if (barDate !== now.toISOString().slice(0, 10)) return false;
   const rawRegularEnd = result?.meta?.currentTradingPeriod?.regular?.end;
-  if (!isStrictFiniteNumber(rawRegularEnd) || rawRegularEnd <= 0 || now.getTime() >= rawRegularEnd * 1_000) {
-    return { bars, partialBarExcluded: false };
-  }
+  if (!isStrictFiniteNumber(rawRegularEnd) || rawRegularEnd <= 0) return true;
   const regularEnd = new Date(rawRegularEnd * 1_000);
-  if (!Number.isFinite(regularEnd.getTime())) return { bars, partialBarExcluded: false };
-  const regularDate = regularEnd.toISOString().slice(0, 10);
-  const completedBars = bars.filter((bar) => bar.date !== regularDate);
+  if (!Number.isFinite(regularEnd.getTime())) return true;
+  return now.getTime() < regularEnd.getTime();
+};
+
+export const filterYahooFormingDailyBars = (payload: unknown, bars: YahooOhlcvBar[], now = new Date()) => {
+  const completedBars = bars.filter((bar) => !isYahooDailyBarForming(payload, bar.date, now));
   return { bars: completedBars, partialBarExcluded: completedBars.length < bars.length };
 };
 

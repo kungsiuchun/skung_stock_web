@@ -170,8 +170,11 @@ export function buildStrategyContext(input: { symbol: string; bars: StrategyBar[
   const priorVolume20 = average(volume.slice(-21, -1));
   const volumeRatio = priorVolume20 > 0 ? volume.at(-1)! / priorVolume20 : 0;
   const benchmark = completedBars(input.benchmarkBars || []);
-  const relativeStrength20 = benchmark.length >= 21
-    ? ((currentPrice / close.at(-21)! - 1) - (benchmark.at(-1)!.close / benchmark.at(-21)!.close - 1)) * 100
+  const benchmarkByDate = new Map(benchmark.map((bar) => [bar.date, bar]));
+  const benchmarkCurrent = benchmarkByDate.get(bars.at(-1)!.date);
+  const benchmarkPrior = benchmarkByDate.get(bars.at(-21)!.date);
+  const relativeStrength20 = benchmarkCurrent && benchmarkPrior
+    ? ((currentPrice / close.at(-21)! - 1) - (benchmarkCurrent.close / benchmarkPrior.close - 1)) * 100
     : null;
   const maAlignment = currentPrice > ma20 && ma20 > ma50 && ma50 > ma200
     ? "Strong Bullish"

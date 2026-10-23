@@ -65,7 +65,7 @@ export function FinanceWorkspaceSummary({ data, cache, onRefresh }: { data: Fina
       <span>{cache ? `快照來源時間：${dateTime(cache.sourceAsOf)} · 快取建立：${dateTime(cache.cachedAt)}` : "歷史結果未保存來源時間及技術／估值／VIX 快照。"}</span>
     </p>
     {cache?.status === "stale" && <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">來源暫時無法更新，正顯示 {cache.ageSeconds} 秒前資料。原因：{cache.refreshError || "未提供"}</p>}
-    {quoteAvailable && lastBar && Math.abs(lastBar.price - data.price!) >= 0.005 && <p className="text-xs text-amber-800">快照報價與日線末值 ${lastBar.price.toFixed(2)} 不同；未提供報價時間，無法確認是否同一時點。</p>}
+    {quoteAvailable && lastBar && Math.abs(lastBar.price - data.price!) >= 0.005 && <p className="text-xs text-amber-800">快照報價與日線末值 ${lastBar.price.toFixed(2)} 不同；{data.quoteSourceAsOf ? "兩者來源時間不同，請注意比較時點。" : "未提供報價時間，無法確認是否同一時點。"}</p>}
   </section>;
 }
 

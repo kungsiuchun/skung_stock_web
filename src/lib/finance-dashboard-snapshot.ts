@@ -153,6 +153,15 @@ export const buildFinanceDashboardSnapshot = (input: {
     const result = parseToolResult(step.tool_result);
     if (!result) continue;
 
+    const reportedRejectedCount = isStrictFiniteNumber(result.rejected_bar_count)
+      && Number.isInteger(result.rejected_bar_count) && result.rejected_bar_count >= 0
+      ? result.rejected_bar_count
+      : 0;
+    const reportedLastValidDate = isValidIsoDate(result.last_valid_date) ? result.last_valid_date : null;
+    chartDataRejectedCount = Math.max(chartDataRejectedCount, reportedRejectedCount);
+    if (reportedLastValidDate) chartDataLastValidDate = reportedLastValidDate;
+    chartDataPartial = chartDataPartial || result.partial === true;
+
     if (step.tool_name === "get_realtime_quote") {
       const rawPrice = result.price !== undefined ? result.price : result.current_price;
       const quotePrice = isStrictFiniteNumber(rawPrice) && rawPrice > 0 ? rawPrice : null;
@@ -169,15 +178,8 @@ export const buildFinanceDashboardSnapshot = (input: {
     if (Array.isArray(result.chart_data)) {
       const normalized = normalizeFinanceChartData(result.chart_data);
       chartData = normalized.bars;
-      const reportedRejectedCount = isStrictFiniteNumber(result.rejected_bar_count)
-        && Number.isInteger(result.rejected_bar_count) && result.rejected_bar_count >= 0
-        ? result.rejected_bar_count
-        : 0;
-      chartDataRejectedCount = Math.max(normalized.rejectedBarCount, reportedRejectedCount);
-      chartDataLastValidDate = isValidIsoDate(result.last_valid_date)
-        ? result.last_valid_date
-        : normalized.lastValidDate;
-      chartDataPartial = result.partial === true;
+      chartDataRejectedCount = Math.max(chartDataRejectedCount, normalized.rejectedBarCount, reportedRejectedCount);
+      chartDataLastValidDate = reportedLastValidDate || normalized.lastValidDate || chartDataLastValidDate;
     }
 
     if (result.score !== undefined) algoScore = finiteNumber(result.score, algoScore);

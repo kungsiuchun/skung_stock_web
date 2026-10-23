@@ -17,7 +17,7 @@ import {
   type SupportResistanceAnalysis,
 } from "./support-resistance";
 import {
-  isStrictFiniteNumber,
+  isYahooDailyBarForming,
   normalizeYahooChartResult,
   reportYahooChartValidation,
 } from "./yahoo-finance-normalizer";
@@ -298,16 +298,16 @@ const weekKey = (dateKey: string) => {
 
 const isFormingBar = (input: {
   barDate: Date;
+  barDateKey: string;
   interval: CandlestickInterval;
   now: Date;
   timeZone: string;
-  regularSessionEnd?: number;
+  payload: unknown;
 }) => {
   const barKey = dateKeyInTimeZone(input.barDate, input.timeZone);
   const nowKey = dateKeyInTimeZone(input.now, input.timeZone);
   if (input.interval === "1d") {
-    if (barKey !== nowKey) return false;
-    return !input.regularSessionEnd || input.now.getTime() < input.regularSessionEnd * 1_000;
+    return isYahooDailyBarForming(input.payload, input.barDateKey, input.now);
   }
   if (input.interval === "1wk") return weekKey(barKey) === weekKey(nowKey);
   return barKey.slice(0, 7) === nowKey.slice(0, 7);
@@ -340,8 +340,6 @@ export const buildCandlestickPatternData = (input: {
   if (normalized.malformedPayload) {
     throw new CandlestickDataError("MALFORMED_PAYLOAD", "Yahoo Finance returned a malformed OHLCV payload.");
   }
-  const rawRegularSessionEnd = result.meta?.currentTradingPeriod?.regular?.end;
-  const regularSessionEnd = isStrictFiniteNumber(rawRegularSessionEnd) && rawRegularSessionEnd > 0 ? rawRegularSessionEnd : undefined;
   const now = input.now || new Date();
   let bars: CandlestickBar[] = normalized.bars.map((bar) => ({
     time: bar.date,
@@ -355,10 +353,11 @@ export const buildCandlestickPatternData = (input: {
   const beforePartialFilter = bars.length;
   bars = bars.filter((bar) => !isFormingBar({
     barDate: new Date(`${bar.time}T12:00:00.000Z`),
+    barDateKey: bar.time,
     interval: input.interval,
     now,
     timeZone,
-    regularSessionEnd,
+    payload: input.payload,
   }));
   const partialBarExcluded = bars.length < beforePartialFilter;
   bars = bars.slice(-120);

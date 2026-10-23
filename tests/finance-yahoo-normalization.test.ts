@@ -7,7 +7,7 @@ import { ToolRegistry } from "../functions/api/agent/registry";
 import { buildFinanceDashboardSnapshot } from "../src/lib/finance-dashboard-snapshot";
 import { normalizeStoredDashboardData } from "../src/lib/finance-dashboard-persistence";
 import { deriveTraderRiskSnapshot } from "../src/lib/trader-risk-snapshot";
-import { normalizeFinanceChartData } from "../src/lib/yahoo-finance-normalizer";
+import { filterYahooFormingDailyBars, normalizeFinanceChartData, normalizeYahooChartResult } from "../src/lib/yahoo-finance-normalizer";
 
 const originalFetch = globalThis.fetch;
 
@@ -28,7 +28,7 @@ const rowFor = (index: number) => {
   };
 };
 
-const yahooPayload = (rows: Array<Record<string, unknown>>, previousClose?: number) => ({
+const yahooPayload = (rows: Array<Record<string, unknown>>, previousClose?: number, metaOverrides: Record<string, unknown> = {}) => ({
   chart: {
     result: [{
       timestamp: rows.map((row) => row.timestamp),
@@ -42,6 +42,7 @@ const yahooPayload = (rows: Array<Record<string, unknown>>, previousClose?: numb
       meta: {
         ...(previousClose === undefined ? {} : { chartPreviousClose: previousClose }),
         currentTradingPeriod: { regular: { end: Date.parse("2024-01-01T00:00:00.000Z") / 1_000 } },
+        ...metaOverrides,
       },
     }],
   },
@@ -52,6 +53,17 @@ const setYahooPayload = (payload: unknown) => {
     status: 200,
     headers: { "Content-Type": "application/json" },
   })) as typeof fetch;
+};
+
+const setYahooPayloadBySymbol = (payloads: Record<string, unknown>) => {
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    const symbol = url.split("/chart/")[1]?.split("?")[0] || "";
+    return new Response(JSON.stringify(payloads[symbol] || payloads.DEFAULT), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
 };
 
 const registry = () => {
@@ -97,6 +109,39 @@ test("public quote tool keeps a genuine zero change and exposes missing previous
   assert.equal(missingPrevious.change_pct, null);
 });
 
+test("public quote tool uses regularMarketTime instead of a daily interval timestamp", async () => {
+  const regularMarketTime = Date.parse("2025-01-02T15:30:00.000Z") / 1_000;
+  setYahooPayload(yahooPayload([rowFor(0), rowFor(1)], 100, { regularMarketTime }));
+  const quote = await registry().execute("get_realtime_quote", { stock_code: "AAPL" });
+  assert.equal(quote.source_as_of, "2025-01-02T15:30:00.000Z");
+
+  setYahooPayload(yahooPayload([rowFor(0), rowFor(1)], 100, { regularMarketTime: String(regularMarketTime) }));
+  const missingQuoteTime = await registry().execute("get_realtime_quote", { stock_code: "AAPL" });
+  assert.equal(missingQuoteTime.source_as_of, null);
+});
+
+test("shared daily forming-bar boundary excludes current rows when session end is missing or invalid", () => {
+  const now = new Date("2026-07-21T18:00:00.000Z");
+  const dates = ["2026-07-17", "2026-07-18", "2026-07-19", "2026-07-20", "2026-07-21"];
+  const rows = dates.map((date, index) => ({
+    timestamp: Date.parse(`${date}T13:30:00.000Z`) / 1_000,
+    open: 100 + index,
+    high: 102 + index,
+    low: 99 + index,
+    close: 101 + index,
+    volume: 1_000 + index,
+  }));
+
+  for (const end of [undefined, "invalid", Number.NaN]) {
+    const payload = yahooPayload(rows, undefined, { currentTradingPeriod: { regular: { end } } });
+    const normalized = normalizeYahooChartResult(payload);
+    const completed = filterYahooFormingDailyBars(payload, normalized.bars, now);
+    assert.equal(completed.bars.length, 4);
+    assert.equal(completed.partialBarExcluded, true);
+    assert.equal(completed.bars.at(-1)?.date, "2026-07-20");
+  }
+});
+
 test("public history, moving average and trend tools reject malformed Yahoo rows", async () => {
   const rows = Array.from({ length: 35 }, (_, index) => rowFor(index));
   rows[5].close = "100.5";
@@ -134,6 +179,72 @@ test("public strategy tool keeps the actual last valid date when the latest row 
   assert.equal(result.last_valid_date, dateFor(220));
   assert.equal(result.chart_data.at(-1).date_iso, dateFor(220));
   assert.ok(result.chart_data.every((row: Record<string, unknown>) => typeof row.price === "number" && row.price > 0));
+});
+
+test("strategy relative strength aligns benchmark endpoints by date and exposes benchmark quality", async () => {
+  const stockRows = Array.from({ length: 260 }, (_, index) => rowFor(index));
+  const benchmarkRows = stockRows.map((row, index) => ({
+    ...row,
+    open: 200 + index * 0.2,
+    high: 202 + index * 0.2,
+    low: 199 + index * 0.2,
+    close: 201 + index * 0.2,
+  }));
+  benchmarkRows[100].close = null;
+  setYahooPayloadBySymbol({
+    AAPL: yahooPayload(stockRows),
+    SPY: yahooPayload(benchmarkRows),
+  });
+
+  const result = await registry().execute("run_algorithmic_strategy", { stock_code: "AAPL", strategy_name: "all" });
+  const alignedBenchmark = benchmarkRows.filter((row) => typeof row.close === "number");
+  const stockCurrent = stockRows.at(-1)!.close as number;
+  const stockPrior = stockRows.at(-21)!.close as number;
+  const benchmarkCurrent = alignedBenchmark.find((row) => row.timestamp === stockRows.at(-1)!.timestamp)!.close as number;
+  const benchmarkPrior = alignedBenchmark.find((row) => row.timestamp === stockRows.at(-21)!.timestamp)!.close as number;
+  const expected = ((stockCurrent / stockPrior - 1) - (benchmarkCurrent / benchmarkPrior - 1)) * 100;
+  assert.equal(result.market_snapshot.relative_strength_vs_spy_20d, Number(expected.toFixed(2)));
+  assert.equal(result.market_snapshot.benchmark_rejected_bar_count, 1);
+  assert.equal(result.market_snapshot.benchmark_partial, true);
+  assert.equal(result.market_snapshot.data_partial, true);
+  assert.equal(result.partial, false);
+});
+
+test("quality metadata survives insufficient tool results and the snapshot boundary", async () => {
+  const trendRows = Array.from({ length: 20 }, (_, index) => rowFor(index));
+  trendRows[5].close = null;
+  setYahooPayload(yahooPayload(trendRows));
+  const tools = registry();
+  const trend = await tools.execute("analyze_trend", { stock_code: "AAPL" });
+  assert.match(trend.error, /Insufficient data/);
+  assert.equal(trend.partial, true);
+  assert.equal(trend.rejected_bar_count, 1);
+  assert.equal(trend.last_valid_date, dateFor(19));
+
+  setYahooPayload(yahooPayload([{ ...rowFor(0), close: null }]));
+  const movingAverage = await tools.execute("calculate_ma", { stock_code: "AAPL", periods: [5] });
+  assert.equal(movingAverage.error, "No closing prices available");
+  assert.equal(movingAverage.partial, true);
+  assert.equal(movingAverage.rejected_bar_count, 1);
+  assert.equal(movingAverage.last_valid_date, null);
+
+  const strategyRows = Array.from({ length: 219 }, (_, index) => rowFor(index));
+  strategyRows[10].close = null;
+  setYahooPayload(yahooPayload(strategyRows));
+  const strategy = await tools.execute("run_algorithmic_strategy", { stock_code: "AAPL", strategy_name: "all" });
+  assert.match(strategy.error, /220 completed daily bars/);
+  assert.equal(strategy.partial, true);
+  assert.equal(strategy.rejected_bar_count, 1);
+  assert.equal(strategy.last_valid_date, dateFor(218));
+
+  const snapshot = buildFinanceDashboardSnapshot({
+    symbol: "AAPL",
+    agent: { success: true, steps: [{ type: "tool_call", tool_name: "run_algorithmic_strategy", tool_result: JSON.stringify(strategy) }] },
+    news: {}, vix: null, fundamentals: null, technical: null, sentiment: null,
+  });
+  assert.equal(snapshot.data.chartDataRejectedCount, 1);
+  assert.equal(snapshot.data.chartDataLastValidDate, dateFor(218));
+  assert.equal(snapshot.data.chartDataPartial, true);
 });
 
 test("snapshot and chart boundaries reject malformed rows without manufacturing quote values", () => {

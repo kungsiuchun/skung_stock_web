@@ -131,7 +131,12 @@ async function handleGetRealtimeQuote(args: Record<string, any>): Promise<Record
   const meta = result.meta || {};
   const normalized = normalizeYahooChartResult(data);
   reportYahooChartValidation(symbol, normalized);
-  if (normalized.malformedPayload) return { error: `Yahoo returned malformed chart data for ${symbol}` };
+  if (normalized.malformedPayload) return {
+    error: `Yahoo returned malformed chart data for ${symbol}`,
+    partial: true,
+    rejected_bar_count: normalized.rejectedBarCount,
+    last_valid_date: normalized.lastValidDate,
+  };
   const quote = result.indicators?.quote?.[0] || {};
   const latestIndex = Math.max(
     Array.isArray(result.timestamp) ? result.timestamp.length : 0,
@@ -147,6 +152,13 @@ async function handleGetRealtimeQuote(args: Record<string, any>): Promise<Record
   const changePct = latestBar && previousClose !== null
     ? Number((((latestBar.close - previousClose) / previousClose) * 100).toFixed(2))
     : null;
+  const rawRegularMarketTime = meta.regularMarketTime;
+  const regularMarketTime = isStrictFiniteNumber(rawRegularMarketTime) && rawRegularMarketTime > 0
+    ? new Date(rawRegularMarketTime * 1_000)
+    : null;
+  const sourceAsOf = regularMarketTime && Number.isFinite(regularMarketTime.getTime())
+    ? regularMarketTime.toISOString()
+    : null;
 
   return {
     symbol,
@@ -160,7 +172,7 @@ async function handleGetRealtimeQuote(args: Record<string, any>): Promise<Record
     partial: normalized.rejectedBarCount > 0,
     rejected_bar_count: normalized.rejectedBarCount,
     last_valid_date: normalized.lastValidDate,
-    source_as_of: latestBar ? new Date(latestBar.timestamp * 1_000).toISOString() : null,
+    source_as_of: sourceAsOf,
     exchange: meta.exchangeName || "N/A",
     market_state: meta.marketState || "N/A",
   };
@@ -210,7 +222,12 @@ async function handleGetDailyHistory(args: Record<string, any>): Promise<Record<
 
   const normalized = normalizeYahooChartResult(data);
   reportYahooChartValidation(symbol, normalized);
-  if (normalized.malformedPayload) return { error: `Yahoo returned malformed chart data for ${symbol}` };
+  if (normalized.malformedPayload) return {
+    error: `Yahoo returned malformed chart data for ${symbol}`,
+    partial: true,
+    rejected_bar_count: normalized.rejectedBarCount,
+    last_valid_date: normalized.lastValidDate,
+  };
   const completed = filterYahooFormingDailyBars(data, normalized.bars);
   const rows = completed.bars.map((bar) => ({
     date: bar.date,
@@ -285,12 +302,22 @@ async function handleCalculateMA(args: Record<string, any>): Promise<Record<stri
 
   const normalized = normalizeYahooChartResult(data);
   reportYahooChartValidation(symbol, normalized);
-  if (normalized.malformedPayload) return { error: `Yahoo returned malformed chart data for ${symbol}` };
+  if (normalized.malformedPayload) return {
+    error: `Yahoo returned malformed chart data for ${symbol}`,
+    partial: true,
+    rejected_bar_count: normalized.rejectedBarCount,
+    last_valid_date: normalized.lastValidDate,
+  };
   const completed = filterYahooFormingDailyBars(data, normalized.bars);
   const closes = completed.bars.map((bar) => bar.close);
 
   if (closes.length === 0) {
-    return { error: "No closing prices available" };
+    return {
+      error: "No closing prices available",
+      partial: normalized.rejectedBarCount > 0 || completed.partialBarExcluded,
+      rejected_bar_count: normalized.rejectedBarCount,
+      last_valid_date: completed.bars.at(-1)?.date || null,
+    };
   }
 
   // Calculate MAs

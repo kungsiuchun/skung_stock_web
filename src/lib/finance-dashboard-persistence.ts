@@ -38,7 +38,10 @@ const validStoredStrategy = (item: unknown) => {
 };
 
 const validRenderData = (data: Record<string, unknown>) => {
-  if (!text(data.symbol) || !data.symbol.trim() || !finite(data.price) || data.price <= 0 || !text(data.change) || !finite(data.algoRating)
+  const validQuote = data.price === null
+    ? data.quoteStatus === "unavailable" && data.change === "未提供"
+    : finite(data.price) && data.price > 0 && (data.quoteStatus === undefined || data.quoteStatus === "available");
+  if (!text(data.symbol) || !data.symbol.trim() || !validQuote || !text(data.change) || !finite(data.algoRating)
     || !(data.marketSentiment === null || finite(data.marketSentiment)) || !optionalText(data.sentimentSource)
     || !optionalText(data.finalAnalysis) || !record(data.strategyPoints)
     || !["entry", "stopLoss", "takeProfit"].every((key) => optionalNumber((data.strategyPoints as Record<string, unknown>)[key]))) return false;

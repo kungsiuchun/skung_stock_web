@@ -57,9 +57,8 @@ const isIsoDate = (value: unknown) => {
 
 const dateTime = (value: unknown) => {
   if (typeof value !== "string" || value.trim() === "") return false;
-  if (Number.isFinite(Date.parse(value))) return true;
-  const date = value.slice(0, 10);
-  return isIsoDate(date) && /^\d{4}-\d{2}-\d{2}[ T](?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?: ?ET)?$/.test(value);
+  const match = /^(\d{4}-\d{2}-\d{2})[ T](?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d| ?ET)?$/.exec(value);
+  return Boolean(match && isIsoDate(match[1]));
 };
 
 const etTime = (value: unknown) => typeof value === "string" && /^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?(?: ET)?$/.test(value);
