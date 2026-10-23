@@ -14,6 +14,7 @@ import {
   filterYahooFormingDailyBars,
   normalizeYahooChartResult,
   reportYahooChartValidation,
+  yahooChartQuality,
 } from "../../../../src/lib/yahoo-finance-normalizer";
 
 // ── Tool 1: analyze_trend ──────────────────────────────────────────
@@ -30,28 +31,16 @@ async function handleAnalyzeTrend(args: Record<string, any>): Promise<Record<str
   if (!res.ok) return { error: `Yahoo Finance API returned ${res.status}` };
 
   const data = await res.json();
-  const result = data.chart?.result?.[0];
-  if (!result) return { error: `No data for ${symbol}` };
-
   const normalized = normalizeYahooChartResult(data);
   reportYahooChartValidation(symbol, normalized);
-  if (normalized.malformedPayload) return {
-    error: `Yahoo returned malformed chart data for ${symbol}`,
-    partial: true,
-    rejected_bar_count: normalized.rejectedBarCount,
-    last_valid_date: normalized.lastValidDate,
-  };
+  if (normalized.malformedPayload) return { error: `Yahoo returned malformed chart data for ${symbol}`, ...yahooChartQuality(normalized) };
   const completed = filterYahooFormingDailyBars(data, normalized.bars);
   const bars = completed.bars;
   const closes = bars.map((bar) => bar.close);
   const volumes = bars.map((bar) => bar.volume);
+  const quality = yahooChartQuality(normalized, completed.partialBarExcluded, bars.at(-1)?.date || null);
 
-  if (closes.length < 30) return {
-    error: "Insufficient data for trend analysis (need at least 30 days)",
-    partial: normalized.rejectedBarCount > 0 || completed.partialBarExcluded,
-    rejected_bar_count: normalized.rejectedBarCount,
-    last_valid_date: bars.at(-1)?.date || null,
-  };
+  if (closes.length < 30) return { error: "Insufficient data for trend analysis (need at least 30 days)", ...quality };
 
   // --- 1.5 Volume Analysis (Current vs 30d Avg) ---
   const currentVolume = volumes[volumes.length - 1];
@@ -124,9 +113,7 @@ async function handleAnalyzeTrend(args: Record<string, any>): Promise<Record<str
         volume: bar.volume,
       };
     }),
-    partial: normalized.rejectedBarCount > 0 || completed.partialBarExcluded,
-    rejected_bar_count: normalized.rejectedBarCount,
-    last_valid_date: bars.at(-1)?.date || null,
+    ...quality,
   };
 }
 

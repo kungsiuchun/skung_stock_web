@@ -242,6 +242,7 @@ export interface ResolveMarketCacheOptions<T> {
   refreshQuotaGuard?: () => Promise<MarketCacheD1QuotaDecision>;
   allowStaleOnRefreshError?: boolean;
   force?: boolean;
+  validate?: (value: T) => boolean;
   sourceAsOf?: (value: T) => string | null | undefined;
   load: () => Promise<T>;
   now?: () => Date;
@@ -417,6 +418,15 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
   const now = options.now || (() => new Date());
   const cacheKey = buildMarketCacheKey(options.scope, options.symbol, options.params);
   const ttlMs = resolveMarketCacheTtlMs(options.dataset, options.ttlMs);
+  const load = async () => {
+    const value = await options.load();
+    if (options.validate && !options.validate(value)) throw new Error("Market cache loader returned an invalid payload.");
+    return value;
+  };
+  const parseValidated = (row: MarketCacheRow) => {
+    const value = parseRow<T>(row);
+    return { value, valid: !options.validate || options.validate(value) };
+  };
   if (options.quotaGuard) {
     const decision = options.quotaGuard();
     if (!decision.allow) throw new MarketCacheQuotaExceededError(decision);
@@ -491,7 +501,7 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
   if (!options.db) {
     let value: T;
     try {
-      value = await runPhase("upstream", options.load);
+      value = await runPhase("upstream", load);
     } catch (error) {
       log({ status: "failed", totalMs: Date.now() - startedAt, ...failureFields(error) });
       throw error;
@@ -525,16 +535,19 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
     log({ status: "failed", totalMs: Date.now() - startedAt, ...failureFields(error) });
     throw error;
   }
+  const existingValue = existing ? parseValidated(existing) : null;
   if (!options.force && existing && Date.parse(existing.expires_at) > initialNow.getTime()) {
-    const cache = metadataFromRow(existing, "hit", initialNow, options.dataset, ttlMs, "hit", "bypassed");
-    log({
-      status: cache.status,
-      ageSeconds: cache.ageSeconds,
-      totalMs: Date.now() - startedAt,
-      rowsRead: cache.rowsRead,
-      rowsWritten: cache.rowsWritten,
-    });
-    return { value: parseRow<T>(existing), cache };
+    if (existingValue?.valid) {
+      const cache = metadataFromRow(existing, "hit", initialNow, options.dataset, ttlMs, "hit", "bypassed");
+      log({
+        status: cache.status,
+        ageSeconds: cache.ageSeconds,
+        totalMs: Date.now() - startedAt,
+        rowsRead: cache.rowsRead,
+        rowsWritten: cache.rowsWritten,
+      });
+      return { value: existingValue.value, cache };
+    }
   }
 
   const pending = inFlight.get(cacheKey) as Promise<MarketCacheResolution<T>> | undefined;
@@ -568,7 +581,7 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
       const upstreamMaxMs = deadlineAt === null
         ? undefined
         : Math.max(1, deadlineAt - Date.now() - staleReserveMs);
-      const value = await runPhase("upstream", options.load, upstreamMaxMs, null);
+      const value = await runPhase("upstream", load, upstreamMaxMs, null);
       const refreshedAt = now();
       const cacheWriteMaxMs = deadlineAt === null
         ? d1PhaseCapMs
@@ -611,9 +624,12 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
       const message = error instanceof Error ? error.message : String(error);
       const failedAt = now();
       let stale = existing;
+      let staleValue = existingValue?.valid ? existingValue : null;
       if (!stale) {
         try {
           stale = await runPhase("stale-read", () => readRow(options.db!, cacheKey), d1PhaseCapMs, null);
+          staleValue = stale ? parseValidated(stale) : null;
+          if (staleValue && !staleValue.valid) stale = null;
         } catch (fallbackError) {
           log({
             status: "failed",
@@ -627,7 +643,7 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
           throw fallbackError;
         }
       }
-      if (stale && options.allowStaleOnRefreshError !== false) {
+      if (stale && staleValue?.valid && options.allowStaleOnRefreshError !== false) {
         let recordErrorClass: string | undefined;
         try {
           await runPhase("record-error", () => recordRefreshError(options.db!, cacheKey, failedAt, message), d1PhaseCapMs, null);
@@ -647,7 +663,7 @@ export async function resolveMarketCache<T>(options: ResolveMarketCacheOptions<T
           1,
         );
         log({ status: cache.status, ageSeconds: cache.ageSeconds, upstreamMs: Date.now() - upstreamStartedAt, totalMs: Date.now() - startedAt, ...failureFields(error), recordErrorClass });
-        return { value: parseRow<T>(stale), cache };
+        return { value: staleValue.value, cache };
       }
       log({ status: "failed", upstreamMs: Date.now() - upstreamStartedAt, totalMs: Date.now() - startedAt, ...failureFields(error) });
       throw error;

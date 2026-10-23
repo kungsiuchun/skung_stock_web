@@ -16,6 +16,12 @@ export interface YahooChartNormalization {
   malformedPayload: boolean;
 }
 
+export interface YahooChartQuality {
+  partial: boolean;
+  rejected_bar_count: number;
+  last_valid_date: string | null;
+}
+
 export interface FinanceChartPoint {
   date?: unknown;
   date_iso?: unknown;
@@ -117,6 +123,35 @@ export const normalizeYahooChartResult = (payload: unknown): YahooChartNormaliza
     lastValidDate: bars.at(-1)?.date || null,
     malformedPayload: false,
   };
+};
+
+export const yahooChartQuality = (
+  result: YahooChartNormalization,
+  partialBarExcluded = false,
+  lastValidDate = result.lastValidDate,
+): YahooChartQuality => ({
+  partial: result.malformedPayload || result.rejectedBarCount > 0 || partialBarExcluded,
+  rejected_bar_count: result.rejectedBarCount,
+  last_valid_date: lastValidDate,
+});
+
+export const getYahooLatestBar = (payload: unknown, result: YahooChartNormalization): YahooOhlcvBar | null => {
+  const chartResult = (payload as { chart?: { result?: unknown[] } } | null)?.chart?.result?.[0] as {
+    timestamp?: unknown;
+    indicators?: { quote?: unknown[] };
+  } | undefined;
+  const quote = chartResult?.indicators?.quote?.[0] as {
+    open?: unknown;
+    high?: unknown;
+    low?: unknown;
+    close?: unknown;
+    volume?: unknown;
+  } | undefined;
+  const lengths = [chartResult?.timestamp, quote?.open, quote?.high, quote?.low, quote?.close, quote?.volume]
+    .filter(Array.isArray)
+    .map((values) => values.length);
+  const latestIndex = lengths.length > 0 ? Math.max(...lengths) - 1 : -1;
+  return result.bars.find((bar) => bar.index === latestIndex) || null;
 };
 
 export const reportYahooChartValidation = (symbol: string, result: YahooChartNormalization) => {

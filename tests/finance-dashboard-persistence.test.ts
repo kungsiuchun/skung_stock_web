@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { loadDashboardPersistence, normalizeStoredDashboardData, sanitizeDashboardHistory } from "../src/lib/finance-dashboard-persistence";
+import { loadDashboardPersistence, normalizeStoredDashboardData, normalizeStoredDashboardSnapshot, sanitizeDashboardHistory } from "../src/lib/finance-dashboard-persistence";
 import { applyDashboardSnapshot, EMPTY_DASHBOARD_SNAPSHOT_STATE } from "../src/lib/finance-dashboard-state";
 import { buildFinanceDashboardSnapshot } from "../src/lib/finance-dashboard-snapshot";
 import { writeBrowserJson } from "../src/lib/browser-storage";
@@ -31,6 +31,25 @@ test("Stored dashboard data rejects malformed render fields without manufacturin
     assert.equal(normalizeStoredDashboardData({ ...validData, ...patch }), null, JSON.stringify(patch));
   }
   assert.equal(normalizeStoredDashboardData({}), null);
+});
+
+test("Cached snapshot validation preserves typed unavailable quotes and rejects legacy values", () => {
+  const unavailable = {
+    ...validData,
+    price: null,
+    change: "未提供",
+    quoteStatus: "unavailable" as const,
+    chartDataLastValidDate: "2026-10-20",
+    chartDataRejectedCount: 1,
+    chartDataPartial: true,
+  };
+  const snapshot = { data: unavailable, vixData: null, valuationData: null, technicalData: null };
+  const validPoint = { date: "2026-10-20", date_iso: "2026-10-20", price: 100, open: 99, high: 101, low: 98, volume: 1_000 };
+  assert.equal(normalizeStoredDashboardSnapshot(snapshot)?.data.price, null);
+  assert.equal(normalizeStoredDashboardSnapshot({ ...snapshot, data: { ...unavailable, price: 0 } }), null);
+  assert.equal(normalizeStoredDashboardSnapshot({ ...snapshot, data: { ...unavailable, chartData: [{ ...validPoint, price: "100" }] } }), null);
+  assert.equal(normalizeStoredDashboardSnapshot({ ...snapshot, vixData: { value: "18", change_pct: 1, history: [17, 18] } }), null);
+  assert.equal(normalizeStoredDashboardSnapshot({ ...snapshot, technicalData: { rsi_14: "50" } }), null);
 });
 
 test("mapped unavailable snapshots survive active and history persistence", () => {

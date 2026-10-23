@@ -2,7 +2,7 @@ import { Clock, RefreshCw, Search, MessageSquare } from "lucide-react";
 import type { FinanceDashboardData } from "@/lib/finance-dashboard-snapshot";
 import type { DashboardHistoryItem } from "@/lib/finance-dashboard-persistence";
 import type { MarketCacheMetadata } from "@/lib/market-data-cache";
-import { FINANCE_ANALYZER_MODEL_CALL_BUDGETS, FINANCE_ANALYZER_SOURCE_MAP } from "@/lib/finance-analyzer-contract";
+import { FINANCE_ANALYZER_SOURCE_MAP } from "@/lib/finance-analyzer-contract";
 import { isValidTraderRiskCandle } from "@/lib/trader-risk-snapshot";
 
 export function FinanceWorkspaceToolbar({ symbol, onSymbolChange, onAnalyze, loading, history, onHistory, onClear, onChat }: {
@@ -77,7 +77,6 @@ export function FinanceWorkspaceSources() {
       {FINANCE_ANALYZER_SOURCE_MAP.slice(0, 8).map((item) => <div key={item.layer} className="space-y-0.5">
         <p className="font-semibold text-slate-800">{item.displayLayer}</p><p className="text-slate-500">{item.displaySource} · {item.deterministic ? "規則計算" : "AI 摘要"}</p>
       </div>)}
-      <p className="border-t border-slate-100 pt-3 text-slate-500">每次研究 AI 摘要上限：{FINANCE_ANALYZER_MODEL_CALL_BUDGETS.dashboard.maxOpenRouterCalls} 次模型調用。AI 解讀與市場資料分開呈現。</p>
     </div>
   </details>;
 }

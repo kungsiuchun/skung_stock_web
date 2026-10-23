@@ -6,6 +6,7 @@ import { onRequest as getTechnicalRadar } from "../technical-radar";
 import { onRequest as getVix } from "../vix";
 import { buildFinanceDashboardSnapshot } from "../../../src/lib/finance-dashboard-snapshot";
 import { MarketCacheQuotaExceededError, resolveMarketCache } from "../../../src/lib/market-data-cache";
+import { normalizeStoredDashboardSnapshot } from "../../../src/lib/finance-dashboard-persistence";
 import type { D1DatabaseLike } from "../../../src/lib/spx-recap-d1";
 import { reserveMarketCacheRefreshQuota } from "../../../src/lib/stocks-watcher-refresh-quota";
 
@@ -42,6 +43,8 @@ const validSymbol = (value: unknown) => {
   return symbol;
 };
 
+const FINANCE_DASHBOARD_CACHE_VERSION = "v4";
+
 export async function onRequestPost(context: { request: Request; env: Env }) {
   let body: { symbol?: unknown };
   try {
@@ -62,7 +65,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       db: context.env.MARKET_CACHE_DB,
       scope: "finance-dashboard-snapshot",
       symbol,
-      params: { symbol, quantStrategySchemaVersion: "v3" },
+      params: { symbol, quantStrategySchemaVersion: "v3", financeDashboardCacheVersion: FINANCE_DASHBOARD_CACHE_VERSION },
+      validate: (value) => normalizeStoredDashboardSnapshot(value) !== null,
       refreshQuotaGuard: context.env.MARKET_CACHE_DB
         ? () => reserveMarketCacheRefreshQuota(context.env.MARKET_CACHE_DB!, { operation: "finance_dashboard" })
         : undefined,
@@ -100,7 +104,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       },
     });
 
-    return json({ data: resolved.value, cache: resolved.cache }, resolved.cache.status === "stale" ? 206 : 200);
+    const snapshot = normalizeStoredDashboardSnapshot(resolved.value);
+    if (!snapshot) throw new Error("Finance dashboard snapshot failed validation.");
+    return json({ data: snapshot, cache: resolved.cache }, resolved.cache.status === "stale" ? 206 : 200);
   } catch (error) {
     return json({
       error: error instanceof Error ? error.message : String(error),

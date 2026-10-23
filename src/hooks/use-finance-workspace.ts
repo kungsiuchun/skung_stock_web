@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { FinanceDashboardSnapshotPayload } from "@/lib/finance-dashboard-snapshot";
 import type { MarketCacheMetadata } from "@/lib/market-data-cache";
 import { parseJsonResponse } from "@/lib/safe-json-response";
-import { loadDashboardPersistence, type DashboardHistoryItem } from "@/lib/finance-dashboard-persistence";
+import { loadDashboardPersistence, normalizeStoredDashboardSnapshot, type DashboardHistoryItem } from "@/lib/finance-dashboard-persistence";
 import { writeBrowserJson } from "@/lib/browser-storage";
 import { DASHBOARD_LOADING_PHASE_MS, getNextDashboardLoadingPhase } from "@/lib/finance-dashboard-loading";
 import {
@@ -65,9 +65,11 @@ export function useFinanceWorkspace() {
       if ((response.status !== 200 && response.status !== 206) || !payload.data || !payload.cache) {
         throw new Error(payload.error || `分析快照請求失敗（HTTP ${response.status}）。`);
       }
+      const normalizedPayload = normalizeStoredDashboardSnapshot(payload.data);
+      if (!normalizedPayload) throw new Error("回傳快照資料無效，已拒絕顯示。請重新查詢。");
       if (generation !== generationRef.current) return;
-      if (payload.data.data.symbol.toUpperCase() !== analyzedSymbol) throw new Error("回傳標的與查詢不符，已拒絕顯示。請重新查詢。");
-      setSnapshot((current) => applyDashboardSnapshot(current, payload.data!, payload.cache!, analyzedSymbol, new Date().toLocaleTimeString()));
+      if (normalizedPayload.data.symbol.toUpperCase() !== analyzedSymbol) throw new Error("回傳標的與查詢不符，已拒絕顯示。請重新查詢。");
+      setSnapshot((current) => applyDashboardSnapshot(current, normalizedPayload, payload.cache!, analyzedSymbol, new Date().toLocaleTimeString()));
     } catch (error) {
       if (generation !== generationRef.current || controller.signal.aborted) return;
       console.error("Finance snapshot failed:", error);

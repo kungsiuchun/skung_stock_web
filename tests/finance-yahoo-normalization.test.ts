@@ -8,6 +8,9 @@ import { buildFinanceDashboardSnapshot } from "../src/lib/finance-dashboard-snap
 import { normalizeStoredDashboardData } from "../src/lib/finance-dashboard-persistence";
 import { deriveTraderRiskSnapshot } from "../src/lib/trader-risk-snapshot";
 import { filterYahooFormingDailyBars, normalizeFinanceChartData, normalizeYahooChartResult } from "../src/lib/yahoo-finance-normalizer";
+import { onRequest as getTechnicalRadar } from "../functions/api/technical-radar";
+import { onRequest as getSentiment } from "../functions/api/sentiment";
+import { onRequest as getVix } from "../functions/api/vix";
 
 const originalFetch = globalThis.fetch;
 
@@ -109,6 +112,64 @@ test("public quote tool keeps a genuine zero change and exposes missing previous
   assert.equal(missingPrevious.change_pct, null);
 });
 
+test("public technical, sentiment, and VIX boundaries never reuse an older close", async () => {
+  for (const invalidClose of [null, "100"]) {
+    const rows = Array.from({ length: 35 }, (_, index) => rowFor(index));
+    rows[rows.length - 1].close = invalidClose;
+    const payload = yahooPayload(rows, 100);
+    setYahooPayload(payload);
+
+    const technicalResponse = await getTechnicalRadar({ request: new Request("https://example.test/api/technical-radar?symbol=AAPL") });
+    const technical = await technicalResponse.json() as Record<string, unknown>;
+    assert.equal(technicalResponse.status, 502);
+    assert.equal(technical.partial, true);
+    assert.equal(technical.rejected_bar_count, 1);
+    assert.equal(technical.last_valid_date, dateFor(33));
+
+    setYahooPayload(payload);
+    const vixResponse = await getVix({ request: new Request("https://example.test/api/vix") });
+    const vix = await vixResponse.json() as Record<string, unknown>;
+    assert.equal(vixResponse.status, 502);
+    assert.equal(vix.partial, true);
+    assert.equal(vix.rejected_bar_count, 1);
+    assert.equal(vix.last_valid_date, dateFor(33));
+  }
+
+  const rows = Array.from({ length: 35 }, (_, index) => rowFor(index));
+  rows[rows.length - 1].close = null;
+  const payload = yahooPayload(rows, 100);
+  globalThis.fetch = (async () => new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  })) as typeof fetch;
+  const sentimentResponse = await getSentiment({
+    request: new Request("https://example.test/api/sentiment?symbol=AAPL"),
+    env: {},
+  });
+  const sentiment = await sentimentResponse.json() as { score: number | null; warnings: string[] };
+  assert.equal(sentimentResponse.status, 200);
+  assert.equal(sentiment.score, null);
+  assert.ok(sentiment.warnings.some((warning) => warning.includes("Technical proxy unavailable")));
+});
+
+test("public technical and VIX endpoints preserve valid controls", async () => {
+  const payload = yahooPayload(Array.from({ length: 35 }, (_, index) => rowFor(index)), 100);
+  setYahooPayload(payload);
+
+  const technicalResponse = await getTechnicalRadar({ request: new Request("https://example.test/api/technical-radar?symbol=AAPL") });
+  const technical = await technicalResponse.json() as Record<string, unknown>;
+  assert.equal(technicalResponse.status, 200);
+  assert.equal(technical.partial, false);
+  assert.equal(typeof technical.rsi_14, "number");
+
+  setYahooPayload(payload);
+  const vixResponse = await getVix({ request: new Request("https://example.test/api/vix") });
+  const vix = await vixResponse.json() as Record<string, unknown>;
+  assert.equal(vixResponse.status, 200);
+  assert.equal(vix.partial, false);
+  assert.equal(typeof vix.value, "number");
+});
+
 test("public quote tool uses regularMarketTime instead of a daily interval timestamp", async () => {
   const regularMarketTime = Date.parse("2025-01-02T15:30:00.000Z") / 1_000;
   setYahooPayload(yahooPayload([rowFor(0), rowFor(1)], 100, { regularMarketTime }));
@@ -166,6 +227,22 @@ test("public history, moving average and trend tools reject malformed Yahoo rows
   assert.equal(trend.rejected_bar_count, 5);
   assert.equal(trend.last_valid_date, dateFor(34));
   assert.ok(trend.chart_data.every((row: Record<string, unknown>) => row.date_iso !== "1970-01-01" && typeof row.volume === "number"));
+});
+
+test("public Yahoo tools retain quality metadata for empty chart results", async () => {
+  setYahooPayload({ chart: { result: [] } });
+  const tools = registry();
+  for (const [name, args] of [
+    ["get_realtime_quote", { stock_code: "AAPL" }],
+    ["get_daily_history", { stock_code: "AAPL", days: 20 }],
+    ["calculate_ma", { stock_code: "AAPL", periods: [5] }],
+    ["analyze_trend", { stock_code: "AAPL" }],
+  ] as const) {
+    const result = await tools.execute(name, args);
+    assert.equal(result.partial, true, name);
+    assert.equal(result.rejected_bar_count, 0, name);
+    assert.equal(result.last_valid_date, null, name);
+  }
 });
 
 test("public strategy tool keeps the actual last valid date when the latest row is rejected", async () => {

@@ -27,6 +27,17 @@ class MemoryD1 implements D1DatabaseLike {
   pruneRowsReadOverride: number | null = null;
   lastPruneQuery = "";
 
+  seed(cacheKey: string, value: unknown, cachedAt: string, expiresAt: string) {
+    this.rows.set(cacheKey, {
+      cache_key: cacheKey,
+      payload_json: JSON.stringify(value),
+      source_as_of: null,
+      cached_at: cachedAt,
+      expires_at: expiresAt,
+      last_refresh_error: null,
+    });
+  }
+
   seedExpiredRows(count: number, expiresAt: string) {
     for (let index = 0; index < count; index += 1) {
       const cacheKey = `expired:${index}`;
@@ -205,6 +216,34 @@ test("cache keys are stable across parameter key order", () => {
   assert.equal(
     buildMarketCacheKey("tool", "aapl", { expiry: "2026-07-17", strike: 200 }),
     buildMarketCacheKey("tool", "AAPL", { strike: 200, expiry: "2026-07-17" }),
+  );
+});
+
+test("validated cache entries cannot return invalid fresh or stale payloads", async () => {
+  const db = new MemoryD1();
+  const now = new Date("2026-07-14T12:00:00.000Z");
+  const params = { version: "v4" };
+  const cacheKey = buildMarketCacheKey("validated", "AAPL", params);
+  db.seed(cacheKey, { valid: false }, "2026-07-14T11:59:00.000Z", "2026-07-14T12:10:00.000Z");
+
+  let loads = 0;
+  const options = {
+    db,
+    scope: "validated",
+    symbol: "AAPL",
+    params,
+    now: () => now,
+    validate: (value: { valid?: unknown }) => value.valid === true,
+    load: async () => ({ valid: ++loads > 0 }),
+  };
+  const refreshed = await resolveMarketCache(options);
+  assert.equal(refreshed.cache.status, "refreshed");
+  assert.equal(refreshed.value.valid, true);
+
+  db.seed(cacheKey, { valid: false }, "2026-07-14T11:00:00.000Z", "2026-07-14T11:30:00.000Z");
+  await assert.rejects(
+    resolveMarketCache({ ...options, load: async () => { throw new Error("upstream unavailable"); } }),
+    /upstream unavailable/,
   );
 });
 

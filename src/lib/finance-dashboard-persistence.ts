@@ -4,7 +4,7 @@ import {
 } from "./finance-analyzer-contract";
 import { normalizeDashboardDecision } from "./finance-dashboard-ai-decision";
 import { getDashboardNarrativeStatus } from "./finance-dashboard-narrative";
-import type { FinanceDashboardData } from "./finance-dashboard-snapshot";
+import type { FinanceDashboardData, FinanceDashboardSnapshotPayload } from "./finance-dashboard-snapshot";
 import { readBrowserJson } from "./browser-storage";
 import {
   isValidIsoDate,
@@ -26,6 +26,25 @@ const text = (value: unknown): value is string => typeof value === "string";
 const optionalText = (value: unknown) => value === undefined || text(value);
 const optionalNumber = (value: unknown) => value === undefined || finite(value);
 const optionalNonNegativeInteger = (value: unknown) => value === undefined || typeof value === "number" && Number.isInteger(value) && value >= 0;
+const validQualityFields = (value: Record<string, unknown>) => (value.partial === undefined || typeof value.partial === "boolean")
+  && optionalNonNegativeInteger(value.rejected_bar_count)
+  && (value.last_valid_date === undefined || value.last_valid_date === null || isValidIsoDate(value.last_valid_date));
+const validTechnicalSnapshot = (value: unknown) => {
+  if (value === undefined || value === null) return true;
+  if (!record(value) || !validQualityFields(value)) return false;
+  if (value.error !== undefined) return text(value.error);
+  return optionalText(value.ma_alignment) && optionalText(value.rsi_signal)
+    && (value.is_bullish === undefined || typeof value.is_bullish === "boolean")
+    && (value.is_bearish === undefined || typeof value.is_bearish === "boolean")
+    && optionalNumber(value.rsi_14) && optionalNumber(value.position_percent)
+    && optionalNumber(value.ma5) && optionalNumber(value.ma20);
+};
+const validVixSnapshot = (value: unknown) => {
+  if (value === undefined || value === null) return true;
+  if (!record(value) || value.error !== undefined || !validQualityFields(value)) return false;
+  return finite(value.value) && value.value > 0 && finite(value.change_pct)
+    && Array.isArray(value.history) && value.history.length >= 2 && value.history.every((item) => finite(item) && item > 0);
+};
 const validStoredStrategy = (item: unknown) => {
   if (!record(item) || !finite(item.score) || !["entry", "stopLoss", "target"].every((key) => optionalNumber(item[key]))) return false;
   const setup = item.tradeSetup || item.trade_setup;
@@ -110,6 +129,18 @@ export const normalizeStoredDashboardData = (data: unknown): FinanceDashboardDat
     tradeSetup: { actionability: "PENDING_TRIGGER" as const, nextStep: "Legacy cache needs a fresh analysis before it can publish a trade plan.", optionsStatus: "PENDING" as const },
   }));
   return { ...(stored as FinanceDashboardData), quantStrategySchemaVersion: "v3", decision: normalizeDashboardDecision((stored as { decision?: unknown }).decision), quantStrategies, recommendedTrade: hasCurrentQuantSchema ? selectRecommendedQuantTrade(quantStrategies) : null, dashboardNarrative: stored.dashboardNarrative || getDashboardNarrativeStatus(stored.finalAnalysis) };
+};
+
+export const normalizeStoredDashboardSnapshot = (value: unknown): FinanceDashboardSnapshotPayload | null => {
+  if (!record(value)) return null;
+  const data = normalizeStoredDashboardData(value.data);
+  if (!data || !validTechnicalSnapshot(value.technicalData) || !validVixSnapshot(value.vixData)) return null;
+  return {
+    data,
+    vixData: value.vixData ?? null,
+    valuationData: value.valuationData ?? null,
+    technicalData: value.technicalData ?? null,
+  };
 };
 
 export const sanitizeDashboardHistory = (items: unknown): DashboardHistoryItem[] => !Array.isArray(items) ? [] : items

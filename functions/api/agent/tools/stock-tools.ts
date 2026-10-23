@@ -13,6 +13,8 @@ import {
   normalizeYahooChartResult,
   reportYahooChartValidation,
   isStrictFiniteNumber,
+  getYahooLatestBar,
+  yahooChartQuality,
 } from "../../../../src/lib/yahoo-finance-normalizer";
 
 // ── Yahoo Session Manager ──────────────────────────────────────────
@@ -123,30 +125,12 @@ async function handleGetRealtimeQuote(args: Record<string, any>): Promise<Record
   }
 
   const data = await res.json();
-  const result = data.chart?.result?.[0];
-  if (!result) {
-    return { error: `No data found for ${symbol}` };
-  }
-
-  const meta = result.meta || {};
   const normalized = normalizeYahooChartResult(data);
   reportYahooChartValidation(symbol, normalized);
-  if (normalized.malformedPayload) return {
-    error: `Yahoo returned malformed chart data for ${symbol}`,
-    partial: true,
-    rejected_bar_count: normalized.rejectedBarCount,
-    last_valid_date: normalized.lastValidDate,
-  };
-  const quote = result.indicators?.quote?.[0] || {};
-  const latestIndex = Math.max(
-    Array.isArray(result.timestamp) ? result.timestamp.length : 0,
-    Array.isArray(quote.open) ? quote.open.length : 0,
-    Array.isArray(quote.high) ? quote.high.length : 0,
-    Array.isArray(quote.low) ? quote.low.length : 0,
-    Array.isArray(quote.close) ? quote.close.length : 0,
-    Array.isArray(quote.volume) ? quote.volume.length : 0,
-  ) - 1;
-  const latestBar = normalized.bars.find((bar) => bar.index === latestIndex);
+  if (normalized.malformedPayload) return { error: `Yahoo returned malformed chart data for ${symbol}`, ...yahooChartQuality(normalized) };
+  const result = data.chart.result[0];
+  const meta = result.meta || {};
+  const latestBar = getYahooLatestBar(data, normalized);
   const rawPreviousClose = result.meta?.chartPreviousClose ?? result.meta?.previousClose;
   const previousClose = isStrictFiniteNumber(rawPreviousClose) && rawPreviousClose > 0 ? rawPreviousClose : null;
   const changePct = latestBar && previousClose !== null
@@ -169,9 +153,7 @@ async function handleGetRealtimeQuote(args: Record<string, any>): Promise<Record
     change_pct: changePct,
     volume: latestBar?.volume ?? null,
     quote_status: latestBar ? "available" : "unavailable",
-    partial: normalized.rejectedBarCount > 0,
-    rejected_bar_count: normalized.rejectedBarCount,
-    last_valid_date: normalized.lastValidDate,
+    ...yahooChartQuality(normalized),
     source_as_of: sourceAsOf,
     exchange: meta.exchangeName || "N/A",
     market_state: meta.marketState || "N/A",
@@ -215,19 +197,9 @@ async function handleGetDailyHistory(args: Record<string, any>): Promise<Record<
   }
 
   const data = await res.json();
-  const result = data.chart?.result?.[0];
-  if (!result) {
-    return { error: `No history data for ${symbol}` };
-  }
-
   const normalized = normalizeYahooChartResult(data);
   reportYahooChartValidation(symbol, normalized);
-  if (normalized.malformedPayload) return {
-    error: `Yahoo returned malformed chart data for ${symbol}`,
-    partial: true,
-    rejected_bar_count: normalized.rejectedBarCount,
-    last_valid_date: normalized.lastValidDate,
-  };
+  if (normalized.malformedPayload) return { error: `Yahoo returned malformed chart data for ${symbol}`, ...yahooChartQuality(normalized) };
   const completed = filterYahooFormingDailyBars(data, normalized.bars);
   const rows = completed.bars.map((bar) => ({
     date: bar.date,
@@ -243,9 +215,7 @@ async function handleGetDailyHistory(args: Record<string, any>): Promise<Record<
     period: `${days}d`,
     data_points: rows.length,
     history: rows,
-    partial: normalized.rejectedBarCount > 0 || completed.partialBarExcluded,
-    rejected_bar_count: normalized.rejectedBarCount,
-    last_valid_date: completed.bars.at(-1)?.date || null,
+    ...yahooChartQuality(normalized, completed.partialBarExcluded, completed.bars.at(-1)?.date || null),
   };
 }
 
@@ -295,28 +265,16 @@ async function handleCalculateMA(args: Record<string, any>): Promise<Record<stri
   }
 
   const data = await res.json();
-  const result = data.chart?.result?.[0];
-  if (!result) {
-    return { error: `No data for ${symbol}` };
-  }
-
   const normalized = normalizeYahooChartResult(data);
   reportYahooChartValidation(symbol, normalized);
-  if (normalized.malformedPayload) return {
-    error: `Yahoo returned malformed chart data for ${symbol}`,
-    partial: true,
-    rejected_bar_count: normalized.rejectedBarCount,
-    last_valid_date: normalized.lastValidDate,
-  };
+  if (normalized.malformedPayload) return { error: `Yahoo returned malformed chart data for ${symbol}`, ...yahooChartQuality(normalized) };
   const completed = filterYahooFormingDailyBars(data, normalized.bars);
   const closes = completed.bars.map((bar) => bar.close);
 
   if (closes.length === 0) {
     return {
       error: "No closing prices available",
-      partial: normalized.rejectedBarCount > 0 || completed.partialBarExcluded,
-      rejected_bar_count: normalized.rejectedBarCount,
-      last_valid_date: completed.bars.at(-1)?.date || null,
+      ...yahooChartQuality(normalized, completed.partialBarExcluded, completed.bars.at(-1)?.date || null),
     };
   }
 
@@ -356,9 +314,7 @@ async function handleCalculateMA(args: Record<string, any>): Promise<Record<stri
     moving_averages: maResults,
     ma_arrangement: arrangement,
     data_points_used: closes.length,
-    partial: normalized.rejectedBarCount > 0 || completed.partialBarExcluded,
-    rejected_bar_count: normalized.rejectedBarCount,
-    last_valid_date: completed.bars.at(-1)?.date || null,
+    ...yahooChartQuality(normalized, completed.partialBarExcluded, completed.bars.at(-1)?.date || null),
   };
 }
 

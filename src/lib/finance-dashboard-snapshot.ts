@@ -299,6 +299,6 @@ export const buildFinanceDashboardSnapshot = (input: {
     },
     vixData: input.vix && typeof input.vix === "object" && !(input.vix as any).error ? input.vix : null,
     valuationData: input.fundamentals && typeof input.fundamentals === "object" && !(input.fundamentals as any).error ? input.fundamentals : null,
-    technicalData: input.technical && typeof input.technical === "object" && !(input.technical as any).error ? input.technical : null,
+    technicalData: input.technical && typeof input.technical === "object" ? input.technical : null,
   };
 };

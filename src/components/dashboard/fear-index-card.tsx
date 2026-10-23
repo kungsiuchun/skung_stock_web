@@ -22,6 +22,9 @@ interface FearIndexProps {
     value: number;
     change_pct: number;
     history: number[];
+    partial?: boolean;
+    rejected_bar_count?: number;
+    last_valid_date?: string | null;
   } | null;
 }
 
@@ -91,6 +94,8 @@ export function FearIndexCard({ data }: FearIndexProps) {
           </div>
         </div>
       </div>
+
+      {data.partial && <p role="status" className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">資料部分被拒絕：{data.rejected_bar_count || 0} 筆；最後有效日期 {data.last_valid_date || "未提供"}。</p>}
 
       <div className="rounded-2xl border border-gray-100 bg-white px-2 py-3">
         <div className="mb-2 flex items-center justify-between px-1">

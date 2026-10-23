@@ -88,6 +88,10 @@ function finiteNumber(value: unknown): number | null {
   return Number.isFinite(numberValue) ? numberValue : null;
 }
 
+function strictFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 function clamp(value: number, min = 0, max = 100): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -161,7 +165,7 @@ export function unavailableSentiment(symbol: string, warnings: string[] = []): S
 export function deriveMarketMoodProxy(input: ProxyInput): SentimentApiResult {
   const components: SentimentComponent[] = [];
 
-  const changePct = finiteNumber(input.quote?.change_pct);
+  const changePct = strictFiniteNumber(input.quote?.change_pct);
   if (changePct !== null) {
     const score = roundedScore(50 + changePct * 6);
     components.push({
@@ -174,7 +178,7 @@ export function deriveMarketMoodProxy(input: ProxyInput): SentimentApiResult {
     });
   }
 
-  const callPutRatio = finiteNumber(input.options?.callPutRatio);
+  const callPutRatio = strictFiniteNumber(input.options?.callPutRatio);
   if (callPutRatio !== null && callPutRatio > 0) {
     const score = roundedScore(50 + (callPutRatio - 1) * 50);
     components.push({
@@ -188,8 +192,8 @@ export function deriveMarketMoodProxy(input: ProxyInput): SentimentApiResult {
   }
 
   if (input.technical) {
-    const position = finiteNumber(input.technical.position_percent);
-    const rsi = finiteNumber(input.technical.rsi_14);
+    const position = strictFiniteNumber(input.technical.position_percent);
+    const rsi = strictFiniteNumber(input.technical.rsi_14);
     let rawScore = 50;
     if (input.technical.is_bullish === true) rawScore += 30;
     if (input.technical.is_bearish === true) rawScore -= 23;
