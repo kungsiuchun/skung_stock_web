@@ -44,7 +44,7 @@ test("An available narrative cannot smuggle an object reason into unavailable re
 });
 
 test("Restored charts require real, unique and ascending effective chart dates", () => {
-  const point = (date_iso: string) => ({ date: date_iso, date_iso, price: 500, volume: 100 });
+  const point = (date_iso: string) => ({ date: date_iso, date_iso, price: 500, open: 495, high: 505, low: 490, volume: 100 });
   for (const chartData of [[point("invalid")], [point("2026-02-30")], [point("2026-10-19"), point("2026-10-19")],
     [point("2026-10-20"), point("2026-10-19")], [{ ...point("2026-10-19"), time: "invalid" }]]) {
     assert.equal(normalizeStoredDashboardData({ ...validData, chartData }), null);

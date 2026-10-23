@@ -10,6 +10,11 @@ import type { ToolDefinition } from "../types";
 import { buildStrategyContext, rankStrategyResults, runAlgorithmicStrategy, selectRecommendedTrade, type StrategyBar } from "../strategies/engine";
 import { TechnicalIndicators } from "../strategies/indicators";
 import { getStrategyResearchPolicy, isQuantStrategyId } from "../strategies/research-policy";
+import {
+  filterYahooFormingDailyBars,
+  normalizeYahooChartResult,
+  reportYahooChartValidation,
+} from "../../../../src/lib/yahoo-finance-normalizer";
 
 // ── Tool 1: analyze_trend ──────────────────────────────────────────
 
@@ -28,21 +33,18 @@ async function handleAnalyzeTrend(args: Record<string, any>): Promise<Record<str
   const result = data.chart?.result?.[0];
   if (!result) return { error: `No data for ${symbol}` };
 
-  const quote = result.indicators?.quote?.[0] || {};
-  const validIndices: number[] = [];
-  const closes: number[] = [];
-  (quote.close || []).forEach((c: any, idx: number) => {
-    if (c !== null) {
-      closes.push(c);
-      validIndices.push(idx);
-    }
-  });
-  const volumes: number[] = validIndices.map(i => quote.volume[i] || 0);
+  const normalized = normalizeYahooChartResult(data);
+  reportYahooChartValidation(symbol, normalized);
+  if (normalized.malformedPayload) return { error: `Yahoo returned malformed chart data for ${symbol}` };
+  const completed = filterYahooFormingDailyBars(data, normalized.bars);
+  const bars = completed.bars;
+  const closes = bars.map((bar) => bar.close);
+  const volumes = bars.map((bar) => bar.volume);
 
   if (closes.length < 30) return { error: "Insufficient data for trend analysis (need at least 30 days)" };
 
   // --- 1.5 Volume Analysis (Current vs 30d Avg) ---
-  const currentVolume = volumes[volumes.length - 1] || 0;
+  const currentVolume = volumes[volumes.length - 1];
   const volSlice = volumes.slice(Math.max(0, volumes.length - 30), volumes.length - 1); // exclude today
   const avgVolume30d = volSlice.length > 0 ? volSlice.reduce((a, b) => a + b, 0) / volSlice.length : 1;
   const volumeRatio = currentVolume / avgVolume30d;
@@ -101,15 +103,20 @@ async function handleAnalyzeTrend(args: Record<string, any>): Promise<Record<str
       low: low60.toFixed(2),
       position_percent: (((currentPrice - low60) / (high60 - low60)) * 100).toFixed(1)
     },
-    chart_data: closes.slice(-30).map((c, i) => {
-      const vIndex = validIndices[validIndices.length - closes.slice(-30).length + i];
-      const ts = result.timestamp?.[vIndex] || 0;
+    chart_data: bars.slice(-30).map((bar) => {
       return {
-        date: new Date(ts * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' }),
-        price: Number(c.toFixed(2)),
-        volume: Number(quote.volume?.[vIndex] || 0)
+        date: bar.date,
+        date_iso: bar.date,
+        price: Number(bar.close.toFixed(2)),
+        open: Number(bar.open.toFixed(2)),
+        high: Number(bar.high.toFixed(2)),
+        low: Number(bar.low.toFixed(2)),
+        volume: bar.volume,
       };
-    })
+    }),
+    partial: normalized.rejectedBarCount > 0 || completed.partialBarExcluded,
+    rejected_bar_count: normalized.rejectedBarCount,
+    last_valid_date: bars.at(-1)?.date || null,
   };
 }
 
@@ -146,42 +153,25 @@ async function handleRunAlgorithmicStrategy(args: Record<string, any>): Promise<
   ]);
   if (!stockResponse.ok) return { error: `Yahoo Finance API returned ${stockResponse.status}` };
 
-  const toCompletedBars = (payload: any, ticker: string): StrategyBar[] => {
-    const result = payload.chart?.result?.[0];
-    if (!result) return [];
-    const quote = result.indicators?.quote?.[0] || {};
-    const timestamps = result.timestamp || [];
-    const regularEnd = Number(result.meta?.currentTradingPeriod?.regular?.end);
-    const isRegularSessionOpen = Number.isFinite(regularEnd) && Date.now() / 1000 < regularEnd;
-    const regularDate = Number.isFinite(regularEnd) ? new Date(regularEnd * 1000).toISOString().slice(0, 10) : "";
-    const bars: StrategyBar[] = [];
-    let rejectedBarCount = 0;
-    for (let index = 0; index < timestamps.length; index += 1) {
-      // Yahoo can return null for an unfinished/missing close. Number(null) is 0,
-      // which previously escaped into chart_data even when the strategy engine rejected it.
-      const rawValues = [timestamps[index], quote.open?.[index], quote.high?.[index], quote.low?.[index], quote.close?.[index], quote.volume?.[index]];
-      if (!rawValues.every((value) => typeof value === "number" && Number.isFinite(value))) { rejectedBarCount++; continue; }
-      const close = Number(quote.close?.[index]);
-      const open = Number(quote.open?.[index]);
-      const high = Number(quote.high?.[index]);
-      const low = Number(quote.low?.[index]);
-      const volume = Number(quote.volume?.[index]);
-      const barDate = new Date(Number(timestamps[index]) * 1000);
-      if (!Number.isFinite(barDate.getTime())) { rejectedBarCount++; continue; }
-      const date = barDate.toISOString().slice(0, 10);
-      if (isRegularSessionOpen && date === regularDate) continue;
-      if (timestamps[index] <= 0 || Math.min(open, high, low, close) <= 0 || volume < 0
-        || low > Math.min(open, close) || high < Math.max(open, close)) { rejectedBarCount++; continue; }
-      bars.push({ date, open, high, low, close, volume });
-    }
-    if (rejectedBarCount) console.warn("[FinanceOHLCValidation]", JSON.stringify({ symbol: ticker, rejectedBarCount, lastValidDate: bars[bars.length - 1]?.date || null }));
-    return bars;
+  const toCompletedBars = (payload: any, ticker: string) => {
+    const normalized = normalizeYahooChartResult(payload);
+    reportYahooChartValidation(ticker, normalized);
+    if (normalized.malformedPayload) return { bars: [] as StrategyBar[], rejectedBarCount: normalized.rejectedBarCount, lastValidDate: null as string | null, partialSessionExcluded: false };
+    const completed = filterYahooFormingDailyBars(payload, normalized.bars);
+    return {
+      bars: completed.bars.map(({ date, open, high, low, close, volume }) => ({ date, open, high, low, close, volume })),
+      rejectedBarCount: normalized.rejectedBarCount,
+      lastValidDate: completed.bars.at(-1)?.date || null,
+      partialSessionExcluded: completed.partialBarExcluded,
+    };
   };
 
   const stockPayload = await stockResponse.json();
   const benchmarkPayload = benchmarkResponse.ok ? await benchmarkResponse.json() : null;
-  const bars = toCompletedBars(stockPayload, symbol);
-  const benchmarkBars = benchmarkPayload ? toCompletedBars(benchmarkPayload, "SPY") : [];
+  const stockData = toCompletedBars(stockPayload, symbol);
+  const benchmarkData = benchmarkPayload ? toCompletedBars(benchmarkPayload, "SPY") : null;
+  const bars = stockData.bars;
+  const benchmarkBars = benchmarkData?.bars || [];
   let context;
   try {
     context = buildStrategyContext({ symbol, bars, benchmarkBars });
@@ -223,8 +213,14 @@ async function handleRunAlgorithmicStrategy(args: Record<string, any>): Promise<
         atr14: Number(context.atr14?.toFixed(2)),
         relative_volume_20d: Number(context.volumeRatio?.toFixed(2)),
         relative_strength_vs_spy_20d: context.relativeStrength20 === null ? null : Number(context.relativeStrength20.toFixed(2)),
-        partial_session_excluded: true,
+        partial_session_excluded: stockData.partialSessionExcluded,
+        data_partial: stockData.rejectedBarCount > 0 || stockData.partialSessionExcluded,
+        rejected_bar_count: stockData.rejectedBarCount,
+        last_valid_date: stockData.lastValidDate,
       },
+      partial: stockData.rejectedBarCount > 0 || stockData.partialSessionExcluded,
+      rejected_bar_count: stockData.rejectedBarCount,
+      last_valid_date: stockData.lastValidDate,
       timestamp: new Date().toISOString(),
       chart_data: chartData,
     };
@@ -243,8 +239,14 @@ async function handleRunAlgorithmicStrategy(args: Record<string, any>): Promise<
       atr14: Number(context.atr14?.toFixed(2)),
       relative_volume_20d: Number(context.volumeRatio?.toFixed(2)),
       relative_strength_vs_spy_20d: context.relativeStrength20 === null ? null : Number(context.relativeStrength20.toFixed(2)),
-      partial_session_excluded: true,
+      partial_session_excluded: stockData.partialSessionExcluded,
+      data_partial: stockData.rejectedBarCount > 0 || stockData.partialSessionExcluded,
+      rejected_bar_count: stockData.rejectedBarCount,
+      last_valid_date: stockData.lastValidDate,
     },
+    partial: stockData.rejectedBarCount > 0 || stockData.partialSessionExcluded,
+    rejected_bar_count: stockData.rejectedBarCount,
+    last_valid_date: stockData.lastValidDate,
     timestamp: new Date().toISOString(),
     chart_data: chartData,
   };

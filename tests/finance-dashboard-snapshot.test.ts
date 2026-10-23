@@ -7,7 +7,7 @@ const agent = {
   reply: "## 即時行情\nAAPL 測試報告\n## 期權鏈分析\n資料\n## 量化策略分析\n資料\n## 綜合分析結論\n資料\n## 交易建議\n資料",
   dashboardDecision: { trend: "bullish", action: "buy", confidence: 70, evidence: ["quote", "options"] },
   steps: [
-    { type: "tool_call", tool_name: "get_realtime_quote", tool_result: JSON.stringify({ price: 200, change_pct: 1.5, chart_data: [{ date: "2026-07-14", price: 200, volume: 100 }] }) },
+    { type: "tool_call", tool_name: "get_realtime_quote", tool_result: JSON.stringify({ price: 200, change_pct: 1.5, chart_data: [{ date: "2026-07-14", date_iso: "2026-07-14", price: 200, open: 199, high: 201, low: 198, volume: 100 }] }) },
     { type: "tool_call", tool_name: "get_options_chain", tool_result: JSON.stringify({ underlying_price: 200, calls: [{ strike: 200, open_interest: 10 }], puts: [{ strike: 195, open_interest: 5 }] }) },
     {
       type: "tool_call",

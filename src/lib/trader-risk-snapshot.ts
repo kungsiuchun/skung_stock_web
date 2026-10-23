@@ -1,3 +1,5 @@
+import { isStrictFiniteNumber } from "./yahoo-finance-normalizer";
+
 export interface TraderRiskBar {
   label: string;
   value: string;
@@ -25,14 +27,14 @@ export interface TraderRiskCandle {
 
 export const isValidTraderRiskCandle = (item: TraderRiskCandle): boolean => {
   const close = item.price;
-  const open = item.open ?? close;
-  const high = item.high ?? close;
-  const low = item.low ?? close;
-  return typeof close === "number" && Number.isFinite(close) && close > 0
-    && typeof open === "number" && Number.isFinite(open) && open > 0
-    && typeof high === "number" && Number.isFinite(high) && high >= Math.max(open, close)
-    && typeof low === "number" && Number.isFinite(low) && low > 0 && low <= Math.min(open, close)
-    && typeof item.volume === "number" && Number.isFinite(item.volume) && item.volume >= 0;
+  const open = item.open;
+  const high = item.high;
+  const low = item.low;
+  return isStrictFiniteNumber(close) && close > 0
+    && isStrictFiniteNumber(open) && open > 0
+    && isStrictFiniteNumber(high) && high >= Math.max(open, close)
+    && isStrictFiniteNumber(low) && low > 0 && low <= Math.min(open, close)
+    && isStrictFiniteNumber(item.volume) && item.volume >= 0;
 };
 
 const formatCompactUsd = (value: number | null) => {
@@ -60,16 +62,16 @@ const metricTone = (
   return "amber";
 };
 
-export function deriveTraderRiskSnapshot(candles: TraderRiskCandle[]): TraderRiskSnapshot {
-  const invalidBarCount = candles.filter((item) => !isValidTraderRiskCandle(item)).length;
+export function deriveTraderRiskSnapshot(candles: TraderRiskCandle[], rejectedBarCount = 0): TraderRiskSnapshot {
+  const invalidBarCount = Math.max(rejectedBarCount, candles.filter((item) => !isValidTraderRiskCandle(item)).length);
   // Refuse misleading risk numbers rather than silently substitute an older bar.
   const clean = (invalidBarCount ? [] : candles)
     .map((item) => ({
-      close: Number(item.price),
-      open: Number(item.open ?? item.price),
-      high: Number(item.high ?? item.price),
-      low: Number(item.low ?? item.price),
-      volume: Number(item.volume),
+      close: item.price as number,
+      open: item.open as number,
+      high: item.high as number,
+      low: item.low as number,
+      volume: item.volume as number,
     }))
     .filter((item) =>
       Number.isFinite(item.close) &&

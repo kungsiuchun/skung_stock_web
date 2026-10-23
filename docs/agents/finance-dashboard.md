@@ -33,8 +33,11 @@ Read this file only for Finance Analyzer UI, its Pages Functions, or related UAT
   describe provenance, not successful connectivity; do not hardcode healthy states.
 - Invalid OHLC rows are visibly excluded from the chart, and invalidate derived
   risk metrics rather than substituting an older row. The Finance Agent's Yahoo
-  normalization rejects null/non-numeric or impossible OHLC before both strategy
-  context and chart construction, with a scoped rejection-count log.
+  normalization rejects null/non-numeric or impossible OHLC and invalid dates
+  before both strategy context and chart construction, with a scoped
+  rejection-count log. A missing latest quote remains unavailable rather than
+  becoming a zero price or zero change; snapshots expose partial state and the
+  actual last valid date.
 - Browser persistence is optional: blocked/full/corrupt storage produces a visible warning, not a route failure or a synthetic API error. Initial hydration must never write empty history over saved data. Invalid saved payloads are not silently deleted.
 - Only validated history metadata and render-safe saved results may be restored. History analysis passes its selected ticker explicitly; restored results clear valuation, technical, VIX and cache metadata that were not saved with that history entry.
 - Never use `height="100%"` for Recharts in a flex container; use an explicit

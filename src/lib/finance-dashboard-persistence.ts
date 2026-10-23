@@ -6,6 +6,11 @@ import { normalizeDashboardDecision } from "./finance-dashboard-ai-decision";
 import { getDashboardNarrativeStatus } from "./finance-dashboard-narrative";
 import type { FinanceDashboardData } from "./finance-dashboard-snapshot";
 import { readBrowserJson } from "./browser-storage";
+import {
+  isValidIsoDate,
+  isValidIsoTimestamp,
+  normalizeFinanceChartPoint,
+} from "./yahoo-finance-normalizer";
 
 export interface DashboardHistoryItem {
   symbol: string;
@@ -20,6 +25,7 @@ const finite = (value: unknown): value is number => typeof value === "number" &&
 const text = (value: unknown): value is string => typeof value === "string";
 const optionalText = (value: unknown) => value === undefined || text(value);
 const optionalNumber = (value: unknown) => value === undefined || finite(value);
+const optionalNonNegativeInteger = (value: unknown) => value === undefined || typeof value === "number" && Number.isInteger(value) && value >= 0;
 const validStoredStrategy = (item: unknown) => {
   if (!record(item) || !finite(item.score) || !["entry", "stopLoss", "target"].every((key) => optionalNumber(item[key]))) return false;
   const setup = item.tradeSetup || item.trade_setup;
@@ -32,19 +38,22 @@ const validStoredStrategy = (item: unknown) => {
 };
 
 const validRenderData = (data: Record<string, unknown>) => {
-  if (!text(data.symbol) || !data.symbol.trim() || !finite(data.price) || !text(data.change) || !finite(data.algoRating)
+  if (!text(data.symbol) || !data.symbol.trim() || !finite(data.price) || data.price <= 0 || !text(data.change) || !finite(data.algoRating)
     || !(data.marketSentiment === null || finite(data.marketSentiment)) || !optionalText(data.sentimentSource)
     || !optionalText(data.finalAnalysis) || !record(data.strategyPoints)
     || !["entry", "stopLoss", "takeProfit"].every((key) => optionalNumber((data.strategyPoints as Record<string, unknown>)[key]))) return false;
+  if ((data.quoteStatus !== undefined && data.quoteStatus !== "available" && data.quoteStatus !== "unavailable")
+    || (data.quoteSourceAsOf !== undefined && data.quoteSourceAsOf !== null && !isValidIsoTimestamp(data.quoteSourceAsOf))
+    || !optionalNonNegativeInteger(data.chartDataRejectedCount)
+    || (data.chartDataPartial !== undefined && typeof data.chartDataPartial !== "boolean")
+    || (data.chartDataLastValidDate !== undefined && data.chartDataLastValidDate !== null && !isValidIsoDate(data.chartDataLastValidDate))) return false;
   if (!Array.isArray(data.news) || !data.news.every((item) => record(item)
     && ["title", "publisher", "publish_time", "link"].every((key) => text(item[key])) && optionalText(item.source))) return false;
-  if (!Array.isArray(data.chartData) || !data.chartData.every((item) => record(item) && text(item.date)
-    && finite(item.price) && finite(item.volume) && optionalText(item.date_iso) && optionalText(item.time)
-    && ["open", "high", "low", "close"].every((key) => optionalNumber(item[key])))) return false;
+  if (!Array.isArray(data.chartData) || !data.chartData.every((item) => record(item) && text(item.date) && normalizeFinanceChartPoint(item))) return false;
   let previousTime = "";
   for (const point of data.chartData) {
-    const time = point.time || point.date_iso;
-    if (!text(time) || !/^\d{4}-\d{2}-\d{2}$/.test(time)) return false;
+    const time = point.date_iso || point.time;
+    if (!isValidIsoDate(time)) return false;
     const timestamp = Date.parse(`${time}T00:00:00Z`);
     if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== time || time <= previousTime) return false;
     previousTime = time;

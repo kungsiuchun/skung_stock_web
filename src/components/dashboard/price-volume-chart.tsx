@@ -22,22 +22,26 @@ import {
   type CandlestickClientResult,
 } from "@/lib/candlestick-pattern-client";
 import type { SupportResistanceRole, SupportResistanceZone } from "@/lib/support-resistance";
-import { isValidTraderRiskCandle } from "@/lib/trader-risk-snapshot";
+import { normalizeFinanceChartPoint } from "@/lib/yahoo-finance-normalizer";
 
 interface ChartDataPoint {
-  date_iso?: string;
-  time?: string;
-  price?: number;
-  close?: number;
-  open?: number;
-  high?: number;
-  low?: number;
-  volume?: number;
+  date?: unknown;
+  date_iso?: unknown;
+  time?: unknown;
+  price?: unknown;
+  close?: unknown;
+  open?: unknown;
+  high?: unknown;
+  low?: unknown;
+  volume?: unknown;
 }
 
 interface PriceVolumeChartProps {
   data: ChartDataPoint[];
   symbol: string;
+  rejectedBarCount?: number;
+  lastValidDate?: string | null;
+  partial?: boolean;
 }
 
 type CachedAnalysis = CandlestickClientResult;
@@ -185,7 +189,7 @@ function SupportResistanceTile({
   );
 }
 
-export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
+export function PriceVolumeChart({ data, symbol, rejectedBarCount = 0, lastValidDate, partial = false }: PriceVolumeChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<ReturnType<typeof createChart> | null>(null);
   const requestGenerationRef = useRef(0);
@@ -259,15 +263,20 @@ export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
   );
 
   const validData = useMemo(() => chartData
-      .map((point) => ({
-        time: point.time || point.date_iso,
-        open: Number(point.open ?? point.price),
-        high: Number(point.high ?? point.price),
-        low: Number(point.low ?? point.price),
-        close: Number(point.close ?? point.price),
-        volume: Number(point.volume),
-      }))
-      .filter((point) => Boolean(point.time) && isValidTraderRiskCandle({ ...point, price: point.close })), [chartData]);
+    .map((point) => {
+      const normalized = normalizeFinanceChartPoint(point);
+      return normalized ? {
+        time: normalized.date_iso,
+        open: normalized.open,
+        high: normalized.high,
+        low: normalized.low,
+        close: normalized.price,
+        volume: normalized.volume,
+      } : null;
+    })
+    .filter((point): point is { time: string; open: number; high: number; low: number; close: number; volume: number } => point !== null), [chartData]);
+  const invalidChartDataCount = chartData.filter((point) => normalizeFinanceChartPoint(point) === null).length;
+  const excludedBarCount = Math.max(rejectedBarCount, invalidChartDataCount);
 
   useEffect(() => {
     if (!containerRef.current || validData.length === 0) return;
@@ -419,7 +428,7 @@ export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
         )}
       </div>
 
-      {validData.length < chartData.length && <p role="status" className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">{chartData.length - validData.length} 筆日線價量資料無效，未繪製；圖表僅顯示有效日期，請刷新研究資料。</p>}
+      {(excludedBarCount > 0 || partial) && <p role="status" className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">{excludedBarCount > 0 ? `${excludedBarCount} 筆日線價量資料無效，未繪製；` : "資料未完整；"}圖表僅顯示有效日期{lastValidDate ? `，最後有效日期 ${lastValidDate}` : ""}，請刷新研究資料。</p>}
       {patternsEnabled && error && (
         <div className="mt-4 flex items-start gap-3 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-800" role="alert">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />

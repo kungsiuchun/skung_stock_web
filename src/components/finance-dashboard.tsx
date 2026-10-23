@@ -37,10 +37,10 @@ export function FinanceDashboard({ showChat = false, onCloseChat, onOpenChat }: 
         <FinanceWorkspaceSummary data={activeData} cache={cache} onRefresh={() => { void analyze(activeData.symbol); }} />
         <div className="grid min-w-0 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_280px]">
           <section aria-label={`${activeData.symbol} 價格與成交量`} className="order-1 min-w-0 rounded-xl border border-slate-200 bg-white p-3 sm:p-4 xl:col-start-1 xl:row-start-1">
-            <PriceVolumeChart key={activeData.symbol} data={activeData.chartData} symbol={activeData.symbol} />
+            <PriceVolumeChart key={activeData.symbol} data={activeData.chartData} symbol={activeData.symbol} rejectedBarCount={activeData.chartDataRejectedCount} lastValidDate={activeData.chartDataLastValidDate} partial={activeData.chartDataPartial} />
           </section>
           <aside aria-label="研究快覽" className="order-3 min-w-0 space-y-3 xl:order-none xl:col-start-2 xl:row-span-2 xl:row-start-1">
-            <TraderRiskSnapshotCard data={activeData.chartData} />
+            <TraderRiskSnapshotCard data={activeData.chartData} rejectedBarCount={activeData.chartDataRejectedCount} />
             <FinanceWorkspaceSources />
           </aside>
           <div className="order-2 min-w-0 xl:col-start-1"><FinanceResearchPanels snapshot={workspace} /></div>

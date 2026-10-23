@@ -1,0 +1,229 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { ALL_ANALYSIS_TOOLS } from "../functions/api/agent/tools/analysis-tools";
+import { ALL_STOCK_TOOLS } from "../functions/api/agent/tools/stock-tools";
+import { ToolRegistry } from "../functions/api/agent/registry";
+import { buildFinanceDashboardSnapshot } from "../src/lib/finance-dashboard-snapshot";
+import { normalizeStoredDashboardData } from "../src/lib/finance-dashboard-persistence";
+import { deriveTraderRiskSnapshot } from "../src/lib/trader-risk-snapshot";
+import { normalizeFinanceChartData } from "../src/lib/yahoo-finance-normalizer";
+
+const originalFetch = globalThis.fetch;
+
+const dateFor = (index: number) => {
+  const date = new Date(Date.UTC(2025, 0, 1 + index));
+  return date.toISOString().slice(0, 10);
+};
+
+const rowFor = (index: number) => {
+  const close = 100 + index * 0.1;
+  return {
+    timestamp: Date.parse(`${dateFor(index)}T00:00:00.000Z`) / 1_000,
+    open: close - 0.5,
+    high: close + 1,
+    low: close - 1,
+    close,
+    volume: 1_000 + index,
+  };
+};
+
+const yahooPayload = (rows: Array<Record<string, unknown>>, previousClose?: number) => ({
+  chart: {
+    result: [{
+      timestamp: rows.map((row) => row.timestamp),
+      indicators: { quote: [{
+        open: rows.map((row) => row.open),
+        high: rows.map((row) => row.high),
+        low: rows.map((row) => row.low),
+        close: rows.map((row) => row.close),
+        volume: rows.map((row) => row.volume),
+      }] },
+      meta: {
+        ...(previousClose === undefined ? {} : { chartPreviousClose: previousClose }),
+        currentTradingPeriod: { regular: { end: Date.parse("2024-01-01T00:00:00.000Z") / 1_000 } },
+      },
+    }],
+  },
+});
+
+const setYahooPayload = (payload: unknown) => {
+  globalThis.fetch = (async () => new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  })) as typeof fetch;
+};
+
+const registry = () => {
+  const value = new ToolRegistry();
+  value.registerAll([...ALL_STOCK_TOOLS, ...ALL_ANALYSIS_TOOLS]);
+  return value;
+};
+
+const validChartPoint = (date: string) => ({
+  date,
+  date_iso: date,
+  price: 100,
+  open: 99,
+  high: 101,
+  low: 98,
+  volume: 1_000,
+});
+
+test.afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
+
+test("public quote tool never turns a missing latest close into a price or change", async () => {
+  const rows = [rowFor(0), { ...rowFor(1), close: null }];
+  setYahooPayload(yahooPayload(rows, 100));
+  const result = await registry().execute("get_realtime_quote", { stock_code: "AAPL" });
+
+  assert.equal(result.price, null);
+  assert.equal(result.change_pct, null);
+  assert.equal(result.volume, null);
+  assert.equal(result.quote_status, "unavailable");
+  assert.equal(result.last_valid_date, dateFor(0));
+});
+
+test("public quote tool keeps a genuine zero change and exposes missing previous close", async () => {
+  setYahooPayload(yahooPayload([rowFor(0)], 100));
+  const unchanged = await registry().execute("get_realtime_quote", { stock_code: "AAPL" });
+  assert.equal(unchanged.change_pct, 0);
+
+  setYahooPayload(yahooPayload([rowFor(0)]));
+  const missingPrevious = await registry().execute("get_realtime_quote", { stock_code: "AAPL" });
+  assert.equal(missingPrevious.price, 100);
+  assert.equal(missingPrevious.change_pct, null);
+});
+
+test("public history, moving average and trend tools reject malformed Yahoo rows", async () => {
+  const rows = Array.from({ length: 35 }, (_, index) => rowFor(index));
+  rows[5].close = "100.5";
+  rows[10].volume = undefined;
+  rows[15].open = true;
+  rows[20].timestamp = undefined;
+  rows[21].timestamp = Number.MAX_VALUE;
+  setYahooPayload(yahooPayload(rows));
+
+  const tools = registry();
+  const history = await tools.execute("get_daily_history", { stock_code: "AAPL", days: 40 });
+  assert.equal(history.rejected_bar_count, 5);
+  assert.equal(history.history.length, 30);
+  assert.equal(history.last_valid_date, dateFor(34));
+  assert.ok(history.history.every((row: Record<string, unknown>) => typeof row.close === "number" && row.close > 0 && typeof row.volume === "number"));
+
+  const movingAverage = await tools.execute("calculate_ma", { stock_code: "AAPL", periods: [5, 10, 20] });
+  assert.equal(movingAverage.data_points_used, 30);
+  assert.equal(movingAverage.last_valid_date, dateFor(34));
+
+  const trend = await tools.execute("analyze_trend", { stock_code: "AAPL" });
+  assert.equal(trend.rejected_bar_count, 5);
+  assert.equal(trend.last_valid_date, dateFor(34));
+  assert.ok(trend.chart_data.every((row: Record<string, unknown>) => row.date_iso !== "1970-01-01" && typeof row.volume === "number"));
+});
+
+test("public strategy tool keeps the actual last valid date when the latest row is rejected", async () => {
+  const rows = Array.from({ length: 222 }, (_, index) => rowFor(index));
+  rows[221].close = null;
+  setYahooPayload(yahooPayload(rows));
+  const result = await registry().execute("run_algorithmic_strategy", { stock_code: "AAPL", strategy_name: "all" });
+
+  assert.equal(result.rejected_bar_count, 1);
+  assert.equal(result.partial, true);
+  assert.equal(result.last_valid_date, dateFor(220));
+  assert.equal(result.chart_data.at(-1).date_iso, dateFor(220));
+  assert.ok(result.chart_data.every((row: Record<string, unknown>) => typeof row.price === "number" && row.price > 0));
+});
+
+test("snapshot and chart boundaries reject malformed rows without manufacturing quote values", () => {
+  const snapshot = buildFinanceDashboardSnapshot({
+    symbol: "AAPL",
+    agent: {
+      success: true,
+      steps: [
+        { type: "tool_call", tool_name: "get_realtime_quote", tool_result: JSON.stringify({ price: null, change_pct: null }) },
+        { type: "tool_call", tool_name: "run_algorithmic_strategy", tool_result: JSON.stringify({
+          partial: true,
+          rejected_bar_count: 3,
+          last_valid_date: "2025-01-01",
+          chart_data: [validChartPoint("2025-01-01"), { ...validChartPoint("2025-01-02"), price: "100" }, { ...validChartPoint("invalid") }],
+        }) },
+      ],
+    },
+    news: {}, vix: null, fundamentals: null, technical: null, sentiment: null,
+  });
+
+  assert.equal(snapshot.data.price, null);
+  assert.equal(snapshot.data.change, "未提供");
+  assert.equal(snapshot.data.quoteStatus, "unavailable");
+  assert.equal(snapshot.data.chartData.length, 1);
+  assert.equal(snapshot.data.chartDataRejectedCount, 3);
+  assert.equal(snapshot.data.chartDataLastValidDate, "2025-01-01");
+  assert.equal(snapshot.data.chartDataPartial, true);
+
+  const unchanged = buildFinanceDashboardSnapshot({
+    symbol: "AAPL",
+    agent: {
+      success: true,
+      steps: [{ type: "tool_call", tool_name: "get_realtime_quote", tool_result: JSON.stringify({ price: 100, change_pct: 0 }) }],
+    },
+    news: {}, vix: null, fundamentals: null, technical: null, sentiment: null,
+  });
+  assert.equal(unchanged.data.price, 100);
+  assert.equal(unchanged.data.change, "+0.00%");
+  assert.equal(unchanged.data.quoteStatus, "available");
+
+  const zeroPrice = buildFinanceDashboardSnapshot({
+    symbol: "AAPL",
+    agent: {
+      success: true,
+      steps: [{ type: "tool_call", tool_name: "get_realtime_quote", tool_result: JSON.stringify({ price: 0, change_pct: 0 }) }],
+    },
+    news: {}, vix: null, fundamentals: null, technical: null, sentiment: null,
+  });
+  assert.equal(zeroPrice.data.price, null);
+  assert.equal(zeroPrice.data.change, "未提供");
+  assert.equal(zeroPrice.data.quoteStatus, "unavailable");
+
+  const unavailableQuote = buildFinanceDashboardSnapshot({
+    symbol: "AAPL",
+    agent: {
+      success: true,
+      steps: [{ type: "tool_call", tool_name: "get_realtime_quote", tool_result: JSON.stringify({ price: 100, change_pct: -100, quote_status: "unavailable" }) }],
+    },
+    news: {}, vix: null, fundamentals: null, technical: null, sentiment: null,
+  });
+  assert.equal(unavailableQuote.data.price, null);
+  assert.equal(unavailableQuote.data.change, "未提供");
+
+  const chart = normalizeFinanceChartData([
+    validChartPoint("2025-01-01"),
+    { ...validChartPoint("2025-01-02"), price: "100" },
+    { ...validChartPoint("2025-01-03"), volume: null },
+    { ...validChartPoint("2025-01-04"), date_iso: "2025-02-30" },
+    { ...validChartPoint("2025-01-05"), price: 0 },
+  ]);
+  assert.equal(chart.bars.length, 1);
+  assert.equal(chart.rejectedBarCount, 4);
+});
+
+test("saved zero prices and invalid saved bars cannot bypass the boundary", () => {
+  const base = {
+    symbol: "AAPL", price: 100, change: "+0.00%", algoRating: 50, marketSentiment: null,
+    strategyPoints: {}, news: [], chartData: [validChartPoint("2025-01-01")],
+    quantStrategies: [], quantStrategySchemaVersion: "v3" as const,
+  };
+  assert.ok(normalizeStoredDashboardData(base));
+  assert.equal(normalizeStoredDashboardData({ ...base, price: 0 }), null);
+  assert.equal(normalizeStoredDashboardData({ ...base, chartData: [{ ...validChartPoint("2025-01-01"), price: 0 }] }), null);
+  assert.equal(normalizeStoredDashboardData({ ...base, chartData: [{ ...validChartPoint("2025-01-01"), volume: "1000" }] }), null);
+  assert.equal(normalizeStoredDashboardData({ ...base, chartData: [{ ...validChartPoint("2025-01-01"), date_iso: "invalid" }] }), null);
+});
+
+test("rejected source rows stop risk metrics even when invalid rows were excluded upstream", () => {
+  const snapshot = deriveTraderRiskSnapshot([validChartPoint("2025-01-01")], 1);
+  assert.equal(snapshot.invalidBarCount, 1);
+  assert.equal(snapshot.dollarVolume, null);
+  assert.ok(snapshot.bars.every((bar) => bar.value === "Needs data"));
+});

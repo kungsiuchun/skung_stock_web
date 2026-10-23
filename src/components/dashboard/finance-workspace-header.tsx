@@ -44,18 +44,20 @@ const dateTime = (value: string | null | undefined) => value && Number.isFinite(
 export function FinanceWorkspaceSummary({ data, cache, onRefresh }: { data: FinanceDashboardData; cache: MarketCacheMetadata | null; onRefresh: () => void }) {
   const validBars = data.chartData.filter(isValidTraderRiskCandle);
   const lastBar = validBars[validBars.length - 1];
+  const quoteAvailable = typeof data.price === "number" && data.price > 0 && data.quoteStatus !== "unavailable";
+  const changeAvailable = data.change !== "未提供";
   return <section aria-label="標的摘要" data-symbol={data.symbol} className="space-y-2 py-4">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
         <h2 className="text-2xl font-bold tracking-tight text-slate-950">{data.symbol}</h2>
-        <span className="font-mono text-2xl font-semibold tabular-nums text-slate-950">${data.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-        <span className={`font-mono text-sm font-semibold ${data.change.startsWith("-") ? "text-red-600" : "text-emerald-700"}`}>{data.change}</span>
+        <span className="font-mono text-2xl font-semibold tabular-nums text-slate-950">{quoteAvailable ? `$${data.price!.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "報價未提供"}</span>
+        <span className={`font-mono text-sm font-semibold ${!changeAvailable ? "text-slate-500" : data.change.startsWith("-") ? "text-red-600" : "text-emerald-700"}`}>{changeAvailable ? data.change : "變動未提供"}</span>
       </div>
       <button type="button" onClick={onRefresh} aria-label={`刷新 ${data.symbol}`} className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold hover:border-blue-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"><RefreshCw className="h-4 w-4" />刷新</button>
     </div>
     <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
       <span>{cache ? (cache.status === "refreshed" || cache.status === "bypassed" ? "本次查詢" : "快取快照") : "已儲存研究 · 請刷新取得最新資料"}</span>
-      <span>報價時間未提供</span>
+      <span>{data.quoteSourceAsOf ? `報價時間 ${dateTime(data.quoteSourceAsOf)}` : "報價時間未提供"}</span>
       <span>日線截至 <span className="font-mono text-slate-700">{lastBar?.date_iso || lastBar?.date || "未提供"}</span></span>
       <span>量化評分 <span className="font-mono font-semibold text-slate-700">{data.algoRating}</span></span>
     </div>
@@ -63,7 +65,7 @@ export function FinanceWorkspaceSummary({ data, cache, onRefresh }: { data: Fina
       <span>{cache ? `快照來源時間：${dateTime(cache.sourceAsOf)} · 快取建立：${dateTime(cache.cachedAt)}` : "歷史結果未保存來源時間及技術／估值／VIX 快照。"}</span>
     </p>
     {cache?.status === "stale" && <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">來源暫時無法更新，正顯示 {cache.ageSeconds} 秒前資料。原因：{cache.refreshError || "未提供"}</p>}
-    {lastBar && Math.abs(lastBar.price - data.price) >= 0.005 && <p className="text-xs text-amber-800">快照報價與日線末值 ${lastBar.price.toFixed(2)} 不同；未提供報價時間，無法確認是否同一時點。</p>}
+    {quoteAvailable && lastBar && Math.abs(lastBar.price - data.price!) >= 0.005 && <p className="text-xs text-amber-800">快照報價與日線末值 ${lastBar.price.toFixed(2)} 不同；未提供報價時間，無法確認是否同一時點。</p>}
   </section>;
 }
 

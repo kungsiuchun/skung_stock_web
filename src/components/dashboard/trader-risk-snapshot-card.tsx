@@ -3,6 +3,7 @@ import { deriveTraderRiskSnapshot, type TraderRiskCandle, type TraderRiskBar } f
 
 interface TraderRiskSnapshotCardProps {
   data: TraderRiskCandle[];
+  rejectedBarCount?: number;
 }
 
 const toneClass: Record<TraderRiskBar["tone"], string> = {
@@ -12,8 +13,8 @@ const toneClass: Record<TraderRiskBar["tone"], string> = {
   gray: "bg-gray-50 text-gray-500 border-gray-100",
 };
 
-export function TraderRiskSnapshotCard({ data }: TraderRiskSnapshotCardProps) {
-  const snapshot = deriveTraderRiskSnapshot(data);
+export function TraderRiskSnapshotCard({ data, rejectedBarCount = 0 }: TraderRiskSnapshotCardProps) {
+  const snapshot = deriveTraderRiskSnapshot(data, rejectedBarCount);
 
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-4">
