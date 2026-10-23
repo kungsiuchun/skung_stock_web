@@ -36,3 +36,14 @@ test("deriveTraderRiskSnapshot reports Needs data when candles are unavailable",
   assert.equal(snapshot.rangePositionPct, null);
   assert.equal(snapshot.bars[0].value, "Needs data");
 });
+
+test("invalid OHLC stops risk metrics instead of presenting zero price or an older candle", () => {
+  const valid = { price: 343.99, open: 339.36, high: 345.25, low: 338.83, volume: 35_614_100 };
+  for (const invalid of [{ ...valid, price: 0 }, { ...valid, high: 300 }, { ...valid, volume: -1 }]) {
+    const snapshot = deriveTraderRiskSnapshot([valid, invalid]);
+    assert.equal(snapshot.invalidBarCount, 1);
+    assert.equal(snapshot.dollarVolume, null);
+    assert.equal(snapshot.rangePositionPct, null);
+    assert.ok(snapshot.bars.every((bar) => bar.value === "Needs data"));
+  }
+});

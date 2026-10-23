@@ -46,7 +46,7 @@ test("client accepts explicit stale 206 responses", async () => {
       data: { schemaVersion: "v2" },
       cache: { status: "stale" },
       requestId: "req-stale",
-    }), { status: 206 })) as typeof fetch,
+    }), { status: 206, headers: { "Content-Type": "application/json" } })) as typeof fetch,
   });
   assert.equal(result.cache.status, "stale");
   assert.equal(result.requestId, "req-stale");
@@ -59,7 +59,7 @@ test("client exposes request IDs for malformed JSON and HTTP failures", async ()
       interval: "1d",
       fetcher: (async () => new Response("not-json", {
         status: 502,
-        headers: { "X-Request-ID": "req-json" },
+        headers: { "Content-Type": "application/json", "X-Request-ID": "req-json" },
       })) as typeof fetch,
     }),
     /Request ID: req-json/,
@@ -72,7 +72,7 @@ test("client exposes request IDs for malformed JSON and HTTP failures", async ()
       fetcher: (async () => new Response(JSON.stringify({
         error: "upstream failed",
         requestId: "req-http",
-      }), { status: 504 })) as typeof fetch,
+      }), { status: 504, headers: { "Content-Type": "application/json" } })) as typeof fetch,
     }),
     /upstream failed Request ID: req-http/,
   );

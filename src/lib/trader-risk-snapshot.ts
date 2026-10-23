@@ -7,6 +7,7 @@ export interface TraderRiskBar {
 
 export interface TraderRiskSnapshot {
   source: string;
+  invalidBarCount: number;
   dollarVolume: number | null;
   relativeVolume: number | null;
   atr14: number | null;
@@ -21,6 +22,18 @@ export interface TraderRiskCandle {
   low?: number;
   volume?: number;
 }
+
+export const isValidTraderRiskCandle = (item: TraderRiskCandle): boolean => {
+  const close = item.price;
+  const open = item.open ?? close;
+  const high = item.high ?? close;
+  const low = item.low ?? close;
+  return typeof close === "number" && Number.isFinite(close) && close > 0
+    && typeof open === "number" && Number.isFinite(open) && open > 0
+    && typeof high === "number" && Number.isFinite(high) && high >= Math.max(open, close)
+    && typeof low === "number" && Number.isFinite(low) && low > 0 && low <= Math.min(open, close)
+    && typeof item.volume === "number" && Number.isFinite(item.volume) && item.volume >= 0;
+};
 
 const formatCompactUsd = (value: number | null) => {
   if (value === null || !Number.isFinite(value)) return "Needs data";
@@ -48,7 +61,9 @@ const metricTone = (
 };
 
 export function deriveTraderRiskSnapshot(candles: TraderRiskCandle[]): TraderRiskSnapshot {
-  const clean = candles
+  const invalidBarCount = candles.filter((item) => !isValidTraderRiskCandle(item)).length;
+  // Refuse misleading risk numbers rather than silently substitute an older bar.
+  const clean = (invalidBarCount ? [] : candles)
     .map((item) => ({
       close: Number(item.price),
       open: Number(item.open ?? item.price),
@@ -91,6 +106,7 @@ export function deriveTraderRiskSnapshot(candles: TraderRiskCandle[]): TraderRis
 
   return {
     source: "Yahoo Finance chart data + local deterministic calculation",
+    invalidBarCount,
     dollarVolume,
     relativeVolume,
     atr14,

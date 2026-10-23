@@ -146,7 +146,7 @@ async function handleRunAlgorithmicStrategy(args: Record<string, any>): Promise<
   ]);
   if (!stockResponse.ok) return { error: `Yahoo Finance API returned ${stockResponse.status}` };
 
-  const toCompletedBars = (payload: any): StrategyBar[] => {
+  const toCompletedBars = (payload: any, ticker: string): StrategyBar[] => {
     const result = payload.chart?.result?.[0];
     if (!result) return [];
     const quote = result.indicators?.quote?.[0] || {};
@@ -155,24 +155,33 @@ async function handleRunAlgorithmicStrategy(args: Record<string, any>): Promise<
     const isRegularSessionOpen = Number.isFinite(regularEnd) && Date.now() / 1000 < regularEnd;
     const regularDate = Number.isFinite(regularEnd) ? new Date(regularEnd * 1000).toISOString().slice(0, 10) : "";
     const bars: StrategyBar[] = [];
+    let rejectedBarCount = 0;
     for (let index = 0; index < timestamps.length; index += 1) {
+      // Yahoo can return null for an unfinished/missing close. Number(null) is 0,
+      // which previously escaped into chart_data even when the strategy engine rejected it.
+      const rawValues = [timestamps[index], quote.open?.[index], quote.high?.[index], quote.low?.[index], quote.close?.[index], quote.volume?.[index]];
+      if (!rawValues.every((value) => typeof value === "number" && Number.isFinite(value))) { rejectedBarCount++; continue; }
       const close = Number(quote.close?.[index]);
       const open = Number(quote.open?.[index]);
       const high = Number(quote.high?.[index]);
       const low = Number(quote.low?.[index]);
       const volume = Number(quote.volume?.[index]);
-      const date = new Date(Number(timestamps[index]) * 1000).toISOString().slice(0, 10);
+      const barDate = new Date(Number(timestamps[index]) * 1000);
+      if (!Number.isFinite(barDate.getTime())) { rejectedBarCount++; continue; }
+      const date = barDate.toISOString().slice(0, 10);
       if (isRegularSessionOpen && date === regularDate) continue;
-      if (![open, high, low, close, volume].every(Number.isFinite)) continue;
+      if (timestamps[index] <= 0 || Math.min(open, high, low, close) <= 0 || volume < 0
+        || low > Math.min(open, close) || high < Math.max(open, close)) { rejectedBarCount++; continue; }
       bars.push({ date, open, high, low, close, volume });
     }
+    if (rejectedBarCount) console.warn("[FinanceOHLCValidation]", JSON.stringify({ symbol: ticker, rejectedBarCount, lastValidDate: bars[bars.length - 1]?.date || null }));
     return bars;
   };
 
   const stockPayload = await stockResponse.json();
   const benchmarkPayload = benchmarkResponse.ok ? await benchmarkResponse.json() : null;
-  const bars = toCompletedBars(stockPayload);
-  const benchmarkBars = benchmarkPayload ? toCompletedBars(benchmarkPayload) : [];
+  const bars = toCompletedBars(stockPayload, symbol);
+  const benchmarkBars = benchmarkPayload ? toCompletedBars(benchmarkPayload, "SPY") : [];
   let context;
   try {
     context = buildStrategyContext({ symbol, bars, benchmarkBars });

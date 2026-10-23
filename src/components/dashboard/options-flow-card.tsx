@@ -102,7 +102,7 @@ export function OptionsFlowCard({ data, symbol }: OptionsFlowProps) {
           <span className="text-[9px] font-black uppercase tracking-wider text-gray-400">Stock chain layer</span>
           <a
             href={buildWatcherHref(symbol)}
-            className="text-[10px] font-black uppercase tracking-wider text-blue-600 hover:text-blue-700"
+            className="inline-flex min-h-11 items-center rounded-lg px-2 text-[10px] font-black uppercase tracking-wider text-blue-600 hover:text-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"
           >
             Open in Watcher
           </a>

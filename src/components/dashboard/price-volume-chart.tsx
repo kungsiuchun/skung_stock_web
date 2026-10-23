@@ -22,6 +22,7 @@ import {
   type CandlestickClientResult,
 } from "@/lib/candlestick-pattern-client";
 import type { SupportResistanceRole, SupportResistanceZone } from "@/lib/support-resistance";
+import { isValidTraderRiskCandle } from "@/lib/trader-risk-snapshot";
 
 interface ChartDataPoint {
   date_iso?: string;
@@ -257,14 +258,7 @@ export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
     [selected],
   );
 
-  useEffect(() => {
-    if (!containerRef.current || chartData.length === 0) return;
-    if (chartRef.current) {
-      chartRef.current.remove();
-      chartRef.current = null;
-    }
-
-    const validData = chartData
+  const validData = useMemo(() => chartData
       .map((point) => ({
         time: point.time || point.date_iso,
         open: Number(point.open ?? point.price),
@@ -273,10 +267,10 @@ export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
         close: Number(point.close ?? point.price),
         volume: Number(point.volume),
       }))
-      .filter((point) => Boolean(point.time)
-        && [point.open, point.high, point.low, point.close, point.volume].every(Number.isFinite)
-        && point.low <= Math.min(point.open, point.close)
-        && point.high >= Math.max(point.open, point.close));
+      .filter((point) => Boolean(point.time) && isValidTraderRiskCandle({ ...point, price: point.close })), [chartData]);
+
+  useEffect(() => {
+    if (!containerRef.current || validData.length === 0) return;
     if (validData.length === 0) return;
 
     const chart = createChart(containerRef.current, {
@@ -343,6 +337,7 @@ export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
         width: containerRef.current.clientWidth,
         height: containerRef.current.clientHeight,
       });
+      chart.timeScale().fitContent();
     });
     resizeObserver.observe(containerRef.current);
 
@@ -352,7 +347,7 @@ export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
       chart.remove();
       chartRef.current = null;
     };
-  }, [chartData, markers]);
+  }, [validData, markers]);
 
   const recentMatches = selected?.data.analysis.recentMatches.slice(-5).reverse() || [];
   const patternBias = selected?.data.analysis.patternBias || "neutral";
@@ -384,7 +379,8 @@ export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
                   key={value}
                   type="button"
                   onClick={() => setInterval(value)}
-                  className={`rounded-lg px-3 py-1.5 text-[10px] font-black transition ${interval === value ? "bg-white text-blue-700 shadow-sm" : "text-gray-500 hover:text-gray-900"}`}
+                  aria-pressed={interval === value}
+                  className={`min-h-11 rounded-lg px-3 py-1.5 text-xs font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600 ${interval === value ? "bg-white text-blue-700 shadow-sm" : "text-gray-500 hover:text-gray-900"}`}
                 >
                   {INTERVAL_LABELS[value]}
                 </button>
@@ -398,7 +394,7 @@ export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
               setPatternsEnabled((current) => !current);
               setRequestError(null);
             }}
-            className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-[10px] font-black transition ${patternsEnabled ? "border-blue-200 bg-blue-50 text-blue-700" : "border-gray-200 bg-white text-gray-600 hover:border-blue-200 hover:text-blue-700"}`}
+            className={`flex min-h-11 items-center gap-2 rounded-lg border px-3 py-2 text-xs font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600 ${patternsEnabled ? "border-blue-200 bg-blue-50 text-blue-700" : "border-gray-200 bg-white text-gray-600 hover:border-blue-200 hover:text-blue-700"}`}
           >
             {patternsEnabled ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
             {patternsEnabled ? "隱藏型態" : "顯示型態"}
@@ -411,7 +407,8 @@ export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
       </div>
 
       <div className="relative">
-        <div ref={containerRef} className="w-full" style={{ height: 320 }} />
+        <div ref={containerRef} data-price-chart className="w-full" style={{ height: 360 }} />
+        {validData.length === 0 && <p className="absolute inset-0 flex items-center justify-center text-sm text-slate-500">價格圖表未提供有效資料</p>}
         {loadingInterval === interval && (
           <div className="absolute inset-0 flex items-center justify-center bg-white/70 backdrop-blur-[1px]" aria-live="polite">
             <div className="flex items-center gap-2 rounded-xl border border-blue-100 bg-white px-4 py-2 text-xs font-bold text-blue-700 shadow-sm">
@@ -422,6 +419,7 @@ export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
         )}
       </div>
 
+      {validData.length < chartData.length && <p role="status" className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">{chartData.length - validData.length} 筆日線價量資料無效，未繪製；圖表僅顯示有效日期，請刷新研究資料。</p>}
       {patternsEnabled && error && (
         <div className="mt-4 flex items-start gap-3 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-800" role="alert">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -434,7 +432,7 @@ export function PriceVolumeChart({ data, symbol }: PriceVolumeChartProps) {
                 setRequestError(null);
                 setRetryNonce((current) => current + 1);
               }}
-              className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-[10px] font-black text-red-800 transition hover:border-red-400"
+              className="mt-3 inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-800 transition hover:border-red-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"
             >
               <RotateCw className="h-3.5 w-3.5" />
               重試{INTERVAL_LABELS[interval]}分析

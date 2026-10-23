@@ -263,6 +263,39 @@ test("algorithmic strategy tool preserves the API while exposing the downgrade s
   }
 });
 
+test("Yahoo strategy normalization never converts null or invalid OHLC into chart prices", async (t) => {
+  const valid = makeBars(260);
+  const tail = makeBars(266).slice(260);
+  const all = [...valid, ...tail];
+  const quote = {
+    open: all.map((bar) => bar.open) as unknown[], high: all.map((bar) => bar.high) as unknown[],
+    low: all.map((bar) => bar.low) as unknown[], close: all.map((bar) => bar.close) as unknown[], volume: all.map((bar) => bar.volume) as unknown[],
+  };
+  quote.close[260] = null;
+  quote.close[261] = 0;
+  quote.high[262] = 1;
+  quote.volume[263] = null;
+  quote.open[264] = "100";
+  const timestamps = all.map((bar) => Date.parse(bar.date) / 1000);
+  timestamps[265] = 1e30;
+  const warnings: string[] = [];
+  t.mock.method(console, "warn", (...args: unknown[]) => warnings.push(args.join(" ")));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ chart: { result: [{ timestamp: timestamps, indicators: { quote: [quote] } }] } }))) as typeof fetch;
+  try {
+    const tool = ALL_ANALYSIS_TOOLS.find((candidate) => candidate.name === "run_algorithmic_strategy")!;
+    const result = await tool.handler({ stock_code: "TEST", strategy_name: "all" });
+    assert.equal(result.error, undefined);
+    const chart = result.chart_data as Array<{ date_iso: string; price: number }>;
+    assert.equal(chart.length, 30);
+    assert.equal(chart[chart.length - 1].date_iso, valid[259].date);
+    assert.ok(chart.every((bar) => bar.price > 0));
+    assert.equal((result.market_snapshot as { as_of: string; daily_bars: number }).as_of, valid[259].date);
+    assert.equal((result.market_snapshot as { daily_bars: number }).daily_bars, 260);
+    assert.ok(warnings.some((line) => line.includes('"rejectedBarCount":6')));
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("walk-forward gate never treats a fixed rule as approved without explicit evidence", () => {
   const report = runStrategyWalkForward("ma_golden_cross", makeBars());
   assert.notEqual(report.gate.status, "PASS");

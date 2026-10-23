@@ -60,8 +60,16 @@ export async function fetchCandlestickAnalysis(input: {
       `/api/candlestick-patterns?symbol=${encodeURIComponent(input.symbol)}&interval=${input.interval}`,
       { signal: controller.signal },
     );
-    const payload = await parseJsonResponse<CandlestickApiResponse>(response, "/api/candlestick-patterns", { allowHttpError: true });
-    const requestId = payload.requestId || response.headers.get("X-Request-ID") || undefined;
+    const responseRequestId = response.headers.get("X-Request-ID") || undefined;
+    let payload: CandlestickApiResponse;
+    try {
+      payload = await parseJsonResponse<CandlestickApiResponse>(response, "/api/candlestick-patterns", { allowHttpError: true });
+    } catch (error) {
+      // Preserve parser diagnostics and the server trace ID even before JSON is usable.
+      if (error instanceof Error && responseRequestId) error.message += ` Request ID: ${responseRequestId}`;
+      throw error;
+    }
+    const requestId = payload.requestId || responseRequestId;
     if ((!response.ok && response.status !== 206) || !payload.data || !payload.cache) {
       throw new Error(`${payload.error || `K 線型態 API 回傳 HTTP ${response.status}。`}${requestId ? ` Request ID: ${requestId}` : ""}`);
     }
