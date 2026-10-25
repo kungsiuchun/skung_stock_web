@@ -26,6 +26,7 @@
     "test:stocks-watcher": "node --import tsx --test tests/stocks-intelligence-watcher.test.ts tests/stocks-watcher-robinhood-options.test.ts tests/fomc-rate-probability.test.ts tests/stocks-watcher-macro.test.ts tests/stocks-watcher-news.test.ts tests/watcher-workspace.test.ts",
     "test:watcher-workspace": "node --import tsx --test tests/watcher-workspace.test.ts",
     "test:watcher-api": "node --import tsx --test tests/watcher-api-contract.test.ts",
+    "test:functions-bundle": "wrangler pages functions build functions --outdir .tmp/functions-bundle",
     "test:stocks-watcher-news": "node --import tsx --test tests/stocks-watcher-news.test.ts",
     "test:stocks-watcher-news:uat": "node tests/stocks-watcher-news.uat.cjs",
     "test:stocks-watcher:uat": "node tests/stocks-intelligence-watcher.uat.cjs",

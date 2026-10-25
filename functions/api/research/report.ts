@@ -13,6 +13,13 @@ interface PublishedResearchReport {
   content: string; sections: ResearchReportSections; model: string; generatedAt: string; evidenceVersion: string;
   symbol: string; lens: string; language: string; sources: Array<{ id: string; label: string; asOf: string | null }>; gaps: string[];
 }
+export const legacyTradingReports = (content: string) => ({
+  fundamentals_report: content,
+  market_report: content,
+  sentiment_report: content,
+  quant_report: content,
+  manager_report: content,
+});
 export const researchJson = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
 export async function readResearchBody(request: Request, maxBytes = 4000): Promise<Record<string, unknown>> {
   if (Number(request.headers.get("Content-Length") || 0) > maxBytes) throw new PublicResearchLimitError("Request is too large.", 413);
@@ -54,6 +61,91 @@ export async function loadResearchEvidence(request: Request, env: ResearchEnv, s
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(evidence)));
   const version = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("");
   return { evidence, version };
+}
+
+interface PublicThemeEvidence {
+  target: string;
+  headlines: Array<{ title: string; publisher: string; publishedAt: string }>;
+  sources: Array<{ id: string; label: string; asOf: string | null }>;
+  gaps: string[];
+}
+
+const themeTarget = (value: unknown) => {
+  if (typeof value !== "string") throw new PublicResearchLimitError("Enter a theme, company or stock ticker.", 400);
+  const target = value.trim();
+  if (!target || target.length > 120 || /[\r\n<>]/.test(target)) throw new PublicResearchLimitError("Enter a theme, company or stock ticker under 120 characters.", 400);
+  return target;
+};
+
+const loadPublicThemeEvidence = async (target: string): Promise<PublicThemeEvidence> => {
+  const response = await fetch(`https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(target)}&newsCount=8&quotesCount=0`);
+  if (!response.ok) throw new Error(`Yahoo theme search is unavailable (HTTP ${response.status}).`);
+  const data = await response.json() as { news?: Array<{ title?: unknown; publisher?: unknown; providerPublishTime?: unknown }> };
+  const headlines = (Array.isArray(data.news) ? data.news : []).flatMap(item => {
+    const publishedAt = typeof item.providerPublishTime === "number" && Number.isFinite(item.providerPublishTime)
+      ? new Date(item.providerPublishTime * 1000)
+      : null;
+    const title = typeof item.title === "string" ? item.title.trim() : "";
+    if (!title || !publishedAt || !Number.isFinite(publishedAt.getTime())) return [];
+    return [{ title: title.slice(0, 300), publisher: typeof item.publisher === "string" && item.publisher.trim() ? item.publisher.trim().slice(0, 120) : "Yahoo Finance", publishedAt: publishedAt.toISOString() }];
+  }).slice(0, 8);
+  if (!headlines.length) throw new Error("No dated public headlines were found for this theme.");
+  const asOf = headlines.map(item => item.publishedAt).sort().at(-1) || null;
+  return {
+    target,
+    headlines,
+    sources: [{ id: "N", label: "Yahoo Finance public search headlines", asOf }],
+    gaps: ["Theme headlines are not a complete company, financial-statement or valuation dataset."],
+  };
+};
+
+const renderPublicThemeReport = (sections: ResearchReportSections, evidence: PublicThemeEvidence, language: string) => {
+  const zh = language !== "en";
+  const claim = (value: { text: string; sourceIds: string[] }) => `${value.text} ${value.sourceIds.map(id => `[${id}]`).join(" ")}`;
+  return `# ${evidence.target} ${zh ? "主題研究摘要" : "Theme research brief"}\n\n${zh ? "公開搜尋資料截至" : "Public search evidence through"}: ${evidence.sources[0].asOf || (zh ? "無法取得" : "Unavailable")} [N]\n\n## ${zh ? "結論" : "Summary"}\n\n${claim(sections.summary)}\n\n` +
+    [[zh ? "支持證據" : "Supporting evidence", sections.support], [zh ? "反向檢查" : "Counterchecks", sections.counterchecks], [zh ? "風險與失效條件" : "Risk / invalidation", sections.risks]].map(([heading, values]) => `## ${heading}\n\n${(values as ResearchReportSections["support"]).map(value => `- ${claim(value)}`).join("\n")}\n\n`).join("") +
+    `## ${zh ? "資料缺口" : "Data gaps"}\n\n${evidence.gaps.map(gap => `- ${zh ? "主題新聞不是完整的公司、財報或估值資料集。" : gap}`).join("\n")}\n\n## ${zh ? "可核對標題" : "Source headlines"}\n\n${evidence.headlines.map(item => `- ${item.title} — ${item.publisher} (${item.publishedAt}) [N]`).join("\n")}`;
+};
+
+export async function runPublicThemeReport(request: Request, env: ResearchEnv, body: { target?: unknown; language?: unknown }) {
+  const target = themeTarget(body.target);
+  const language = String(body.language ?? "zh-TW");
+  if (!["zh-TW", "en"].includes(language)) throw new PublicResearchLimitError("Invalid report language.", 400);
+  const evidence = await loadPublicThemeEvidence(target);
+  if (!env.MARKET_CACHE_DB) throw new PublicResearchLimitError("Shared report caching and usage limits are unavailable.", 503);
+  const versionBytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(evidence)));
+  const version = Array.from(new Uint8Array(versionBytes), b => b.toString(16).padStart(2, "0")).join("");
+  const resolved = await resolveMarketCache<PublishedResearchReport>({
+    db: env.MARKET_CACHE_DB,
+    scope: "research-theme-v1",
+    symbol: target.toUpperCase(),
+    params: { version, target, language },
+    ttlMs: 24 * 3600_000,
+    refreshQuotaGuard: () => reserveMarketCacheRefreshQuota(env.MARKET_CACHE_DB!, { operation: "research_report" }),
+    sourceAsOf: () => evidence.sources[0].asOf,
+    validate: value => {
+      try {
+        const sections = validateResearchReport(value.sections, ["N"]);
+        return value.symbol === target && value.evidenceVersion === version && value.lens === "serenity" && value.language === language
+          && typeof value.model === "string" && value.model.length > 0 && value.model.length < 150 && Number.isFinite(Date.parse(value.generatedAt))
+          && JSON.stringify(value.sources) === JSON.stringify(evidence.sources) && JSON.stringify(value.gaps) === JSON.stringify(evidence.gaps)
+          && value.content === renderPublicThemeReport(sections, evidence, language);
+      } catch { return false; }
+    },
+    load: async () => {
+      const generated = await callFreeResearchModel(env, [
+        { role: "system", content: `You are a public theme evidence analyst. Write ${language === "en" ? "English" : "Traditional Chinese"}. Use only the dated headlines below. Do not infer price targets, company quality, performance or catalysts. State when evidence is thin. Return ONLY a JSON object with exactly summary, support, counterchecks, risks. Every claim must cite [N]. Keep each claim under 80 Chinese characters or 45 English words. No URLs, HTML or extra fields. Maximum 180 words total.` },
+        { role: "user", content: JSON.stringify(evidence) },
+      ], true, researchReportSchema(["N"]));
+      let parsed: unknown;
+      try { parsed = JSON.parse(generated.content); } catch { throw new Error("The free model returned invalid theme JSON. No retry was sent."); }
+      const sections = validateResearchReport(parsed, ["N"]);
+      const content = renderPublicThemeReport(sections, evidence, language);
+      return { content, sections, model: generated.model, generatedAt: new Date().toISOString(), evidenceVersion: version, symbol: target, lens: "serenity", language, sources: evidence.sources, gaps: evidence.gaps };
+    },
+  });
+  if (resolved.cache.status === "stale") throw new PublicResearchLimitError("Theme report refresh failed. A stale report was not presented as current.", 503);
+  return { ...resolved.value, cache: resolved.cache };
 }
 
 export async function runPublicReport(request: Request, env: ResearchEnv, body: { symbol?: unknown; lens?: unknown; language?: unknown }) {

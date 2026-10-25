@@ -37,6 +37,7 @@ interface HistoryMsg {
 interface FinanceChatToolProps {
   isOpen: boolean;
   onClose: () => void;
+  symbol?: string;
 }
 
 interface FinanceChatPanelProps {
@@ -44,6 +45,7 @@ interface FinanceChatPanelProps {
   className?: string;
   title?: string;
   subtitle?: string;
+  symbol?: string;
 }
 
 const STRATEGY_OPTIONS = [
@@ -67,6 +69,7 @@ export function FinanceChatPanel({
   className = "",
   title = "Finance Agent Chat",
   subtitle = "ReAct Agent · Multi-turn · Tool Calling",
+  symbol,
 }: FinanceChatPanelProps) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -105,6 +108,7 @@ export function FinanceChatPanel({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: msg,
+          symbol,
           history: apiHistory,
           strategy_mode: selectedStrategy,
           user_memories: userMemories,
@@ -334,13 +338,13 @@ export function FinanceChatPanel({
   );
 }
 
-export default function FinanceChatTool({ isOpen, onClose }: FinanceChatToolProps) {
+export default function FinanceChatTool({ isOpen, onClose, symbol }: FinanceChatToolProps) {
   if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
       <button className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} aria-label="Close chat" />
-      <FinanceChatPanel onClose={onClose} className="relative z-10 h-[88vh] w-full max-w-5xl rounded-2xl border border-white/10 shadow-2xl" />
+      <FinanceChatPanel symbol={symbol} onClose={onClose} className="relative z-10 h-[88vh] w-full max-w-5xl rounded-2xl border border-white/10 shadow-2xl" />
     </div>
   );
 }

@@ -25,8 +25,8 @@ export async function callFreeResearchModel(env: FreeResearchEnv, messages: Arra
         upstreamStatus: typeof upstreamStatus === "number" ? upstreamStatus : undefined, upstreamTitle: typeof upstreamTitle === "string" ? upstreamTitle.slice(0, 80) : undefined }));
       throw new PublicResearchLimitError(response.status === 429 ? "The free model provider has reached its allowance. No retry was sent." : `The free model provider is unavailable (HTTP ${response.status}). No retry was sent.`, response.status === 429 ? 429 : 502);
     }
-    const data = await response.json() as { choices?: Array<{ message?: { content?: unknown }; finish_reason?: string }>; model?: string; usage?: { cost?: number; completion_tokens?: number; completion_tokens_details?: { reasoning_tokens?: number } } };
-    if (typeof data.usage?.cost === "number" && data.usage.cost > 0) throw new Error("The free provider reported a nonzero cost; output rejected.");
+    const data = await response.json() as { choices?: Array<{ message?: { content?: unknown }; finish_reason?: string }>; model?: string; usage?: { cost?: unknown; completion_tokens?: number; completion_tokens_details?: { reasoning_tokens?: number } } };
+    if (typeof data.usage?.cost !== "number" || !Number.isFinite(data.usage.cost) || data.usage.cost !== 0) throw new Error("The free provider did not prove zero cost; output rejected.");
     const content = data.choices?.[0]?.message?.content;
     if (typeof content !== "string" || !content.trim() || content.length > 24000 || data.choices?.[0]?.finish_reason === "length") {
       console.error(JSON.stringify({ event: "public_research_invalid_output", model: data.model, finishReason: data.choices?.[0]?.finish_reason, contentLength: typeof content === "string" ? content.length : 0, completionTokens: data.usage?.completion_tokens, reasoningTokens: data.usage?.completion_tokens_details?.reasoning_tokens }));

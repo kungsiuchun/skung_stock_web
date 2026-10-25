@@ -8,6 +8,7 @@ import {
   getNativeStocksToolCacheSymbol,
   normalizeStocksWatcherSymbol,
   listNativeStocksTools,
+  validateNativeStocksToolParams,
 } from "../../src/lib/stocks-native-yahoo";
 import {
   classifyMarketCacheDataset,
@@ -64,6 +65,8 @@ const normalizeToolName = (value: unknown) => {
   }
   return tool;
 };
+
+const hasMeaningfulValue = (value: unknown) => value !== undefined && value !== null && (typeof value !== "string" || value.trim().length > 0);
 
 const normalizeParams = (value: unknown) => {
   if (value === undefined) return {};
@@ -625,6 +628,10 @@ export async function onRequest(context: { request: Request; env?: Env }) {
         || ["chart_gex", "chart_indicators", "pre_event_briefing"].includes(tool);
       if (!supported) throw new Error("Unknown Watcher tool.");
       const params = normalizeParams(body.params);
+      const native = listNativeStocksTools().some(entry => entry.name === tool) || ["chart_gex", "chart_indicators", "pre_event_briefing"].includes(tool);
+      if (native) validateNativeStocksToolParams(tool, params);
+      if (["get_valuation_bands", "get_financial_statements"].includes(tool)
+        && ![params.symbol, params.ticker, params.stock_code].some(hasMeaningfulValue)) throw new Error("Missing required tool parameter: symbol.");
       validatedTool = true;
       if (tool === "get_watchlist")
         return await callTrackedWatchlist(env, requestId);

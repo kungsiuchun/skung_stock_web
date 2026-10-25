@@ -19,6 +19,7 @@ import {
 import { STOCKS_WATCHER_SYMBOLS, STOCKS_WATCHER_UNIVERSE } from "../src/lib/stocks-watcher-universe";
 import {
   buildNativeYahooEarningsSnapshot,
+  fetchNativeYahooHistory,
   listNativeStocksTools,
   normalizeStocksWatcherSymbol,
   quoteRowFromYahooChartResult,
@@ -1229,4 +1230,16 @@ test("cache row observability can feed the quota guard without exposing payloads
     load: async () => ({ ok: true }),
   });
   assert.deepEqual(getMarketCacheD1QuotaObservation(resolved.cache), { rowsRead: 0, rowsWritten: 0 });
+});
+
+test("native Yahoo history drops incomplete OHLCV bars instead of synthesizing zero values", async () => {
+  const before = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json({ chart: { result: [{
+    timestamp: [1792785600, 1792872000],
+    indicators: { quote: [{ open: [100, null], high: [105, 105], low: [98, 98], close: [102, 103], volume: [1000, null] }] },
+  }] } })) as typeof fetch;
+  try {
+    const history = await fetchNativeYahooHistory("NVDA", "5d", "1d");
+    assert.deepEqual(history, [{ date: "2026-10-23", open: 100, high: 105, low: 98, close: 102, volume: 1000 }]);
+  } finally { globalThis.fetch = before; }
 });

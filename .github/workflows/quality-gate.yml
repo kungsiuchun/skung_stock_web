@@ -24,4 +24,5 @@ jobs:
 
       - run: npm ci
       - run: npm run test:no-mistakes
+      - run: npm run test:functions-bundle
       - run: npm run lint

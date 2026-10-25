@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { calculateTradePlan, parseWorkspaceSaved, EMPTY_WORKSPACE_SAVED, readWorkspaceRoute, workspaceHref, parseWorkspaceHistory, deriveWorkspaceEvidence, parseWorkspaceQuotes } from "../src/lib/watcher-workspace";
+import { persistWorkspaceSaved } from "../src/hooks/use-watcher-workspace";
 import { reservePublicCounter, reservePublicAiAttempt, reservePublicR2Read } from "../src/lib/public-research-budget";
 import { callFreeResearchModel } from "../functions/api/research/free-model";
 import { runPublicReport } from "../functions/api/research/report";
@@ -43,6 +44,17 @@ test("long/short scenarios use whole shares and reject invalid risk or target ge
 test("saved imports are validated as a unit; corruption never becomes empty persisted data", () => {
   assert.deepEqual(parseWorkspaceSaved(EMPTY_WORKSPACE_SAVED), EMPTY_WORKSPACE_SAVED);
   for (const value of [null, { version: 2 }, { ...EMPTY_WORKSPACE_SAVED, plans: [{}] }, { ...EMPTY_WORKSPACE_SAVED, customSymbols: ["<script>"] }, { ...EMPTY_WORKSPACE_SAVED, tags: { NVDA: "Buy" } }]) assert.throws(() => parseWorkspaceSaved(value));
+});
+
+test("workspace persistence preserves corrupt data and commits before reporting success", () => {
+  let writes = 0;
+  const storage = { setItem: (_key: string, _value: string) => { writes++; } };
+  const blocked = persistWorkspaceSaved(storage, EMPTY_WORKSPACE_SAVED, true);
+  assert.equal(blocked.saved, null); assert.equal(blocked.error, "Saved workspace is invalid. Export it or replace it before saving."); assert.equal(writes, 0);
+  const replaced = persistWorkspaceSaved(storage, EMPTY_WORKSPACE_SAVED, true, true);
+  assert.deepEqual(replaced.saved, EMPTY_WORKSPACE_SAVED); assert.equal(replaced.error, null); assert.equal(writes, 1);
+  const failed = persistWorkspaceSaved({ setItem: () => { throw new Error("quota exceeded"); } }, EMPTY_WORKSPACE_SAVED, false);
+  assert.equal(failed.saved, null); assert.equal(failed.error, "Workspace changes were not saved on this browser. Export your workspace before closing."); assert.equal(failed.detail, "quota exceeded");
 });
 
 test("workspace navigation preserves ticker, range and tab without consuming legacy SPX/Portfolio parameters", () => {
@@ -115,7 +127,7 @@ test("reports cache only server evidence and reuse one generation across public 
   const chart = { chart: { result: [{ meta: { regularMarketPrice: 200, regularMarketTime: Date.parse(quoteAsOf) / 1000, regularMarketPreviousClose: 198, symbol: "NVDA", currency: "USD" }, timestamp: timestamps, indicators: { quote: [{ open: timestamps.map(() => 199), high: timestamps.map(() => 202), low: timestamps.map(() => 198), close: timestamps.map(() => 200), volume: timestamps.map(() => 1000) }] } }] } };
   try {
     globalThis.fetch = (async (input, init) => {
-      if (String(input).includes("openrouter.ai")) { models++; const body = JSON.parse(init!.body as string); assert.ok(!JSON.stringify(body).includes("my private thesis")); assert.equal(body.response_format.type, "json_schema"); assert.deepEqual(body.response_format.json_schema.schema.properties.summary.properties.sourceIds.items.enum, ["Q", "T"]); const claim = { text: "Price evidence is dated; published financials are unavailable.", sourceIds: ["Q", "T"] }; return Response.json({ choices: [{ message: { content: JSON.stringify({ summary: claim, support: [claim], counterchecks: [claim], risks: [claim] }) }, finish_reason: "stop" }], model: "example/free:free" }); }
+      if (String(input).includes("openrouter.ai")) { models++; const body = JSON.parse(init!.body as string); assert.ok(!JSON.stringify(body).includes("my private thesis")); assert.equal(body.response_format.type, "json_schema"); assert.deepEqual(body.response_format.json_schema.schema.properties.summary.properties.sourceIds.items.enum, ["Q", "T"]); const claim = { text: "Price evidence is dated; published financials are unavailable.", sourceIds: ["Q", "T"] }; return Response.json({ choices: [{ message: { content: JSON.stringify({ summary: claim, support: [claim], counterchecks: [claim], risks: [claim] }) }, finish_reason: "stop" }], model: "example/free:free", usage: { cost: 0 } }); }
       assert.match(String(input), /yahoo\.com/); return Response.json(chart);
     }) as typeof fetch;
     const request = new Request("https://example.test/api/research/report");

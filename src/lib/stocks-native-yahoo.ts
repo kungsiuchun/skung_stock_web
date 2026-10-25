@@ -320,16 +320,30 @@ const fetchHistory = async (symbol: string, range = "1y", interval = "1d"): Prom
   const closes: Array<number | null> = quote.close || [];
   const volumes: Array<number | null> = quote.volume || [];
 
-  return timestamps
-    .map((timestamp, index) => ({
-      date: interval.includes("m") || interval.endsWith("h") ? new Date(timestamp * 1000).toISOString() : dateFromSeconds(timestamp),
-      open: round(toNumber(opens[index])),
-      high: round(toNumber(highs[index])),
-      low: round(toNumber(lows[index])),
-      close: round(toNumber(closes[index])),
-      volume: Math.round(toNumber(volumes[index])),
-    }))
-    .filter((row) => row.close > 0);
+  const history = timestamps.flatMap((timestamp, index) => {
+    const open = opens[index];
+    const high = highs[index];
+    const low = lows[index];
+    const close = closes[index];
+    const volume = volumes[index];
+    const date = typeof timestamp === "number" && Number.isFinite(timestamp) ? new Date(timestamp * 1000) : null;
+    if (!date || !Number.isFinite(date.getTime()) || typeof open !== "number" || !Number.isFinite(open) || open <= 0
+      || typeof high !== "number" || !Number.isFinite(high) || high <= 0
+      || typeof low !== "number" || !Number.isFinite(low) || low <= 0
+      || typeof close !== "number" || !Number.isFinite(close) || close <= 0
+      || typeof volume !== "number" || !Number.isFinite(volume) || volume < 0
+      || high < Math.max(open, close) || low > Math.min(open, close)) return [];
+    return [{
+      date: interval.includes("m") || interval.endsWith("h") ? date.toISOString() : date.toISOString().slice(0, 10),
+      open: round(open),
+      high: round(high),
+      low: round(low),
+      close: round(close),
+      volume: Math.round(volume),
+    }];
+  });
+  if (!history.length) throw new Error("Yahoo history contains no complete OHLCV bars.");
+  return history;
 };
 
 export const fetchNativeYahooHistory = (symbol: string, range = "1y", interval = "1d") =>
@@ -1104,6 +1118,20 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
 
 const NATIVE_TOOL_BY_NAME = new Map(NATIVE_TOOL_REGISTRY.map((definition) => [definition.name, definition]));
 
+const hasValue = (value: unknown) => value !== undefined && value !== null && (typeof value !== "string" || value.trim().length > 0);
+
+export const validateNativeStocksToolParams = (name: string, params: Record<string, unknown> = {}) => {
+  const canonicalName = canonicalNativeToolName(name);
+  const definition = NATIVE_TOOL_BY_NAME.get(canonicalName);
+  if (!definition) throw new Error(`Native Yahoo tool '${name}' is not implemented.`);
+  for (const required of definition.inputSchema?.required || []) {
+    const value = required === "ticker"
+      ? params.ticker ?? params.symbol ?? params.stock_code
+      : params[required];
+    if (!hasValue(value)) throw new Error(`Missing required tool parameter: ${required}.`);
+  }
+};
+
 export const getNativeStocksToolCacheParams = (
   name: string,
   params: Record<string, unknown> = {},
@@ -1111,6 +1139,7 @@ export const getNativeStocksToolCacheParams = (
   const canonicalName = canonicalNativeToolName(name);
   const definition = NATIVE_TOOL_BY_NAME.get(canonicalName);
   if (!definition) throw new Error(`Native Yahoo tool '${name}' is not implemented.`);
+  validateNativeStocksToolParams(canonicalName, params);
   const context = nativeToolContext(params);
   const expiry = context.expiry || null;
   const topRows = Number.isFinite(context.topRows) ? Math.trunc(context.topRows) : 12;
@@ -1281,6 +1310,7 @@ export const callNativeStocksTool = async (name: string, params: Record<string, 
   const canonicalName = canonicalNativeToolName(name);
   const definition = NATIVE_TOOL_BY_NAME.get(canonicalName);
   if (!definition) throw new Error(`Native Yahoo tool '${name}' is not implemented.`);
+  validateNativeStocksToolParams(canonicalName, params);
   return definition.handler(nativeToolContext(params));
 };
 
