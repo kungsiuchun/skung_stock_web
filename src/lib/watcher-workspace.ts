@@ -42,17 +42,20 @@ const object = (value: unknown): Record<string, unknown> => {
 const nullableNumber = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : null;
 export function parseWorkspaceQuotes(value: unknown): WorkspaceQuote[] {
   const raw = object(value);
-  if (!Array.isArray(raw.quotes)) throw new Error("Quote data is unavailable.");
+  if (raw.source !== "native_yahoo" || !Array.isArray(raw.quotes)) throw new Error("Quote data source could not be verified.");
   return raw.quotes.map(value => {
     const row = object(value);
     const symbol = workspaceSymbol(row.symbol);
     if (typeof row.price !== "number" || !Number.isFinite(row.price) || row.price <= 0) throw new Error(`Quote is invalid for ${symbol}.`);
+    if (typeof row.currency !== "string" || !/^[A-Z]{3}$/.test(row.currency)) throw new Error(`Quote currency is invalid for ${symbol}.`);
     return { symbol, name: typeof row.name === "string" ? row.name : symbol, price: row.price, change: row.changeAvailable === false ? null : nullableNumber(row.change), changePercent: row.changeAvailable === false ? null : nullableNumber(row.changePercent),
-      asOf: typeof row.asOf === "string" && Number.isFinite(Date.parse(row.asOf)) ? row.asOf : null, currency: typeof row.currency === "string" ? row.currency : "Unknown currency", marketState: typeof row.marketState === "string" ? row.marketState : "Unknown session", ...(typeof row.warning === "string" ? { warning: row.warning } : {}) };
+      asOf: typeof row.asOf === "string" && Number.isFinite(Date.parse(row.asOf)) ? row.asOf : null, currency: row.currency, marketState: typeof row.marketState === "string" ? row.marketState : "Unknown session", ...(typeof row.warning === "string" ? { warning: row.warning } : {}) };
   });
 }
-export function parseWorkspaceHistory(value: unknown) {
+export function parseWorkspaceHistory(value: unknown, expectedSymbol?: string) {
   const raw = object(value);
+  if (raw.source !== "native_yahoo" || expectedSymbol && raw.ticker !== expectedSymbol) throw new Error("Price history source or ticker could not be verified.");
+  if (raw.currency !== undefined && (typeof raw.currency !== "string" || !/^[A-Z]{3}$/.test(raw.currency))) throw new Error("Price history currency is invalid.");
   if (!Array.isArray(raw.history) || !raw.history.length) throw new Error("Price history is unavailable.");
   let previous = "";
   if (raw.rejected_bar_count !== undefined && (!Number.isInteger(raw.rejected_bar_count) || (raw.rejected_bar_count as number) < 0)) throw new Error("Price history quality metadata is invalid.");

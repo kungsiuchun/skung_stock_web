@@ -6,8 +6,8 @@ export interface StocksWatcherUniverseStock {
   sector: string;
   type: StocksWatcherAssetType;
   fallbackPrice: number;
-  fallbackChange: number;
-  fallbackChangePercent: number;
+  fallbackChange: number | null;
+  fallbackChangePercent: number | null;
 }
 
 export const STOCKS_WATCHER_UNIVERSE: StocksWatcherUniverseStock[] = [

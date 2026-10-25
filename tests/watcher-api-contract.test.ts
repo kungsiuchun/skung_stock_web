@@ -56,7 +56,7 @@ test("explicit free model disables reasoning, retains zero prices and reports se
     const body = JSON.parse(String(init?.body));
     assert.equal(body.model, model); assert.deepEqual(body.reasoning, { enabled: false });
     assert.deepEqual(body.provider, { max_price: { prompt: 0, completion: 0 }, allow_fallbacks: false });
-    return Response.json({ choices: [{ message: { content: "Dated evidence [Q]." }, finish_reason: "stop" }], usage: { cost: 0 } });
+    return Response.json({ choices: [{ message: { content: "Dated evidence [Q]." }, finish_reason: "stop" }], model, usage: { cost: 0 } });
   }) as typeof fetch;
   try {
     const result = await callFreeResearchModel({ MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "fixture-key", PUBLIC_RESEARCH_MODEL: model, OPENROUTER_MODEL: "legacy/paid" }, []);
@@ -95,18 +95,20 @@ test("Watcher rejects wrong method, unknown tool and malformed ticker/expiry wit
 });
 
 test("public research agent and legacy report aliases share verified evidence/cache and never call the legacy paid model", async () => {
-  const { db, sql } = sqlite(); const fetchBefore = globalThis.fetch; let models = 0;
+  const { db, sql } = sqlite(); const fetchBefore = globalThis.fetch; let models = 0; let invalidChat = false;
   const asOf = "2026-10-23T20:00:00Z";
   const timestamps = Array.from({ length: 220 }, (_, i) => Date.parse("2026-03-18T20:00:00Z") / 1000 + i * 86400);
   const chart = { chart: { result: [{ meta: { symbol: "NVDA", regularMarketPrice: 200, regularMarketTime: Date.parse(asOf) / 1000, regularMarketPreviousClose: 198, currency: "USD" }, timestamp: timestamps, indicators: { quote: [{ open: timestamps.map(() => 199), high: timestamps.map(() => 202), low: timestamps.map(() => 198), close: timestamps.map(() => 200), volume: timestamps.map(() => 1000) }] } }] } };
-  const env = { MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "fixture-key", OPENROUTER_MODEL: "legacy/paid" };
+  const env = { MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "fixture-key", OPENROUTER_MODEL: "legacy/paid", VALUATION_DATA: { get: async () => null } };
   globalThis.fetch = (async (url, init) => {
     if (String(url).includes("openrouter.ai")) {
       models++; const payload = JSON.parse(init!.body as string); assert.equal(payload.model, "openrouter/free"); assert.equal(payload.provider.max_price.prompt, 0);
-      const sourceIds = payload.response_format?.json_schema?.schema?.properties?.summary?.properties?.sourceIds?.items?.enum || ["Q", "T"];
-      const claim = { text: "Only dated public evidence is available.", sourceIds: sourceIds.slice(0, Math.min(2, sourceIds.length)) };
-      const content = payload.response_format ? JSON.stringify({ summary: claim, support: [claim], counterchecks: [claim], risks: [claim] }) : "The dated quote [Q] and history [T] do not establish business quality.";
-      return Response.json({ choices: [{ message: { content }, finish_reason: "stop" }], model: "fixture:free", usage: { cost: 0 } });
+      assert.ok(!JSON.stringify(payload).includes("fixture-private-memory"));
+      const schema = payload.response_format?.json_schema?.schema;
+      const sourceIds = schema?.properties?.summary?.properties?.sourceIds?.items?.enum || schema?.properties?.sourceIds?.items?.enum || ["Q", "T"];
+      const claim = invalidChat ? { text: "Invented financial evidence [F]", sourceIds: ["F"] } : { text: "Only dated public evidence is available.", sourceIds: sourceIds.slice(0, Math.min(2, sourceIds.length)) };
+      const content = JSON.stringify(schema?.properties?.summary ? { summary: claim, support: [claim], counterchecks: [claim], risks: [claim] } : claim);
+      return Response.json({ choices: [{ message: { content }, finish_reason: "stop" }], model: "nvidia/nemotron-3.5-super-vl:free", usage: { cost: 0 } });
     }
     if (String(url).includes("/v1/finance/search")) return Response.json({ news: [{ title: "AI semiconductor demand remains a dated public theme", publisher: "Yahoo Finance", providerPublishTime: Date.parse(asOf) / 1000 }] });
     assert.match(String(url), /yahoo\.com/); return Response.json(chart);
@@ -125,15 +127,19 @@ test("public research agent and legacy report aliases share verified evidence/ca
     const reply = await chat({ request: request({ symbol: "NVDA", message: "What is missing?", language: "en" }), env });
     const replyBody = await reply.json() as any;
     assert.equal(reply.status, 200); assert.equal(replyBody.symbol, "NVDA"); assert.deepEqual(replyBody.steps, []); assert.ok(Array.isArray(replyBody.history)); assert.deepEqual(replyBody.new_memories, []); assert.equal(models, 3);
-    const legacyReply = await legacyChat({ request: request({ message: "What is missing?" }, "/api/agent/chat"), env });
+    const legacyReply = await legacyChat({ request: request({ message: "What is missing?", language: "en", strategy_mode: "golden_cross", user_memories: ["fixture-private-memory"] }, "/api/agent/chat"), env });
     const legacyBody = await legacyReply.json() as any;
     assert.equal(legacyReply.status, 200); assert.equal(legacyBody.symbol, "NVDA"); assert.ok(Array.isArray(legacyBody.history)); assert.equal(models, 4);
+    assert.match(legacyBody.reply, /were not executed/);
+    invalidChat = true;
+    const rejected = await chat({ request: request({ symbol: "NVDA", message: "What is missing?", language: "en" }), env });
+    assert.equal(rejected.status, 502); assert.equal(models, 5); assert.equal((await rejected.json() as any).success, false);
   } finally { globalThis.fetch = fetchBefore; sql.close(); }
 });
 
 test("public model rejects a provider cost that is not a finite numeric zero", async () => {
   const { db, sql } = sqlite(); const before = globalThis.fetch;
-  globalThis.fetch = (async () => Response.json({ choices: [{ message: { content: "answer" }, finish_reason: "stop" }], usage: { cost: "0" } })) as typeof fetch;
+  globalThis.fetch = (async () => Response.json({ choices: [{ message: { content: "answer" }, finish_reason: "stop" }], model: "nvidia/nemotron-3.5-super-vl:free", usage: { cost: "0" } })) as typeof fetch;
   try { await assert.rejects(callFreeResearchModel({ MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "fixture-key" }, []), /did not prove zero cost/); }
   finally { globalThis.fetch = before; sql.close(); }
 });

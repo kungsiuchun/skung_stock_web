@@ -24,16 +24,20 @@ export function persistWorkspaceSaved(storage: Pick<Storage, "setItem">, next: W
 export function createWorkspaceClient() {
   const cache = new Map<string, { value: WorkspaceTool; expires: number }>();
   const snapshots = new Map<string, { value: StocksWatcherSnapshot; expires: number }>();
+  const active = new Set<AbortController>();
+  let generation = 0;
   let running = 0;
   const waiting: Array<() => void> = [];
   async function tool(name: string, params: Record<string, unknown> = {}, signal?: AbortSignal, force = false): Promise<WorkspaceTool> {
+    const requestGeneration = generation;
     const key = JSON.stringify([name, params]);
     const hit = cache.get(key);
     if (!force && hit && hit.expires > Date.now()) return hit.value;
     if (running >= 2) await new Promise<void>(resolve => waiting.push(resolve));
-    if (signal?.aborted) { waiting.shift()?.(); throw new DOMException("Superseded request", "AbortError"); }
+    if (signal?.aborted || requestGeneration !== generation) { waiting.shift()?.(); throw new DOMException("Superseded request", "AbortError"); }
     running++;
     const deadline = new AbortController();
+    active.add(deadline);
     const abort = () => deadline.abort();
     signal?.addEventListener("abort", abort, { once: true });
     const timer = window.setTimeout(abort, 30_000);
@@ -41,28 +45,34 @@ export function createWorkspaceClient() {
       const response = await fetch("/api/stocks-intelligence-watcher", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tool: name, params }), signal: deadline.signal });
       const body = await response.json() as WorkspaceTool & { ok?: boolean; error?: string };
       if (!response.ok || body.ok === false || body.raw === undefined) throw new Error(body.error || `Market data is unavailable (HTTP ${response.status}).`);
+      if (requestGeneration !== generation) throw new DOMException("Superseded request", "AbortError");
       if (cache.size >= 100) cache.delete(cache.keys().next().value as string);
       cache.set(key, { value: body, expires: Date.now() + (name === "get_quotes" ? 60_000 : 15 * 60_000) });
       return body;
     } catch (error) {
+      if (requestGeneration !== generation) throw new DOMException("Superseded request", "AbortError");
       if (deadline.signal.aborted && !signal?.aborted) throw new Error("Market data request timed out. Use Refresh to retry.");
       throw error;
-    } finally { window.clearTimeout(timer); signal?.removeEventListener("abort", abort); running--; waiting.shift()?.(); }
+    } finally { window.clearTimeout(timer); active.delete(deadline); signal?.removeEventListener("abort", abort); running--; waiting.shift()?.(); }
   }
   async function optionsSnapshot(symbol: string, signal?: AbortSignal) {
+    const requestGeneration = generation;
     const cached = snapshots.get(symbol);
     if (cached && cached.expires > Date.now()) return cached.value;
     const controller = new AbortController(); const abort = () => controller.abort(); signal?.addEventListener("abort", abort, { once: true });
+    active.add(controller);
     const timer = window.setTimeout(abort, 45_000);
     let response: Response; let value: StocksWatcherSnapshot & { error?: string };
     try { response = await fetch(`/api/stocks-intelligence-watcher?symbol=${encodeURIComponent(symbol)}&surface=options`, { signal: controller.signal }); value = await response.json(); }
-    finally { window.clearTimeout(timer); signal?.removeEventListener("abort", abort); }
+    finally { window.clearTimeout(timer); active.delete(controller); signal?.removeEventListener("abort", abort); }
+    if (requestGeneration !== generation) throw new DOMException("Superseded request", "AbortError");
     if (!response.ok || value.symbol !== symbol || !value.quote) throw new Error(value.error || "The options snapshot could not be verified.");
     if (snapshots.size >= 20) snapshots.delete(snapshots.keys().next().value as string);
     snapshots.set(symbol, { value, expires: Date.now() + 60_000 });
     return value;
   }
-  return { tool, optionsSnapshot };
+  const invalidate = () => { generation++; cache.clear(); snapshots.clear(); for (const controller of active) controller.abort(); };
+  return { tool, optionsSnapshot, invalidate };
 }
 export type WorkspaceClient = ReturnType<typeof createWorkspaceClient>;
 
@@ -98,7 +108,7 @@ export function useWatcherWorkspace(symbol: string, customs: string[], active: b
   const [watchlist, setWatchlist] = useState<WorkspaceResource<string[]>>({ data: null, loading: false, error: null });
   const [quotes, setQuotes] = useState<WorkspaceResource<WorkspaceQuote[]>>({ data: null, loading: false, error: null });
   const [context, setContext] = useState<WorkspaceResource<MarketContextSnapshot & { freshness?: { status: string } }>>({ data: null, loading: false, error: null });
-  const [research, setResearch] = useState<{ symbol: string; quote: WorkspaceQuote | null; bars: WorkspaceBar[]; rejected: number; loading: boolean; error: string | null; stale: boolean }>({ symbol, quote: null, bars: [], rejected: 0, loading: false, error: null, stale: false });
+  const [research, setResearch] = useState<{ symbol: string; quote: WorkspaceQuote | null; bars: WorkspaceBar[]; rejected: number; loading: boolean; error: string | null; errorDetail: string | null; stale: boolean }>({ symbol, quote: null, bars: [], rejected: 0, loading: false, error: null, errorDetail: null, stale: false });
   const quotesRef = useRef<WorkspaceQuote[]>([]);
   const quotesFetchedAt = useRef(0);
   const customKey = customs.join(",");
@@ -146,7 +156,7 @@ export function useWatcherWorkspace(symbol: string, customs: string[], active: b
     const controller = new AbortController();
     setResearch({ symbol, quote: null, bars: [], rejected: 0, loading: true, error: null, errorDetail: null, stale: false });
     const quote = Date.now() - quotesFetchedAt.current < 60_000 ? quotesRef.current.find(row => row.symbol === symbol) : undefined;
-    const quotePromise = quote && revision === 0 ? Promise.resolve({ raw: { quotes: [quote] } } as WorkspaceTool) : client.tool("get_quotes", { tickers: symbol }, controller.signal, revision > 0);
+    const quotePromise = quote && revision === 0 ? Promise.resolve({ raw: { source: "native_yahoo", quotes: [quote] } } as WorkspaceTool) : client.tool("get_quotes", { tickers: symbol }, controller.signal, revision > 0);
     void Promise.allSettled([quotePromise, client.tool("get_stock_history", { ticker: symbol, range: "1y", interval: "1d" }, controller.signal, revision > 0)]).then(results => {
       if (controller.signal.aborted) return;
       const errors: string[] = [];
@@ -156,7 +166,7 @@ export function useWatcherWorkspace(symbol: string, customs: string[], active: b
         stale ||= result.value.cache?.status === "stale";
         try {
           if (index === 0) { quote = parseWorkspaceQuotes(result.value.raw).find(row => row.symbol === symbol) ?? null; if (!quote) throw new Error("Requested quote identity is missing."); }
-          else { const data = parseWorkspaceHistory(result.value.raw); bars = data.bars; rejected = data.rejected; }
+          else { const data = parseWorkspaceHistory(result.value.raw, symbol); bars = data.bars; rejected = data.rejected; }
         } catch (error) { errors.push(message(error)); }
       }
       setResearch({ symbol, quote, bars, rejected, loading: false, error: errors.length ? "Research data is unavailable." : null, errorDetail: errors.join(" ") || null, stale });
@@ -164,5 +174,5 @@ export function useWatcherWorkspace(symbol: string, customs: string[], active: b
     return () => controller.abort();
   }, [client, symbol, revision, coreActive]);
   const visibleResearch = useMemo(() => research.symbol === symbol ? research : { symbol, quote: null, bars: [], rejected: 0, loading: true, error: null, errorDetail: null, stale: false }, [research, symbol]);
-  return { client, watchlist, quotes, context, research: visibleResearch, refresh: () => setRevision(value => value + 1) };
+  return { client, watchlist, quotes, context, research: visibleResearch, refreshRevision: revision, refresh: () => { client.invalidate(); setRevision(value => value + 1); } };
 }

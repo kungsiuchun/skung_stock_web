@@ -856,7 +856,7 @@ test("row quote parser preserves Yahoo quote fields for watcher rows", () => {
       { symbol: "GOOG", price: 356.24, previousClose: 357.89, change: -1.65, changePercent: -0.46, source: "yahoo_quote", fetchedAt: 1234 },
       { symbol: "AAPL", price: 316.22, previousClose: null, change: 21.84, changePercent: 7.42, source: "yahoo_quote", fetchedAt: 1234 },
       { symbol: "ZERO", price: 50, previousClose: null, change: 0, changePercent: 0, source: "yahoo_quote", fetchedAt: 1234 },
-      { symbol: "FLAT", price: 100, previousClose: null, change: 0, changePercent: 0, source: "yahoo_quote", fetchedAt: 1234 },
+      { symbol: "FLAT", price: 100, previousClose: null, change: null, changePercent: null, source: "yahoo_quote", fetchedAt: 1234 },
     ],
   );
   assert.deepEqual(quotes.map((quote) => quote.changeAvailable), [true, true, true, false]);
@@ -912,6 +912,7 @@ test("Yahoo explicit quote change wins over bad chartPreviousClose fallback", ()
   const quote = quoteRowFromYahooChartResult("TSLA", {
     meta: {
       shortName: "Tesla, Inc.",
+      currency: "USD",
       regularMarketPrice: 406.55,
       chartPreviousClose: 425.3,
       regularMarketChange: 12.49,
@@ -1078,6 +1079,26 @@ test("native snapshot leaves history and expiry rows empty when optional data is
   assert.equal(snapshot.gexRegime, "Unavailable");
 });
 
+test("partial option metrics retain observed OI, omit invalid strikes and never manufacture ratios or sweeps", async () => {
+  const client = new FakeStocksNativeClient();
+  const original = client.callTool.bind(client);
+  client.callTool = async (name, args) => {
+    if (name === "get_options") return { text: "", raw: { chain: { selectedExpiry: "2026-05-29", expiries: ["2026-05-29"], calls: [{ strike: 180, openInterest: 10, volume: null }, { openInterest: 100, volume: 100 }], puts: [{ strike: 180, openInterest: 20, volume: 0 }] } } };
+    if (name === "get_options_gex") return { text: "", raw: { exposures: [] } };
+    return original(name, args);
+  };
+  const snapshot = await buildStocksWatcherSnapshotFromNative("NVDA", client, undefined, { surface: "options" });
+  assert.equal(snapshot.expiryRows[0].openInterest, 30);
+  assert.equal(snapshot.expiryRows[0].volume, null);
+  assert.equal(snapshot.expiryRows[0].primaryStrike, 180);
+  assert.equal(snapshot.putCallOpenInterest, 2);
+  assert.equal(snapshot.putCallVolume, null);
+  assert.equal(snapshot.sweeps, null);
+  assert.equal(snapshot.strikes.length, 0);
+  const summary = buildStocksWatcherDeterministicSummary(buildStocksWatcherAiSummaryPayload(snapshot));
+  assert.match(summary.headline, /unavailable/); assert.ok(!summary.headline.includes("pinning"));
+});
+
 test("curated ticker falls back to Yahoo options when the Robinhood release is unavailable", async () => {
   const snapshot = await buildStocksWatcherSnapshotFromNative("NVDA", new FakeStocksNativeClient(), {
     unavailableReason: "ROBINHOOD_OPTIONS_NOT_PUBLISHED: current.json is unavailable.",
@@ -1235,6 +1256,7 @@ test("cache row observability can feed the quota guard without exposing payloads
 test("native Yahoo history drops incomplete OHLCV bars instead of synthesizing zero values", async () => {
   const before = globalThis.fetch;
   globalThis.fetch = (async () => Response.json({ chart: { result: [{
+    meta: { symbol: "NVDA" },
     timestamp: [1792785600, 1792872000],
     indicators: { quote: [{ open: [100, null], high: [105, 105], low: [98, 98], close: [102, 103], volume: [1000, null] }] },
   }] } })) as typeof fetch;

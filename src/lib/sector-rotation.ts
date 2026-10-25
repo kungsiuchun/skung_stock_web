@@ -5,6 +5,7 @@ import {
   type SectorUniverse,
 } from "./market-breadth";
 import { isNyseTradingDay } from "./nyse-calendar";
+import { isValidIsoDate as dateValid } from "./yahoo-finance-normalizer";
 
 export const SECTOR_ROTATION_SCHEMA_VERSION = 1 as const;
 export const SECTOR_ROTATION_WINDOWS = [
@@ -100,10 +101,6 @@ export interface SectorRotationSnapshot {
 }
 
 const round = (value: number) => Math.round(value * 1_000_000) / 1_000_000;
-const dateValid = (value: unknown): value is string => typeof value === "string"
-  && /^\d{4}-\d{2}-\d{2}$/.test(value)
-  && Number.isFinite(Date.parse(`${value}T00:00:00.000Z`))
-  && new Date(`${value}T00:00:00.000Z`).toISOString().slice(0, 10) === value;
 const shiftDate = (value: string, days: number) => {
   const date = new Date(`${value}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() + days);

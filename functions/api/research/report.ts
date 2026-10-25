@@ -7,6 +7,8 @@ import { reserveMarketCacheRefreshQuota } from "../../../src/lib/stocks-watcher-
 import type { WatcherFinancialStatements, R2BucketLike } from "../../../src/lib/stocks-watcher-valuation-data";
 import type { RobinhoodOptionsR2BucketLike } from "../../../src/lib/stocks-watcher-robinhood-options";
 import { renderResearchReport, researchReportSchema, validateResearchReport, type ResearchReportSections } from "../../../src/lib/research-report";
+import { BoundedBodyError, readBoundedText, fetchBoundedText } from "../../../src/lib/bounded-body";
+import { isVerifiedFreeResearchModel } from "../../../src/lib/free-research-models";
 
 export interface ResearchEnv extends FreeResearchEnv { VALUATION_DATA?: R2BucketLike; OPTIONS_SNAPSHOT_DATA?: RobinhoodOptionsR2BucketLike }
 interface PublishedResearchReport {
@@ -22,9 +24,12 @@ export const legacyTradingReports = (content: string) => ({
 });
 export const researchJson = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
 export async function readResearchBody(request: Request, maxBytes = 4000): Promise<Record<string, unknown>> {
-  if (Number(request.headers.get("Content-Length") || 0) > maxBytes) throw new PublicResearchLimitError("Request is too large.", 413);
-  const text = await request.text();
-  if (new TextEncoder().encode(text).byteLength > maxBytes) throw new PublicResearchLimitError("Request is too large.", 413);
+  let text: string;
+  try { text = await readBoundedText(request, maxBytes); }
+  catch (error) {
+    if (error instanceof BoundedBodyError) throw new PublicResearchLimitError(error.kind === "size" ? "Request is too large." : "Request body timed out.", error.kind === "size" ? 413 : 408);
+    throw new PublicResearchLimitError("Request must contain valid UTF-8 JSON.", 400);
+  }
   let value: unknown;
   try { value = JSON.parse(text); } catch { throw new PublicResearchLimitError("Request must contain valid JSON.", 400); }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new PublicResearchLimitError("Request must be a JSON object.", 400);
@@ -33,16 +38,16 @@ export async function readResearchBody(request: Request, maxBytes = 4000): Promi
 export async function loadResearchEvidence(request: Request, env: ResearchEnv, symbol: string) {
   const load = async (tool: string, params: Record<string, unknown>) => {
     const response = await watcherTool({ env, request: new Request(new URL("/api/stocks-intelligence-watcher", request.url), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tool, params }) }) });
-    const body = await response.json() as { ok?: boolean; raw?: unknown; error?: string; cache?: { status?: string; lastRefreshError?: string } };
-    if (!response.ok || body.ok === false || !body.raw) throw new Error(body.error || `${tool} is unavailable.`);
-    if (body.cache?.status === "stale") throw new Error(`${tool} is stale; refresh is required before AI interpretation.`);
+    const body = await response.json() as { ok?: boolean; raw?: unknown; error?: string; retryAt?: string; quota?: { resetsAtUtc?: string }; cache?: { status?: string; lastRefreshError?: string } };
+    if (!response.ok || body.ok === false || !body.raw) throw new PublicResearchLimitError(body.error || `${tool} is unavailable.`, [404, 429, 503, 504].includes(response.status) ? response.status : 502, body.retryAt || body.quota?.resetsAtUtc);
+    if (body.cache?.status === "stale") throw new PublicResearchLimitError(`${tool} is stale; refresh is required before AI interpretation.`, 503);
     return body.raw;
   };
   // Two concurrent requests; public reports contain only server-assembled facts.
   const [rawQuote, rawHistory] = await Promise.all([load("get_quotes", { tickers: symbol }), load("get_stock_history", { ticker: symbol, range: "1y", interval: "1d" })]);
   const quote = parseWorkspaceQuotes(rawQuote).find(row => row.symbol === symbol);
   if (!quote || !quote.asOf) throw new Error("A timestamped quote is required for research.");
-  const history = parseWorkspaceHistory(rawHistory);
+  const history = parseWorkspaceHistory(rawHistory, symbol);
   const technical = deriveWorkspaceEvidence(history.bars, history.rejected);
   const gaps: string[] = [];
   let financials: Pick<WatcherFinancialStatements, "financialSource" | "quarters" | "generatedAt"> | null = null;
@@ -50,7 +55,10 @@ export async function loadResearchEvidence(request: Request, env: ResearchEnv, s
     const raw = await load("get_financial_statements", { symbol, ticker: symbol, limit: 4 }) as WatcherFinancialStatements;
     if (raw.symbol !== symbol || !raw.financialSource || !Array.isArray(raw.quarters)) throw new Error("Published financial identity is invalid.");
     financials = { financialSource: raw.financialSource, quarters: raw.quarters.slice(0, 4), generatedAt: raw.generatedAt };
-  } catch { gaps.push("Published SEC financials unavailable; business quality and valuation cannot be concluded."); }
+  } catch (error) {
+    if (!(error instanceof PublicResearchLimitError) || error.status !== 404) throw error;
+    gaps.push("Published SEC financials unavailable; business quality and valuation cannot be concluded.");
+  }
   if (history.rejected) gaps.push(`${history.rejected} invalid price bars were excluded; derived levels are unavailable.`);
   gaps.push("Options, news and upcoming earnings are not included in this report's evidence. Check those tabs separately.");
   const evidence = { symbol, quote, technical, financials, gaps, sources: [
@@ -78,9 +86,9 @@ const themeTarget = (value: unknown) => {
 };
 
 const loadPublicThemeEvidence = async (target: string): Promise<PublicThemeEvidence> => {
-  const response = await fetch(`https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(target)}&newsCount=8&quotesCount=0`);
+  const { response, text } = await fetchBoundedText(`https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(target)}&newsCount=8&quotesCount=0`, {}, 512 * 1024);
   if (!response.ok) throw new Error(`Yahoo theme search is unavailable (HTTP ${response.status}).`);
-  const data = await response.json() as { news?: Array<{ title?: unknown; publisher?: unknown; providerPublishTime?: unknown }> };
+  const data = JSON.parse(text) as { news?: Array<{ title?: unknown; publisher?: unknown; providerPublishTime?: unknown }> };
   const headlines = (Array.isArray(data.news) ? data.news : []).flatMap(item => {
     const publishedAt = typeof item.providerPublishTime === "number" && Number.isFinite(item.providerPublishTime)
       ? new Date(item.providerPublishTime * 1000)
@@ -121,13 +129,14 @@ export async function runPublicThemeReport(request: Request, env: ResearchEnv, b
     symbol: target.toUpperCase(),
     params: { version, target, language },
     ttlMs: 24 * 3600_000,
+    allowStaleOnRefreshError: false,
     refreshQuotaGuard: () => reserveMarketCacheRefreshQuota(env.MARKET_CACHE_DB!, { operation: "research_report" }),
     sourceAsOf: () => evidence.sources[0].asOf,
     validate: value => {
       try {
         const sections = validateResearchReport(value.sections, ["N"]);
         return value.symbol === target && value.evidenceVersion === version && value.lens === "serenity" && value.language === language
-          && typeof value.model === "string" && value.model.length > 0 && value.model.length < 150 && Number.isFinite(Date.parse(value.generatedAt))
+          && isVerifiedFreeResearchModel(value.model) && Number.isFinite(Date.parse(value.generatedAt))
           && JSON.stringify(value.sources) === JSON.stringify(evidence.sources) && JSON.stringify(value.gaps) === JSON.stringify(evidence.gaps)
           && value.content === renderPublicThemeReport(sections, evidence, language);
       } catch { return false; }
@@ -158,14 +167,14 @@ export async function runPublicReport(request: Request, env: ResearchEnv, body: 
   if (!env.MARKET_CACHE_DB) throw new PublicResearchLimitError("Shared report caching and usage limits are unavailable.", 503);
   const facts = { symbol, language, quote: evidence.quote.price, currency: evidence.quote.currency, quoteAsOf: evidence.quote.asOf!, priceAsOf: evidence.technical.lastDate, gaps: evidence.gaps };
   const resolved = await resolveMarketCache<PublishedResearchReport>({ db: env.MARKET_CACHE_DB, scope: "research-report-v2", symbol,
-    params: { version, lens, language, prompt: 3 }, ttlMs: 24 * 3600_000,
+    params: { version, lens, language, prompt: 3 }, ttlMs: 24 * 3600_000, allowStaleOnRefreshError: false,
     refreshQuotaGuard: () => reserveMarketCacheRefreshQuota(env.MARKET_CACHE_DB!, { operation: "research_report" }),
     sourceAsOf: () => evidence.quote.asOf,
     validate: value => {
       try {
         const sections = validateResearchReport(value.sections, evidence.sources.map(source => source.id));
         return value.symbol === symbol && value.evidenceVersion === version && value.lens === lens && value.language === language
-          && typeof value.model === "string" && value.model.length > 0 && value.model.length < 150 && Number.isFinite(Date.parse(value.generatedAt))
+          && isVerifiedFreeResearchModel(value.model) && Number.isFinite(Date.parse(value.generatedAt))
           && JSON.stringify(value.sources) === JSON.stringify(evidence.sources) && JSON.stringify(value.gaps) === JSON.stringify(evidence.gaps)
           && value.content === renderResearchReport(sections, facts);
       } catch { return false; }
@@ -193,5 +202,5 @@ export async function onRequestPost({ request, env }: { request: Request; env: R
   try {
     const body = await readResearchBody(request);
     return researchJson({ success: true, report: await runPublicReport(request, env, body) });
-  } catch (error) { return researchJson({ success: false, error: error instanceof Error ? error.message : "Research unavailable.", ...(error instanceof PublicResearchLimitError ? { retryAt: error.retryAt } : {}) }, error instanceof PublicResearchLimitError ? error.status : error instanceof SyntaxError ? 400 : 502); }
+  } catch (error) { return researchJson({ success: false, error: error instanceof Error ? error.message : "Research unavailable.", ...(error instanceof PublicResearchLimitError ? { retryAt: error.retryAt } : {}) }, error instanceof PublicResearchLimitError ? error.status : 502); }
 }

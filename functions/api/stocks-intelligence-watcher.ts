@@ -33,6 +33,7 @@ import {
   loadWatcherValuationBands,
   loadWatcherValuationRelease,
   STOCKS_WATCHER_VALUATION_TOOLS,
+  WatcherValuationInputError,
   type R2BucketLike,
 } from "../../src/lib/stocks-watcher-valuation-data";
 import {
@@ -43,6 +44,11 @@ import {
 } from "../../src/lib/stocks-watcher-robinhood-options";
 import { PublicResearchLimitError } from "../../src/lib/public-research-budget";
 import { workspaceSymbol } from "../../src/lib/watcher-workspace";
+import { BoundedBodyError, readBoundedText } from "../../src/lib/bounded-body";
+
+const valuationErrorStatus = (error: unknown, message: string) => error instanceof WatcherValuationInputError ? 400
+  : message.startsWith("VALUATION_DATA_NOT_PUBLISHED:") ? 404
+  : /^VALUATION_DATA_(UNAVAILABLE|STALE|CONFLICT):/.test(message) ? 503 : 502;
 
 const json = (body: unknown, init: ResponseInit = {}) =>
   new Response(JSON.stringify(body), {
@@ -379,9 +385,7 @@ const callNativeTool = async (
       return json(
         { ok: false, requestId, tool, params, error: message, coverageStatus },
         {
-          status: message.startsWith("VALUATION_DATA_NOT_PUBLISHED:")
-            ? 404
-            : 400,
+          status: valuationErrorStatus(error, message),
         },
       );
     }
@@ -413,9 +417,7 @@ const callNativeTool = async (
       return json(
         { ok: false, requestId, tool, params, error: message, coverageStatus },
         {
-          status: message.startsWith("VALUATION_DATA_NOT_PUBLISHED:")
-            ? 404
-            : 400,
+          status: valuationErrorStatus(error, message),
         },
       );
     }
@@ -449,7 +451,7 @@ const callNativeTool = async (
     db: env.MARKET_CACHE_DB,
     scope,
     symbol: getNativeStocksToolCacheSymbol(cacheParams),
-    params: cacheParams,
+    params: { ...cacheParams, dataSchema: "observed-v3" },
     dataset,
     ttlMs: getMarketCacheDatasetTtlMs(dataset),
     refreshQuotaGuard: env.MARKET_CACHE_DB
@@ -618,10 +620,11 @@ export async function onRequest(context: { request: Request; env?: Env }) {
     let requestedTool = "";
     let validatedTool = false;
     try {
-      const body = (await context.request.json()) as {
+      const body = JSON.parse(await readBoundedText(context.request, 32 * 1024)) as {
         tool?: unknown;
         params?: unknown;
       };
+      if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Tool request must be a JSON object.");
       const tool = normalizeToolName(body.tool);
       requestedTool = tool;
       const supported = [...listNativeStocksTools(), ...STOCKS_WATCHER_VALUATION_TOOLS].some(entry => entry.name === tool)
@@ -642,6 +645,8 @@ export async function onRequest(context: { request: Request; env?: Env }) {
         requestId,
       );
     } catch (error) {
+      if (error instanceof BoundedBodyError) return json({ ok: false, errorCode: validatedTool ? "UPSTREAM_UNAVAILABLE" : "INVALID_REQUEST", error: validatedTool ? (error.kind === "size" ? "The data provider response exceeded its size limit." : "The data provider timed out.") : (error.kind === "size" ? "Request is too large." : "Request body timed out.") }, withRequestId({ status: validatedTool ? (error.kind === "size" ? 502 : 504) : (error.kind === "size" ? 413 : 408) }));
+      if (error instanceof PublicResearchLimitError) return json({ ok: false, error: error.message, retryAt: error.retryAt }, withRequestId({ status: error.status }));
       const quotaFailure = validatedTool ? watcherQuotaFailure(error) : null;
       const errorCode = quotaFailure?.errorCode || (validatedTool
         ? "UPSTREAM_UNAVAILABLE"
@@ -688,7 +693,7 @@ export async function onRequest(context: { request: Request; env?: Env }) {
       db: env.MARKET_CACHE_DB,
       scope,
       symbol,
-      params: optionsOnly ? { symbol, surface: "options", schema: 2 } : { symbol, gexDataSchema: "observed-v2" },
+      params: optionsOnly ? { symbol, surface: "options", schema: 3 } : { symbol, gexDataSchema: "observed-v3" },
       dataset,
       ttlMs: getMarketCacheDatasetTtlMs(dataset),
       refreshQuotaGuard: env.MARKET_CACHE_DB

@@ -1,4 +1,5 @@
 import { strFromU8, unzipSync } from "fflate";
+import { isValidIsoDate } from "./yahoo-finance-normalizer";
 
 export const MARKET_BREADTH_SCHEMA_VERSION = 1 as const;
 export const MARKET_BREADTH_PRICE_LIMIT = 420;
@@ -28,7 +29,7 @@ export interface PriceBar {
 export const mergeMarketBreadthPriceBars = (existing: PriceBar[], incoming: PriceBar[]) => {
   const byDate = new Map<string, PriceBar>();
   for (const bar of [...existing, ...incoming]) {
-    if (/^\d{4}-\d{2}-\d{2}$/.test(bar.date) && Number.isFinite(bar.close) && bar.close > 0) byDate.set(bar.date, { date: bar.date, close: bar.close });
+    if (isValidIsoDate(bar.date) && Number.isFinite(bar.close) && bar.close > 0) byDate.set(bar.date, { date: bar.date, close: bar.close });
   }
   return [...byDate.values()].sort((left, right) => left.date.localeCompare(right.date)).slice(-MARKET_BREADTH_PRICE_LIMIT);
 };
@@ -286,7 +287,7 @@ export const parseStateStreetHoldingsWorkbook = (
 };
 
 const assertIsoDate = (value: string, label: string) => {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+  if (!isValidIsoDate(value)) {
     throw new Error(`${label} must be YYYY-MM-DD.`);
   }
 };
@@ -354,7 +355,7 @@ export const buildSectorUniverse = (input: {
 };
 
 const sortedBars = (series: PriceBar[]) => [...series]
-  .filter((bar) => /^\d{4}-\d{2}-\d{2}$/.test(bar.date) && Number.isFinite(bar.close) && bar.close > 0)
+  .filter((bar) => isValidIsoDate(bar.date) && Number.isFinite(bar.close) && bar.close > 0)
   .sort((left, right) => left.date.localeCompare(right.date));
 
 export const calculateSessionReturn = (series: PriceBar[], sessionsBack: number): number | null => {
@@ -618,7 +619,7 @@ export const validateMarketBreadthSnapshot = (value: unknown): MarketBreadthSnap
   if (snapshot.schemaVersion !== MARKET_BREADTH_SCHEMA_VERSION) throw new Error("Market breadth snapshot schema version is invalid.");
   if (typeof snapshot.snapshotId !== "string" || !snapshot.snapshotId.startsWith("market-breadth-v1-")) throw new Error("Market breadth snapshot ID is invalid.");
   if (!Number.isFinite(Date.parse(snapshot.generatedAt || ""))) throw new Error("Market breadth generatedAt is invalid.");
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(snapshot.priceAsOf || "") || !/^\d{4}-\d{2}-\d{2}$/.test(snapshot.holdingsAsOf || "")) {
+  if (!isValidIsoDate(snapshot.priceAsOf) || !isValidIsoDate(snapshot.holdingsAsOf)) {
     throw new Error("Market breadth as-of dates are invalid.");
   }
   if (!Number.isInteger(snapshot.universeCount) || Number(snapshot.universeCount) <= 0) throw new Error("Market breadth universe count is invalid.");

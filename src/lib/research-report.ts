@@ -1,5 +1,13 @@
 export interface ResearchClaim { text: string; sourceIds: string[] }
 export interface ResearchReportSections { summary: ResearchClaim; support: ResearchClaim[]; counterchecks: ResearchClaim[]; risks: ResearchClaim[] }
+export function validateResearchClaim(value: ResearchClaim, sourceIds: string[]): ResearchClaim {
+  if (!value || Object.keys(value).sort().join(",") !== "sourceIds,text" || typeof value.text !== "string" || !value.text.trim() || value.text.length > 900
+    || /https?:|www\.|javascript:|data:|<|!\[|\[[^\]]*\]\s*\(/i.test(value.text)
+    || !Array.isArray(value.sourceIds) || !value.sourceIds.length || value.sourceIds.length > sourceIds.length
+    || value.sourceIds.some(id => !sourceIds.includes(id)) || new Set(value.sourceIds).size !== value.sourceIds.length
+    || [...value.text.matchAll(/\[([A-Za-z][A-Za-z0-9_-]{0,30})\]/g)].some(match => !value.sourceIds.includes(match[1]))) throw new Error("A research claim has invalid text or source references.");
+  return { text: value.text, sourceIds: [...value.sourceIds] };
+}
 export function researchReportSchema(sourceIds: string[]) {
   const claim = { type: "object", additionalProperties: false, required: ["text", "sourceIds"], properties: {
     text: { type: "string", minLength: 1, maxLength: 900 },
@@ -11,12 +19,7 @@ export function researchReportSchema(sourceIds: string[]) {
 export function validateResearchReport(value: unknown, sourceIds: string[]): ResearchReportSections {
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join(",") !== "counterchecks,risks,summary,support") throw new Error("Research report sections are invalid.");
   const row = value as ResearchReportSections;
-  const claim = (value: ResearchClaim) => {
-    if (!value || Object.keys(value).sort().join(",") !== "sourceIds,text" || typeof value.text !== "string" || !value.text.trim() || value.text.length > 900
-      || /https?:|<|!\[/.test(value.text) || !Array.isArray(value.sourceIds) || !value.sourceIds.length || value.sourceIds.length > 3
-      || value.sourceIds.some(id => !sourceIds.includes(id)) || new Set(value.sourceIds).size !== value.sourceIds.length) throw new Error("A report claim has invalid text or source references.");
-    return { text: value.text, sourceIds: [...value.sourceIds] };
-  };
+  const claim = (value: ResearchClaim) => validateResearchClaim(value, sourceIds);
   const list = (values: ResearchClaim[]) => { if (!Array.isArray(values) || !values.length || values.length > 4) throw new Error("Research report evidence lists are invalid."); return values.map(claim); };
   return { summary: claim(row.summary), support: list(row.support), counterchecks: list(row.counterchecks), risks: list(row.risks) };
 }

@@ -1,5 +1,6 @@
 import type { MarketBreadthSnapshot } from "./market-breadth";
 import type { SectorRotationSnapshot } from "./sector-rotation";
+import { isValidIsoDate } from "./yahoo-finance-normalizer";
 
 export interface MarketContextSnapshot {
   schemaVersion: 1; snapshotId: string; priceAsOf: string; holdingsAsOf: string; generatedAt: string;
@@ -29,8 +30,8 @@ export function validateMarketContext(value: unknown): MarketContextSnapshot {
   const row = value as MarketContextSnapshot;
   const finiteOrNull = (n: unknown) => n === null || typeof n === "number" && Number.isFinite(n);
   if (!row || row.schemaVersion !== 1 || typeof row.snapshotId !== "string" || !row.snapshotId
-    || !/^\d{4}-\d{2}-\d{2}$/.test(row.priceAsOf) || !/^\d{4}-\d{2}-\d{2}$/.test(row.holdingsAsOf)
-    || !Number.isFinite(Date.parse(row.generatedAt)) || row.benchmark?.symbol !== "SPY" || !finiteOrNull(row.benchmark.oneDay)
+    || !isValidIsoDate(row.priceAsOf) || !isValidIsoDate(row.holdingsAsOf)
+    || typeof row.generatedAt !== "string" || !isValidIsoDate(row.generatedAt.slice(0, 10)) || !Number.isFinite(Date.parse(row.generatedAt)) || row.benchmark?.symbol !== "SPY" || !finiteOrNull(row.benchmark.oneDay)
     || !row.participation || ![row.participation.above, row.participation.eligible, row.participation.total].every(n => Number.isInteger(n) && n >= 0)
     || row.participation.above > row.participation.eligible || row.participation.eligible > row.participation.total
     || !finiteOrNull(row.participation.pct) || row.participation.pct !== (row.participation.eligible ? 100 * row.participation.above / row.participation.eligible : null)

@@ -333,8 +333,8 @@ export const toRobinhoodOptionsToolPayload = (
       text: `${baseText} Put/call ratios for ${view.selectedExpiry || "unavailable expiry"}.`,
       raw: visualRaw({
         expiry: view.selectedExpiry,
-        putCallOpenInterest: putOi / Math.max(1, callOi),
-        putCallVolume: putVol / Math.max(1, callVol),
+        putCallOpenInterest: callOi > 0 ? putOi / callOi : null,
+        putCallVolume: callVol > 0 ? putVol / callVol : null,
         callOi,
         putOi,
         callVol,

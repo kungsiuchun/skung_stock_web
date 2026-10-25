@@ -927,11 +927,12 @@ export function StocksIntelligenceWatcherPage({ embeddedSymbol, embedded = false
   }, [activeSubTab, loadExpiryOverview, onEmbeddedExpiryChange]);
 
   useEffect(() => {
-    if (embeddedExpiry) {
-      setSelectedExpiry(embeddedExpiry);
-      setChartSelectedExpiries([embeddedExpiry]);
-    }
-  }, [embeddedExpiry]);
+    if (!embedded) return;
+    setSelectedExpiry(embeddedExpiry ?? null);
+    setChartSelectedExpiries(embeddedExpiry ? [embeddedExpiry] : []);
+    setChartExpiryMenuOpen(false);
+    setChartTooltip(null);
+  }, [embedded, embeddedExpiry]);
   useEffect(() => { if (embeddedRange) setPriceRange(embeddedRange); }, [embeddedRange]);
 
   const preloadYahooExpirySummaries = useCallback(async () => {
@@ -2508,7 +2509,7 @@ export function StocksIntelligenceWatcherPage({ embeddedSymbol, embedded = false
       ["Target Mean", targetMean],
     ];
     const financialRows = [
-      ["Price", quote ? currency(quote.price) : "n/a", quote ? `${quote.changePercent.toFixed(2)}%` : "n/a"],
+      ["Price", quote ? currency(quote.price) : "n/a", formatSignedPercent(quote?.changePercent)],
       ["Forward P/E", display(["forwardPE", "forwardPe"]), "Yahoo"],
       ["Trailing P/E", display(["trailingPE", "trailingPe"]), "Yahoo"],
       ["Beta", beta, "5Y proxy"],
@@ -2869,7 +2870,7 @@ export function StocksIntelligenceWatcherPage({ embeddedSymbol, embedded = false
     }, new Map());
     const liveWatchlistQuotes = watchlist.flatMap((stock) => {
       const quote = rowQuotesBySymbol[stock.symbol];
-      return quote?.source === "yahoo_quote" && quote.changeAvailable ? [{ stock, quote }] : [];
+      return quote?.source === "yahoo_quote" && quote.changeAvailable && quote.changePercent !== null ? [{ stock, quote: { ...quote, changePercent: quote.changePercent } }] : [];
     });
     const watchlistCoverage = liveWatchlistQuotes.length;
     const sectorRows = Array.from(
@@ -3197,7 +3198,7 @@ export function StocksIntelligenceWatcherPage({ embeddedSymbol, embedded = false
                   onClick={() => selectOptionsExpiry(normalizedExpiry)}
                 >
                   <span>{formatExpiryDate(row.expiry, "compact")}</span>
-                  <span>{row.loaded ? formatNumber(row.openInterest || 0) : loadState === "loading" ? "Loading" : loadState === "retry" ? "Retry" : "Load"}</span>
+                  <span>{row.loaded ? formatNumber(row.openInterest) : loadState === "loading" ? "Loading" : loadState === "retry" ? "Retry" : "Load"}</span>
                   <span className={exposureToneClassName(row.netGex, row.loaded)} title={usesNativeYahooOptions ? "Locally estimated Yahoo proxy; not dealer positioning" : undefined}>{row.loaded ? formatOptionalSignedExposure(row.netGex) : "n/a"}</span>
                   <span className={exposureToneClassName(row.netDex, row.loaded)} title={usesNativeYahooOptions ? "Locally estimated Yahoo proxy; not dealer positioning" : undefined}>{row.loaded ? formatOptionalSignedExposure(row.netDex) : "n/a"}</span>
                 </button>

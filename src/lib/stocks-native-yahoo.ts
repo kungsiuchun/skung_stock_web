@@ -5,6 +5,7 @@ import {
   STOCKS_WATCHER_UNIVERSE,
 } from "./stocks-watcher-universe";
 import { normalizeYahooChartResult } from "./yahoo-finance-normalizer";
+import { fetchBoundedText } from "./bounded-body";
 
 export { STOCKS_WATCHER_SYMBOLS, STOCKS_WATCHER_UNIVERSE } from "./stocks-watcher-universe";
 export type StocksWatcherSupportedSymbol = string;
@@ -37,9 +38,9 @@ export interface QuoteRow {
   high: number | null;
   low: number | null;
   previousClose: number | null;
-  change: number;
-  changePercent: number;
-  volume: number;
+  change: number | null;
+  changePercent: number | null;
+  volume: number | null;
   currency: string;
   exchange: string;
   marketState: string;
@@ -102,6 +103,8 @@ const toNumber = (value: unknown, fallback = 0) =>
 const toOptionalNumber = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value) ? value : null;
 
+export const completeTotal = (values: Array<number | null>) => values.length && values.every(value => value !== null && Number.isFinite(value) && value >= 0) ? (values as number[]).reduce((sum, value) => sum + value, 0) : null;
+
 const roundOptional = (value: unknown, digits = 2) => {
   const number = toOptionalNumber(value);
   return number === null ? null : round(number, digits);
@@ -109,12 +112,12 @@ const roundOptional = (value: unknown, digits = 2) => {
 
 const roundOptionalInteger = (value: unknown) => {
   const number = toOptionalNumber(value);
-  return number === null ? null : Math.round(number);
+  return number === null || number < 0 ? null : Math.round(number);
 };
 
 const fmtMoney = (value: number) => `$${value.toLocaleString("en-US", { maximumFractionDigits: 2, minimumFractionDigits: 2 })}`;
-const fmtPct = (value: number) => `${value >= 0 ? "+" : ""}${round(value, 2).toFixed(2)}%`;
-const fmtSigned = (value: number) => `${value >= 0 ? "+" : ""}${round(value, 2).toFixed(2)}`;
+const fmtPct = (value: number | null) => value === null ? "n/a" : `${value >= 0 ? "+" : ""}${round(value, 2).toFixed(2)}%`;
+const fmtSigned = (value: number | null) => value === null ? "n/a" : `${value >= 0 ? "+" : ""}${round(value, 2).toFixed(2)}`;
 
 const compact = (value: number | null | undefined) => {
   if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
@@ -192,7 +195,7 @@ const normalizeToolTicker = (params: Record<string, unknown>, fallback = DEFAULT
   );
 
 const yahooJson = async <T>(url: string, options: RequestInit = {}) => {
-  const response = await fetch(url, {
+  const { response, text } = await fetchBoundedText(url, {
     ...options,
     headers: {
       "User-Agent": YAHOO_UA,
@@ -200,7 +203,6 @@ const yahooJson = async <T>(url: string, options: RequestInit = {}) => {
       ...(options.headers || {}),
     },
   });
-  const text = await response.text();
   if (!response.ok) {
     throw new Error(`Yahoo request failed ${response.status}: ${text.slice(0, 180)}`);
   }
@@ -211,23 +213,23 @@ const getYahooSession = async () => {
   const now = Date.now();
   if (yahooSession && now - yahooSession.fetchedAt < SESSION_TTL_MS) return yahooSession;
 
-  const cookieResponse = await fetch("https://fc.yahoo.com", {
+  const { response: cookieResponse } = await fetchBoundedText("https://fc.yahoo.com", {
     headers: { "User-Agent": YAHOO_UA },
-  });
+  }, 64 * 1024);
   const cookie = cookieResponse.headers.get("set-cookie") || "";
-  const crumbResponse = await fetch("https://query2.finance.yahoo.com/v1/test/getcrumb", {
+  const { response: crumbResponse, text: crumb } = await fetchBoundedText("https://query2.finance.yahoo.com/v1/test/getcrumb", {
     headers: {
       "User-Agent": YAHOO_UA,
       Cookie: cookie,
     },
-  });
+  }, 4096);
   if (!crumbResponse.ok) {
     throw new Error(`Yahoo crumb request failed ${crumbResponse.status}`);
   }
 
   yahooSession = {
     cookie,
-    crumb: (await crumbResponse.text()).trim(),
+    crumb: crumb.trim(),
     fetchedAt: now,
   };
   return yahooSession;
@@ -249,6 +251,7 @@ const fetchChart = async (symbol: string, range = "1y", interval = "1d") => {
   );
   const result = data.chart?.result?.[0];
   if (!result) throw new Error(`No Yahoo chart data for ${normalizeStocksWatcherSymbol(symbol)}`);
+  if (typeof result.meta?.symbol !== "string" || resolveStocksWatcherYahooSymbol(result.meta.symbol).yahooSymbol !== yahooSymbol) throw new Error(`Yahoo chart identity does not match ${symbol}.`);
   return result as Record<string, any>;
 };
 
@@ -265,21 +268,21 @@ export const quoteRowFromYahooChartResult = (symbol: string, chart: Record<strin
   let lastIndex = closes.length - 1;
   while (lastIndex > 0 && typeof closes[lastIndex] !== "number") lastIndex -= 1;
 
-  const price = toNumber(meta.regularMarketPrice, toNumber(closes[lastIndex], 0));
+  const price = toOptionalNumber(meta.regularMarketPrice) ?? toOptionalNumber(closes[lastIndex]);
+  if (price === null || price <= 0) throw new Error(`A positive Yahoo quote is unavailable for ${symbol}.`);
+  if (typeof meta.currency !== "string" || !/^[A-Z]{3}$/.test(meta.currency)) throw new Error(`Quote currency is unavailable for ${symbol}.`);
   const explicitPreviousClose = toOptionalNumber(meta.regularMarketPreviousClose ?? meta.previousClose);
   const explicitChange = toOptionalNumber(meta.regularMarketChange);
   const explicitChangePercent = toOptionalNumber(meta.regularMarketChangePercent);
-  const previousCloseFallback = toOptionalNumber(closes[Math.max(0, lastIndex - 1)])
-    ?? toOptionalNumber(meta.chartPreviousClose)
-    ?? price;
+  const previousCloseFallback = (lastIndex > 0 ? toOptionalNumber(closes[lastIndex - 1]) : null)
+    ?? toOptionalNumber(meta.chartPreviousClose);
   const previousClose = explicitPreviousClose
     ?? (explicitChange !== null ? price - explicitChange : previousCloseFallback);
-  const fallbackChange = price - previousClose;
-  const changeConflict = explicitChange !== null && Math.abs(explicitChange - fallbackChange) > Math.max(0.2, Math.abs(price) * 0.01);
+  const fallbackChange = previousClose !== null && previousClose > 0 ? price - previousClose : null;
+  const changeConflict = explicitChange !== null && fallbackChange !== null && Math.abs(explicitChange - fallbackChange) > Math.max(0.2, Math.abs(price) * 0.01);
   const change = explicitChange ?? fallbackChange;
-  const changePercent = explicitChangePercent ?? (previousClose ? (change / previousClose) * 100 : 0);
-  const changeAvailable = explicitChangePercent !== null || explicitChange !== null || explicitPreviousClose !== null
-    || lastIndex > 0 && toOptionalNumber(closes[lastIndex - 1]) !== null || toOptionalNumber(meta.chartPreviousClose) !== null;
+  const changePercent = explicitChangePercent ?? (previousClose !== null && previousClose > 0 && change !== null ? (change / previousClose) * 100 : null);
+  const changeAvailable = change !== null && changePercent !== null;
 
   return {
     symbol: displaySymbol,
@@ -288,12 +291,12 @@ export const quoteRowFromYahooChartResult = (symbol: string, chart: Record<strin
     open: roundOptional(meta.regularMarketOpen ?? opens[lastIndex]),
     high: roundOptional(meta.regularMarketDayHigh ?? highs[lastIndex]),
     low: roundOptional(meta.regularMarketDayLow ?? lows[lastIndex]),
-    previousClose: round(previousClose, 2),
-    change: round(change, 2),
-    changePercent: round(changePercent, 2),
+    previousClose: roundOptional(previousClose, 2),
+    change: roundOptional(change, 2),
+    changePercent: roundOptional(changePercent, 2),
     changeAvailable,
-    volume: toNumber(meta.regularMarketVolume, toNumber(volumes[lastIndex], 0)),
-    currency: String(meta.currency || "USD"),
+    volume: roundOptionalInteger(meta.regularMarketVolume ?? volumes[lastIndex]),
+    currency: meta.currency,
     exchange: String(meta.exchangeName || meta.fullExchangeName || "Yahoo"),
     marketState: String(meta.marketState || "UNKNOWN"),
     asOf: typeof meta.regularMarketTime === "number"
@@ -403,14 +406,19 @@ const fetchOptions = async (symbol: string, expiry?: string): Promise<OptionChai
   const expiries = (result.expirationDates || []).map((value: number) => dateFromSeconds(value));
   const selected = result.options?.[0] || {};
   const quote = result.quote || {};
+  if (typeof quote.symbol !== "string" || resolveStocksWatcherYahooSymbol(quote.symbol).yahooSymbol !== yahooSymbol) throw new Error(`Yahoo options identity does not match ${symbol}.`);
+  const spot = toOptionalNumber(quote.regularMarketPrice);
+  if (spot === null || spot <= 0) throw new Error(`Yahoo options underlying price is unavailable for ${symbol}.`);
+  const selectedExpiry = typeof selected.expirationDate === "number" ? dateFromSeconds(selected.expirationDate) : null;
+  if (expiry && selectedExpiry !== expiry) throw new Error(`Yahoo options expiration does not match ${expiry}.`);
 
   return {
     symbol: displaySymbol,
-    spot: round(toNumber(quote.regularMarketPrice, toNumber(quote.bid, 0))),
+    spot: round(spot),
     expiries,
-    selectedExpiry: typeof selected.expirationDate === "number" ? dateFromSeconds(selected.expirationDate) : expiries[0] || null,
-    calls: (selected.calls || []).map(normalizeOptionLeg),
-    puts: (selected.puts || []).map(normalizeOptionLeg),
+    selectedExpiry,
+    calls: (selected.calls || []).map(normalizeOptionLeg).filter((leg: OptionLeg | null): leg is OptionLeg => leg !== null),
+    puts: (selected.puts || []).map(normalizeOptionLeg).filter((leg: OptionLeg | null): leg is OptionLeg => leg !== null),
     source: {
       provider: "yahoo",
       label: "Yahoo delayed",
@@ -418,7 +426,7 @@ const fetchOptions = async (symbol: string, expiry?: string): Promise<OptionChai
   };
 };
 
-const normalizeOptionLeg = (leg: Record<string, any>): OptionLeg => ({
+const normalizeOptionLeg = (leg: Record<string, any>): OptionLeg | null => !leg || toOptionalNumber(leg.strike) === null || leg.strike <= 0 ? null : ({
   contractSymbol: String(leg.contractSymbol || ""),
   strike: round(toNumber(leg.strike)),
   lastPrice: roundOptional(leg.lastPrice),
@@ -663,7 +671,11 @@ const htmlExposureChart = (ticker: string, rows: ReturnType<typeof optionRowsNea
   return `<!doctype html><html><body style="margin:0;background:#020617;color:#e2e8f0;font-family:Inter,system-ui,sans-serif"><div style="position:relative;height:360px;padding:14px"><h3 style="margin:0 0 10px;font-size:14px">${escapeHtml(title)}</h3><canvas id="c"></canvas></div><script src="https://cdn.jsdelivr.net/npm/chart.js"></script><script>const labels=${JSON.stringify(labels)};const values=${JSON.stringify(values)};new Chart(document.getElementById('c'),{type:'bar',data:{labels,datasets:[{label:${JSON.stringify(metric === "dex" ? "Net DEX" : "Avg IV %")},data:values,backgroundColor:${JSON.stringify(color)},borderColor:${JSON.stringify(color)},borderWidth:1}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#e2e8f0'}}},scales:{x:{ticks:{color:'#94a3b8'},grid:{color:'rgba(148,163,184,.12)'}},y:{ticks:{color:'#94a3b8'},grid:{color:'rgba(148,163,184,.14)'}}}}});</script></body></html>`;
 };
 
-const fetchUniverseQuotes = () => Promise.all(STOCKS_WATCHER_QUOTE_SYMBOLS.map((symbol) => fetchQuote(symbol)));
+const requireQuoteMetrics = (quote: QuoteRow) => {
+  if (quote.changePercent === null || quote.volume === null) throw new Error(`Quote change or volume is unavailable for ${quote.symbol}; aggregate analysis was stopped.`);
+  return { ...quote, changePercent: quote.changePercent, volume: quote.volume };
+};
+const fetchUniverseQuotes = async () => (await Promise.all(STOCKS_WATCHER_QUOTE_SYMBOLS.map((symbol) => fetchQuote(symbol)))).map(requireQuoteMetrics);
 
 const quoteBySymbolMap = () => new Map(STOCKS_WATCHER_UNIVERSE.map((stock) => [stock.symbol, stock]));
 
@@ -914,12 +926,12 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     { name: "get_options_pcr", description: "Put/call ratio from Yahoo option volume and open interest.", inputSchema: { properties: { ticker: { type: "string" }, expiry: { type: "string" } }, required: ["ticker"] } },
     async ({ ticker, expiry }) => {
       const chain = await fetchOptions(ticker, expiry);
-      const callOi = chain.calls.reduce((sum, leg) => sum + numberOrZero(leg.openInterest), 0);
-      const putOi = chain.puts.reduce((sum, leg) => sum + numberOrZero(leg.openInterest), 0);
-      const callVol = chain.calls.reduce((sum, leg) => sum + numberOrZero(leg.volume), 0);
-      const putVol = chain.puts.reduce((sum, leg) => sum + numberOrZero(leg.volume), 0);
-      const raw = { ticker, expiry: chain.selectedExpiry, putCallOpenInterest: round(putOi / Math.max(1, callOi), 2), putCallVolume: round(putVol / Math.max(1, callVol), 2), callOi, putOi, callVol, putVol };
-      return toolResult(`| Metric | Value |\n| --- | ---: |\n| P/C open interest | ${raw.putCallOpenInterest} |\n| P/C volume | ${raw.putCallVolume} |`, raw);
+      const callOi = completeTotal(chain.calls.map(leg => leg.openInterest));
+      const putOi = completeTotal(chain.puts.map(leg => leg.openInterest));
+      const callVol = completeTotal(chain.calls.map(leg => leg.volume));
+      const putVol = completeTotal(chain.puts.map(leg => leg.volume));
+      const raw = { ticker, expiry: chain.selectedExpiry, putCallOpenInterest: callOi !== null && callOi > 0 && putOi !== null ? round(putOi / callOi, 2) : null, putCallVolume: callVol !== null && callVol > 0 && putVol !== null ? round(putVol / callVol, 2) : null, callOi, putOi, callVol, putVol };
+      return toolResult(`| Metric | Value |\n| --- | ---: |\n| P/C open interest | ${displayNumber(raw.putCallOpenInterest)} |\n| P/C volume | ${displayNumber(raw.putCallVolume)} |`, raw);
     },
   ),
   tool(
@@ -927,7 +939,7 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
     async ({ ticker, expiry }) => {
       const chain = await fetchOptions(ticker, expiry);
       const legs = [...chain.calls.map((leg) => ({ ...leg, type: "C" })), ...chain.puts.map((leg) => ({ ...leg, type: "P" }))].sort((a, b) => numberOrZero(b.volume) - numberOrZero(a.volume)).slice(0, 12);
-      const text = `# ${ticker} unusual options volume proxy\n| Type | Strike | Volume | OI | Vol/OI | Bid | Ask | IV |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${legs.map((leg) => `| ${leg.type} | ${leg.strike} | ${displayNumber(leg.volume)} | ${displayNumber(leg.openInterest)} | ${round(numberOrZero(leg.volume) / Math.max(1, numberOrZero(leg.openInterest)), 2)} | ${displayNumber(leg.bid)} | ${displayNumber(leg.ask)} | ${leg.impliedVolatility === null ? "n/a" : `${leg.impliedVolatility}%`} |`).join("\n")}`;
+      const text = `# ${ticker} unusual options volume proxy\n| Type | Strike | Volume | OI | Vol/OI | Bid | Ask | IV |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${legs.map((leg) => `| ${leg.type} | ${leg.strike} | ${displayNumber(leg.volume)} | ${displayNumber(leg.openInterest)} | ${displayNumber(leg.volume !== null && leg.openInterest !== null && leg.openInterest > 0 ? round(leg.volume / leg.openInterest, 2) : null)} | ${displayNumber(leg.bid)} | ${displayNumber(leg.ask)} | ${leg.impliedVolatility === null ? "n/a" : `${leg.impliedVolatility}%`} |`).join("\n")}`;
       return toolResult(text, { chain, legs });
     },
   ),
@@ -1007,7 +1019,7 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
       const quotes = await Promise.all(Array.from(new Set(requested)).map((symbol) => fetchQuote(symbol)));
       const signals = quotes.map((quote) => ({
         symbol: quote.symbol,
-        signal: quote.changePercent > 1 ? "positive_momentum" : quote.changePercent < -1 ? "negative_momentum" : "neutral",
+        signal: quote.changePercent === null ? "unavailable" : quote.changePercent > 1 ? "positive_momentum" : quote.changePercent < -1 ? "negative_momentum" : "neutral",
         changePercent: quote.changePercent,
         volume: quote.volume,
       }));
@@ -1027,7 +1039,7 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
         ? params.tickers.map((item) => normalizeStocksWatcherSymbol(String(item))).filter(Boolean)
         : STOCKS_WATCHER_QUOTE_SYMBOLS;
       const quotes = await Promise.all(Array.from(new Set(requested)).map((symbol) => fetchQuote(symbol)));
-      const sorted = [...quotes].sort((a, b) => b.changePercent - a.changePercent);
+      const sorted = quotes.map(requireQuoteMetrics).sort((a, b) => b.changePercent - a.changePercent);
       const text = [
         "# Native morning briefing",
         `- Focus: ${String(params.focus || "market watch")}`,
@@ -1124,6 +1136,10 @@ export const validateNativeStocksToolParams = (name: string, params: Record<stri
   const canonicalName = canonicalNativeToolName(name);
   const definition = NATIVE_TOOL_BY_NAME.get(canonicalName);
   if (!definition) throw new Error(`Native Yahoo tool '${name}' is not implemented.`);
+  if (canonicalName === "get_stock_history") {
+    if (params.range !== undefined && (typeof params.range !== "string" || !/^([1-9]\d*(d|mo|y)|ytd|max)$/.test(params.range.trim()))) throw new Error("Invalid history range.");
+    if (params.interval !== undefined && (typeof params.interval !== "string" || !["1d", "1wk", "1mo"].includes(params.interval.trim()))) throw new Error("Invalid history interval.");
+  }
   for (const required of definition.inputSchema?.required || []) {
     const value = required === "ticker"
       ? params.ticker ?? params.symbol ?? params.stock_code
@@ -1261,8 +1277,8 @@ const buildEventContextToolResult = async (
     typeof quoteName === "string" ? quoteName.split(/\s+/)[0] : "",
   ]).catch(() => []);
   const latest = history[history.length - 1];
-  const prior = history[Math.max(0, history.length - 21)];
-  const oneMonthReturn = prior?.close ? ((latest.close - prior.close) / prior.close) * 100 : 0;
+  const prior = history.length >= 21 ? history[history.length - 21] : null;
+  const oneMonthReturn = latest && prior?.close ? ((latest.close - prior.close) / prior.close) * 100 : null;
 
   if (canonicalName === "earnings_vol_crush") {
     const calendar = (stats.raw as { summary?: Record<string, any> }).summary?.calendarEvents || {};

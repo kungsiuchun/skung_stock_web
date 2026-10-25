@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { calculateTradePlan, parseWorkspaceSaved, EMPTY_WORKSPACE_SAVED, readWorkspaceRoute, workspaceHref, parseWorkspaceHistory, deriveWorkspaceEvidence, parseWorkspaceQuotes } from "../src/lib/watcher-workspace";
-import { persistWorkspaceSaved } from "../src/hooks/use-watcher-workspace";
+import { persistWorkspaceSaved, createWorkspaceClient } from "../src/hooks/use-watcher-workspace";
 import { reservePublicCounter, reservePublicAiAttempt, reservePublicR2Read } from "../src/lib/public-research-budget";
 import { callFreeResearchModel } from "../functions/api/research/free-model";
 import { runPublicReport } from "../functions/api/research/report";
@@ -70,15 +70,59 @@ test("workspace navigation preserves ticker, range and tab without consuming leg
 
 test("invalid OHLC bars are excluded visibly and invalidate derived metrics", () => {
   const good = { date: "2026-10-22", open: 100, high: 105, low: 98, close: 102, volume: 1000 };
-  const parsed = parseWorkspaceHistory({ history: [good, { ...good, date: "2026-10-23", high: 80 }] });
+  const parsed = parseWorkspaceHistory({ source: "native_yahoo", history: [good, { ...good, date: "2026-10-23", high: 80 }] });
   assert.equal(parsed.rejected, 1); assert.equal(parsed.bars.length, 1);
   assert.equal(deriveWorkspaceEvidence(parsed.bars, parsed.rejected).atr14, null);
   assert.throws(() => parseWorkspaceHistory({ history: [{ ...good, close: null }] }));
-  const quote = parseWorkspaceQuotes({ quotes: [{ symbol: "NVDA", price: 200, changePercent: null, change: null, asOf: null }] })[0];
+  const quote = parseWorkspaceQuotes({ source: "native_yahoo", quotes: [{ symbol: "NVDA", currency: "USD", price: 200, changePercent: null, change: null, asOf: null }] })[0];
   assert.equal(quote.changePercent, null); assert.equal(quote.asOf, null);
-  const missingChange = quoteRowFromYahooChartResult("NVDA", { meta: { regularMarketPrice: 200 }, timestamp: [], indicators: { quote: [{}] } });
-  assert.equal(parseWorkspaceQuotes({ quotes: [missingChange] })[0].changePercent, null);
-  assert.equal(parseWorkspaceHistory({ history: [good, null], rejected_bar_count: 2 }).rejected, 3);
+  const missingChange = quoteRowFromYahooChartResult("NVDA", { meta: { regularMarketPrice: 200, currency: "USD" }, timestamp: [], indicators: { quote: [{}] } });
+  assert.equal(parseWorkspaceQuotes({ source: "native_yahoo", quotes: [missingChange] })[0].changePercent, null);
+  assert.equal(missingChange.change, null); assert.equal(missingChange.previousClose, null); assert.equal(missingChange.volume, null);
+  assert.equal(parseWorkspaceHistory({ source: "native_yahoo", history: [good, null], rejected_bar_count: 2 }).rejected, 3);
+  assert.throws(() => parseWorkspaceQuotes({ source: "unknown", quotes: [missingChange] }), /source/);
+  for (const currency of ["", "US", "invalid"]) assert.throws(() => parseWorkspaceQuotes({ source: "native_yahoo", quotes: [{ ...missingChange, currency }] }), /currency/);
+  assert.throws(() => parseWorkspaceHistory({ source: "unknown", ticker: "NVDA", history: [good] }, "NVDA"), /source/);
+  assert.throws(() => parseWorkspaceHistory({ source: "native_yahoo", ticker: "AAPL", history: [good] }, "NVDA"), /ticker/);
+});
+
+test("Refresh cancels active and queued requests and prevents late responses restoring old caches", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { value: globalThis, configurable: true });
+  const pending: Array<{ signal: AbortSignal; resolve: (response: Response) => void }> = [];
+  let immediate = false; let calls = 0;
+  globalThis.fetch = ((_url, init) => {
+    calls++;
+    if (immediate) return Promise.resolve(Response.json({ ok: true, raw: { revision: "new" }, symbol: "NVDA", quote: { price: 200 } }));
+    return new Promise<Response>(resolve => pending.push({ signal: init!.signal!, resolve }));
+  }) as typeof fetch;
+  try {
+    const client = createWorkspaceClient();
+    const one = assert.rejects(client.tool("get_quotes", { tickers: "NVDA" }), { name: "AbortError" });
+    const two = assert.rejects(client.tool("get_stock_history", { ticker: "NVDA" }), { name: "AbortError" });
+    const queued = assert.rejects(client.tool("get_quotes", { tickers: "AAPL" }), { name: "AbortError" });
+    assert.equal(calls, 2);
+    client.invalidate();
+    assert.ok(pending.every(row => row.signal.aborted));
+    pending.splice(0).forEach(row => row.resolve(Response.json({ ok: true, raw: { revision: "old" } })));
+    await Promise.all([one, two, queued]);
+    assert.equal(calls, 2);
+    immediate = true;
+    assert.deepEqual((await client.tool("get_quotes", { tickers: "NVDA" })).raw, { revision: "new" });
+    await client.tool("get_quotes", { tickers: "NVDA" }); assert.equal(calls, 3);
+    immediate = false;
+    const oldSnapshot = assert.rejects(client.optionsSnapshot("NVDA"), { name: "AbortError" });
+    client.invalidate();
+    assert.ok(pending[0].signal.aborted);
+    pending.shift()!.resolve(Response.json({ symbol: "NVDA", quote: { price: 100 } }));
+    await oldSnapshot;
+    immediate = true;
+    assert.equal((await client.optionsSnapshot("NVDA")).quote.price, 200);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow); else Reflect.deleteProperty(globalThis, "window");
+  }
 });
 
 test("atomic counters enforce concurrent reservations, monotonic UTC resets and corrupt-state fail closed", async () => {
@@ -112,7 +156,7 @@ test("public model pins free routing, bounds output/time, rejects paid config an
   const { db, sql } = sqliteD1(); const original = globalThis.fetch; let calls = 0;
   try {
     globalThis.fetch = (async (_url, init) => { calls++; const body = JSON.parse(init!.body as string); assert.equal(body.model, "openrouter/free"); assert.equal(body.max_tokens, 1536); assert.deepEqual(body.provider.max_price, { prompt: 0, completion: 0 }); assert.ok(init?.signal); return new Response("{}", { status: 429 }); }) as typeof fetch;
-    await assert.rejects(callFreeResearchModel({ MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "test-key", PUBLIC_RESEARCH_MODEL: "openai/paid" }, []), /paid model/);
+    await assert.rejects(callFreeResearchModel({ MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "test-key", PUBLIC_RESEARCH_MODEL: "openai/paid" }, []), /not verified free/);
     assert.equal(calls, 0);
     await assert.rejects(callFreeResearchModel({ MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "test-key", OPENROUTER_MODEL: "legacy/paid" }, []), /No retry/);
     assert.equal(calls, 1);
@@ -127,12 +171,12 @@ test("reports cache only server evidence and reuse one generation across public 
   const chart = { chart: { result: [{ meta: { regularMarketPrice: 200, regularMarketTime: Date.parse(quoteAsOf) / 1000, regularMarketPreviousClose: 198, symbol: "NVDA", currency: "USD" }, timestamp: timestamps, indicators: { quote: [{ open: timestamps.map(() => 199), high: timestamps.map(() => 202), low: timestamps.map(() => 198), close: timestamps.map(() => 200), volume: timestamps.map(() => 1000) }] } }] } };
   try {
     globalThis.fetch = (async (input, init) => {
-      if (String(input).includes("openrouter.ai")) { models++; const body = JSON.parse(init!.body as string); assert.ok(!JSON.stringify(body).includes("my private thesis")); assert.equal(body.response_format.type, "json_schema"); assert.deepEqual(body.response_format.json_schema.schema.properties.summary.properties.sourceIds.items.enum, ["Q", "T"]); const claim = { text: "Price evidence is dated; published financials are unavailable.", sourceIds: ["Q", "T"] }; return Response.json({ choices: [{ message: { content: JSON.stringify({ summary: claim, support: [claim], counterchecks: [claim], risks: [claim] }) }, finish_reason: "stop" }], model: "example/free:free", usage: { cost: 0 } }); }
+      if (String(input).includes("openrouter.ai")) { models++; const body = JSON.parse(init!.body as string); assert.ok(!JSON.stringify(body).includes("my private thesis")); assert.equal(body.response_format.type, "json_schema"); assert.deepEqual(body.response_format.json_schema.schema.properties.summary.properties.sourceIds.items.enum, ["Q", "T"]); const claim = { text: "Price evidence is dated; published financials are unavailable.", sourceIds: ["Q", "T"] }; return Response.json({ choices: [{ message: { content: JSON.stringify({ summary: claim, support: [claim], counterchecks: [claim], risks: [claim] }) }, finish_reason: "stop" }], model: "nvidia/nemotron-3.5-super-vl:free", usage: { cost: 0 } }); }
       assert.match(String(input), /yahoo\.com/); return Response.json(chart);
     }) as typeof fetch;
     const request = new Request("https://example.test/api/research/report");
-    const first = await runPublicReport(request, { MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "test-key" }, { symbol: "NVDA" });
-    const second = await runPublicReport(request, { MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "test-key" }, { symbol: "NVDA" });
+    const first = await runPublicReport(request, { MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "test-key", VALUATION_DATA: { get: async () => null } }, { symbol: "NVDA" });
+    const second = await runPublicReport(request, { MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "test-key", VALUATION_DATA: { get: async () => null } }, { symbol: "NVDA" });
     assert.equal(first.content, second.content); assert.equal(second.cache.status, "hit"); assert.equal(models, 1);
     assert.ok(first.gaps.length); assert.equal(first.sources[0].asOf, new Date(quoteAsOf).toISOString());
   } finally { globalThis.fetch = original; sql.close(); }
@@ -191,7 +235,7 @@ test("quote batches isolate one failed ticker and never exceed two provider requ
     globalThis.fetch = (async input => {
       count++; active++; peak = Math.max(peak, active); await new Promise(resolve => setTimeout(resolve, 3)); active--;
       if (String(input).includes("/BAD?")) return new Response("Unavailable", { status: 404 });
-      return Response.json({ chart: { result: [{ meta: { regularMarketPrice: 100, regularMarketPreviousClose: 99, regularMarketTime: 1792785600 }, timestamp: [1792785600], indicators: { quote: [{ close: [100], volume: [1000] }] } }] } });
+      return Response.json({ chart: { result: [{ meta: { symbol: decodeURIComponent(new URL(String(input)).pathname.split("/").at(-1)!), currency: "USD", regularMarketPrice: 100, regularMarketPreviousClose: 99, regularMarketTime: 1792785600 }, timestamp: [1792785600], indicators: { quote: [{ close: [100], volume: [1000] }] } }] } });
     }) as typeof fetch;
     const client = new NativeStocksYahooClient();
     const result = await client.callTool("get_quotes", { tickers: "NVDA,BAD,MSFT" });

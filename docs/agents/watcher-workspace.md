@@ -56,6 +56,11 @@
 - Public model policy uses `PUBLIC_RESEARCH_MODEL` (default `openrouter/free`).
   The legacy `OPENROUTER_MODEL` belongs to other flows and cannot select or disable
   the public model. Do not synchronize or modify production secrets for this split.
+- Requested and returned model identities must match the checked-in verified-free
+  catalog in `free-research-models.ts`; a `:free` suffix alone is insufficient.
+  Each response must report numeric zero cost. Missing proof rejects the output.
+  Refresh that catalog from the official model API when selecting another model;
+  there is no runtime catalog polling or automatic provider substitution.
 - The deployment selects `nvidia/nemotron-3.5-super-vl:free` with reasoning
   disabled. The default free router exhausted the output budget in reasoning
   during validation. Reports use a strict JSON schema with allowed source IDs
@@ -80,6 +85,10 @@
   Portfolio tests, lint, `npm run build` and a local Pages Functions bundle check.
   Check 390/768/1440px, dark/light, keyboard, ticker supersession, back/refresh,
   legacy shares, missing sources, quota rejection and corrupt local storage.
+- The full gate includes runtime cache-cost regressions, Portfolio API tests and
+  `test:finance-agent-public-smoke`, which mocks providers while executing the
+  public and legacy research routes. The separate legacy tool-source smoke
+  requires credentials and is not an offline CI gate.
 - Commit, push, merge, workflow execution, external resource creation and production
   deployment each require their own explicit authority. Local completion is not
   production verification.

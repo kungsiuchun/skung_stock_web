@@ -4,6 +4,7 @@ import { parseCookie, isAllowedWatcherEmail, verifyWatcherSession } from "../../
 import { D1_DATABASE_BUDGETS, d1UtcResetAt } from "../../../src/lib/d1-free-tier-budget";
 import { pruneExpiredMarketCacheEntries } from "../../../src/lib/market-data-cache";
 import type { D1DatabaseLike } from "../../../src/lib/spx-recap-d1";
+import { PublicResearchLimitError } from "../../../src/lib/public-research-budget";
 
 interface Env {
   VALUATION_DATA?: R2BucketLike;
@@ -152,8 +153,9 @@ export async function onRequestPost(context: { request: Request; env?: Env }) {
     const result = await requestWatcherCoverage(context.env?.VALUATION_DATA, symbol);
     return json({ ok: true, tool: body.tool, raw: result, text: result.status === "queued" ? `${result.symbol} queued for the next daily valuation batch.` : `${result.symbol} ${result.status.replace("_", " ")}.`, coverageStatus: result.status === "already_published" ? "published" : "queued" });
   } catch (error) {
+    if (error instanceof PublicResearchLimitError) return json({ ok: false, error: error.message, retryAt: error.retryAt }, { status: error.status });
     const message = error instanceof Error ? error.message : String(error);
-    const status = message.startsWith("VALUATION_DATA_UNAVAILABLE:") || message.startsWith("VALUATION_DATA_CONFLICT:") ? 503 : 400;
+    const status = /^VALUATION_DATA_(UNAVAILABLE|CONFLICT|STALE):/.test(message) ? 503 : message.startsWith("VALUATION_DATA_INVALID:") ? 502 : 400;
     return json({ ok: false, error: message }, { status });
   }
 }

@@ -21,6 +21,7 @@ import {
   aggregateSpxOneMinutePriceActionCandles,
   aggregateSpxPriceActionCandles,
   buildSpxPriceActionCompassRequestUrl,
+  formatSpxCandleTime,
   buildSpxPriceActionCompassResponse,
   deriveSpxSupportResistanceZones,
   detectSpxPriceActionPatterns,
@@ -51,7 +52,7 @@ describe("Yahoo hourly timestamps and SPX RTH 4h aggregation", () => {
     const source = [...hourlySession("2026-10-20T13:30:00Z"), ...hourlySession("2026-10-21T13:30:00Z", 7, 6100)];
     t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
       assert.match(String(input), /interval=1h/);
-      return Response.json({ chart: { result: [{
+      return Response.json({ chart: { result: [{ meta: { symbol: "^SPX" },
         timestamp: source.map((row) => row.time / 1000),
         indicators: { quote: [{
           open: source.map((row) => row.open), high: source.map((row) => row.high), low: source.map((row) => row.low),
@@ -125,7 +126,7 @@ describe("Yahoo hourly timestamps and SPX RTH 4h aggregation", () => {
 
   it("preserves existing minute timestamps, daily dates and non-4h aggregation", async (t) => {
     const source = hourlySession("2026-10-20T13:30:00Z", 1);
-    t.mock.method(globalThis, "fetch", async () => Response.json({ chart: { result: [{
+    t.mock.method(globalThis, "fetch", async () => Response.json({ chart: { result: [{ meta: { symbol: "^SPX" },
       timestamp: [source[0].time / 1000], indicators: { quote: [{ open: [6000], high: [6002], low: [5999], close: [6000.5], volume: [1] }] },
     }] } }));
     for (const interval of ["1m", "5m", "15m", "1d", "1wk"]) {
@@ -546,7 +547,7 @@ describe("SPX Price Action Compass API", () => {
   it("bounds dated Yahoo history to the selected ET session and excludes later candles", async () => {
     const priorFetch = globalThis.fetch;
     const times = ["2026-07-09T14:00:00Z", "2026-07-10T14:00:00Z", "2026-07-13T14:00:00Z"].map(t => Date.parse(t) / 1000);
-    globalThis.fetch = (async () => Response.json({chart:{result:[{
+    globalThis.fetch = (async () => Response.json({chart:{result:[{meta:{symbol:"^SPX"},
       timestamp:times, indicators:{quote:[{open:[6000,6001,6002],high:[6002,6003,6004],low:[5998,5999,6000],close:[6001,6002,6003],volume:[10,20,30]}]},
     }]}})) as typeof fetch;
     try {
@@ -563,7 +564,7 @@ describe("SPX Price Action Compass API", () => {
   it("returns an explicit empty window when Yahoo has no candle for the selected ET session", async () => {
     const priorFetch = globalThis.fetch;
     const times = ["2026-07-09T14:00:00Z", "2026-07-10T14:00:00Z", "2026-07-13T14:00:00Z"].map(t => Date.parse(t) / 1000);
-    globalThis.fetch = (async () => Response.json({chart:{result:[{
+    globalThis.fetch = (async () => Response.json({chart:{result:[{meta:{symbol:"^SPX"},
       timestamp:times, indicators:{quote:[{open:[6000,6001,6002],high:[6002,6003,6004],low:[5998,5999,6000],close:[6001,6002,6003],volume:[10,20,30]}]},
     }]}})) as typeof fetch;
     try {
@@ -575,6 +576,12 @@ describe("SPX Price Action Compass API", () => {
         assert.ok(payload.warnings.some(warning => /No SPX OHLCV candles/.test(warning)));
       }
     } finally {globalThis.fetch=priorFetch;}
+  });
+  it("daily candle labels retain the trading date across DST while intraday labels use ET", () => {
+    const candle = (date: string) => ({ date_iso: date, time: Date.parse(date + "T00:00:00Z"), open: 100, high: 102, low: 99, close: 101, volume: 1000 });
+    for (const date of ["2026-07-13", "2026-11-02", "2026-03-09"]) assert.equal(formatSpxCandleTime(candle(date), "1d", true), `${date} session`);
+    assert.equal(formatSpxCandleTime({ ...candle("2026-07-13"), time: Date.parse("2026-07-13T14:30:00Z") }, "5m"), "2026-07-13 10:30 ET");
+    assert.equal(formatSpxCandleTime({ ...candle("2026-11-02"), time: Date.parse("2026-11-02T14:30:00Z") }, "5m", true), "2026-11-02 09:30:00 ET");
   });
   it("builds a Compass request for the Board-selected session date", () => {
     assert.equal(
@@ -1028,7 +1035,7 @@ describe("SPX Price Action Compass API", () => {
   it("routes a non-trading current ET date to Yahoo without calling 0DTESPX", async () => {
     const originalFetch = globalThis.fetch;
     const nowMs = Date.parse("2026-09-26T16:00:00.000Z");
-    const yahooPayload = { chart: { result: [{
+    const yahooPayload = { chart: { result: [{ meta: { symbol: "^SPX" },
       timestamp: [Math.floor(Date.parse("2026-09-25T20:00:00.000Z") / 1_000)],
       indicators: { quote: [{ open: [6660], high: [6670], low: [6650], close: [6665], volume: [10] }] },
     }] } };
@@ -1090,7 +1097,7 @@ describe("SPX Price Action Compass API", () => {
     const startMs = Date.parse("2026-07-13T13:30:00.000Z");
     const endMs = Date.parse("2026-07-13T20:00:00.000Z");
     const nowMs = Date.parse("2026-07-13T12:00:00.000Z");
-    const yahooPayload = { chart: { result: [{
+    const yahooPayload = { chart: { result: [{ meta: { symbol: "^SPX" },
       timestamp: [Math.floor(startMs / 1_000)],
       indicators: { quote: [{ open: [6000], high: [6002], low: [5998], close: [6001], volume: [10] }] },
     }] } };

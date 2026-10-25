@@ -1,6 +1,7 @@
 import { validateMarketBreadthSnapshot, type MarketBreadthSnapshot } from "./market-breadth";
 import { validateSectorRotationSnapshot, type SectorRotationSnapshot } from "./sector-rotation";
 import { buildMarketContext, validateMarketContext } from "./market-context";
+import { isValidIsoDate as isDate } from "./yahoo-finance-normalizer";
 
 export const MARKET_BREADTH_STATUS_KEY = "market-breadth/status.json";
 export const MARKET_BREADTH_STATE_KEYS = ["market-breadth/state/prices-a.json", "market-breadth/state/prices-b.json"] as const;
@@ -48,8 +49,7 @@ export interface MarketBreadthObjectStore {
   put: (key: string, value: string, options?: { httpMetadata?: { contentType?: string } }) => Promise<unknown>;
 }
 
-const isIso = (value: unknown) => typeof value === "string" && Number.isFinite(Date.parse(value));
-const isDate = (value: unknown) => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+const isIso = (value: unknown) => typeof value === "string" && isDate(value.slice(0, 10)) && Number.isFinite(Date.parse(value));
 const isString = (value: unknown) => typeof value === "string" && value.length > 0;
 
 const validateAttempt = (attempt: MarketBreadthAttempt, label: string) => {
