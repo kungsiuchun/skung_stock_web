@@ -115,6 +115,14 @@ test("discretionary frameworks cannot emit a live BUY signal through the existin
   assert.equal(result.researchStatus?.liveTradingEligible, false);
 });
 
+test("golden-cross pending trigger uses MA5 and missing relative strength never crashes research", () => {
+  const context = { symbol: "TEST", currentPrice: 120, ma5: 115, ma10: 110, ma20: 105, ma50: 100, ma200: 90, rsi14: 60, maAlignment: "Strong Bullish", high60d: 110, low60d: 90 };
+  const cross = runAlgorithmicStrategy("ma_golden_cross", context);
+  assert.equal(cross?.tradeSetup.triggerPrice, 115);
+  const trend = runAlgorithmicStrategy("bull_trend", context);
+  assert.ok(trend?.reasons.some(reason => reason.includes("資料缺失")));
+});
+
 test("executable setups carry a complete 2R trade plan while pending setups expose only a trigger", () => {
   const executable = runAlgorithmicStrategy("volume_breakout", {
     symbol: "TEST",

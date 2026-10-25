@@ -14,9 +14,11 @@ Read this file only for Finance Analyzer UI, its Pages Functions, or related UAT
 - Finance Analyzer is a chart-first research workspace. Search, recent research,
   quote and chart remain primary; technicals, options, fundamentals, news and AI
   interpretation live in research tabs. AI chat and source/method details are secondary.
-- `use-finance-workspace` owns snapshot requests, request supersession and existing
-  browser persistence. Research tabs consume the selected snapshot without starting
-  another analysis. Existing APIs and model-call budgets are unchanged.
+- Public Finance hashes now open the unified Watcher research workspace. See
+  `watcher-workspace.md` for current navigation, selected-symbol and free AI policy.
+  The compatibility Finance snapshot is data-only and never starts a model call.
+  Legacy research components and their browser history remain available in source;
+  do not erase saved history during workspace changes.
 
 ## Display and data rules
 

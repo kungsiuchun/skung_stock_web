@@ -1,10 +1,12 @@
 import { validateMarketBreadthSnapshot, type MarketBreadthSnapshot } from "./market-breadth";
 import { validateSectorRotationSnapshot, type SectorRotationSnapshot } from "./sector-rotation";
+import { buildMarketContext, validateMarketContext } from "./market-context";
 
 export const MARKET_BREADTH_STATUS_KEY = "market-breadth/status.json";
 export const MARKET_BREADTH_STATE_KEYS = ["market-breadth/state/prices-a.json", "market-breadth/state/prices-b.json"] as const;
 export const MARKET_BREADTH_SNAPSHOT_KEYS = ["market-breadth/snapshots/snapshot-a.json", "market-breadth/snapshots/snapshot-b.json"] as const;
 export const SECTOR_ROTATION_SNAPSHOT_KEYS = ["sector-rotation/snapshots/snapshot-a.json", "sector-rotation/snapshots/snapshot-b.json"] as const;
+export const MARKET_CONTEXT_KEYS = ["market-context/summary-a.json", "market-context/summary-b.json"] as const;
 export const MARKET_BREADTH_RUN_SLOTS = 64;
 
 export type MarketBreadthAttemptStatus = "READY" | "PARTIAL" | "FAILED" | "SKIPPED";
@@ -31,6 +33,7 @@ export interface MarketBreadthStatus {
     publishedAt: string;
     rotationKey?: typeof SECTOR_ROTATION_SNAPSHOT_KEYS[number];
     rotationSnapshotId?: string;
+    contextKey?: typeof MARKET_CONTEXT_KEYS[number];
   };
   lastAttempt: MarketBreadthAttempt;
   unresolvedFailure?: MarketBreadthAttempt | null;
@@ -86,6 +89,7 @@ export const validateMarketBreadthStatus = (value: unknown): MarketBreadthStatus
         throw new Error("Sector rotation current release pointer is invalid.");
       }
     }
+    if (current.contextKey !== undefined && !MARKET_CONTEXT_KEYS.includes(current.contextKey)) throw new Error("Market context pointer is invalid.");
   }
   return {
     ...status,
@@ -131,6 +135,7 @@ export const publishMarketBreadthRelease = async (store: Pick<MarketBreadthObjec
     || rotation.holdingsAsOf !== snapshot.holdingsAsOf || rotation.generatedAt !== snapshot.generatedAt || rotation.universeCount !== snapshot.universeCount)) {
     throw new Error("SECTOR_ROTATION_SOURCE_POINTER_MISMATCH");
   }
+  const contextSummary = validateMarketContext(buildMarketContext(snapshot, rotation));
   const stateKey = input.previousStatus?.state.key === MARKET_BREADTH_STATE_KEYS[0] ? MARKET_BREADTH_STATE_KEYS[1] : MARKET_BREADTH_STATE_KEYS[0];
   const snapshotKey = input.previousStatus?.current?.snapshotKey === MARKET_BREADTH_SNAPSHOT_KEYS[0]
     ? MARKET_BREADTH_SNAPSHOT_KEYS[1]
@@ -140,6 +145,7 @@ export const publishMarketBreadthRelease = async (store: Pick<MarketBreadthObjec
     ? SECTOR_ROTATION_SNAPSHOT_KEYS[1]
     : SECTOR_ROTATION_SNAPSHOT_KEYS[0];
   const metadata = { httpMetadata: { contentType: "application/json; charset=utf-8" } };
+  const contextKey = snapshotKey === MARKET_BREADTH_SNAPSHOT_KEYS[0] ? MARKET_CONTEXT_KEYS[0] : MARKET_CONTEXT_KEYS[1];
   const status: MarketBreadthStatus = {
     schemaVersion: 1,
     state: { key: stateKey, updatedAt: input.attempt.finishedAt },
@@ -152,6 +158,7 @@ export const publishMarketBreadthRelease = async (store: Pick<MarketBreadthObjec
       holdingsAsOf: snapshot.holdingsAsOf,
       publishedAt: snapshot.generatedAt,
       ...(rotation ? { rotationKey, rotationSnapshotId: rotation.snapshotId } : {}),
+      contextKey,
     },
     lastAttempt: input.attempt,
     unresolvedFailure: null,
@@ -159,6 +166,7 @@ export const publishMarketBreadthRelease = async (store: Pick<MarketBreadthObjec
   await store.put(stateKey, input.stateJson, metadata);
   await store.put(snapshotKey, JSON.stringify(snapshot), metadata);
   if (rotation) await store.put(rotationKey, JSON.stringify(rotation), metadata);
+  await store.put(contextKey, JSON.stringify(contextSummary), metadata);
   await store.put(runKey, JSON.stringify(input.attempt), metadata);
   await store.put(MARKET_BREADTH_STATUS_KEY, JSON.stringify(status), metadata);
   return status;
@@ -190,6 +198,33 @@ export const publishMarketBreadthAttempt = async (store: Pick<MarketBreadthObjec
   return status;
 };
 
+// Runs under the existing producer's concurrency group. Only derive from the
+// immutable READY pair; never re-date it or clear a failed refresh marker.
+export const publishMarketContextForCurrentRelease = async (store: MarketBreadthObjectStore) => {
+  const raw = await readJsonObject(store, MARKET_BREADTH_STATUS_KEY);
+  const status = validateMarketBreadthStatus(raw);
+  const current = status.current;
+  if (!current?.rotationKey) throw new Error("MARKET_CONTEXT_READY_PAIR_REQUIRED");
+  const snapshot = validateMarketBreadthSnapshot(await readJsonObject(store, current.snapshotKey));
+  const rotation = validateSectorRotationSnapshot(await readJsonObject(store, current.rotationKey));
+  if (snapshot.snapshotId !== current.snapshotId || snapshot.priceAsOf !== current.priceAsOf
+    || snapshot.holdingsAsOf !== current.holdingsAsOf || snapshot.generatedAt !== current.publishedAt
+    || rotation.snapshotId !== current.rotationSnapshotId || rotation.sourceSnapshotId !== current.snapshotId
+    || rotation.priceAsOf !== current.priceAsOf || rotation.holdingsAsOf !== current.holdingsAsOf || rotation.generatedAt !== current.publishedAt) {
+    throw new Error("MARKET_CONTEXT_READY_PAIR_MISMATCH");
+  }
+  const summary = validateMarketContext(buildMarketContext(snapshot, rotation));
+  if (current.contextKey && JSON.stringify(await readJsonObject(store, current.contextKey)) === JSON.stringify(summary)) {
+    return { status: "READY" as const, mode: "SUMMARY_ONLY" as const, snapshotId: current.snapshotId, contextKey: current.contextKey, changed: false };
+  }
+  const contextKey = current.contextKey === MARKET_CONTEXT_KEYS[0] ? MARKET_CONTEXT_KEYS[1] : MARKET_CONTEXT_KEYS[0];
+  const metadata = { httpMetadata: { contentType: "application/json; charset=utf-8" } };
+  await store.put(contextKey, JSON.stringify(summary), metadata);
+  if (JSON.stringify(await readJsonObject(store, MARKET_BREADTH_STATUS_KEY)) !== JSON.stringify(raw)) throw new Error("MARKET_CONTEXT_RELEASE_CHANGED");
+  await store.put(MARKET_BREADTH_STATUS_KEY, JSON.stringify({ ...status, current: { ...current, contextKey } }), metadata);
+  return { status: "READY" as const, mode: "SUMMARY_ONLY" as const, snapshotId: current.snapshotId, contextKey, changed: true };
+};
+
 const marketBreadthRunKey = (runId: string) => {
   let hash = 2166136261;
   for (let index = 0; index < runId.length; index += 1) {
@@ -200,7 +235,7 @@ const marketBreadthRunKey = (runId: string) => {
 };
 
 export const estimateMarketBreadthR2MonthlyUsage = (input: { days: number; apiRequestsPerDay: number; refreshRunsPerDay: number }) => ({
-  classAOperations: input.days * input.refreshRunsPerDay * 4,
+  classAOperations: input.days * input.refreshRunsPerDay * 6,
   classBOperations: input.days * input.apiRequestsPerDay * 2 + input.days * input.refreshRunsPerDay * 2,
   apiFunctionRequests: input.days * input.apiRequestsPerDay,
 });

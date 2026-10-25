@@ -150,7 +150,7 @@ export async function onRequestPost(context: { request: Request; env?: Env }) {
     const symbol = normalizeStocksWatcherSymbol(rawSymbol, "");
     if (!symbol || symbol !== rawSymbol) throw new Error("ADMIN_TOOL_INVALID: symbol is invalid.");
     const result = await requestWatcherCoverage(context.env?.VALUATION_DATA, symbol);
-    return json({ ok: true, tool: body.tool, raw: result, text: result.status === "queued" ? `${result.symbol} queued for the next daily valuation batch.` : `${result.symbol} ${result.status.replace("_", " ")}.`, coverageStatus: result.status === "queued" ? "queued" : "published" });
+    return json({ ok: true, tool: body.tool, raw: result, text: result.status === "queued" ? `${result.symbol} queued for the next daily valuation batch.` : `${result.symbol} ${result.status.replace("_", " ")}.`, coverageStatus: result.status === "already_published" ? "published" : "queued" });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const status = message.startsWith("VALUATION_DATA_UNAVAILABLE:") || message.startsWith("VALUATION_DATA_CONFLICT:") ? 503 : 400;

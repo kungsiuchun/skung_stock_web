@@ -225,7 +225,7 @@ const metric = (context: StrategyContext) => ({
   priorLow60: finite(context.priorLow60, finite(context.low60d, finite(context.currentPrice))),
   ma20Slope: finite(context.ma20Slope),
   ma50Slope: finite(context.ma50Slope),
-  rs20: context.relativeStrength20,
+  rs20: context.relativeStrength20 ?? null,
 });
 
 const baseSetup = (actionability: TradeActionability, nextStep: string, details: Partial<TradeSetup> = {}): TradeSetup => ({
@@ -332,7 +332,7 @@ const evaluateGoldenCross = (context: StrategyContext): Draft => {
   const priorMa5 = closes.length >= 11 ? smaAt(closes, closes.length - 1, 5) : finite(context.ma5);
   const priorMa10 = closes.length >= 11 ? smaAt(closes, closes.length - 1, 10) : finite(context.ma10);
   const crossed = priorMa5 <= priorMa10 && finite(context.ma5) > finite(context.ma10) && m.ma20 > m.ma50;
-  const trigger = Math.max(m.priorHigh20 + m.atr * 0.1, m.ma5);
+  const trigger = Math.max(m.priorHigh20 + m.atr * 0.1, finite(context.ma5));
   const reasons = [`MA5/10：${finite(context.ma5).toFixed(2)} / ${finite(context.ma10).toFixed(2)}；前一日 ${priorMa5.toFixed(2)} / ${priorMa10.toFixed(2)}。`, `20MA ${m.ma20.toFixed(2)} 高於 50MA ${m.ma50.toFixed(2)}。`];
   if (!crossed) return draft(BuySignal.WAIT, 48, reasons, ["未出現真正由下而上的 MA5/10 cross；不可用均線距離冒充金叉。"], baseSetup("PENDING_TRIGGER", "等待 MA5 由下穿上 MA10，並收市站上前 20 日高位。", { entryType: "BREAKOUT_TRIGGER", triggerPrice: roundPrice(trigger) }), context);
   const setup = plannedTrade({ actionability: m.price >= trigger && m.price <= trigger + m.atr * 0.25 ? "EXECUTABLE" : "PENDING_TRIGGER", nextStep: `收市突破 ${trigger.toFixed(2)} 並保持在 MA10 上方。`, entryType: "BREAKOUT_TRIGGER", triggerPrice: trigger, stopLoss: Math.min(finite(context.ma10) - m.atr * 0.5, m.priorLow20 - m.atr * 0.1), target1: m.priorHigh60 + m.atr * 2, target2: m.priorHigh60 + m.atr * 4, invalidation: `收市跌回 MA10 ${finite(context.ma10).toFixed(2)} 下方。` });

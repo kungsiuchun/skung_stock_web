@@ -4,6 +4,7 @@ import {
   STOCKS_WATCHER_SYMBOLS,
   STOCKS_WATCHER_UNIVERSE,
 } from "./stocks-watcher-universe";
+import { normalizeYahooChartResult } from "./yahoo-finance-normalizer";
 
 export { STOCKS_WATCHER_SYMBOLS, STOCKS_WATCHER_UNIVERSE } from "./stocks-watcher-universe";
 export type StocksWatcherSupportedSymbol = string;
@@ -44,6 +45,7 @@ export interface QuoteRow {
   marketState: string;
   asOf: string | null;
   warning?: string;
+  changeAvailable?: boolean;
 }
 
 export interface NativeYahooHistoryRow {
@@ -263,7 +265,7 @@ export const quoteRowFromYahooChartResult = (symbol: string, chart: Record<strin
   let lastIndex = closes.length - 1;
   while (lastIndex > 0 && typeof closes[lastIndex] !== "number") lastIndex -= 1;
 
-  const price = toNumber(meta.regularMarketPrice, toNumber(closes[lastIndex], toNumber(meta.previousClose, 0)));
+  const price = toNumber(meta.regularMarketPrice, toNumber(closes[lastIndex], 0));
   const explicitPreviousClose = toOptionalNumber(meta.regularMarketPreviousClose ?? meta.previousClose);
   const explicitChange = toOptionalNumber(meta.regularMarketChange);
   const explicitChangePercent = toOptionalNumber(meta.regularMarketChangePercent);
@@ -276,6 +278,8 @@ export const quoteRowFromYahooChartResult = (symbol: string, chart: Record<strin
   const changeConflict = explicitChange !== null && Math.abs(explicitChange - fallbackChange) > Math.max(0.2, Math.abs(price) * 0.01);
   const change = explicitChange ?? fallbackChange;
   const changePercent = explicitChangePercent ?? (previousClose ? (change / previousClose) * 100 : 0);
+  const changeAvailable = explicitChangePercent !== null || explicitChange !== null || explicitPreviousClose !== null
+    || lastIndex > 0 && toOptionalNumber(closes[lastIndex - 1]) !== null || toOptionalNumber(meta.chartPreviousClose) !== null;
 
   return {
     symbol: displaySymbol,
@@ -287,13 +291,14 @@ export const quoteRowFromYahooChartResult = (symbol: string, chart: Record<strin
     previousClose: round(previousClose, 2),
     change: round(change, 2),
     changePercent: round(changePercent, 2),
+    changeAvailable,
     volume: toNumber(meta.regularMarketVolume, toNumber(volumes[lastIndex], 0)),
     currency: String(meta.currency || "USD"),
     exchange: String(meta.exchangeName || meta.fullExchangeName || "Yahoo"),
     marketState: String(meta.marketState || "UNKNOWN"),
     asOf: typeof meta.regularMarketTime === "number"
       ? new Date(meta.regularMarketTime * 1000).toISOString()
-      : typeof timestamps[lastIndex] === "number"
+      : toOptionalNumber(meta.regularMarketPrice) === null && typeof timestamps[lastIndex] === "number"
         ? new Date(timestamps[lastIndex] * 1000).toISOString()
         : null,
     ...(changeConflict ? { warning: "Yahoo explicit quote change differs from derived price-minus-previous-close; explicit quote change used." } : {}),
@@ -714,8 +719,19 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
       const rawTickers = String(params.tickers || "").trim();
       const requested = rawTickers ? rawTickers.split(",").map((item) => normalizeStocksWatcherSymbol(item)).filter(Boolean) : [];
       const symbols = Array.from(new Set(requested.length > 0 ? requested : STOCKS_WATCHER_QUOTE_SYMBOLS));
-      const quotes = await Promise.all(symbols.map((symbol) => fetchQuote(symbol)));
-      return toolResult(markdownQuoteTable(quotes), { quotes });
+      if (symbols.length > 20) throw new Error("A quote request supports at most 20 unique tickers.");
+      const quotes: QuoteRow[] = [];
+      const errors: Array<{ symbol: string; message: string }> = [];
+      for (let index = 0; index < symbols.length; index += 2) {
+        const batch = symbols.slice(index, index + 2);
+        const results = await Promise.allSettled(batch.map(symbol => fetchQuote(symbol)));
+        results.forEach((result, offset) => {
+          if (result.status === "fulfilled" && result.value.price > 0) quotes.push(result.value);
+          else errors.push({ symbol: batch[offset], message: result.status === "rejected" ? (result.reason instanceof Error ? result.reason.message : "Provider request failed.") : "Provider quote is invalid." });
+        });
+      }
+      if (!quotes.length) throw new Error("Yahoo returned no valid quotes for the requested tickers.");
+      return toolResult(markdownQuoteTable(quotes), { quotes, errors, partial: errors.length > 0 });
     },
   ),
   tool(
@@ -745,8 +761,10 @@ const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
           : interval === "1d" && range === "1mo"
             ? 31
             : 120;
-      const history = (await fetchHistory(ticker, range, interval)).slice(-limit);
-      return toolResult(markdownHistory(history, limit), { ticker, range, interval, history });
+      const normalized = normalizeYahooChartResult({ chart: { result: [await fetchChart(ticker, range, interval)] } });
+      if (normalized.malformedPayload) throw new Error("Yahoo history is malformed.");
+      const history = normalized.bars.slice(-limit).map(({ date, open, high, low, close, volume }) => ({ date, open, high, low, close, volume }));
+      return toolResult(markdownHistory(history, limit), { ticker, range, interval, history, rejected_bar_count: normalized.rejectedBarCount, last_valid_date: normalized.lastValidDate });
     },
   ),
   tool(
@@ -1100,7 +1118,7 @@ export const getNativeStocksToolCacheParams = (
   if (canonicalName === "get_stock_history") {
     const range = typeof params.range === "string" && /^(\d+(d|mo|y)|ytd|max)$/.test(params.range.trim()) ? params.range.trim() : "5y";
     const interval = typeof params.interval === "string" && /^(1d|1wk|1mo)$/.test(params.interval.trim()) ? params.interval.trim() : "1d";
-    return { tool: canonicalName, ticker: context.ticker, range, interval };
+    return { tool: canonicalName, ticker: context.ticker, range, interval, historySchemaVersion: "validated-v2" };
   }
   if (["get_options", "get_options_gex", "chart_gex", "get_options_dex", "chart_dex", "get_options_0dte", "get_options_greeks", "chart_greeks", "get_options_iv_intraday", "get_options_pcr", "get_options_sweeps", "get_options_mispricing"].includes(canonicalName)) {
     const base = { tool: canonicalName, ticker: context.ticker, expiry };
@@ -1118,7 +1136,7 @@ export const getNativeStocksToolCacheParams = (
       .split(",")
       .map((item) => normalizeStocksWatcherSymbol(item))
       .filter(Boolean);
-    return { tool: canonicalName, tickers: Array.from(new Set(requested.length > 0 ? requested : STOCKS_WATCHER_QUOTE_SYMBOLS)) };
+    return { tool: canonicalName, tickers: Array.from(new Set(requested.length > 0 ? requested : STOCKS_WATCHER_QUOTE_SYMBOLS)), quoteSchemaVersion: "quality-v2" };
   }
   if (["get_intraday", "get_stock_stats", "get_beta", "earnings_vol_crush"].includes(canonicalName)) return { tool: canonicalName, ticker: context.ticker };
   if (canonicalName === "chart_indicator") return { tool: canonicalName, ticker: context.ticker };

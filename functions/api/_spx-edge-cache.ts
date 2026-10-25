@@ -59,7 +59,7 @@ export const canonicalSpxCacheRequest = (request: Request) => {
   return new Request(url.toString(), { method: "GET" });
 };
 
-export const getSpxEdgeCache = () => typeof caches === "undefined" ? null : caches.default;
+export const getSpxEdgeCache = () => typeof caches === "undefined" ? null : (caches as CacheStorage & { default: Cache }).default;
 
 export const readSpxEdgeCache = async (request: Request) => {
   if (request.method !== "GET") return null;

@@ -1,4 +1,4 @@
-import { onRequestPost as runAgentChat } from "../agent/chat";
+import { loadDataOnlyDashboardAgent } from "../research/dashboard-data";
 import { onRequest as getFundamentals } from "../fundamentals";
 import { onRequest as getNews } from "../news";
 import { onRequest as getSentiment } from "../sentiment";
@@ -43,7 +43,7 @@ const validSymbol = (value: unknown) => {
   return symbol;
 };
 
-const FINANCE_DASHBOARD_CACHE_VERSION = "v4";
+const FINANCE_DASHBOARD_CACHE_VERSION = "v5-data-only";
 
 export async function onRequestPost(context: { request: Request; env: Env }) {
   let body: { symbol?: unknown };
@@ -71,18 +71,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         ? () => reserveMarketCacheRefreshQuota(context.env.MARKET_CACHE_DB!, { operation: "finance_dashboard" })
         : undefined,
       load: async () => {
-        const agentRequest = requestFor(context.request, "/api/agent/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            surface: "finance_dashboard",
-            message: `分析 ${symbol}。先使用 get_realtime_quote、get_options_chain、run_algorithmic_strategy（strategy_name=all），然後輸出完整繁體中文 Dashboard 報告。`,
-            history: [],
-          }),
-        });
         const symbolPath = encodeURIComponent(symbol);
         const [agentResponse, newsResponse, vixResponse, fundamentalsResponse, technicalResponse, sentimentResponse] = await Promise.all([
-          runAgentChat({ request: agentRequest, env: context.env } as any),
+          loadDataOnlyDashboardAgent(symbol).then(value => json(value)),
           getNews({ request: requestFor(context.request, `/api/news?symbol=${symbolPath}`), env: context.env }),
           getVix({ request: requestFor(context.request, "/api/vix"), env: context.env }),
           getFundamentals({ request: requestFor(context.request, `/api/fundamentals?symbol=${symbolPath}`), env: context.env }),

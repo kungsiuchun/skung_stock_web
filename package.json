@@ -11,7 +11,7 @@
     "dev:spx-uat": "npm run spx:uat:seed && concurrently --kill-others-on-fail \"vite --mode spx-uat --port 5173 --strictPort\" \"npx wrangler pages dev . --port 8788 --compatibility-date=2024-04-01 --persist-to .wrangler/spx-uat\"",
     "dev:spx-live": "concurrently --kill-others-on-fail \"vite --mode spx-live --port 5173 --strictPort\" \"npx wrangler pages dev . --port 8788 --compatibility-date=2024-04-01\"",
     "build": "tsc && vite build",
-    "test:no-mistakes": "npm run test:spx-gex && npm run test:spx-pa && npm run test:quant-strategies && npm run test:finance-ui && npm run test:stocks-watcher && npm run test:market-breadth && npm run test:sector-rotation && npm run test:deploy-scope && npm run test:portfolio-ui && npm run build",
+    "test:no-mistakes": "npm run typecheck:api && npm run test:spx-gex && npm run test:spx-pa && npm run test:quant-strategies && npm run test:finance-ui && npm run test:stocks-watcher && npm run test:watcher-api && npm run test:market-breadth && npm run test:sector-rotation && npm run test:deploy-scope && npm run test:portfolio-ui && npm run test:portfolio-backtest && npm run build",
     "d1:migrate:local": "wrangler d1 migrations apply spx-recap-db --local",
     "d1:migrate:remote": "wrangler d1 migrations apply spx-recap-db --remote",
     "spx:backfill:dry": "tsx scripts/backfill-spx-recap.ts --dry-run",
@@ -23,7 +23,9 @@
     "test:finance-agent-tools-smoke": "node --import tsx --test tests/finance-agent-tools-smoke.test.ts",
     "test:quant-strategies": "node --import tsx --test tests/quant-strategies.test.ts",
     "quant:audit": "tsx scripts/quant-strategy-audit.ts",
-    "test:stocks-watcher": "node --import tsx --test tests/stocks-intelligence-watcher.test.ts tests/stocks-watcher-robinhood-options.test.ts tests/fomc-rate-probability.test.ts tests/stocks-watcher-macro.test.ts tests/stocks-watcher-news.test.ts",
+    "test:stocks-watcher": "node --import tsx --test tests/stocks-intelligence-watcher.test.ts tests/stocks-watcher-robinhood-options.test.ts tests/fomc-rate-probability.test.ts tests/stocks-watcher-macro.test.ts tests/stocks-watcher-news.test.ts tests/watcher-workspace.test.ts",
+    "test:watcher-workspace": "node --import tsx --test tests/watcher-workspace.test.ts",
+    "test:watcher-api": "node --import tsx --test tests/watcher-api-contract.test.ts",
     "test:stocks-watcher-news": "node --import tsx --test tests/stocks-watcher-news.test.ts",
     "test:stocks-watcher-news:uat": "node tests/stocks-watcher-news.uat.cjs",
     "test:stocks-watcher:uat": "node tests/stocks-intelligence-watcher.uat.cjs",
@@ -50,7 +52,8 @@
     "preview": "vite preview",
     "test:portfolio-ui": "node --import tsx --test tests/app-routes.test.ts tests/portfolio-experience.test.ts tests/portfolio-backtest-share.test.ts tests/portfolio-backtest-csv.test.ts tests/safe-json-response.test.ts tests/stocks-watcher-panel-loaders.test.ts",
     "test:sector-rotation": "node --import tsx --test tests/sector-rotation.test.ts tests/sector-rotation-r2.test.ts",
-    "test:sector-rotation:uat": "node --import tsx tests/sector-rotation.uat.cjs"
+    "test:sector-rotation:uat": "node --import tsx tests/sector-rotation.uat.cjs",
+    "typecheck:api": "tsc -p tsconfig.api.json"
   },
   "dependencies": {
     "clsx": "^2.1.1",

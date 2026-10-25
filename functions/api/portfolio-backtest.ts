@@ -379,7 +379,7 @@ const fetchHistory = async (input: {
   },
 });
 
-const boundedSeriesFetch = async (tickers: string[], load: (ticker: string) => Promise<ReturnType<typeof fetchHistory>>) => {
+const boundedSeriesFetch = async (tickers: string[], load: (ticker: string) => ReturnType<typeof fetchHistory>) => {
   const results: Awaited<ReturnType<typeof fetchHistory>>[] = [];
   let next = 0;
   const worker = async () => {
@@ -403,7 +403,7 @@ export async function onRequestPost(context: ApiContext) {
   try {
     let body: BacktestRequest | TickerValidationRequest;
     try {
-      body = await context.request.json() as BacktestRequest;
+      body = await context.request.json() as BacktestRequest | TickerValidationRequest;
     } catch {
       throw new PortfolioBacktestApiError("INVALID_JSON", "Portfolio backtest requests must contain valid JSON.");
     }

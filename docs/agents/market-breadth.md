@@ -12,8 +12,9 @@ its R2 objects.
   slots, a 64-slot-ring run record, then moves `market-breadth/status.json` last.
   Secrets exist only on the final workflow step.
 - `MARKET_BREADTH_DATA` binds only to the Standard-class
-  `market-breadth-data` R2 bucket. This feature has no D1 migration and must not
-  use `MARKET_CACHE_DB` or `SPX_RECAP_DB`.
+  `market-breadth-data` R2 bucket. Its publication and market data remain R2-only,
+  with no D1 migration. Public reads share the workspace's existing
+  `MARKET_CACHE_DB` usage guard; never store breadth data there or in `SPX_RECAP_DB`.
 - State Street SPY and 11 Select Sector SPDR daily workbooks own the dated
   universe, weights, and unique sector mapping. Massive adjusted daily
   aggregates own prices. `MASSIVE_API_KEY` is Actions-only; production requires
@@ -35,6 +36,13 @@ its R2 objects.
   snapshots before the shared status pointer. See `sector-rotation.md` for that
   API and model contract. New daily runs recheck the last READY adjusted close
   and replace affected histories before appending a new session.
+- Watcher also publishes a compact sibling `market-context/summary-a.json` or
+  `summary-b.json` before moving the shared pointer. Its API retains two R2 reads;
+  missing legacy summary pointers remain explicit unavailable until publication.
+- `SUMMARY_ONLY` on the existing producer/workflow bootstraps that summary from
+  the validated READY breadth/rotation pair without a market-data request. It is
+  idempotent, preserves source times and unresolved failures, and writes the summary
+  before the pointer under the existing shared workflow concurrency group.
 - Regression: `npm run test:market-breadth`,
   `npm run test:market-breadth:uat`, `npm run build`, and a local Pages Functions
   bundle check.

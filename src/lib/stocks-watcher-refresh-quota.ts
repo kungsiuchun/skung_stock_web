@@ -99,8 +99,8 @@ export const reserveMarketCacheRefreshQuota = async (
       ON CONFLICT(cache_key) DO UPDATE SET
         payload_json = json_object(
           'dayUtc', ?,
-          'rowsRead', MIN(CAST(json_extract(market_cache_entries.payload_json, '$.rowsRead') AS INTEGER) + ?, ?),
-          'rowsWritten', MIN(CAST(json_extract(market_cache_entries.payload_json, '$.rowsWritten') AS INTEGER) + ?, ?)
+          'rowsRead', MIN(CAST(json_extract(market_cache_entries.payload_json, '$.rowsRead') AS INTEGER) + CAST(? AS INTEGER), CAST(? AS INTEGER)),
+          'rowsWritten', MIN(CAST(json_extract(market_cache_entries.payload_json, '$.rowsWritten') AS INTEGER) + CAST(? AS INTEGER), CAST(? AS INTEGER))
         ),
         cached_at = ?,
         expires_at = ?,

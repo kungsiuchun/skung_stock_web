@@ -141,6 +141,12 @@ class FakeStocksNativeClient implements StocksWatcherToolClient {
 
   async callTool(name: string, _args: Record<string, unknown> = {}) {
     const text = await this.callToolText(name);
+    if (name === "get_options_gex") {
+      return { text, raw: { exposures: [
+        { strike: 180, callOpenInterest: 1000, putOpenInterest: 500, callVolume: 100, putVolume: 50, callGex: 12_800_000, putGex: -3_000_000, netGex: 9_800_000 },
+        { strike: 185, callOpenInterest: 2000, putOpenInterest: 600, callVolume: 200, putVolume: 60, callGex: 35_000_000, putGex: -4_000_000, netGex: 31_000_000 },
+      ] } };
+    }
     if (name === "get_quotes") {
       return {
         text,
@@ -1067,7 +1073,8 @@ test("native snapshot leaves history and expiry rows empty when optional data is
   assert.equal(snapshot.selectedExpiry, null);
   assert.ok(snapshot.warnings.includes("Options expiry data unavailable."));
   assert.ok(snapshot.warnings.includes("Price history unavailable."));
-  assert.ok(snapshot.strikes.length > 0); // completeRows synthetic GEX path remains independent.
+  assert.deepEqual(snapshot.strikes, []);
+  assert.equal(snapshot.gexRegime, "Unavailable");
 });
 
 test("curated ticker falls back to Yahoo options when the Robinhood release is unavailable", async () => {

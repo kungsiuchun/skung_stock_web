@@ -16,19 +16,19 @@ export const FINANCE_ANALYZER_MODEL_CALL_BUDGETS: Record<
   }
 > = {
   dashboard: {
-    endpoint: "/api/agent/chat",
-    maxOpenRouterCalls: 6,
-    role: "Default dashboard narrative, narrow tool scope",
+    endpoint: "/api/finance-dashboard/snapshot",
+    maxOpenRouterCalls: 0,
+    role: "Market data only; interpretation requires an explicit action",
   },
   chat: {
     endpoint: "/api/agent/chat",
-    maxOpenRouterCalls: 10,
-    role: "User-opened Finance Agent Chat, broad ReAct scope",
+    maxOpenRouterCalls: 1,
+    role: "Explicit research question using shared free-only limits",
   },
   committee: {
     endpoint: "/api/trading-agent/query",
-    maxOpenRouterCalls: 25,
-    role: "Explicit secondary Trading Agent Committee action",
+    maxOpenRouterCalls: 1,
+    role: "Explicit research lens using the shared public report cache",
   },
 };
 

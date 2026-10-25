@@ -6,6 +6,7 @@ import {
   MARKET_BREADTH_STATUS_KEY,
   publishMarketBreadthAttempt,
   publishMarketBreadthRelease,
+  publishMarketContextForCurrentRelease,
   readJsonObject,
   validateMarketBreadthStatus,
   type MarketBreadthAttempt,
@@ -151,7 +152,7 @@ const requiredEnv = (name: string) => {
 export const runGitHubMarketBreadthRefresh = async (input?: {
   store?: MarketBreadthObjectStore;
   now?: Date;
-  mode?: "AUTO" | "BACKFILL" | "DAILY";
+  mode?: "AUTO" | "BACKFILL" | "DAILY" | "SUMMARY_ONLY";
   backfillBatchSize?: number;
   client?: MarketBreadthDataClient;
 }) => {
@@ -161,14 +162,17 @@ export const runGitHubMarketBreadthRefresh = async (input?: {
     credentials: { accessKeyId: requiredEnv("MARKET_BREADTH_R2_ACCESS_KEY_ID"), secretAccessKey: requiredEnv("MARKET_BREADTH_R2_SECRET_ACCESS_KEY") },
   }), process.env.MARKET_BREADTH_R2_BUCKET?.trim() || "market-breadth-data");
 
+  const requestedMode = input?.mode || process.env.MARKET_BREADTH_MODE || "AUTO";
+  if (requestedMode === "SUMMARY_ONLY") return publishMarketContextForCurrentRelease(store);
+  if (!["AUTO", "BACKFILL", "DAILY"].includes(requestedMode)) throw new Error("MARKET_BREADTH_MODE_INVALID");
+
   const rawStatus = await readJsonObject(store, MARKET_BREADTH_STATUS_KEY);
   const previousStatus: MarketBreadthStatus | null = rawStatus === null ? null : validateMarketBreadthStatus(rawStatus);
   const rawState = previousStatus ? await readJsonObject(store, previousStatus.state.key) : null;
   const repository = new StateRepository(rawState === null ? emptyState() : parseState(rawState));
   if (!repository.state.latestSnapshot && previousStatus?.current) throw new Error("MARKET_BREADTH_STATE_CURRENT_SNAPSHOT_MISSING");
 
-  const requestedMode = input?.mode || (process.env.MARKET_BREADTH_MODE as "AUTO" | "BACKFILL" | "DAILY" | undefined) || "AUTO";
-  const mode = requestedMode === "AUTO" ? repository.state.latestSnapshot ? "DAILY" : "BACKFILL" : requestedMode;
+  const mode = requestedMode === "AUTO" ? repository.state.latestSnapshot ? "DAILY" : "BACKFILL" : requestedMode as "DAILY" | "BACKFILL";
   const result = await runMarketBreadthRefresh({
     mode,
     repository,

@@ -222,11 +222,16 @@ import {
   approvedUniverseHoldingsFromResult,
   MiniSparkline,
 } from "./stocks-intelligence-watcher-leaf-components";
-export function StocksIntelligenceWatcherPage() {
+export function StocksIntelligenceWatcherPage({ embeddedSymbol, embedded = false, embeddedExpiry, onEmbeddedExpiryChange, embeddedTool, embeddedSnapshot, embeddedRange, onEmbeddedRangeChange }: {
+  embeddedSymbol?: string; embedded?: boolean; embeddedExpiry?: string | null; onEmbeddedExpiryChange?: (expiry: string) => void;
+  embeddedTool?: (tool: string, params: Record<string, unknown>) => Promise<{ raw: unknown; text: string }>;
+  embeddedSnapshot?: (symbol: string, signal?: AbortSignal) => Promise<StocksWatcherSnapshot>;
+  embeddedRange?: StocksWatcherPriceRange; onEmbeddedRangeChange?: (range: StocksWatcherPriceRange) => void;
+} = {}) {
   const [selectedSymbol, setSelectedSymbol] = useState(() =>
-    typeof window === "undefined"
+    embeddedSymbol || (typeof window === "undefined"
       ? STOCKS_WATCHER_DEFAULT_SYMBOL
-      : getStocksWatcherInitialSymbolFromHash(window.location.hash),
+      : getStocksWatcherInitialSymbolFromHash(window.location.hash)),
   );
   const selectedSymbolRef = useRef(selectedSymbol);
   const [query, setQuery] = useState("");
@@ -238,7 +243,7 @@ export function StocksIntelligenceWatcherPage() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<"home" | "markets" | "watcher" | "portfolio" | "more">("watcher");
   const [snapshot, setSnapshot] = useState<StocksWatcherSnapshot | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(embedded);
   const [loadingSymbol, setLoadingSymbol] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -269,7 +274,7 @@ export function StocksIntelligenceWatcherPage() {
   const [cacheVersion, setCacheVersion] = useState(0);
   const [sectorFilter, setSectorFilter] = useState("All Sectors");
   const [typeFilter, setTypeFilter] = useState("All Types");
-  const [activeTab, setActiveTab] = useState<TopTab>("Overview");
+  const [activeTab, setActiveTab] = useState<TopTab>(embedded ? "Options" : "Overview");
   const [earningsQuarterLimit, setEarningsQuarterLimit] = useState<4 | 8 | 12>(8);
   const [activeSubTab, setActiveSubTab] = useState<OptionsSubTab>("Overview");
   const tabDataCache = useRef<Map<string, TabCacheEntry>>(new Map());
@@ -278,8 +283,8 @@ export function StocksIntelligenceWatcherPage() {
   const [fearGreedState, setFearGreedState] = useState<FearGreedPanelState>({ loading: false, error: null, data: null, cache: null });
   const fearGreedLoadedRef = useRef(false);
   const [subTabPanelState, setSubTabPanelState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
-  const [selectedExpiry, setSelectedExpiry] = useState<string | null>(null);
-  const [priceRange, setPriceRange] = useState<StocksWatcherPriceRange>("3mo");
+  const [selectedExpiry, setSelectedExpiry] = useState<string | null>(embeddedExpiry || null);
+  const [priceRange, setPriceRange] = useState<StocksWatcherPriceRange>(embeddedRange || "3mo");
   const [expiryOverviewState, setExpiryOverviewState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
   const expiryOverviewRequestRef = useRef(0);
   const [chartSelectedExpiries, setChartSelectedExpiries] = useState<string[]>([]);
@@ -333,22 +338,22 @@ export function StocksIntelligenceWatcherPage() {
   }, []);
 
   useEffect(() => {
-    if (typeof window !== "undefined") {
+    if (!embedded && typeof window !== "undefined") {
       window.localStorage.setItem(HIDDEN_SYMBOLS_STORAGE_KEY, JSON.stringify(hiddenSymbols));
     }
-  }, [hiddenSymbols]);
+  }, [embedded, hiddenSymbols]);
 
   useEffect(() => {
-    if (typeof window !== "undefined") {
+    if (!embedded && typeof window !== "undefined") {
       window.localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(favorites));
     }
-  }, [favorites]);
+  }, [embedded, favorites]);
 
   useEffect(() => {
-    if (typeof window !== "undefined") {
+    if (!embedded && typeof window !== "undefined") {
       window.localStorage.setItem(CUSTOM_STOCKS_STORAGE_KEY, JSON.stringify(customStocks));
     }
-  }, [customStocks]);
+  }, [embedded, customStocks]);
 
   useEffect(() => {
     const closeFromNativeClick = (event: globalThis.MouseEvent) => {
@@ -373,14 +378,14 @@ export function StocksIntelligenceWatcherPage() {
     ]);
 
     try {
-      const response = await fetch("/api/stocks-intelligence-watcher", {
+      const response = embeddedTool ? null : await fetch("/api/stocks-intelligence-watcher", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tool: name, params }),
       });
-      const payload = await parseJsonResponse<{ ok?: boolean; tool?: string; text?: string; raw?: unknown; error?: string }>(response, "/api/stocks-intelligence-watcher");
+      const payload: { ok?: boolean; tool?: string; text?: string; raw?: unknown; error?: string } = embeddedTool ? await embeddedTool(name, params) : await parseJsonResponse(response!, "/api/stocks-intelligence-watcher");
       if (payload.ok === false) {
-        throw new Error(payload.error || `native Yahoo tool ${name} failed with HTTP ${response.status}`);
+        throw new Error(payload.error || `native Yahoo tool ${name} failed with HTTP ${response?.status}`);
       }
 
       const endedAt = Date.now();
@@ -410,16 +415,16 @@ export function StocksIntelligenceWatcherPage() {
       );
       throw requestError;
     }
-  }, []);
+  }, [embeddedTool]);
 
   const fetchSnapshotData = async (symbol: string, options: { signal?: AbortSignal } = {}) => {
     const nextSymbol = normalizeSymbol(symbol);
-    const response = await fetch(`/api/stocks-intelligence-watcher?symbol=${encodeURIComponent(nextSymbol)}`, {
+    const response = embeddedSnapshot ? null : await fetch(`/api/stocks-intelligence-watcher?symbol=${encodeURIComponent(nextSymbol)}`, {
       signal: options.signal,
     });
-    const body = await parseJsonResponse<StocksWatcherSnapshot & { error?: string }>(response, `/api/stocks-intelligence-watcher?symbol=${encodeURIComponent(nextSymbol)}`, { allowHttpError: true });
-    if ((response.status !== 200 && response.status !== 206) || !body.symbol || !body.quote) {
-      throw new Error(body.error || `Stocks Watcher request failed with HTTP ${response.status}.`);
+    const body: StocksWatcherSnapshot & { error?: string } = embeddedSnapshot ? await embeddedSnapshot(nextSymbol, options.signal) : await parseJsonResponse(response!, `/api/stocks-intelligence-watcher?symbol=${encodeURIComponent(nextSymbol)}`, { allowHttpError: true });
+    if ((response && response.status !== 200 && response.status !== 206) || !body.symbol || !body.quote) {
+      throw new Error(body.error || `Stocks Watcher request failed with HTTP ${response?.status}.`);
     }
     const fetchedAt = Date.now();
     snapshotCacheRef.current.set(body.symbol, { snapshot: body, fetchedAt });
@@ -446,7 +451,7 @@ export function StocksIntelligenceWatcherPage() {
       const result = await fetchSnapshotData(nextSymbol, { signal: controller.signal });
       setSnapshot(result.snapshot);
       setSelectedSymbol(result.snapshot.symbol);
-      const nextExpiry = getStocksWatcherSnapshotExpiry(result.snapshot);
+      const nextExpiry = embeddedExpiry || getStocksWatcherSnapshotExpiry(result.snapshot);
       setSelectedExpiry(nextExpiry);
       setChartSelectedExpiries(nextExpiry ? [nextExpiry] : []);
       setChartGexByExpiry({});
@@ -556,9 +561,10 @@ export function StocksIntelligenceWatcherPage() {
   }, [callNativeTool]);
 
   useEffect(() => {
+    if (embedded) return;
     loadFavoritesFromLocal();
     void loadNativeWatchlist();
-  }, [loadFavoritesFromLocal, loadNativeWatchlist]);
+  }, [embedded, loadFavoritesFromLocal, loadNativeWatchlist]);
 
   const curatedValuationTickers = useMemo(
     () => nativeWatchlist,
@@ -909,6 +915,7 @@ export function StocksIntelligenceWatcherPage() {
     const normalizedExpiry = normalizeExpiryDate(expiry);
     if (!normalizedExpiry) return;
     setSelectedExpiry(normalizedExpiry);
+    onEmbeddedExpiryChange?.(normalizedExpiry);
     setChartSelectedExpiries([normalizedExpiry]);
     setChartExpiryMenuOpen(false);
     setChartTooltip(null);
@@ -917,7 +924,15 @@ export function StocksIntelligenceWatcherPage() {
     } else {
       setSubTabPanelState({ loading: true, error: null, data: null });
     }
-  }, [activeSubTab, loadExpiryOverview]);
+  }, [activeSubTab, loadExpiryOverview, onEmbeddedExpiryChange]);
+
+  useEffect(() => {
+    if (embeddedExpiry) {
+      setSelectedExpiry(embeddedExpiry);
+      setChartSelectedExpiries([embeddedExpiry]);
+    }
+  }, [embeddedExpiry]);
+  useEffect(() => { if (embeddedRange) setPriceRange(embeddedRange); }, [embeddedRange]);
 
   const preloadYahooExpirySummaries = useCallback(async () => {
     if (!snapshot || !usesNativeYahooOptions) return;
@@ -1056,8 +1071,8 @@ export function StocksIntelligenceWatcherPage() {
   }, [callNativeTool]);
 
   useEffect(() => {
-    void loadMarketContext();
-  }, [loadMarketContext]);
+    if (!embedded) void loadMarketContext();
+  }, [embedded, loadMarketContext]);
 
   const allStocks = useMemo(() => uniqueStocks([...nativeWatchlist, ...customStocks]), [customStocks, nativeWatchlist]);
 
@@ -1325,6 +1340,7 @@ export function StocksIntelligenceWatcherPage() {
     exposureRaw: expiryOverviewState.data?.get_options_gex?.raw,
     now,
   });
+  const optionsSourceAt = optionsVisualModel.capturedAt || snapshot?.optionsSnapshot?.capturedAt || null;
   const selectedChain = optionsVisualModel.chain as unknown as RawOptionChain | null;
   const selectedExposures = optionsVisualModel.strikeRows as unknown as RawOptionExposure[];
   const rows = buildStrikeRowsFromOptionRaw(selectedChain, selectedExposures);
@@ -1642,7 +1658,7 @@ export function StocksIntelligenceWatcherPage() {
               <OhlcVolumeChart
                 result={priceResult}
                 priceRange={priceRange}
-                onPriceRangeChange={setPriceRange}
+                onPriceRangeChange={range => { setPriceRange(range); onEmbeddedRangeChange?.(range); }}
                 sharedPriceAxisRange={sharedPriceAxisRange}
                 sharedAxisStrikes={gexRows.map((row) => row.strike)}
                 onPriceAxisCoordinatesChange={updatePriceAxisCoordinates}
@@ -1746,11 +1762,11 @@ export function StocksIntelligenceWatcherPage() {
         </div>
         <div className="flex flex-wrap justify-end gap-2 text-xs font-black">
           <span className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-300">
-            Updated {snapshot ? formatOptionsSourceTime(snapshot.generatedAt) : "--"}
+            Data as of {optionsSourceAt ? formatOptionsSourceTime(optionsSourceAt) : "source time unavailable"}
           </span>
           {snapshot?.cache && (
             <span className={`rounded-md border px-3 py-1.5 ${snapshot.cache.status === "stale" ? "border-amber-800 bg-amber-950/40 text-amber-200" : "border-slate-700 bg-slate-900 text-slate-300"}`}>
-              {snapshot.cache.status === "stale" ? `Stale ${snapshot.cache.ageSeconds}s` : snapshot.cache.status === "hit" ? `Cache hit ${snapshot.cache.ageSeconds}s` : snapshot.cache.status === "bypassed" ? "Cache bypassed" : "Fresh source"}
+              {snapshot.cache.status === "stale" ? `Stale cache ${snapshot.cache.ageSeconds}s` : snapshot.cache.status === "hit" ? `Cache hit ${snapshot.cache.ageSeconds}s` : snapshot.cache.status === "bypassed" ? "Cache bypassed" : "Cache refreshed"}
             </span>
           )}
         </div>
@@ -3190,7 +3206,7 @@ export function StocksIntelligenceWatcherPage() {
           </div>
           {yahooExpiryPreloadLabel && <div className="siw-yahoo-expiry-preload" data-yahoo-expiry-preload>{yahooExpiryPreloadLabel}</div>}
           <button type="button" className="siw-view-all" onClick={() => selectOptionsExpiry(snapshot?.availableExpiries?.[0] || currentExpiry || null)}>
-            View all expiries
+            Nearest expiry
           </button>
         </aside>
 
@@ -3520,7 +3536,7 @@ export function StocksIntelligenceWatcherPage() {
           </header>
 
           <nav className="siw-main-tabs" aria-label="Stocks watcher sections">
-            {TOP_TABS.map((item) => {
+            {(embedded ? TOP_TABS.filter(item => item === "Chart" || item === "Options") : TOP_TABS).map((item) => {
               const TabIcon = TOP_TAB_ICONS[item];
               return (
                 <button
@@ -3542,7 +3558,7 @@ export function StocksIntelligenceWatcherPage() {
           <label className="siw-mobile-section-selector">
             <span>Watcher section</span>
             <select name="watcher-section" value={activeTab} onChange={(event) => setActiveTab(event.target.value as TopTab)}>
-              {TOP_TABS.map((item) => <option key={item} value={item}>{item}</option>)}
+              {(embedded ? TOP_TABS.filter(item => item === "Chart" || item === "Options") : TOP_TABS).map((item) => <option key={item} value={item}>{item === "Chart" && embedded ? "Price + GEX" : item}</option>)}
             </select>
           </label>
 
@@ -3577,10 +3593,12 @@ export function StocksIntelligenceWatcherPage() {
               </section>
             )}
 
-            {renderPrimaryPanel()}
+            {embedded && ((loading && !snapshot) || (activeTab === "Options" && activeSubTab === "Overview" && expiryOverviewState.loading && !expiryOverviewState.data))
+              ? <p className="p-5 text-sm text-slate-400" role="status">Loading options data…</p>
+              : renderPrimaryPanel()}
 
             <div className="siw-detail-stack" data-detail-stack>
-              {renderAiSummaryPanel()}
+              {!embedded && renderAiSummaryPanel()}
             </div>
           </div>
 
@@ -3653,7 +3671,7 @@ export function StocksIntelligenceWatcherPage() {
               <div className="space-y-4">
                 {Object.values(strikeDrawer.data).map((result) => (
                   <div key={result.tool} className="rounded-md border border-slate-800 bg-slate-950/50 p-3">
-                    <h3 className="mb-2 text-sm font-black text-blue-100">{result.tool}</h3>
+                    <h3 className="mb-2 text-sm font-black text-blue-100">{({ get_options_greeks: "Strike exposures", get_options_iv_intraday: "Implied volatility by strike", get_options_mispricing: "Contract quote checks" } as Record<string, string>)[result.tool] || "Option evidence"}</h3>
                     {renderOptionResultPanel(result)}
                   </div>
                 ))}

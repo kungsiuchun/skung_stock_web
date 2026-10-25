@@ -1,0 +1,150 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { EMPTY_WORKSPACE_SAVED, WORKSPACE_STORAGE_KEY, parseWorkspaceHistory, parseWorkspaceQuotes, parseWorkspaceSaved, workspaceSymbol, type WorkspaceBar, type WorkspaceQuote, type WorkspaceSaved } from "@/lib/watcher-workspace";
+import { validateMarketContext, type MarketContextSnapshot } from "@/lib/market-context";
+import type { StocksWatcherSnapshot } from "@/lib/stocks-intelligence-watcher";
+
+export interface WorkspaceResource<T> { data: T | null; loading: boolean; error: string | null }
+export interface WorkspaceTool { raw: unknown; text: string; cache?: { status: string; sourceAsOf?: string | null; cachedAt?: string; lastRefreshError?: string | null } }
+const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+
+/** One session cache + two request lanes. There is no background quote polling. */
+export function createWorkspaceClient() {
+  const cache = new Map<string, { value: WorkspaceTool; expires: number }>();
+  const snapshots = new Map<string, { value: StocksWatcherSnapshot; expires: number }>();
+  let running = 0;
+  const waiting: Array<() => void> = [];
+  async function tool(name: string, params: Record<string, unknown> = {}, signal?: AbortSignal, force = false): Promise<WorkspaceTool> {
+    const key = JSON.stringify([name, params]);
+    const hit = cache.get(key);
+    if (!force && hit && hit.expires > Date.now()) return hit.value;
+    if (running >= 2) await new Promise<void>(resolve => waiting.push(resolve));
+    if (signal?.aborted) { waiting.shift()?.(); throw new DOMException("Superseded request", "AbortError"); }
+    running++;
+    const deadline = new AbortController();
+    const abort = () => deadline.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    const timer = window.setTimeout(abort, 30_000);
+    try {
+      const response = await fetch("/api/stocks-intelligence-watcher", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tool: name, params }), signal: deadline.signal });
+      const body = await response.json() as WorkspaceTool & { ok?: boolean; error?: string };
+      if (!response.ok || body.ok === false || body.raw === undefined) throw new Error(body.error || `Market data is unavailable (HTTP ${response.status}).`);
+      if (cache.size >= 100) cache.delete(cache.keys().next().value as string);
+      cache.set(key, { value: body, expires: Date.now() + (name === "get_quotes" ? 60_000 : 15 * 60_000) });
+      return body;
+    } catch (error) {
+      if (deadline.signal.aborted && !signal?.aborted) throw new Error("Market data request timed out. Use Refresh to retry.");
+      throw error;
+    } finally { window.clearTimeout(timer); signal?.removeEventListener("abort", abort); running--; waiting.shift()?.(); }
+  }
+  async function optionsSnapshot(symbol: string, signal?: AbortSignal) {
+    const cached = snapshots.get(symbol);
+    if (cached && cached.expires > Date.now()) return cached.value;
+    const controller = new AbortController(); const abort = () => controller.abort(); signal?.addEventListener("abort", abort, { once: true });
+    const timer = window.setTimeout(abort, 45_000);
+    let response: Response; let value: StocksWatcherSnapshot & { error?: string };
+    try { response = await fetch(`/api/stocks-intelligence-watcher?symbol=${encodeURIComponent(symbol)}&surface=options`, { signal: controller.signal }); value = await response.json(); }
+    finally { window.clearTimeout(timer); signal?.removeEventListener("abort", abort); }
+    if (!response.ok || value.symbol !== symbol || !value.quote) throw new Error(value.error || "The options snapshot could not be verified.");
+    if (snapshots.size >= 20) snapshots.delete(snapshots.keys().next().value as string);
+    snapshots.set(symbol, { value, expires: Date.now() + 60_000 });
+    return value;
+  }
+  return { tool, optionsSnapshot };
+}
+export type WorkspaceClient = ReturnType<typeof createWorkspaceClient>;
+
+export function useWorkspaceSaved() {
+  const [initial] = useState(() => {
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem(WORKSPACE_STORAGE_KEY);
+      return { data: raw ? parseWorkspaceSaved(JSON.parse(raw)) : EMPTY_WORKSPACE_SAVED, error: null as string | null, original: raw };
+    } catch (error) { return { data: EMPTY_WORKSPACE_SAVED, error: `Local storage could not be read: ${error instanceof SyntaxError ? "Saved workspace is not valid JSON." : message(error)} Export remains available; saved data will not be overwritten.`, original: raw }; }
+  });
+  const [saved, setSaved] = useState(initial.data);
+  const [storageError, setStorageError] = useState(initial.error);
+  const corruptStorage = useRef(Boolean(initial.error));
+  const updateSaved = useCallback((next: WorkspaceSaved, replaceCorrupt = false) => {
+    const checked = parseWorkspaceSaved(next);
+    setSaved(checked);
+    if (corruptStorage.current && !replaceCorrupt) return;
+    try { localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(checked)); corruptStorage.current = false; setStorageError(null); }
+    catch (error) { setStorageError(`Could not save on this browser: ${message(error)}. Export your workspace before closing.`); }
+  }, []);
+  return { saved, updateSaved, storageError, preservedData: initial.error ? initial.original : null };
+}
+
+export function useWatcherWorkspace(symbol: string, customs: string[], active: boolean) {
+  const [client] = useState(createWorkspaceClient);
+  const [revision, setRevision] = useState(0);
+  const [watchlist, setWatchlist] = useState<WorkspaceResource<string[]>>({ data: null, loading: false, error: null });
+  const [quotes, setQuotes] = useState<WorkspaceResource<WorkspaceQuote[]>>({ data: null, loading: false, error: null });
+  const [context, setContext] = useState<WorkspaceResource<MarketContextSnapshot & { freshness?: { status: string } }>>({ data: null, loading: false, error: null });
+  const [research, setResearch] = useState<{ symbol: string; quote: WorkspaceQuote | null; bars: WorkspaceBar[]; rejected: number; loading: boolean; error: string | null; stale: boolean }>({ symbol, quote: null, bars: [], rejected: 0, loading: false, error: null, stale: false });
+  const quotesRef = useRef<WorkspaceQuote[]>([]);
+  const quotesFetchedAt = useRef(0);
+  const customKey = customs.join(",");
+  const coreActive = active;
+  useEffect(() => {
+    if (!coreActive) return;
+    const controller = new AbortController();
+    let current = true;
+    setWatchlist({ data: null, loading: true, error: null });
+    setQuotes({ data: null, loading: true, error: null });
+    void client.tool("get_watchlist", {}, controller.signal, revision > 0).then(async result => {
+      const raw = result.raw as { source?: string; symbols?: unknown[]; stocks?: Array<{ symbol?: unknown }> };
+      if (raw.source !== "d1_tracking") throw new Error("The curated watchlist source could not be verified.");
+      const symbols = (raw.symbols || raw.stocks?.map(s => s.symbol) || []).map(workspaceSymbol);
+      if (!symbols.length || symbols.length > 20) throw new Error("The curated watchlist is empty or exceeds its 20-stock limit.");
+      if (!current) return;
+      setWatchlist({ data: symbols, loading: false, error: null });
+      const requested = Array.from(new Set([...symbols, ...customKey.split(",").filter(Boolean)]));
+      const all: WorkspaceQuote[] = [];
+      for (let index = 0; index < requested.length; index += 20) {
+        const quoteResult = await client.tool("get_quotes", { tickers: requested.slice(index, index + 20).join(",") }, controller.signal, revision > 0);
+        all.push(...parseWorkspaceQuotes(quoteResult.raw));
+        if (quoteResult.cache?.status === "stale") throw new Error("Watchlist quotes are stale. Refresh is required.");
+      }
+      if (current) { const missing = requested.filter(symbol => !all.some(row => row.symbol === symbol)); quotesRef.current = all; quotesFetchedAt.current = Date.now(); setQuotes({ data: all, loading: false, error: missing.length ? `Quotes unavailable for ${missing.join(", ")}. Other prices remain available.` : null }); }
+    }).catch(error => { if (current) { setWatchlist(state => ({ ...state, loading: false, error: state.data ? null : message(error) })); setQuotes({ data: null, loading: false, error: message(error) }); } });
+    return () => { current = false; controller.abort(); };
+  }, [client, revision, customKey, coreActive]);
+
+  useEffect(() => {
+    if (!coreActive) return;
+    const controller = new AbortController();
+    setContext({ data: null, loading: true, error: null });
+    void fetch("/api/market-context", { signal: controller.signal }).then(async response => {
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || "Market context is unavailable.");
+      const checked = validateMarketContext(data);
+      if (!controller.signal.aborted) setContext({ data: { ...checked, freshness: data.freshness }, loading: false, error: null });
+    }).catch(error => { if (!controller.signal.aborted) setContext({ data: null, loading: false, error: message(error) }); });
+    return () => controller.abort();
+  }, [revision, coreActive]);
+
+  useEffect(() => {
+    if (!coreActive) return;
+    const controller = new AbortController();
+    setResearch({ symbol, quote: null, bars: [], rejected: 0, loading: true, error: null, stale: false });
+    const quote = Date.now() - quotesFetchedAt.current < 60_000 ? quotesRef.current.find(row => row.symbol === symbol) : undefined;
+    const quotePromise = quote && revision === 0 ? Promise.resolve({ raw: { quotes: [quote] } } as WorkspaceTool) : client.tool("get_quotes", { tickers: symbol }, controller.signal, revision > 0);
+    void Promise.allSettled([quotePromise, client.tool("get_stock_history", { ticker: symbol, range: "1y", interval: "1d" }, controller.signal, revision > 0)]).then(results => {
+      if (controller.signal.aborted) return;
+      const errors: string[] = [];
+      let quote: WorkspaceQuote | null = null; let bars: WorkspaceBar[] = []; let rejected = 0; let stale = false;
+      for (const [index, result] of results.entries()) {
+        if (result.status === "rejected") { errors.push(message(result.reason)); continue; }
+        stale ||= result.value.cache?.status === "stale";
+        try {
+          if (index === 0) { quote = parseWorkspaceQuotes(result.value.raw).find(row => row.symbol === symbol) ?? null; if (!quote) throw new Error("Requested quote identity is missing."); }
+          else { const data = parseWorkspaceHistory(result.value.raw); bars = data.bars; rejected = data.rejected; }
+        } catch (error) { errors.push(message(error)); }
+      }
+      setResearch({ symbol, quote, bars, rejected, loading: false, error: errors.join(" ") || null, stale });
+    });
+    return () => controller.abort();
+  }, [client, symbol, revision, coreActive]);
+  const visibleResearch = useMemo(() => research.symbol === symbol ? research : { symbol, quote: null, bars: [], rejected: 0, loading: true, error: null, stale: false }, [research, symbol]);
+  return { client, watchlist, quotes, context, research: visibleResearch, refresh: () => setRevision(value => value + 1) };
+}

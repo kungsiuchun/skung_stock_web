@@ -11,6 +11,7 @@ import {
   MARKET_BREADTH_SNAPSHOT_KEYS,
   publishMarketBreadthAttempt,
   publishMarketBreadthRelease,
+  publishMarketContextForCurrentRelease,
   validateMarketBreadthStatus,
   type MarketBreadthObjectStore,
 } from "../src/lib/market-breadth-r2";
@@ -82,6 +83,44 @@ const noProviderClient = {
 };
 
 describe("Sector rotation shared release publication", () => {
+  it("SUMMARY_ONLY derives the READY pair without a provider, preserves failure/date, and is idempotent", async () => {
+    const store = new MemoryObjectStore();
+    const { status, attempt } = await publishFixture(store);
+    delete status.current!.contextKey;
+    status.lastAttempt = { ...attempt, status: "FAILED", errorClass: "PROVIDER_TIMEOUT" };
+    status.unresolvedFailure = status.lastAttempt;
+    store.objects.set(MARKET_BREADTH_STATUS_KEY, JSON.stringify(status));
+    store.writes = [];
+    const result = await runGitHubMarketBreadthRefresh({ store, mode: "SUMMARY_ONLY", client: noProviderClient });
+    assert.equal(result.status, "READY");
+    const after = validateMarketBreadthStatus(JSON.parse(store.objects.get(MARKET_BREADTH_STATUS_KEY)!));
+    assert.deepEqual({ ...after.current, contextKey: undefined }, { ...status.current, contextKey: undefined });
+    assert.deepEqual(after.unresolvedFailure, status.unresolvedFailure);
+    assert.deepEqual(after.lastAttempt, status.lastAttempt);
+    assert.deepEqual(store.writes, [after.current!.contextKey, MARKET_BREADTH_STATUS_KEY]);
+    const summary = JSON.parse(store.objects.get(after.current!.contextKey!)!);
+    assert.equal(summary.generatedAt, status.current!.publishedAt);
+    store.writes = [];
+    const repeat = await publishMarketContextForCurrentRelease(store);
+    assert.equal(repeat.changed, false);
+    assert.deepEqual(store.writes, []);
+  });
+
+  it("SUMMARY_ONLY rejects mismatched sources and leaves the active pointer intact on upload failure", async () => {
+    const store = new MemoryObjectStore();
+    const { status, rotation } = await publishFixture(store);
+    const original = store.objects.get(MARKET_BREADTH_STATUS_KEY);
+    store.objects.set(status.current!.rotationKey!, JSON.stringify({ ...rotation, sourceSnapshotId: "wrong" }));
+    await assert.rejects(publishMarketContextForCurrentRelease(store), /MISMATCH|invalid/i);
+    assert.equal(store.objects.get(MARKET_BREADTH_STATUS_KEY), original);
+    store.objects.set(status.current!.rotationKey!, JSON.stringify(rotation));
+    delete status.current!.contextKey;
+    store.objects.set(MARKET_BREADTH_STATUS_KEY, JSON.stringify(status));
+    const beforeFailure = store.objects.get(MARKET_BREADTH_STATUS_KEY);
+    store.failKey = "market-context/summary-a.json";
+    await assert.rejects(publishMarketContextForCurrentRelease(store), /upload failure/);
+    assert.equal(store.objects.get(MARKET_BREADTH_STATUS_KEY), beforeFailure);
+  });
   it("writes both inactive snapshots before moving the shared READY pointer", async () => {
     const store = new MemoryObjectStore();
     const { status, rotation } = await publishFixture(store);

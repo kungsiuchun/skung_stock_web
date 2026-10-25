@@ -11,7 +11,7 @@ on:
         required: true
         default: AUTO
         type: choice
-        options: [AUTO, BACKFILL, DAILY]
+        options: [AUTO, BACKFILL, DAILY, SUMMARY_ONLY]
       backfill_batch_size:
         description: Symbols to backfill in this run (1-50)
         required: true

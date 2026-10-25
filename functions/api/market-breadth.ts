@@ -1,4 +1,5 @@
 import { determineMarketBreadthFreshness } from "../../src/lib/market-breadth";
+import { PublicResearchLimitError } from "../../src/lib/public-research-budget";
 import { readMarketBreadthRelease, resolveMarketBreadthUnresolvedFailure, type MarketBreadthObjectStore } from "../../src/lib/market-breadth-r2";
 
 interface Context {
@@ -48,6 +49,7 @@ export async function onRequest(context: Context) {
     });
     return json({ ...snapshot, status: "READY", freshness }, 200, "public, max-age=60, stale-while-revalidate=300");
   } catch (error) {
+    if (error instanceof PublicResearchLimitError) return json({ status: "ERROR", message: error.message }, error.status);
     return json({
       status: "ERROR",
       errorCode: "MARKET_BREADTH_READ_FAILED",
