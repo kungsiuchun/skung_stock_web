@@ -61,16 +61,18 @@
   Each response must report numeric zero cost. Missing proof rejects the output.
   Refresh that catalog from the official model API when selecting another model;
   there is no runtime catalog polling or automatic provider substitution.
-- The candidate configuration selects `dots-studio/dots-3-note-preview:free`
-  with reasoning disabled. Provider metadata advertises structured output;
-  metadata alone does not establish successful live acceptance. No paid or
-  automatic provider fallback is used. Reports require a strict JSON schema with allowed source IDs
-  and a short response budget; provider failures never trigger another model.
+- The configuration selects `google/gemma-4-31b-it:free`, with reasoning disabled
+  and temperature zero. This endpoint declares JSON mode rather than native
+  constrained JSON Schema; its complete dynamic schema is supplied in the trusted
+  system message and every result still passes strict server validation. Other
+  schema-capable paths retain native JSON Schema. Provider routing requires all
+  requested parameters, with zero prices and no fallback. Capability metadata
+  alone does not prove a successful live response.
 - Owner OAuth accepts only verified allowlisted GitHub emails. Provider exchanges
   have bounded deadlines; malformed/provider failures return explicit JSON errors.
 - Reports validate a structured summary/support/counterchecks/risks contract and
   source IDs before rendering. Cache identity includes evidence hash, symbol, lens,
-  language and prompt version. Never relabel a cached report's source timestamp;
+  bilingual bundle and prompt version. Never relabel a cached report's source timestamp;
   stale reports are not a fallback when regeneration fails. Chat is not shared-cached.
 - Program-rendered facts own prices, dates, range position, technical metrics
   and published financial amounts. Range position is 0% at the low and 100% at
@@ -79,9 +81,17 @@
   and common quantified amounts/durations after Unicode normalization. These
   bounded checks do not prove every semantic interpretation: actual outputs
   still require numerical/source review during acceptance.
-- Report prompt version 6 and theme scope version 2 exclude earlier numerical
+- Report prompt version 7 and theme scope version 3 exclude earlier numerical
   prose. Chat returns facts separately and never adds those figures to model
   history; the browser renders them in a source disclosure.
+- Each stock/lens generation prepares both report languages from identical public
+  evidence. Both must validate before the shared bundle is cached. The public
+  response still contains only the requested language; switching language reuses
+  that bundle while its evidence identity remains the same. A partly valid bundle
+  is rejected, never published. Chat and theme reports keep their own contracts.
+- Minimal model receipts record the schema fingerprint, format, model/provider,
+  generation ID, finish reason and zero-cost/token metadata. They do not log
+  prompts, questions, report prose or private conversation history.
 - Schema and runtime limits enforce one claim per report section, at most eighty
   characters for Chinese or three hundred and twenty for English. Chat has its
   own bounded claim length. The provider's token ceiling remains unchanged;

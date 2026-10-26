@@ -194,7 +194,8 @@ test("malformed model JSON stays upstream failure and expired reports retain pro
       if (String(url).includes("openrouter.ai")) {
         modelCalls++;
         if (expired) return new Response("Quota reached", { status: 429 });
-        return mode === "report-envelope" ? new Response("{broken") : envelope(mode === "chat-content" ? "{broken" : JSON.stringify({ summary: claim, support: [claim], counterchecks: [claim], risks: [claim] }));
+        const sections = { summary: claim, support: [claim], counterchecks: [claim], risks: [claim] };
+        return mode === "report-envelope" ? new Response("{broken") : envelope(mode === "chat-content" ? "{broken" : JSON.stringify({ "zh-TW": sections, en: sections }));
       }
       if (String(url).includes("/v8/finance/chart/")) return Response.json(chart);
       throw new Error("Unexpected mock route");
