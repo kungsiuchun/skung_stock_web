@@ -51,7 +51,7 @@ test("public routes reject unsupported methods before cache, R2 or handlers", as
 
 test("explicit free model disables reasoning, retains zero prices and reports selected model identity", async () => {
   const { db, sql } = sqlite(); const before = globalThis.fetch;
-  const model = "nvidia/nemotron-3.5-super-vl:free";
+  const model = "dots-studio/dots-3-note-preview:free";
   globalThis.fetch = (async (_url, init) => {
     const body = JSON.parse(String(init?.body));
     assert.equal(body.model, model); assert.deepEqual(body.reasoning, { enabled: false });
@@ -104,6 +104,14 @@ test("public research agent and legacy report aliases share verified evidence/ca
     if (String(url).includes("openrouter.ai")) {
       models++; const payload = JSON.parse(init!.body as string); assert.equal(payload.model, "openrouter/free"); assert.equal(payload.provider.max_price.prompt, 0);
       assert.ok(!JSON.stringify(payload).includes("fixture-private-memory"));
+      if (payload.messages?.[0]?.content.includes("equity evidence analyst")) {
+        const evidence = JSON.parse(payload.messages.at(-1).content);
+        assert.equal(evidence.priceEvidence.dailyCloseRange, "inside_observed_range");
+        assert.equal(evidence.priceEvidence.closerRangeBoundary, "equidistant");
+        assert.equal(evidence.priceEvidence.dailyCloseVsShortMovingAverage, "equal");
+        assert.ok(!("technical" in evidence)); assert.ok(!("quote" in evidence));
+        assert.ok(!JSON.stringify(evidence).includes("2026-10-23"));
+      }
       const schema = payload.response_format?.json_schema?.schema;
       const sourceIds = schema?.properties?.summary?.properties?.sourceIds?.items?.enum || schema?.properties?.sourceIds?.items?.enum || ["Q", "T"];
       const claim = invalidChat ? { text: "Invented financial evidence [F]", sourceIds: ["F"] } : { text: "Only dated public evidence is available.", sourceIds: sourceIds.slice(0, Math.min(2, sourceIds.length)) };
@@ -127,6 +135,8 @@ test("public research agent and legacy report aliases share verified evidence/ca
     const reply = await chat({ request: request({ symbol: "NVDA", message: "What is missing?", language: "en" }), env });
     const replyBody = await reply.json() as any;
     assert.equal(reply.status, 200); assert.equal(replyBody.symbol, "NVDA"); assert.deepEqual(replyBody.steps, []); assert.ok(Array.isArray(replyBody.history)); assert.deepEqual(replyBody.new_memories, []); assert.equal(models, 3);
+    assert.match(replyBody.facts, /Verified quote: USD 200/);
+    assert.ok(!replyBody.reply.includes("200")); assert.ok(!replyBody.history.at(-1).content.includes("Verified quote"));
     const legacyReply = await legacyChat({ request: request({ message: "What is missing?", language: "en", strategy_mode: "golden_cross", user_memories: ["fixture-private-memory"] }, "/api/agent/chat"), env });
     const legacyBody = await legacyReply.json() as any;
     assert.equal(legacyReply.status, 200); assert.equal(legacyBody.symbol, "NVDA"); assert.ok(Array.isArray(legacyBody.history)); assert.equal(models, 4);
@@ -134,6 +144,11 @@ test("public research agent and legacy report aliases share verified evidence/ca
     invalidChat = true;
     const rejected = await chat({ request: request({ symbol: "NVDA", message: "What is missing?", language: "en" }), env });
     assert.equal(rejected.status, 502); assert.equal(models, 5); assert.equal((await rejected.json() as any).success, false);
+    invalidChat = false;
+    sql.exec(`UPDATE market_cache_entries SET cache_key=replace(cache_key, '"prompt":6', '"prompt":5') WHERE scope='research-report-v2'`);
+    const afterPromptChange = await report({ request: request({ symbol: "NVDA" }), env });
+    assert.equal(afterPromptChange.status, 200); assert.equal(models, 6);
+    assert.equal((await afterPromptChange.json() as any).report.cache.status, "refreshed");
   } finally { globalThis.fetch = fetchBefore; sql.close(); }
 });
 

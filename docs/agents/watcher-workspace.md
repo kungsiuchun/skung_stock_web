@@ -61,9 +61,10 @@
   Each response must report numeric zero cost. Missing proof rejects the output.
   Refresh that catalog from the official model API when selecting another model;
   there is no runtime catalog polling or automatic provider substitution.
-- The deployment selects `nvidia/nemotron-3.5-super-vl:free` with reasoning
-  disabled. The default free router exhausted the output budget in reasoning
-  during validation. Reports use a strict JSON schema with allowed source IDs
+- The candidate configuration selects `dots-studio/dots-3-note-preview:free`
+  with reasoning disabled. Provider metadata advertises structured output;
+  metadata alone does not establish successful live acceptance. No paid or
+  automatic provider fallback is used. Reports require a strict JSON schema with allowed source IDs
   and a short response budget; provider failures never trigger another model.
 - Owner OAuth accepts only verified allowlisted GitHub emails. Provider exchanges
   have bounded deadlines; malformed/provider failures return explicit JSON errors.
@@ -71,6 +72,20 @@
   source IDs before rendering. Cache identity includes evidence hash, symbol, lens,
   language and prompt version. Never relabel a cached report's source timestamp;
   stale reports are not a fallback when regeneration fails. Chat is not shared-cached.
+- Program-rendered facts own prices, dates, range position, technical metrics
+  and published financial amounts. Range position is 0% at the low and 100% at
+  the high, never a percentage below the range. Model input projects qualitative
+  relationships; generated prose is qualitative and rejects digits, percentages
+  and common quantified amounts/durations after Unicode normalization. These
+  bounded checks do not prove every semantic interpretation: actual outputs
+  still require numerical/source review during acceptance.
+- Report prompt version 6 and theme scope version 2 exclude earlier numerical
+  prose. Chat returns facts separately and never adds those figures to model
+  history; the browser renders them in a source disclosure.
+- Schema and runtime limits enforce one claim per report section, at most eighty
+  characters for Chinese or three hundred and twenty for English. Chat has its
+  own bounded claim length. The provider's token ceiling remains unchanged;
+  overlong or incomplete responses are rejected, never truncated into success.
 
 ## Local plans and verification
 

@@ -7,11 +7,12 @@ import { validateMarketContext } from "../src/lib/market-context";
 import { MARKET_BREADTH_SECTORS } from "../src/lib/market-breadth";
 import { validateMarketBreadthStatus, MARKET_BREADTH_STATE_KEYS } from "../src/lib/market-breadth-r2";
 import { callFreeResearchModel } from "../functions/api/research/free-model";
-import { loadResearchEvidence, readResearchBody, onRequestPost as report } from "../functions/api/research/report";
+import { loadResearchEvidence, projectResearchTechnicals, researchNarrativeEvidence, readResearchBody, onRequestPost as report } from "../functions/api/research/report";
 import { publicResearchChat as chat } from "../functions/api/research/chat-service";
 import { onRequestPost as admin } from "../functions/api/stocks-intelligence-watcher/admin";
 import { onRequest as watcher } from "../functions/api/stocks-intelligence-watcher";
-import { validateResearchClaim } from "../src/lib/research-report";
+import { renderResearchDataFacts, renderResearchReport, researchReportSchema, validateResearchClaim, validateResearchReport } from "../src/lib/research-report";
+import { deriveWorkspaceEvidence } from "../src/lib/watcher-workspace";
 import type { D1DatabaseLike } from "../src/lib/spx-recap-d1";
 import { NativeStocksYahooClient } from "../src/lib/stocks-native-yahoo";
 
@@ -28,6 +29,62 @@ const sqlite = () => {
   return { db, sql };
 };
 const request = (tool: string, params: Record<string, unknown>) => new Request("https://example.test/api/stocks-intelligence-watcher", { method: "POST", body: JSON.stringify({ tool, params }) });
+
+test("research range facts distinguish an inside close from a percentage below the range", () => {
+  const bars = Array.from({ length: 20 }, (_, index) => ({ date: `2026-10-${String(index + 1).padStart(2, "0")}`, open: 211, high: 243.37, low: 210.18, close: 210.96, volume: 100 }));
+  const technical = projectResearchTechnicals(deriveWorkspaceEvidence(bars), 210.96, "USD");
+  const range = technical.dailyRange20;
+  assert.equal(range.closeRelation, "inside_observed_range");
+  assert.ok(Math.abs(range.positionPercentFromLow! - 2.3501054534504) < .00001);
+  assert.ok(Math.abs(range.priceAboveLow! - .78) < .000001);
+  assert.ok(Math.abs(range.priceBelowHigh! - 32.41) < .000001);
+  assert.ok(!("rangePositionPct" in technical)); assert.ok(!("bars" in technical));
+  const claim = { text: "The dated close is near the lower end of its observed range.", sourceIds: ["T"] };
+  const content = renderResearchReport({ summary: claim, support: [claim], counterchecks: [claim], risks: [claim] }, { symbol: "NVDA", language: "en", quote: 220, currency: "USD", quoteAsOf: "2026-10-21T15:00Z", priceAsOf: "2026-10-20", range20: range, gaps: [] });
+  assert.match(content, /Verified quote: USD 220/); assert.match(content, /last close 210.96 is inside the range/); assert.match(content, /position from low 2.35%/);
+  const missing = projectResearchTechnicals(deriveWorkspaceEvidence(bars.slice(0, 10)), 210.96, "USD").dailyRange20;
+  assert.equal(missing.closeRelation, "unavailable"); assert.equal(missing.positionPercentFromLow, null);
+  const flat = bars.map(row => ({ ...row, open: 100, high: 100, low: 100, close: 100 }));
+  const flatRange = projectResearchTechnicals(deriveWorkspaceEvidence(flat), 100, "USD").dailyRange20;
+  assert.equal(flatRange.closeRelation, "inside_observed_range"); assert.equal(flatRange.positionPercentFromLow, null); assert.equal(flatRange.priceAboveLow, 0);
+  assert.throws(() => projectResearchTechnicals(deriveWorkspaceEvidence(bars), 200, "USD"), /outside/);
+});
+
+test("qualitative interpretation rejects numeric restatements without rejecting ordinary words", () => {
+  const claim = (text: string) => ({ text, sourceIds: ["T"] });
+  for (const text of ["Price is 2.35% below its range.", "Price is ２．３５％ below its range.", "The filing is two months old.", "資料落後兩個月。", "現金流為一百億元。", "The statement is as of July.", "Revenue grew ٢ percent.", "營收增長百分之二。", "There is a two-month reporting lag.", "Revenue rose twenty percent.", "Revenue rose twenty-five percent.", "Revenue rose one million.", "Quarter Ⅲ was stronger."])
+    assert.throws(() => validateResearchClaim(claim(text), ["T"], true), /qualitative/);
+  for (const text of ["數據一致，但一般解讀仍需核對。", "營運現金流較前一季下降。", "營運現金流較上一季度下降。", "One concern is missing cash-flow context.", "May remain uncertain without dated financials."])
+    assert.equal(validateResearchClaim(claim(text), ["T"], true).text, text);
+});
+
+test("structured prose limits match runtime lengths and keep one claim in each section", () => {
+  const claim = { text: "甲".repeat(80), sourceIds: ["T"] };
+  assert.ok(validateResearchClaim(claim, ["T"], true));
+  assert.throws(() => validateResearchClaim({ ...claim, text: "甲".repeat(81) }, ["T"], true));
+  assert.ok(validateResearchClaim({ ...claim, text: "a".repeat(320) }, ["T"], true, 320));
+  assert.throws(() => validateResearchClaim({ ...claim, text: "a".repeat(321) }, ["T"], true, 320));
+  const schema = researchReportSchema(["T"], true);
+  assert.equal(schema.properties.summary.properties.text.maxLength, 80);
+  assert.equal(schema.properties.support.maxItems, 1);
+  assert.equal(researchReportSchema(["T"], true, 320).properties.summary.properties.text.maxLength, 320);
+  const sections = { summary: claim, support: [claim], counterchecks: [claim], risks: [claim] };
+  assert.ok(validateResearchReport(sections, ["T"], true));
+  assert.throws(() => validateResearchReport({ ...sections, risks: [claim, claim] }, ["T"], true));
+});
+
+test("program facts preserve zero and unavailable financial currency instead of assuming quote currency", () => {
+  const content = renderResearchDataFacts({ symbol: "NVDA", language: "en", quote: 210.96, currency: "USD", quoteAsOf: "2026-10-23T20:00Z", priceAsOf: "2026-10-23", gaps: [],
+    quarters: [{ date: "2026-07-26", currency: null, revenue: 0, netIncome: null, operatingCashFlow: 100, freeCashFlow: -10, eps: null }] });
+  assert.match(content, /revenue 0 \(currency unavailable\)/); assert.match(content, /net income Unavailable/);
+  assert.match(content, /operating cash flow 100 \(currency unavailable\)/); assert.ok(!content.includes("revenue USD"));
+  const input = { symbol: "NVDA", quote: { asOf: "2026-10-23T20:00Z", changePercent: 0 },
+    technical: { dailyRange20: { closeRelation: "unavailable", dailyClose: 100, priceAboveLow: null, priceBelowHigh: null }, sma20: null, sma50: null, sma200: null, relativeVolume: null, invalidBarCount: 0 },
+    financials: { financialSource: { dataAsOf: "2026-07-26" }, quarters: [{ currency: null, revenue: 200 }, { currency: "USD", revenue: 100 }] }, sources: [] } as unknown as Parameters<typeof researchNarrativeEvidence>[0];
+  assert.equal(researchNarrativeEvidence(input).financialEvidence.versusPreviousPublishedQuarter.revenue, "unavailable");
+  input.financials!.quarters[0].currency = "USD";
+  assert.equal(researchNarrativeEvidence(input).financialEvidence.versusPreviousPublishedQuarter.revenue, "higher");
+});
 
 test("options reject wrong provider identities and keep missing sweep ratios distinct from genuine zero", async () => {
   const before = globalThis.fetch;
