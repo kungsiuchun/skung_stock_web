@@ -1,4 +1,4 @@
-import { STOCKS_WATCHER_SYMBOLS, normalizeStocksWatcherSymbol } from "./stocks-native-yahoo";
+import { STOCKS_WATCHER_SYMBOLS, normalizeStocksWatcherSymbol, completeTotal } from "./stocks-native-yahoo";
 import type { StocksNativeToolResult, StocksNativeToolSummary } from "./stocks-native-yahoo";
 import { STOCKS_WATCHER_UNIVERSE } from "./stocks-watcher-universe";
 import type { StocksWatcherUniverseStock } from "./stocks-watcher-universe";
@@ -20,8 +20,8 @@ export interface StocksWatcherQuote {
   high: number | null;
   low: number | null;
   previousClose: number | null;
-  change: number;
-  changePercent: number;
+  change: number | null;
+  changePercent: number | null;
   marketState: string | null;
   asOf: string | null;
 }
@@ -94,12 +94,12 @@ export interface StocksWatcherEarningsSnapshot {
 
 export interface StocksWatcherExpiryRow {
   expiry: string;
-  openInterest: number;
+  openInterest: number | null;
   primaryStrike: number;
   strike: number;
-  volume: number;
-  dominantType: "C" | "P";
-  type: "C" | "P";
+  volume: number | null;
+  dominantType: "C" | "P" | null;
+  type: "C" | "P" | null;
   /** Only populated when the source supplied auditable gamma inputs. */
   netGex?: number;
   /** Only populated when the source supplied auditable delta inputs. */
@@ -138,9 +138,9 @@ export interface StocksWatcherSnapshot {
   atm: number;
   selectedTimeLabel: string;
   gexRegime: string;
-  putCallOpenInterest: number;
-  putCallVolume: number;
-  sweeps: number;
+  putCallOpenInterest: number | null;
+  putCallVolume: number | null;
+  sweeps: number | null;
   availableExpiries: string[];
   selectedExpiry: string | null;
   expiryRows: StocksWatcherExpiryRow[];
@@ -197,8 +197,8 @@ export interface StocksWatcherRowQuote {
   companyName?: string;
   price: number;
   previousClose?: number | null;
-  change: number;
-  changePercent: number;
+  change: number | null;
+  changePercent: number | null;
   changeAvailable: boolean;
   marketState: string | null;
   asOf: string | null;
@@ -459,58 +459,34 @@ const extractAvailableExpiries = (text: string) => {
   return Array.from(new Set(text.split("\n").map(parseDateLike).filter((date): date is string => Boolean(date)))).slice(0, 24);
 };
 
-const parseOptionRows = (text: string, spot: number): StocksWatcherExpiryRow[] => {
+const parseOptionRows = (text: string): StocksWatcherExpiryRow[] => {
   const rows: StocksWatcherExpiryRow[] = [];
+  let headers: string[] = [];
 
   for (const line of text.split("\n")) {
     if (!line.trim().startsWith("|")) continue;
     const cells = parseTableCells(line);
-    const expiry = cells.map(parseDateLike).find(Boolean);
-    const typeCell = cells.find((cell) => /\b(call|put|c|p)\b/i.test(cell));
+    if (cells.some(cell => /^exp(iry)?$/i.test(cell)) && cells.some(cell => /^str(ike)?$/i.test(cell))) { headers = cells.map(cell => cell.toLowerCase().replace(/^exp$/, "expiry").replace(/^str$/, "strike")); continue; }
+    const cell = (name: string) => cells[headers.indexOf(name)] || "";
+    const expiry = parseDateLike(cell("expiry"));
+    const typeCell = cell("type");
+    if (!/^(call|put|c|p)$/i.test(typeCell)) continue;
     const type = /put|\bp\b/i.test(typeCell || "") ? "P" : "C";
-    const numbers = cells.map(parseNumber).filter((value): value is number => value !== null);
-    const strike = numbers.find((value) => value > spot * 0.55 && value < spot * 1.45) || round(spot / 5) * 5;
-    const largeNumbers = numbers.filter((value) => value >= 10);
-
-    if (!expiry || largeNumbers.length < 2) continue;
+    const strike = parseNumber(cell("strike"));
+    if (!expiry || strike === null || strike <= 0) continue;
 
     rows.push({
       expiry,
-      openInterest: Math.max(...largeNumbers),
+      openInterest: parseNumber(cell("oi")),
       primaryStrike: strike,
       strike,
-      volume: largeNumbers[largeNumbers.length - 1],
+      volume: parseNumber(cell("volume")),
       dominantType: type,
       type,
     });
   }
 
   return rows.slice(0, 24);
-};
-
-const parseGexRows = (text: string, spot: number): Partial<StocksWatcherStrikeRow>[] => {
-  const rows: Partial<StocksWatcherStrikeRow>[] = [];
-
-  for (const line of text.split("\n")) {
-    if (!line.trim().startsWith("|")) continue;
-    const cells = parseTableCells(line);
-    const numbers = cells.map(parseNumber).filter((value): value is number => value !== null);
-    const strike = numbers.find((value) => value > spot * 0.55 && value < spot * 1.45);
-    if (!strike || numbers.length < 2) continue;
-
-    const gexNumbers = numbers.filter((value) => value !== strike).filter((value) => Math.abs(value) > 1_000 || Math.abs(value) < 200);
-    const callGex = Math.abs(gexNumbers.find((value) => value > 0) || 0);
-    const putGex = -Math.abs([...gexNumbers].reverse().find((value) => value < 0) || 0);
-
-    rows.push({
-      strike,
-      callGex,
-      putGex,
-      netGex: callGex + putGex,
-    });
-  }
-
-  return rows.slice(0, 80);
 };
 
 const parseHistory = (text: string): StocksWatcherHistoryPoint[] => {
@@ -538,6 +514,19 @@ const parseHistory = (text: string): StocksWatcherHistoryPoint[] => {
   return points.slice(-40);
 };
 
+const observedStrikeRows = (raw: unknown): StocksWatcherStrikeRow[] => {
+  const record = raw && typeof raw === "object" ? raw as Record<string, unknown> : null;
+  const rows = Array.isArray(record?.exposures) ? record.exposures : [];
+  const fields = ["strike", "callOpenInterest", "putOpenInterest", "callVolume", "putVolume", "callGex", "putGex", "netGex"] as const;
+  return rows.flatMap(value => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const row = value as Record<string, unknown>;
+    if (fields.some(field => typeof row[field] !== "number" || !Number.isFinite(row[field])) || (row.strike as number) <= 0
+      || ["callOpenInterest", "putOpenInterest", "callVolume", "putVolume"].some(field => (row[field] as number) < 0)) return [];
+    return [Object.fromEntries(fields.map(field => [field, row[field]])) as unknown as StocksWatcherStrikeRow];
+  }).sort((a, b) => a.strike - b.strike).slice(0, 60);
+};
+
 const historyFromRawResult = (raw: unknown): StocksWatcherHistoryPoint[] => {
   const rawRecord = recordFromUnknown(raw);
   const history = Array.isArray(rawRecord?.history) ? rawRecord.history : [];
@@ -553,38 +542,6 @@ const historyFromRawResult = (raw: unknown): StocksWatcherHistoryPoint[] => {
     })
     .filter((row): row is StocksWatcherHistoryPoint => Boolean(row))
     .slice(-40);
-};
-
-const seeded = (symbol: string) =>
-  Array.from(symbol.toUpperCase()).reduce((sum, char) => sum + char.charCodeAt(0), 0);
-
-const buildSyntheticStrikes = (symbol: string, spot: number): StocksWatcherStrikeRow[] => {
-  const seed = seeded(symbol);
-  const step = spot > 800 ? 10 : spot > 150 ? 2.5 : 1;
-  const atm = Math.round(spot / step) * step;
-
-  return Array.from({ length: 25 }, (_, index) => {
-    const distance = index - 12;
-    const strike = round(atm + distance * step, 2);
-    const intensity = Math.max(0.12, 1 - Math.abs(distance) / 15);
-    const callOpenInterest = Math.round((seed % 9 + 3) * 900 * intensity + Math.max(0, distance) * 280);
-    const putOpenInterest = Math.round((seed % 7 + 3) * 760 * intensity + Math.max(0, -distance) * 320);
-    const callVolume = Math.round(callOpenInterest * (0.22 + (index % 4) * 0.08));
-    const putVolume = Math.round(putOpenInterest * (0.2 + (index % 5) * 0.06));
-    const callGex = Math.round(callOpenInterest * intensity * 550);
-    const putGex = -Math.round(putOpenInterest * (1 - intensity * 0.35) * 460);
-
-    return {
-      strike,
-      callOpenInterest,
-      putOpenInterest,
-      callVolume,
-      putVolume,
-      callGex,
-      putGex,
-      netGex: callGex + putGex,
-    };
-  });
 };
 
 const buildExpirySummaryRows = (
@@ -605,48 +562,24 @@ const buildExpirySummaryRows = (
     // never manufacture an OI/volume/strike row for it.
     if (rows.length === 0) return null;
 
-    const callInterest = rows.filter((row) => row.type === "C").reduce((sum, row) => sum + row.openInterest, 0);
-    const putInterest = rows.filter((row) => row.type === "P").reduce((sum, row) => sum + row.openInterest, 0);
-    const dominant: "C" | "P" = callInterest >= putInterest ? "C" : "P";
-    const primary = rows.reduce((best, row) => (row.openInterest + row.volume) > (best.openInterest + best.volume) ? row : best);
+    const callInterest = completeTotal(rows.filter(row => row.type === "C").map(row => row.openInterest));
+    const putInterest = completeTotal(rows.filter(row => row.type === "P").map(row => row.openInterest));
+    const dominant = callInterest !== null && putInterest !== null ? callInterest >= putInterest ? "C" : "P" : null;
+    const score = (row: StocksWatcherExpiryRow) => (row.openInterest ?? -1) + (row.volume ?? -1);
+    const primary = rows.reduce((best, row) => score(row) > score(best) ? row : best);
 
     return {
       expiry: normalized,
-      openInterest: rows.reduce((sum, row) => sum + row.openInterest, 0),
+      openInterest: completeTotal(rows.map(row => row.openInterest)),
       primaryStrike: primary.primaryStrike || primary.strike,
       strike: primary.primaryStrike || primary.strike,
-      volume: rows.reduce((sum, row) => sum + row.volume, 0),
+      volume: completeTotal(rows.map(row => row.volume)),
       dominantType: dominant,
       type: dominant,
     };
   });
 
   return summaries.filter((row): row is StocksWatcherExpiryRow => Boolean(row)).slice(0, 32);
-};
-
-const completeRows = (symbol: string, spot: number, partialRows: Partial<StocksWatcherStrikeRow>[]) => {
-  // Keep the legacy deterministic completion path isolated to the GEX grid.
-  // It must never be reused for quote, history, expiry, news, or earnings data.
-  const fallback = buildSyntheticStrikes(symbol, spot);
-  const byStrike = new Map(fallback.map((row) => [row.strike, row]));
-
-  for (const row of partialRows) {
-    if (typeof row.strike !== "number") continue;
-    const fallbackRow = byStrike.get(row.strike) || fallback.reduce((best, item) => Math.abs(item.strike - row.strike!) < Math.abs(best.strike - row.strike!) ? item : best);
-    byStrike.set(row.strike, {
-      ...fallbackRow,
-      ...row,
-      callOpenInterest: row.callOpenInterest ?? fallbackRow.callOpenInterest,
-      putOpenInterest: row.putOpenInterest ?? fallbackRow.putOpenInterest,
-      callVolume: row.callVolume ?? fallbackRow.callVolume,
-      putVolume: row.putVolume ?? fallbackRow.putVolume,
-      callGex: row.callGex ?? fallbackRow.callGex,
-      putGex: row.putGex ?? fallbackRow.putGex,
-      netGex: row.netGex ?? (row.callGex ?? fallbackRow.callGex) + (row.putGex ?? fallbackRow.putGex),
-    });
-  }
-
-  return Array.from(byStrike.values()).sort((a, b) => a.strike - b.strike).slice(0, 60);
 };
 
 const summariseTool = (name: string, text: string) => {
@@ -724,9 +657,9 @@ export const getStocksWatcherRowQuotesFromRawResult = (raw: unknown, fetchedAt =
         symbol,
         price,
         previousClose: numberFromUnknown(quote.previousClose) ?? null,
-        change: change ?? 0,
-        changePercent: changePercent ?? 0,
-        changeAvailable: change !== undefined && changePercent !== undefined,
+        change: change ?? null,
+        changePercent: changePercent ?? null,
+        changeAvailable: quote.changeAvailable !== false && change !== undefined && changePercent !== undefined,
         marketState: typeof quote.marketState === "string" ? quote.marketState : null,
         asOf: typeof quote.asOf === "string" ? quote.asOf : null,
         fetchedAt,
@@ -820,12 +753,12 @@ const earningsFromRawResult = (raw: unknown): StocksWatcherEarningsSnapshot => {
     epsDifference: numberFromUnknown(earnings.epsDifference) ?? null,
     surprisePercent: numberFromUnknown(earnings.surprisePercent) ?? null,
     result: earnings.result === "beat" || earnings.result === "miss" ? earnings.result : null,
-    priceMove: priceMove
+    priceMove: priceMove && typeof priceMove.eventTradingDate === "string" && numberFromUnknown(priceMove.previousClose) !== undefined && numberFromUnknown(priceMove.close) !== undefined && numberFromUnknown(priceMove.changePercent) !== undefined
       ? {
         eventTradingDate: typeof priceMove.eventTradingDate === "string" ? priceMove.eventTradingDate : "",
-        previousClose: numberFromUnknown(priceMove.previousClose) ?? 0,
-        close: numberFromUnknown(priceMove.close) ?? 0,
-        changePercent: numberFromUnknown(priceMove.changePercent) ?? 0,
+        previousClose: priceMove.previousClose as number,
+        close: priceMove.close as number,
+        changePercent: priceMove.changePercent as number,
         basis: typeof priceMove.basis === "string" ? priceMove.basis : "close_to_close",
       }
       : null,
@@ -845,16 +778,17 @@ const rowsFromRawOptionChain = (raw: unknown): {
   const expiries = Array.isArray(chain.expiries)
     ? chain.expiries.map((item) => typeof item === "string" ? parseDateLike(item) || item : "").filter(Boolean)
     : [];
-  const normalizeLeg = (leg: unknown, type: "C" | "P") => {
+  const normalizeLeg = (leg: unknown, type: "C" | "P"): StocksWatcherExpiryRow | null => {
     const record = recordFromUnknown(leg);
     if (!record || !selectedExpiry) return null;
-    const strike = typeof record.strike === "number" ? record.strike : 0;
+    const strike = numberFromUnknown(record.strike);
+    if (strike === undefined || strike <= 0) return null;
     return {
       expiry: selectedExpiry,
-      openInterest: typeof record.openInterest === "number" ? record.openInterest : 0,
+      openInterest: numberFromUnknown(record.openInterest) ?? null,
       primaryStrike: strike,
       strike,
-      volume: typeof record.volume === "number" ? record.volume : 0,
+      volume: numberFromUnknown(record.volume) ?? null,
       dominantType: type,
       type,
     };
@@ -869,6 +803,7 @@ export const buildStocksWatcherSnapshotFromNative = async (
   symbol: string,
   client: StocksWatcherToolClient,
   publishedOptions?: StocksWatcherPublishedOptionsInput,
+  options: { surface?: "options" } = {},
 ): Promise<StocksWatcherSnapshot> => {
   const upperSymbol = normalizeStocksWatcherSymbol(symbol);
   const warnings: string[] = [];
@@ -903,18 +838,17 @@ export const buildStocksWatcherSnapshotFromNative = async (
 
   const quoteChange = typeof partialQuote.change === "number" && Number.isFinite(partialQuote.change)
     ? partialQuote.change
-    : 0;
+    : null;
   const quoteChangePercent = typeof partialQuote.changePercent === "number" && Number.isFinite(partialQuote.changePercent)
     ? partialQuote.changePercent
-    : 0;
+    : null;
   if (partialQuote.change === undefined || partialQuote.changePercent === undefined) {
     warnings.push(`Native Yahoo quote change fields unavailable for ${upperSymbol}.`);
   }
 
   let rawOptions = { expiries: [] as string[], selectedExpiry: null as string | null, rows: [] as StocksWatcherExpiryRow[] };
   let optionsText = "";
-  let gexText = "";
-  let zeroDteText = "";
+  let gexRows: StocksWatcherStrikeRow[] = [];
   let robinhoodView: ReturnType<typeof toRobinhoodOptionsView> | null = null;
   if (publishedOptions?.snapshot) {
     assertRobinhoodSpotCompatible(publishedOptions.snapshot.spot, price);
@@ -929,41 +863,44 @@ export const buildStocksWatcherSnapshotFromNative = async (
       { ticker: upperSymbol, strikesAroundAtm: 25 },
     ], toolRuns);
     rawOptions = rowsFromRawOptionChain(optionsResult.raw);
+    gexRows = observedStrikeRows(optionsResult.raw);
     optionsText = optionsResult.text;
     const frontExpiry = rawOptions.expiries.length > 0 ? rawOptions.expiries[0] : extractAvailableExpiries(optionsText)[0];
-    gexText = frontExpiry ? await callToolWithVariants(client, "get_options_gex", [
-      { ticker: upperSymbol, expiry: frontExpiry, topRows: 20 },
-    ], toolRuns) : "";
-    zeroDteText = await callToolWithVariants(client, "get_options_0dte", [
+    if (!gexRows.length && frontExpiry) {
+      const result = await callToolStructuredWithVariants(client, "get_options_gex", [{ ticker: upperSymbol, expiry: frontExpiry, topRows: 20 }], toolRuns);
+      gexRows = observedStrikeRows(result.raw);
+    }
+    if (options.surface !== "options") await callToolWithVariants(client, "get_options_0dte", [
       { ticker: upperSymbol },
     ], toolRuns);
   }
-  const intradayResult = await callToolStructuredWithVariants(client, "get_intraday", [
+  const deferred = { text: "", raw: null };
+  const intradayResult = options.surface === "options" ? deferred : await callToolStructuredWithVariants(client, "get_intraday", [
     { ticker: upperSymbol },
   ], toolRuns);
-  const historyResult = await callToolStructuredWithVariants(client, "get_stock_history", [
+  const historyResult = options.surface === "options" ? deferred : await callToolStructuredWithVariants(client, "get_stock_history", [
     { ticker: upperSymbol },
   ], toolRuns);
   const intradayText = intradayResult.text;
   const historyText = historyResult.text;
-  const breadthText = await callToolWithVariants(client, "market_breadth", [
+  const breadthText = options.surface === "options" ? "" : await callToolWithVariants(client, "market_breadth", [
     {},
     { market: "US" },
   ], toolRuns);
-  const relativeStrengthText = await callToolWithVariants(client, "basket_relative_strength", [
+  const relativeStrengthText = options.surface === "options" ? "" : await callToolWithVariants(client, "basket_relative_strength", [
     {},
   ], toolRuns);
-  const newsResult = await callToolStructuredWithVariants(client, "pre_event_brief", [
+  const newsResult = options.surface === "options" ? deferred : await callToolStructuredWithVariants(client, "pre_event_brief", [
     { ticker: upperSymbol, intent: "overview news" },
   ], toolRuns);
-  const earningsResult = await callToolStructuredWithVariants(client, "earnings_vol_crush", [
+  const earningsResult = options.surface === "options" ? deferred : await callToolStructuredWithVariants(client, "earnings_vol_crush", [
     { ticker: upperSymbol },
   ], toolRuns);
 
-  const parsedExpiries = parseOptionRows(optionsText, price);
+  const parsedExpiries = rawOptions.rows.length ? [] : parseOptionRows(optionsText);
   const expiries = robinhoodView?.availableExpiries || (rawOptions.expiries.length > 0 ? rawOptions.expiries : extractAvailableExpiries(optionsText));
   const expiryRows = robinhoodView?.expiryRows || buildExpirySummaryRows(expiries, [...rawOptions.rows, ...parsedExpiries]);
-  const strikes = robinhoodView?.strikes || completeRows(upperSymbol, price, parseGexRows(`${gexText}\n${zeroDteText}`, price));
+  const strikes = robinhoodView?.strikes || gexRows;
   const rawIntradayHistory = historyFromRawResult(intradayResult.raw);
   const rawDailyHistory = historyFromRawResult(historyResult.raw);
   const parsedIntradayHistory = parseHistory(intradayText);
@@ -976,11 +913,12 @@ export const buildStocksWatcherSnapshotFromNative = async (
         ? parsedIntradayHistory
         : parsedDailyHistory;
   if (expiryRows.length === 0) warnings.push("Options expiry data unavailable.");
-  if (history.length === 0) warnings.push("Price history unavailable.");
-  const callOi = strikes.reduce((sum, row) => sum + row.callOpenInterest, 0);
-  const putOi = strikes.reduce((sum, row) => sum + row.putOpenInterest, 0);
-  const callVol = strikes.reduce((sum, row) => sum + row.callVolume, 0);
-  const putVol = strikes.reduce((sum, row) => sum + row.putVolume, 0);
+  if (strikes.length === 0) warnings.push("GEX strike data unavailable; no synthetic rows were generated.");
+  if (history.length === 0 && options.surface !== "options") warnings.push("Price history unavailable.");
+  const callOi = completeTotal(robinhoodView ? strikes.map(row => row.callOpenInterest) : rawOptions.rows.filter(row => row.type === "C").map(row => row.openInterest));
+  const putOi = completeTotal(robinhoodView ? strikes.map(row => row.putOpenInterest) : rawOptions.rows.filter(row => row.type === "P").map(row => row.openInterest));
+  const callVol = completeTotal(robinhoodView ? strikes.map(row => row.callVolume) : rawOptions.rows.filter(row => row.type === "C").map(row => row.volume));
+  const putVol = completeTotal(robinhoodView ? strikes.map(row => row.putVolume) : rawOptions.rows.filter(row => row.type === "P").map(row => row.volume));
   const netGex = strikes.reduce((sum, row) => sum + row.netGex, 0);
 
   return {
@@ -1002,10 +940,10 @@ export const buildStocksWatcherSnapshotFromNative = async (
     spot: price,
     atm: round(price / 2.5) * 2.5,
     selectedTimeLabel: "live",
-    gexRegime: netGex >= 0 ? "Pinning" : "Amplifying",
-    putCallOpenInterest: round(putOi / Math.max(1, callOi), 2),
-    putCallVolume: round(putVol / Math.max(1, callVol), 2),
-    sweeps: robinhoodView ? 0 : (zeroDteText.match(/\bsweep/i) ? 1 : 0),
+    gexRegime: strikes.length === 0 ? "Unavailable" : netGex >= 0 ? "Pinning" : "Amplifying",
+    putCallOpenInterest: callOi !== null && callOi > 0 && putOi !== null ? round(putOi / callOi, 2) : null,
+    putCallVolume: callVol !== null && callVol > 0 && putVol !== null ? round(putVol / callVol, 2) : null,
+    sweeps: null,
     // Keep the provider-advertised expiry list, but expose rows only when the
     // provider returned actual option data for that expiry.
     availableExpiries: expiries,

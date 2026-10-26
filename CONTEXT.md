@@ -10,7 +10,7 @@ Coverage writes are owner-only and API-only: GitHub OAuth establishes a signed H
 
 The public portfolio uses the “Siu — Code & Camera” identity: warm paper, ink, and burnt orange; serif headlines with readable sans-serif body text. The homepage introduces Siu as a data analyst and creative developer, then offers three paths: Market Lab, Photography, and About & résumé.
 
-Portfolio styles are scoped to the portfolio shell. Trading tools retain their existing layouts, routes, API contracts, source labels, and data behavior. Tool modules load on demand rather than with the homepage.
+Portfolio styles are scoped to the portfolio shell. Trading research tools share the Watcher workspace, with Today, Markets, Research, Plans, Portfolio and SPX navigation. Legacy hashes remain supported, including versioned portfolio setups and SPX replay parameters. Heavy tools load on demand rather than with the homepage.
 
 The landing page retains Siu's particle portrait. Canvas enhances an always-present portrait image; a pause control, reduced-motion preference, and offscreen/hidden-page suspension bound its motion. No Three.js or WebGL dependency is required.
 
@@ -114,9 +114,9 @@ SPX GEX Heatmap snapshots remain the retained intraday product surface for brows
 
 ## Stocks Intelligence Watcher
 
-Stocks Intelligence Watcher is a Work Item that turns the Stocks Intelligence MCP ticker workflow into a dense live ticker terminal.
+Watcher is the Market Lab's unified US-stock swing/position research workspace. Today leads with the curated watchlist, browser-local Holding/Candidate tags and published market context. Research keeps the selected ticker across charts, technicals, published financials, options, news, reports and manually sized plans. Markets, ETF backtesting and published SPX views share its navigation and theme.
 
-Stocks Intelligence Watcher should lead with a usable watchlist, search, favorites, options expiry table, and OI/volume/GEX strike views rather than a static explanation.
+The initial stock view loads data without AI or quote polling. Reports and chat require explicit action, use server-assembled public evidence and a shared free-only allowance. The paid SPX Telegram Worker remains independent. Plans and personal watchlist tags stay in browser storage, with validated JSON export/import and visible storage errors. There is no brokerage execution or account synchronization.
 
 Stocks Intelligence Watcher uses a repo-native Yahoo backend; the browser receives only normalized JSON from the Pages Function.
 
@@ -140,7 +140,7 @@ The production Massive credential has Basic-plan EOD recency and a five-requests
 
 Missing constituent history is unavailable and excluded from the eligible breadth denominator. It is never converted to zero or treated as below a moving average.
 
-GitHub Actions owns the batch computation and writes bounded normalized objects to the dedicated Standard-class `market-breadth-data` R2 bucket. Price state and READY snapshots use independent A/B slots, refresh audit uses a 64-slot ring, and the status pointer always moves last. Pages owns a read-only R2 API. The feature uses no D1 and no scheduled Cloudflare Worker, and must not share `MARKET_CACHE_DB`, `SPX_RECAP_DB`, or the SPX trading Worker.
+GitHub Actions owns the batch computation and writes bounded normalized objects to the dedicated Standard-class `market-breadth-data` R2 bucket. Price state and READY snapshots use independent A/B slots, refresh audit uses a 64-slot ring, and the status pointer always moves last. A compact sibling summary supports Watcher Today. Pages owns read-only R2 APIs; their usage guard shares the existing `MARKET_CACHE_DB` allocation without storing breadth data there. The producer has no D1 or scheduled Cloudflare Worker and remains separate from `SPX_RECAP_DB` and the SPX trading Worker.
 
 A failed refresh preserves the last READY snapshot and makes the public API report `STALE` with a safe error class. No source failure may create demo data or overwrite the last-good snapshot.
 

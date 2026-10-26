@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import {
   buildSpxPriceActionCompassRequestUrl,
+  formatSpxCandleTime,
   projectSpxChartClientPoint,
   selectActionablePatterns,
   sortSpxPriceActionPatternsLatestFirst,
@@ -347,7 +348,7 @@ export function SpxPriceActionCompass({
               <h2 className="text-xl font-semibold text-white">Price action</h2>
             </div>
             <p className="mt-1 text-xs leading-5 text-zinc-500">
-              {data.source.label} · {data.source.interval} · Last candle {data.candles.length ? formatEtTime(data.candles[data.candles.length - 1].time, true) : "unavailable"}
+              {data.source.label} · {data.source.interval} · Last candle {data.candles.length ? formatSpxCandleTime(data.candles[data.candles.length - 1], data.timeframe, true) : "unavailable"}
             </p>
             <p className="text-[11px] text-slate-400">Price window is independent of the GEX replay minute.</p>
           </div>
@@ -360,6 +361,7 @@ export function SpxPriceActionCompass({
                 <button
                   key={item}
                   type="button"
+                  disabled={!enabled}
                   onClick={() => setTimeframe(item)}
                   className={`h-7 px-2.5 font-mono text-[11px] font-black transition-colors ${
                     timeframe === item ? "bg-cyan-200 text-[#03111a]" : "text-cyan-100 hover:bg-cyan-300/15"
@@ -370,6 +372,7 @@ export function SpxPriceActionCompass({
                 </button>
               ))}
             </div>
+            {!enabled && <span role="status" className="text-xs text-zinc-400">Loading session before chart selection…</span>}
             <ToolbarToggle active={showZones} onClick={() => setShowZones((value) => !value)} title="Support and resistance">
               <Grid3X3 className="h-4 w-4" />
             </ToolbarToggle>
@@ -387,7 +390,7 @@ export function SpxPriceActionCompass({
 
         {reconnecting && <Notice tone="amber" text="Reconnecting SPX source…" />}
         {data.source.status === "STALE" && <div role="status"><Notice tone="amber" text="STALE price context · Last verified candles remain visible. Current SPX is not live." />{!error && <button className="min-h-10 px-3 text-xs text-cyan-200 underline" onClick={() => setRetryKey(k => k + 1)}>Retry price chart</button>}</div>}
-        {error && <div role="alert"><Notice tone="red" text={`${spxFailureMessage(failureDetails?.httpStatus ?? null)}${data.candles.length ? ` Last verified candle: ${formatEtTime(data.candles[data.candles.length - 1].time, true)}.` : " Price chart unavailable."}`} /><button className="min-h-10 px-3 text-xs text-cyan-200 underline" onClick={() => setRetryKey(k => k + 1)}>Retry price chart</button><details className="p-2 text-xs text-zinc-400"><summary className="cursor-pointer">Price diagnostics</summary><p className="break-all">{formatSpxFailureDetails(failureDetails)}</p></details></div>}
+        {error && <div role="alert"><Notice tone="red" text={`${spxFailureMessage(failureDetails?.httpStatus ?? null)}${data.candles.length ? ` Last verified candle: ${formatSpxCandleTime(data.candles[data.candles.length - 1], data.timeframe, true)}.` : " Price chart unavailable."}`} /><button className="min-h-10 px-3 text-xs text-cyan-200 underline" onClick={() => setRetryKey(k => k + 1)}>Retry price chart</button><details className="p-2 text-xs text-zinc-400"><summary className="cursor-pointer">Price diagnostics</summary><p className="break-all">{formatSpxFailureDetails(failureDetails)}</p></details></div>}
         {data.warnings.length > 0 && <Notice tone="amber" text={data.warnings.join(" ")} />}
 
         <div className="grid gap-2 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -398,6 +401,7 @@ export function SpxPriceActionCompass({
               </div>
             ) : (
               <PriceActionChartCanvas
+                timeframe={data.timeframe}
                 candles={chartWindow.candles}
                 patterns={chartWindow.patterns}
                 zones={data.zones}
@@ -477,7 +481,7 @@ export function SpxPriceActionCompass({
                     </div>
                     {signalDensity === "actionable" && <ActionableMeta candidate={actionableById.get(pattern.id)} rank={topPatterns.findIndex((item) => item.id === pattern.id) + 1} />}
                     <div className="mt-1 font-mono text-[10px] text-zinc-500">
-                      {data.candles[pattern.toIndex] ? formatEtTime(data.candles[pattern.toIndex].time) : "time n/a"} · ${formatPrice(pattern.price)}
+                      {formatSpxCandleTime(data.candles[pattern.toIndex], data.timeframe)} · ${formatPrice(pattern.price)}
                     </div>
                   </button>
                 ))}
@@ -507,6 +511,7 @@ export function SpxPriceActionCompass({
 
         <div className="grid gap-2 xl:grid-cols-[minmax(0,1fr)_360px]">
           <SelectedSignalCard
+            timeframe={data.timeframe}
             pattern={selectedPattern}
             candle={selectedPattern ? data.candles[selectedPattern.toIndex] : undefined}
             onShowDetail={() => {
@@ -592,6 +597,7 @@ const Notice = ({ tone, text }: { tone: "red" | "amber"; text: string }) => (
 );
 
 interface ChartProps {
+  timeframe: SpxPriceActionTimeframe;
   candles: SpxPriceActionCandle[];
   patterns: SpxPriceActionPattern[];
   zones: SpxPriceActionZone[];
@@ -655,6 +661,7 @@ const layoutChartPatternLabels = (patterns: ChartPatternGeometry[], chartHeight:
 };
 
 function PriceActionChartCanvas({
+  timeframe,
   candles,
   patterns,
   zones,
@@ -990,7 +997,7 @@ function PriceActionChartCanvas({
           return (
             <g key={index}>
               <line x1={axisLeft} y1={y} x2={plotRight} y2={y} stroke="#123142" strokeDasharray="3 3" />
-              <text x={axisLeft - 6} y={y + 3} textAnchor="end" className="fill-zinc-500 font-mono text-[10px]">
+              <text x={axisLeft - 6} y={y + 3} textAnchor="end" className="fill-slate-400 font-mono text-[10px]">
                 {price.toFixed(1)}
               </text>
             </g>
@@ -1111,7 +1118,7 @@ function PriceActionChartCanvas({
             <text x={28} y={Math.max(14, crosshair.y + 3)} textAnchor="middle" className="fill-black font-mono text-[9px] font-black">{crosshair.price.toFixed(1)}</text>
             <rect x={Math.max(axisLeft, Math.min(width - 168, crosshair.x - 78))} y={height - 19} width={166} height={17} fill="#f8fafc" />
             <text x={Math.max(axisLeft, Math.min(width - 168, crosshair.x - 78)) + 83} y={height - 7} textAnchor="middle" className="fill-black font-mono text-[8px] font-black">
-              {formatEtTime(candles[crosshair.index]?.time)}
+              {formatSpxCandleTime(candles[crosshair.index], timeframe)}
             </text>
           </g>
         )}
@@ -1148,10 +1155,12 @@ const ZoneTile = ({ label, zone }: { label: string; zone: SpxPriceActionZone | n
 );
 
 const SelectedSignalCard = ({
+  timeframe,
   pattern,
   candle,
   onShowDetail,
 }: {
+  timeframe: SpxPriceActionTimeframe;
   pattern: SpxPriceActionPattern | null;
   candle?: SpxPriceActionCandle;
   onShowDetail: () => void;
@@ -1177,7 +1186,7 @@ const SelectedSignalCard = ({
             <span>Price ${formatPrice(pattern.price)}</span>
             <span title="Pattern recognition score, not a win rate">Match {Math.round(pattern.confidence * 100)}/100</span>
             <span>Window {pattern.fromIndex}-{pattern.toIndex}</span>
-            <span>{candle ? formatEtTime(candle.time) : "time n/a"}</span>
+            <span>{formatSpxCandleTime(candle, timeframe)}</span>
           </div>
         </div>
         <button

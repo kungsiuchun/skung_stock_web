@@ -1,11 +1,8 @@
-import type { PagesFunction } from "@cloudflare/workers-types";
-import type { Ai } from "@cloudflare/workers-types";
-
 interface Env {
-  image_caption_ai: Ai; // prefer Ai over any
+  image_caption_ai: { run(model: string, inputs: { image: number[]; prompt: string; max_tokens: number }): Promise<unknown> };
 }
 
-export const onRequestPost: PagesFunction<Env> = async (context) => {
+export const onRequestPost = async (context: { request: Request; env: Env }) => {
   try {
     const formData = await context.request.formData();
     const imageFile = formData.get("image");

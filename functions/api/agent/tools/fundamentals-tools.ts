@@ -81,7 +81,7 @@ class AlphaVantageClient {
 
 function getApiKey(env?: any): string {
   // Using user provided key as fallback
-  return env?.ALPHA_VANTAGE_API_KEY || "DVN3696NDAQ7B417";
+  return env?.ALPHA_VANTAGE_API_KEY;
 }
 
 // ── Tool 1: get_company_overview ─────────────────────────────

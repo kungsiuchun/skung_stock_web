@@ -44,7 +44,7 @@ const VIEW_TITLES: Record<ViewState, string> = {
   "trading-agent-dashboard": "Trading Agent",
   "spx-recap": "SPX Recap",
   "spx-gex-heatmap": "SPX Market Structure",
-  "stocks-intelligence-watcher": "Stocks Intelligence Watcher",
+  "stocks-intelligence-watcher": "Watcher",
   "fixed-income": "Fixed Income",
   "market-breadth": "S&P 500 Market Breadth",
   "sector-rotation": "SPY Sector Rotation",

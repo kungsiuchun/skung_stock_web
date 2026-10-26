@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildFinanceDashboardSnapshot } from "../src/lib/finance-dashboard-snapshot";
+import { normalizeStoredDashboardSnapshot } from "../src/lib/finance-dashboard-persistence";
+
+test("a data-only snapshot has no invented neutral algorithmic score", () => {
+  const snapshot = buildFinanceDashboardSnapshot({ symbol: "NVDA", agent: { success: true, steps: [] }, news: {}, vix: null, fundamentals: null, technical: null, sentiment: null });
+  assert.equal(snapshot.data.algoRating, null);
+  assert.ok(normalizeStoredDashboardSnapshot(snapshot));
+});
 
 const agent = {
   success: true,

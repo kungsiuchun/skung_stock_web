@@ -21,7 +21,7 @@ export function FinanceDashboard({ showChat = false, onCloseChat, onOpenChat }: 
         <h1 className="text-lg font-semibold">AI 研究對話</h1>
         <button type="button" onClick={onCloseChat} className="min-h-11 rounded-lg border border-white/20 px-3 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400">返回研究</button>
       </div>
-      <FinanceChatPanel className="min-h-0 flex-1 rounded-xl border border-white/10" subtitle="查詢市場資料與研究問題" />
+      <FinanceChatPanel symbol={symbol} className="min-h-0 flex-1 rounded-xl border border-white/10" subtitle="查詢市場資料與研究問題" />
     </div>
   </div>;
 

@@ -59,7 +59,7 @@ export function FinanceWorkspaceSummary({ data, cache, onRefresh }: { data: Fina
       <span>{cache ? (cache.status === "refreshed" || cache.status === "bypassed" ? "本次查詢" : "快取快照") : "已儲存研究 · 請刷新取得最新資料"}</span>
       <span>{data.quoteSourceAsOf ? `報價時間 ${dateTime(data.quoteSourceAsOf)}` : "報價時間未提供"}</span>
       <span>日線截至 <span className="font-mono text-slate-700">{lastBar?.date_iso || lastBar?.date || "未提供"}</span></span>
-      <span>量化評分 <span className="font-mono font-semibold text-slate-700">{data.algoRating}</span></span>
+      <span>量化評分 <span className="font-mono font-semibold text-slate-700">{data.algoRating ?? "未計算"}</span></span>
     </div>
     <p className="flex items-start gap-1.5 text-xs text-slate-500"><Clock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
       <span>{cache ? `快照來源時間：${dateTime(cache.sourceAsOf)} · 快取建立：${dateTime(cache.cachedAt)}` : "歷史結果未保存來源時間及技術／估值／VIX 快照。"}</span>

@@ -166,10 +166,10 @@ test("watchlist quota reserves its bounded authoritative tracking scan", async (
 test("ignored POST parameters cannot create additional market-cache entries", async () => {
   const db = new MarketCacheD1();
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(JSON.stringify({
+  globalThis.fetch = async (input) => new Response(JSON.stringify({
     chart: {
       result: [{
-        meta: { regularMarketPrice: 180, regularMarketPreviousClose: 179 },
+        meta: { symbol: decodeURIComponent(new URL(String(input)).pathname.split("/").at(-1)!), currency: "USD", regularMarketPrice: 180, regularMarketPreviousClose: 179 },
         timestamp: [1_700_000_000],
         indicators: { quote: [{ open: [179], high: [181], low: [178], close: [180], volume: [100] }] },
       }],
@@ -201,12 +201,12 @@ test("ignored ticker input reuses the default quotes market-cache entry", async 
   const db = new MarketCacheD1();
   const originalFetch = globalThis.fetch;
   let quoteLoads = 0;
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (input) => {
     quoteLoads += 1;
     return new Response(JSON.stringify({
       chart: {
         result: [{
-          meta: { regularMarketPrice: 180, regularMarketPreviousClose: 179 },
+          meta: { symbol: decodeURIComponent(new URL(String(input)).pathname.split("/").at(-1)!), currency: "USD", regularMarketPrice: 180, regularMarketPreviousClose: 179 },
           timestamp: [1_700_000_000],
           indicators: { quote: [{ open: [179], high: [181], low: [178], close: [180], volume: [100] }] },
         }],
@@ -248,7 +248,7 @@ test("options sweeps refreshes separately for distinct expiry requests", async (
     optionLoads += 1;
     return new Response(JSON.stringify({ optionChain: { result: [{
       expirationDates: [Number(expiry)],
-      quote: { regularMarketPrice: 180 },
+      quote: { symbol: "NVDA", regularMarketPrice: 180 },
       options: [{ expirationDate: Number(expiry), calls: [{ strike: 180, volume: 20, openInterest: 10 }], puts: [] }],
     }] } }));
   };
@@ -283,9 +283,9 @@ test("equivalent exposure row limits reuse one market-cache entry", async () => 
     if (url.includes("/v1/test/getcrumb")) return new Response("crumb");
     optionLoads += 1;
     return new Response(JSON.stringify({ optionChain: { result: [{
-      expirationDates: [1_788_000_000],
-      quote: { regularMarketPrice: 180 },
-      options: [{ expirationDate: 1_788_000_000, calls: [{ strike: 180, volume: 20, openInterest: 10 }], puts: [] }],
+      expirationDates: [(Date.parse("2026-08-28T00:00:00Z") / 1000)],
+      quote: { symbol: "NVDA", regularMarketPrice: 180 },
+      options: [{ expirationDate: (Date.parse("2026-08-28T00:00:00Z") / 1000), calls: [{ strike: 180, volume: 20, openInterest: 10 }], puts: [] }],
     }] } }));
   };
   try {
@@ -319,9 +319,9 @@ test("equivalent options display bounds reuse one market-cache entry", async () 
     if (url.includes("/v1/test/getcrumb")) return new Response("crumb");
     optionLoads += 1;
     return new Response(JSON.stringify({ optionChain: { result: [{
-      expirationDates: [1_788_000_000],
-      quote: { regularMarketPrice: 180 },
-      options: [{ expirationDate: 1_788_000_000, calls: [{ strike: 180, volume: 20, openInterest: 10 }], puts: [] }],
+      expirationDates: [(Date.parse("2026-08-28T00:00:00Z") / 1000)],
+      quote: { symbol: "NVDA", regularMarketPrice: 180 },
+      options: [{ expirationDate: (Date.parse("2026-08-28T00:00:00Z") / 1000), calls: [{ strike: 180, volume: 20, openInterest: 10 }], puts: [] }],
     }] } }));
   };
   try {
@@ -348,12 +348,12 @@ test("ignored market selection reuses one market breadth cache entry", async () 
   const db = new MarketCacheD1();
   const originalFetch = globalThis.fetch;
   let quoteLoads = 0;
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (input) => {
     quoteLoads += 1;
     return new Response(JSON.stringify({
       chart: {
         result: [{
-          meta: { regularMarketPrice: 180, regularMarketPreviousClose: 179 },
+          meta: { symbol: decodeURIComponent(new URL(String(input)).pathname.split("/").at(-1)!), currency: "USD", regularMarketPrice: 180, regularMarketPreviousClose: 179 },
           timestamp: [1_700_000_000],
           indicators: { quote: [{ open: [179], high: [181], low: [178], close: [180], volume: [100] }] },
         }],
@@ -391,7 +391,7 @@ test("normalized ticker and ignored signal intent reuse market-cache entries", a
     if (url.includes("/v8/finance/chart/")) {
       chartLoads += 1;
       return new Response(JSON.stringify({ chart: { result: [{
-        meta: { regularMarketPrice: 180, regularMarketPreviousClose: 179 },
+        meta: { symbol: decodeURIComponent(new URL(String(input)).pathname.split("/").at(-1)!), currency: "USD", regularMarketPrice: 180, regularMarketPreviousClose: 179 },
         timestamp: [1_700_000_000],
         indicators: { quote: [{ open: [179], high: [181], low: [178], close: [180], volume: [100] }] },
       }], error: null } }));
@@ -434,7 +434,7 @@ test("exhausted refresh quota fails closed before the Yahoo load", async () => {
   });
   const originalFetch = globalThis.fetch;
   let fetches = 0;
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (_input) => {
     fetches += 1;
     throw new Error("Yahoo must not run after quota rejection");
   };
@@ -459,7 +459,7 @@ test("quota-store failures return D1_QUOTA_STORE_UNAVAILABLE instead of pretendi
   db.quotaStoreAvailable = false;
   let fetches = 0;
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (_input) => {
     fetches += 1;
     throw new Error("Yahoo must not run after quota-store failure");
   };

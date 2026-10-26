@@ -13,6 +13,9 @@ export interface R2BucketLike {
 }
 export interface WatcherValuationRelease { schemaVersion: string; releaseId: string; generatedAt: string; }
 export type WatcherCoverageStatus = "published" | "queued" | "unavailable";
+export class WatcherValuationInputError extends Error {
+  constructor(message: string) { super(`VALUATION_DATA_INVALID: ${message}`); }
+}
 export interface WatcherCoverageRecord { symbol: string; requestedAt: string; state: "queued" | "published"; }
 export interface WatcherCoverageRegistry { schemaVersion: string; updatedAt: string; symbols: WatcherCoverageRecord[]; }
 
@@ -80,14 +83,14 @@ const nullableString = (value: unknown) => typeof value === "string" ? value : n
 const fail = (message: string): never => { throw new Error(`VALUATION_DATA_INVALID: ${message}`); };
 
 export const parseWatcherValuationMetric = (value: unknown): WatcherValuationMetric => {
-  const metric = String(value || "pe").toLowerCase();
-  if (!WATCHER_VALUATION_METRICS.includes(metric as WatcherValuationMetric)) throw new Error("VALUATION_DATA_INVALID: metric must be pe, fcf, or ps.");
+  const metric = value === undefined ? "pe" : typeof value === "string" ? value.toLowerCase() : "";
+  if (!WATCHER_VALUATION_METRICS.includes(metric as WatcherValuationMetric)) throw new WatcherValuationInputError("metric must be pe, fcf, or ps.");
   return metric as WatcherValuationMetric;
 };
 
 export const parseWatcherValuationWindow = (value: unknown): WatcherValuationWindow => {
-  const window = String(value || "3Y").toUpperCase();
-  if (!WATCHER_VALUATION_WINDOWS.includes(window as WatcherValuationWindow)) throw new Error("VALUATION_DATA_INVALID: window must be 1Y, 2Y, 3Y, or 5Y.");
+  const window = value === undefined ? "3Y" : typeof value === "string" ? value.toUpperCase() : "";
+  if (!WATCHER_VALUATION_WINDOWS.includes(window as WatcherValuationWindow)) throw new WatcherValuationInputError("window must be 1Y, 2Y, 3Y, or 5Y.");
   return window as WatcherValuationWindow;
 };
 
@@ -173,7 +176,11 @@ const getJson = async (bucket: R2BucketLike | undefined, key: string) => {
   if (!bucket) throw new Error("VALUATION_DATA_UNAVAILABLE: R2 binding is not configured.");
   const object = await bucket.get(key);
   if (!object) throw new Error(`VALUATION_DATA_NOT_PUBLISHED: ${key} is unavailable.`);
-  return object.json();
+  try { return await object.json(); }
+  catch (error) {
+    if (error instanceof SyntaxError) fail(`published JSON is malformed (${key})`);
+    throw error;
+  }
 };
 
 export const loadWatcherValuationRelease = async (bucket: R2BucketLike | undefined): Promise<WatcherValuationRelease> => {
@@ -219,7 +226,12 @@ const parseCoverageRegistry = (body: Record<string, unknown> | null): WatcherCov
 const readWatcherCoverageRegistry = async (bucket: R2BucketLike | undefined) => {
   if (!bucket) throw new Error("VALUATION_DATA_UNAVAILABLE: R2 binding is not configured.");
   const object = await bucket.get("coverage/universe.json");
-  return { registry: parseCoverageRegistry(object ? record(await object.json()) : null), etag: object?.httpEtag };
+  try {
+    return { registry: parseCoverageRegistry(object ? record(await object.json()) : null), etag: object?.httpEtag };
+  } catch (error) {
+    if (error instanceof SyntaxError) fail("published JSON is malformed (coverage/universe.json)");
+    throw error;
+  }
 };
 
 export const loadWatcherCoverageRegistry = async (bucket: R2BucketLike | undefined): Promise<WatcherCoverageRegistry> => {
@@ -276,7 +288,7 @@ export const loadWatcherValuationBands = async (bucket: R2BucketLike | undefined
 export const loadWatcherFinancialStatements = async (bucket: R2BucketLike | undefined, input: { symbol: string; periods?: unknown; release?: WatcherValuationRelease }) => {
   const symbol = normalizeStocksWatcherSymbol(input.symbol);
   const periods = input.periods === undefined ? 4 : Number(input.periods);
-  if (!Number.isInteger(periods) || periods < 1 || periods > 12) throw new Error("VALUATION_DATA_INVALID: periods must be an integer from 1 to 12.");
+  if (!Number.isInteger(periods) || periods < 1 || periods > 12) throw new WatcherValuationInputError("periods must be an integer from 1 to 12.");
   const release = input.release || await loadWatcherValuationRelease(bucket);
   const financials = parseFinancials(await getJson(bucket, releaseKey(release, `financials/${symbol}.json`),), symbol);
   return { ...financials, quarters: financials.quarters.slice(0, periods) };

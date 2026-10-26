@@ -15,7 +15,7 @@ import {
 export interface DashboardHistoryItem {
   symbol: string;
   timestamp: string;
-  score: number;
+  score: number | null;
   fullData?: FinanceDashboardData;
 }
 
@@ -67,7 +67,7 @@ const validRenderData = (data: Record<string, unknown>) => {
   const validQuote = data.price === null
     ? data.quoteStatus === "unavailable" && data.change === "未提供"
     : finite(data.price) && data.price > 0 && (data.quoteStatus === undefined || data.quoteStatus === "available");
-  if (!text(data.symbol) || !data.symbol.trim() || !validQuote || !text(data.change) || !finite(data.algoRating)
+  if (!text(data.symbol) || !data.symbol.trim() || !validQuote || !text(data.change) || !(data.algoRating === null || finite(data.algoRating))
     || !(data.marketSentiment === null || finite(data.marketSentiment)) || !optionalText(data.sentimentSource)
     || !optionalText(data.finalAnalysis) || !record(data.strategyPoints)
     || !["entry", "stopLoss", "takeProfit"].every((key) => optionalNumber((data.strategyPoints as Record<string, unknown>)[key]))) return false;
@@ -152,7 +152,7 @@ export const normalizeStoredDashboardSnapshot = (value: unknown): FinanceDashboa
 };
 
 export const sanitizeDashboardHistory = (items: unknown): DashboardHistoryItem[] => !Array.isArray(items) ? [] : items
-  .filter((item): item is DashboardHistoryItem => record(item) && text(item.symbol) && Boolean(item.symbol.trim()) && text(item.timestamp) && finite(item.score))
+  .filter((item): item is DashboardHistoryItem => record(item) && text(item.symbol) && Boolean(item.symbol.trim()) && text(item.timestamp) && (item.score === null || finite(item.score)))
   .map((item) => {
     const fullData = normalizeStoredDashboardData(item.fullData);
     return { symbol: item.symbol, timestamp: item.timestamp, score: item.score, fullData: fullData?.symbol === item.symbol ? fullData : undefined };

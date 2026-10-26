@@ -82,6 +82,7 @@ test("personal photography uses local assets and keyboard reachable viewer trigg
 
 test("Market Lab uses native links for routes and keeps only the caption modal as a button", () => {
   const html = renderToStaticMarkup(createElement(WorkGallery, { onOpenCaptionTool: () => undefined }));
-  assert.equal((html.match(/class="text-link" href="#\/work\//g) || []).length, 10);
+  assert.equal((html.match(/class="text-link" href="#\/work\//g) || []).length, 2);
+  assert.match(html, /Watcher/);
   assert.equal((html.match(/<button[^>]+class="text-link"/g) || []).length, 1);
 });

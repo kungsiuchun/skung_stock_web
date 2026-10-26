@@ -2,6 +2,7 @@ import type { StocksWatcherChartMode, StocksWatcherExpiryRow, StocksWatcherSnaps
 import type { StocksWatcherPriceRange } from "@/lib/stocks-intelligence-watcher-session";
 import type { StocksWatcherUniverseStock } from "@/lib/stocks-watcher-universe";
 import { normalizeOptionsVisualModel } from "@/lib/stocks-watcher-options-visual";
+import { completeTotal } from "@/lib/stocks-native-yahoo";
 import type { FearGreedSnapshot } from "@/lib/fear-greed";
 import type { MarketCacheMetadata } from "@/lib/market-data-cache";
 import type { WatcherFinancialQuarter, WatcherFinancialSource, WatcherFinancialStatements, WatcherValuationMetric } from "@/lib/stocks-watcher-valuation-data";
@@ -165,10 +166,10 @@ export interface RawOptionChain {
 export interface ExpirySelectorRow {
   expiry: string;
   loaded: boolean;
-  openInterest?: number;
+  openInterest?: number | null;
   primaryStrike?: number;
-  volume?: number;
-  dominantType?: "C" | "P";
+  volume?: number | null;
+  dominantType?: "C" | "P" | null;
   netGex?: number;
   netDex?: number;
 }
@@ -228,7 +229,8 @@ export interface RawQuoteRow {
   volume?: number;
 }
 
-export const formatNumber = (value: number) => {
+export const formatNumber = (value: number | null | undefined) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
   const abs = Math.abs(value);
   if (abs >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
   if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
@@ -250,7 +252,7 @@ export const quoteDirection = (change: number | null | undefined, changePercent:
   return 0;
 };
 
-export const signedNumberText = (value: number) => `${value > 0 ? "+" : ""}${value.toFixed(2)}`;
+export const signedNumberText = (value: number | null) => value === null ? "n/a" : `${value > 0 ? "+" : ""}${value.toFixed(2)}`;
 export const directionArrow = (direction: number) => direction > 0 ? "▲" : direction < 0 ? "▼" : "";
 
 export const formatOptionalPrice = (value: number | null | undefined) =>
@@ -434,7 +436,7 @@ export const uniqueStocks = (stocks: StocksWatcherUniverseStock[]) => {
   return Array.from(bySymbol.values());
 };
 
-export const stockFromRecord = (record: Record<string, unknown>, fallback?: StocksWatcherUniverseStock) => {
+export const stockFromRecord = (record: Record<string, unknown>, fallback?: StocksWatcherUniverseStock): StocksWatcherUniverseStock | null => {
   const symbol = typeof record.symbol === "string" ? normalizeSymbol(record.symbol) : fallback?.symbol || "";
   if (!symbol || !/^[A-Z0-9.^-]{1,12}$/.test(symbol)) return null;
   return {
@@ -869,17 +871,18 @@ export const buildExpiryRowsForSelector = (snapshot: StocksWatcherSnapshot | nul
       return { expiry, loaded: false };
     }
 
-    const callOi = rows.filter((row) => row.type === "C").reduce((sum, row) => sum + row.openInterest, 0);
-    const putOi = rows.filter((row) => row.type === "P").reduce((sum, row) => sum + row.openInterest, 0);
-    const dominantType = callOi >= putOi ? "C" : "P";
-    const primary = rows.reduce((best, row) => (row.openInterest + row.volume) > (best.openInterest + best.volume) ? row : best);
+    const callOi = completeTotal(rows.filter(row => row.type === "C").map(row => row.openInterest));
+    const putOi = completeTotal(rows.filter(row => row.type === "P").map(row => row.openInterest));
+    const dominantType = callOi !== null && putOi !== null ? callOi >= putOi ? "C" : "P" : null;
+    const score = (row: StocksWatcherExpiryRow) => (row.openInterest ?? -1) + (row.volume ?? -1);
+    const primary = rows.reduce((best, row) => score(row) > score(best) ? row : best);
 
     return {
       expiry,
       loaded: true,
-      openInterest: rows.reduce((sum, row) => sum + row.openInterest, 0),
+      openInterest: completeTotal(rows.map(row => row.openInterest)),
       primaryStrike: primary.primaryStrike || primary.strike,
-      volume: rows.reduce((sum, row) => sum + row.volume, 0),
+      volume: completeTotal(rows.map(row => row.volume)),
       dominantType,
       netGex: rows.length > 0 && rows.every((row) => typeof row.netGex === "number" && Number.isFinite(row.netGex))
         ? rows.reduce((sum, row) => sum + (row.netGex || 0), 0)

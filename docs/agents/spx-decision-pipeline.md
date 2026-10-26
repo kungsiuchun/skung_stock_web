@@ -105,6 +105,9 @@ the scheduler Durable Object, D1 ledger, or Telegram delivery.
 - Yahoo intraday bars retain timestamps. Four-hour candles aggregate within each
   ET NYSE session from 09:30, never across trading dates; session extension and
   aggregation share the NYSE regular/early-close calendar.
+- Daily chart labels use the candle's trading `date_iso` directly. Only intraday
+  labels convert the timestamp to ET; UTC-midnight daily bars must not shift to
+  the previous ET date. Timeframe selection waits for the Board session to settle.
 - Latest-GEX automatic failures/EMPTY reads stop after three attempts per ET
   date; manual snapshot retry resets that budget. Full holidays do not poll;
   canonical GEX retains its 15-minute collection window after regular or early

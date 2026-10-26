@@ -23,8 +23,6 @@ jobs:
           cache: npm
 
       - run: npm ci
-      - run: npm run test:deploy-scope
-      - run: npm run test:market-breadth
-      - run: npm run test:sector-rotation
+      - run: npm run test:no-mistakes
+      - run: npm run test:functions-bundle
       - run: npm run lint
-      - run: npm run build

@@ -90,7 +90,7 @@ export const ValuationRainbowChart = ({ valuation }: { valuation: WatcherValuati
           );
         })}
       </div>
-      <p><b>Current {currency(valuation.latest.price)}</b><span>Discounted → Fair value → Stretched</span></p>
+      <p><b>Published price {currency(valuation.latest.price)}</b><span>Lower historical multiple → Mean → Higher multiple</span></p>
     </div>
   );
 };
@@ -342,13 +342,14 @@ export const OhlcVolumeChart = ({
     }
     setTooltip(null);
 
+    const palette = getComputedStyle(containerRef.current);
     const chart = createChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height: containerRef.current.clientHeight,
       autoSize: true,
       layout: {
-        background: { type: ColorType.Solid, color: "#05080d" },
-        textColor: "#8aa0bc",
+        background: { type: ColorType.Solid, color: palette.getPropertyValue("--ww-surface").trim() || "#05080d" },
+        textColor: palette.getPropertyValue("--ww-muted").trim() || "#8aa0bc",
         fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
         fontSize: 11,
       },

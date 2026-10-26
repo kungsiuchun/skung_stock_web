@@ -111,7 +111,8 @@ export async function onRequest(context: any) {
     return jsonResponse({ error: "Missing symbol param" }, 400);
   }
 
-  const retail = await tryRetailSentiment(symbol, context.env);
+  // Public research never uses an account-backed social data service.
+  const retail = await tryRetailSentiment(symbol, { ...context.env, ADANOS_API_KEY: undefined });
   if (retail.sourceType === "retail") {
     return jsonResponse(retail);
   }

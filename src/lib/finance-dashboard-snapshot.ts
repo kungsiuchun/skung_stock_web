@@ -34,7 +34,7 @@ export interface FinanceDashboardData {
   symbol: string;
   price: number | null;
   change: string;
-  algoRating: number;
+  algoRating: number | null;
   marketSentiment: number | null;
   sentimentSource?: string;
   sentimentData?: SentimentApiResult | null;
@@ -141,7 +141,7 @@ export const buildFinanceDashboardSnapshot = (input: {
   let change = "未提供";
   let quoteStatus: FinanceDashboardData["quoteStatus"] = "unavailable";
   let quoteSourceAsOf: string | null = null;
-  let algoScore = 50;
+  let algoScore: number | null = null;
   let chartData: FinanceDashboardData["chartData"] = [];
   let chartDataRejectedCount = 0;
   let chartDataLastValidDate: string | null = null;
@@ -183,7 +183,7 @@ export const buildFinanceDashboardSnapshot = (input: {
       chartDataLastValidDate = reportedLastValidDate || normalized.lastValidDate || chartDataLastValidDate;
     }
 
-    if (result.score !== undefined) algoScore = finiteNumber(result.score, algoScore);
+    if (typeof result.score === "number" && Number.isFinite(result.score)) algoScore = result.score;
 
     if (step.tool_name === "get_options_chain") {
       const calls = Array.isArray(result.calls) ? result.calls : [];

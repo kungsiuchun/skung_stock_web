@@ -11,9 +11,9 @@ import {
 } from "../src/lib/finance-analyzer-contract";
 
 test("dashboard model budget stays narrower than chat and committee flows", () => {
-  assert.equal(FINANCE_ANALYZER_MODEL_CALL_BUDGETS.dashboard.maxOpenRouterCalls, 6);
-  assert.equal(FINANCE_ANALYZER_MODEL_CALL_BUDGETS.chat.maxOpenRouterCalls, 10);
-  assert.equal(FINANCE_ANALYZER_MODEL_CALL_BUDGETS.committee.maxOpenRouterCalls, 25);
+  assert.equal(FINANCE_ANALYZER_MODEL_CALL_BUDGETS.dashboard.maxOpenRouterCalls, 0);
+  assert.equal(FINANCE_ANALYZER_MODEL_CALL_BUDGETS.chat.maxOpenRouterCalls, 1);
+  assert.equal(FINANCE_ANALYZER_MODEL_CALL_BUDGETS.committee.maxOpenRouterCalls, 1);
 });
 
 test("dashboard tool contract excludes broad chat-only tools", () => {

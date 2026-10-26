@@ -14,16 +14,17 @@ export async function onRequestGet(context: { request: Request; env?: Env }) {
   if (!stateCookie || !state || stateCookie !== state || !code) return json({ ok: false, error: "AUTH_STATE_INVALID" }, { status: 400 });
   if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET || !env.STOCKS_WATCHER_SESSION_SECRET || !env.STOCKS_WATCHER_ALLOWED_EMAIL) return json({ ok: false, error: "AUTH_CONFIG_UNCONFIGURED" }, { status: 503 });
   const redirectUri = `${env.STOCKS_WATCHER_AUTH_ORIGIN || requestUrl.origin}/api/stocks-intelligence-watcher/auth/callback`;
-  const tokenResponse = await fetch("https://github.com/login/oauth/access_token", { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify({ client_id: env.GITHUB_CLIENT_ID, client_secret: env.GITHUB_CLIENT_SECRET, code, redirect_uri: redirectUri, state }) });
+  try {
+  const tokenResponse = await fetch("https://github.com/login/oauth/access_token", { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify({ client_id: env.GITHUB_CLIENT_ID, client_secret: env.GITHUB_CLIENT_SECRET, code, redirect_uri: redirectUri, state }), signal: AbortSignal.timeout(10000) });
   if (!tokenResponse.ok) return json({ ok: false, error: "AUTH_GITHUB_TOKEN_FAILED" }, { status: 502 });
   const tokenBody = await tokenResponse.json() as { access_token?: string };
   if (!tokenBody.access_token) return json({ ok: false, error: "AUTH_GITHUB_TOKEN_MISSING" }, { status: 502 });
   const headers = { Authorization: `Bearer ${tokenBody.access_token}`, Accept: "application/vnd.github+json" };
-  const [userResponse, emailsResponse] = await Promise.all([fetch("https://api.github.com/user", { headers }), fetch("https://api.github.com/user/emails", { headers })]);
-  if (!userResponse.ok || !emailsResponse.ok) return json({ ok: false, error: "AUTH_GITHUB_PROFILE_FAILED" }, { status: 502 });
-  const user = await userResponse.json() as { email?: string | null };
+  const emailsResponse = await fetch("https://api.github.com/user/emails", { headers, signal: AbortSignal.timeout(10000) });
+  if (!emailsResponse.ok) return json({ ok: false, error: "AUTH_GITHUB_PROFILE_FAILED" }, { status: 502 });
   const emails = await emailsResponse.json() as Array<{ email?: string; verified?: boolean }>;
-  const email = emails.find((entry) => entry.verified && isAllowedWatcherEmail(entry.email || "", env.STOCKS_WATCHER_ALLOWED_EMAIL))?.email || (user.email && isAllowedWatcherEmail(user.email, env.STOCKS_WATCHER_ALLOWED_EMAIL) ? user.email : null);
+  if (!Array.isArray(emails)) return json({ ok: false, error: "AUTH_GITHUB_PROFILE_INVALID" }, { status: 502 });
+  const email = emails.find((entry) => entry.verified === true && isAllowedWatcherEmail(entry.email || "", env.STOCKS_WATCHER_ALLOWED_EMAIL))?.email;
   if (!email) return json({ ok: false, error: "AUTH_EMAIL_NOT_ALLOWED" }, { status: 403 });
   const session = await createWatcherSession(email, env.STOCKS_WATCHER_SESSION_SECRET);
   const location = new URL("/", requestUrl.origin);
@@ -32,4 +33,5 @@ export async function onRequestGet(context: { request: Request; env?: Env }) {
   responseHeaders.append("Set-Cookie", `stocks_watcher_session=${session}; Max-Age=28800; Path=/api/stocks-intelligence-watcher; HttpOnly; Secure; SameSite=Lax`);
   responseHeaders.append("Set-Cookie", "stocks_watcher_oauth_state=; Max-Age=0; Path=/api/stocks-intelligence-watcher/auth; HttpOnly; Secure; SameSite=Lax");
   return new Response(null, { status: 302, headers: responseHeaders });
+  } catch { return json({ ok: false, error: "AUTH_PROVIDER_UNAVAILABLE" }, { status: 502 }); }
 }

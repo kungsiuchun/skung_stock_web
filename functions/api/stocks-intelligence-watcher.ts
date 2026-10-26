@@ -7,6 +7,8 @@ import {
   getNativeStocksToolCacheParams,
   getNativeStocksToolCacheSymbol,
   normalizeStocksWatcherSymbol,
+  listNativeStocksTools,
+  validateNativeStocksToolParams,
 } from "../../src/lib/stocks-native-yahoo";
 import {
   classifyMarketCacheDataset,
@@ -31,6 +33,7 @@ import {
   loadWatcherValuationBands,
   loadWatcherValuationRelease,
   STOCKS_WATCHER_VALUATION_TOOLS,
+  WatcherValuationInputError,
   type R2BucketLike,
 } from "../../src/lib/stocks-watcher-valuation-data";
 import {
@@ -39,6 +42,13 @@ import {
   type RobinhoodOptionsPublishedSnapshot,
   type RobinhoodOptionsR2BucketLike,
 } from "../../src/lib/stocks-watcher-robinhood-options";
+import { PublicResearchLimitError } from "../../src/lib/public-research-budget";
+import { workspaceSymbol } from "../../src/lib/watcher-workspace";
+import { BoundedBodyError, readBoundedText } from "../../src/lib/bounded-body";
+
+const valuationErrorStatus = (error: unknown, message: string) => error instanceof WatcherValuationInputError ? 400
+  : message.startsWith("VALUATION_DATA_NOT_PUBLISHED:") ? 404
+  : /^VALUATION_DATA_(UNAVAILABLE|STALE|CONFLICT):/.test(message) ? 503 : 502;
 
 const json = (body: unknown, init: ResponseInit = {}) =>
   new Response(JSON.stringify(body), {
@@ -62,9 +72,21 @@ const normalizeToolName = (value: unknown) => {
   return tool;
 };
 
+const hasMeaningfulValue = (value: unknown) => value !== undefined && value !== null && (typeof value !== "string" || value.trim().length > 0);
+
 const normalizeParams = (value: unknown) => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return value as Record<string, unknown>;
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Tool params must be a JSON object.");
+  const params = value as Record<string, unknown>;
+  for (const key of ["symbol", "ticker", "stock_code"]) if (params[key] !== undefined) workspaceSymbol(params[key]);
+  if (params.tickers !== undefined) {
+    const tickers = Array.isArray(params.tickers) ? params.tickers : typeof params.tickers === "string" ? params.tickers.split(/[\s,]+/).filter(Boolean) : [];
+    if (!tickers.length) throw new Error("Enter at least one valid ticker.");
+    tickers.forEach(workspaceSymbol);
+  }
+  if (params.expiry !== undefined && (typeof params.expiry !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(params.expiry)
+    || !Number.isFinite(Date.parse(params.expiry)) || new Date(params.expiry).toISOString().slice(0, 10) !== params.expiry)) throw new Error("Invalid option expiration.");
+  return params;
 };
 
 interface Env {
@@ -82,7 +104,7 @@ interface WatcherApiObservability {
   rowsRead: number;
   rowsWritten: number;
   source: "native_yahoo" | "d1_tracking" | "robinhood_mcp";
-  errorCode?: "UPSTREAM_UNAVAILABLE" | "INVALID_REQUEST" | "D1_SAFETY_CUTOFF" | "D1_QUOTA_STORE_UNAVAILABLE";
+  errorCode?: "UPSTREAM_UNAVAILABLE" | "INVALID_REQUEST" | "D1_SAFETY_CUTOFF" | "D1_QUOTA_STORE_UNAVAILABLE" | "PUBLIC_USAGE_LIMIT";
 }
 
 const requestIdFor = (request: Request) => {
@@ -96,6 +118,7 @@ const requestIdFor = (request: Request) => {
 };
 
 const watcherQuotaFailure = (error: unknown) => {
+  if (error instanceof PublicResearchLimitError) return { status: error.status, errorCode: "PUBLIC_USAGE_LIMIT" as const, error: error.message, quota: { reason: "public_usage_limit" } };
   if (!(error instanceof MarketCacheQuotaExceededError)) return null;
   const { decision } = error;
   const unavailable = decision.reason === "quota_store_unavailable" || decision.reason === "quota_state_invalid";
@@ -210,6 +233,7 @@ const resolveCuratedRobinhoodOptions = async (
     await assertPublishedOptionsD1Current(env.MARKET_CACHE_DB, snapshot);
     return { curated: true, snapshot };
   } catch (error) {
+    if (error instanceof PublicResearchLimitError) throw error;
     return {
       curated: true,
       unavailableReason: error instanceof Error ? error.message : String(error),
@@ -263,7 +287,7 @@ export const attachPublishedWatcherData = async (
       ],
       availableTools: [
         ...snapshot.availableTools,
-        ...STOCKS_WATCHER_VALUATION_TOOLS,
+        ...STOCKS_WATCHER_VALUATION_TOOLS.map(tool => ({ ...tool, inputKeys: [...tool.inputKeys] })),
       ],
     };
   }
@@ -319,7 +343,7 @@ export const attachPublishedWatcherData = async (
     warnings,
     availableTools: [
       ...snapshot.availableTools,
-      ...STOCKS_WATCHER_VALUATION_TOOLS,
+      ...STOCKS_WATCHER_VALUATION_TOOLS.map(tool => ({ ...tool, inputKeys: [...tool.inputKeys] })),
     ],
   };
 };
@@ -353,6 +377,7 @@ const callNativeTool = async (
         coverageStatus: "published",
       });
     } catch (error) {
+      if (error instanceof PublicResearchLimitError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       const coverageStatus = message.startsWith("VALUATION_DATA_NOT_PUBLISHED:")
         ? await getWatcherCoverageStatus(env.VALUATION_DATA, symbol)
@@ -360,9 +385,7 @@ const callNativeTool = async (
       return json(
         { ok: false, requestId, tool, params, error: message, coverageStatus },
         {
-          status: message.startsWith("VALUATION_DATA_NOT_PUBLISHED:")
-            ? 404
-            : 400,
+          status: valuationErrorStatus(error, message),
         },
       );
     }
@@ -386,6 +409,7 @@ const callNativeTool = async (
         coverageStatus: "published",
       });
     } catch (error) {
+      if (error instanceof PublicResearchLimitError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       const coverageStatus = message.startsWith("VALUATION_DATA_NOT_PUBLISHED:")
         ? await getWatcherCoverageStatus(env.VALUATION_DATA, symbol)
@@ -393,9 +417,7 @@ const callNativeTool = async (
       return json(
         { ok: false, requestId, tool, params, error: message, coverageStatus },
         {
-          status: message.startsWith("VALUATION_DATA_NOT_PUBLISHED:")
-            ? 404
-            : 400,
+          status: valuationErrorStatus(error, message),
         },
       );
     }
@@ -411,7 +433,7 @@ const callNativeTool = async (
         requestId,
         published.snapshot,
       );
-    if (published.curated) {
+    if (published.curated && "unavailableReason" in published) {
       console.warn(
         JSON.stringify({
           event: "stocks_watcher_options_fallback",
@@ -429,7 +451,7 @@ const callNativeTool = async (
     db: env.MARKET_CACHE_DB,
     scope,
     symbol: getNativeStocksToolCacheSymbol(cacheParams),
-    params: cacheParams,
+    params: { ...cacheParams, dataSchema: "observed-v3" },
     dataset,
     ttlMs: getMarketCacheDatasetTtlMs(dataset),
     refreshQuotaGuard: env.MARKET_CACHE_DB
@@ -571,6 +593,13 @@ const callTrackedWatchlist = async (env: Env, requestId: string) => {
 
 export async function onRequest(context: { request: Request; env?: Env }) {
   const url = new URL(context.request.url);
+  if (!["GET", "POST"].includes(context.request.method)) return json({ ok: false, error: "Only GET and POST are supported." }, { status: 405, headers: { Allow: "GET, POST" } });
+  if (context.request.method === "GET") {
+    try {
+      if (url.searchParams.has("symbol")) workspaceSymbol(url.searchParams.get("symbol"));
+      if (url.searchParams.has("surface") && url.searchParams.get("surface") !== "options") throw new Error("Unknown snapshot surface.");
+    } catch (error) { return json({ ok: false, error: error instanceof Error ? error.message : "Invalid request." }, { status: 400 }); }
+  }
   const symbol = normalizeSymbol(url.searchParams.get("symbol"));
   const env = context.env || {};
   const requestId = requestIdFor(context.request);
@@ -591,22 +620,33 @@ export async function onRequest(context: { request: Request; env?: Env }) {
     let requestedTool = "";
     let validatedTool = false;
     try {
-      const body = (await context.request.json()) as {
+      const body = JSON.parse(await readBoundedText(context.request, 32 * 1024)) as {
         tool?: unknown;
         params?: unknown;
       };
+      if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Tool request must be a JSON object.");
       const tool = normalizeToolName(body.tool);
       requestedTool = tool;
+      const supported = [...listNativeStocksTools(), ...STOCKS_WATCHER_VALUATION_TOOLS].some(entry => entry.name === tool)
+        || ["chart_gex", "chart_indicators", "pre_event_briefing"].includes(tool);
+      if (!supported) throw new Error("Unknown Watcher tool.");
+      const params = normalizeParams(body.params);
+      const native = listNativeStocksTools().some(entry => entry.name === tool) || ["chart_gex", "chart_indicators", "pre_event_briefing"].includes(tool);
+      if (native) validateNativeStocksToolParams(tool, params);
+      if (["get_valuation_bands", "get_financial_statements"].includes(tool)
+        && ![params.symbol, params.ticker, params.stock_code].some(hasMeaningfulValue)) throw new Error("Missing required tool parameter: symbol.");
       validatedTool = true;
       if (tool === "get_watchlist")
         return await callTrackedWatchlist(env, requestId);
       return await callNativeTool(
         tool,
-        normalizeParams(body.params),
+        params,
         env,
         requestId,
       );
     } catch (error) {
+      if (error instanceof BoundedBodyError) return json({ ok: false, errorCode: validatedTool ? "UPSTREAM_UNAVAILABLE" : "INVALID_REQUEST", error: validatedTool ? (error.kind === "size" ? "The data provider response exceeded its size limit." : "The data provider timed out.") : (error.kind === "size" ? "Request is too large." : "Request body timed out.") }, withRequestId({ status: validatedTool ? (error.kind === "size" ? 502 : 504) : (error.kind === "size" ? 413 : 408) }));
+      if (error instanceof PublicResearchLimitError) return json({ ok: false, error: error.message, retryAt: error.retryAt }, withRequestId({ status: error.status }));
       const quotaFailure = validatedTool ? watcherQuotaFailure(error) : null;
       const errorCode = quotaFailure?.errorCode || (validatedTool
         ? "UPSTREAM_UNAVAILABLE"
@@ -644,7 +684,8 @@ export async function onRequest(context: { request: Request; env?: Env }) {
   }
 
   try {
-    const scope = "stocks-watcher-snapshot";
+    const optionsOnly = new URL(context.request.url).searchParams.get("surface") === "options";
+    const scope = optionsOnly ? "stocks-watcher-options-bootstrap" : "stocks-watcher-snapshot";
     // The bundle contains quote/options/history/news/earnings data; keep one
     // conservative snapshot TTL and do not claim per-dataset freshness.
     const dataset: MarketCacheDataset = "snapshot";
@@ -652,7 +693,7 @@ export async function onRequest(context: { request: Request; env?: Env }) {
       db: env.MARKET_CACHE_DB,
       scope,
       symbol,
-      params: { symbol },
+      params: optionsOnly ? { symbol, surface: "options", schema: 3 } : { symbol, gexDataSchema: "observed-v3" },
       dataset,
       ttlMs: getMarketCacheDatasetTtlMs(dataset),
       refreshQuotaGuard: env.MARKET_CACHE_DB
@@ -662,11 +703,10 @@ export async function onRequest(context: { request: Request; env?: Env }) {
         )
         : undefined,
       requestId,
-      sourceAsOf: (snapshot) => snapshot.generatedAt,
+      sourceAsOf: (snapshot) => snapshot.quote.asOf,
       load: async () => {
         const published = await resolveCuratedRobinhoodOptions(env, symbol);
-        return attachPublishedWatcherData(
-          await buildStocksWatcherSnapshotFromNative(
+        const snapshot = await buildStocksWatcherSnapshotFromNative(
             symbol,
             new NativeStocksYahooClient(),
             published.curated
@@ -674,9 +714,9 @@ export async function onRequest(context: { request: Request; env?: Env }) {
                 ? { snapshot: published.snapshot }
                 : { unavailableReason: published.unavailableReason }
               : undefined,
-          ),
-          env.VALUATION_DATA,
+            optionsOnly ? { surface: "options" } : {},
         );
+        return optionsOnly ? snapshot : attachPublishedWatcherData(snapshot, env.VALUATION_DATA);
       },
     });
     return json(

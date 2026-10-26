@@ -89,6 +89,14 @@ export interface SpxPriceActionCandle {
   volume: number;
 }
 
+/** Daily bars identify a trading date; intraday bars identify an instant. */
+export const formatSpxCandleTime = (candle: SpxPriceActionCandle | undefined, timeframe: SpxPriceActionTimeframe, includeSeconds = false) => {
+  if (!candle) return "time n/a";
+  if (timeframe === "1d") return `${candle.date_iso} session`;
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: includeSeconds ? "2-digit" : undefined, hourCycle: "h23" }).formatToParts(new Date(candle.time)).reduce<Record<string, string>>((values, part) => { values[part.type] = part.value; return values; }, {});
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}${includeSeconds ? `:${parts.second}` : ""} ET`;
+};
+
 export interface SpxPriceActionPattern {
   id: string;
   type: SpxPriceActionPatternType;

@@ -237,7 +237,7 @@ export async function onRequest(context: { request: Request; env: Env }) {
     audit = await readKVAudit(context.env, selectedDate);
   }
 
-  let analytics = { days: [], summary: emptySummary, learnedRules: [] as { sourceDate: string | null; text: string }[] };
+  let analytics: Omit<Awaited<ReturnType<typeof readD1Analytics>>, "learnedRules"> & { learnedRules: { sourceDate: string | null; text: string }[] } = { days: [], summary: emptySummary, learnedRules: [] };
   let performance: Awaited<ReturnType<typeof readFinalSignalPerformance>> = [];
   if (fromDate && toDate) {
     if (context.env.SPX_RECAP_DB && d1Dates.length > 0) {

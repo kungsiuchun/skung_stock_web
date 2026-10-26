@@ -106,7 +106,7 @@ const status = (current: null | { snapshotKey: string } = { snapshotKey: MARKET_
 describe("Market Breadth R2 architecture", () => {
   it("stays inside Cloudflare free limits even at the Pages Functions free request ceiling", () => {
     const usage = estimateMarketBreadthR2MonthlyUsage({ days: 31, apiRequestsPerDay: 100_000, refreshRunsPerDay: 2 });
-    assert.deepEqual(usage, { classAOperations: 248, classBOperations: 6_200_124, apiFunctionRequests: 3_100_000 });
+    assert.deepEqual(usage, { classAOperations: 372, classBOperations: 6_200_124, apiFunctionRequests: 3_100_000 });
     assert.equal(usage.classAOperations < 1_000_000, true);
     assert.equal(usage.classBOperations < 10_000_000, true);
   });
@@ -123,6 +123,7 @@ describe("Market Breadth R2 architecture", () => {
     assert.deepEqual(store.writes, [
       MARKET_BREADTH_STATE_KEYS[0],
       MARKET_BREADTH_SNAPSHOT_KEYS[0],
+      "market-context/summary-a.json",
       "market-breadth/runs/slot-60.json",
       MARKET_BREADTH_STATUS_KEY,
     ]);
