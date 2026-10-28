@@ -170,6 +170,31 @@ test("public technical and VIX endpoints preserve valid controls", async () => {
   assert.equal(typeof vix.value, "number");
 });
 
+test("VIX validates its daily-close series without requiring unrelated OHLC fields", async () => {
+  const rows = [{ ...rowFor(0), close: 18.39 }, { ...rowFor(1), open: 0, high: 0, low: 0, close: 17.52 }];
+  setYahooPayload(yahooPayload(rows, undefined, { symbol: "^VIX", regularMarketPrice: 17.52 }));
+  const response = await getVix({ request: new Request("https://example.test/api/vix") });
+  const value = await response.json() as any;
+  assert.equal(response.status, 200); assert.equal(value.value, 17.52); assert.equal(value.change_pct, -4.73);
+  assert.deepEqual(value.history, [18.39, 17.52]); assert.equal(value.asOf, dateFor(1));
+  assert.equal(value.source, "Yahoo Finance daily closes"); assert.equal(value.partial, false);
+  for (const patch of [
+    (p: any) => { p.chart.result[0].indicators.quote[0].close[1] = 0; },
+    (p: any) => { p.chart.result[0].timestamp[1] = p.chart.result[0].timestamp[0]; },
+    (p: any) => { p.chart.result[0].indicators.quote[0].close.push(17.5); },
+    (p: any) => { p.chart.result[0].meta.symbol = "^SPX"; },
+    (p: any) => { p.chart.result[0].indicators.quote[0].close[0] = null; },
+    (p: any) => { p.chart.result[0].timestamp[1] = Date.now() / 1000 + 2 * 86400; },
+    (p: any) => {
+      p.chart.result[0].timestamp[1] = Date.parse(new Date().toISOString().slice(0, 10) + "T00:00:00Z") / 1000;
+      p.chart.result[0].meta.currentTradingPeriod.regular.end = Date.now() / 1000 + 3600;
+    },
+  ]) {
+    const invalid = yahooPayload(rows, undefined, { symbol: "^VIX" }); patch(invalid); setYahooPayload(invalid);
+    assert.equal((await getVix({ request: new Request("https://example.test/api/vix") })).status, 502);
+  }
+});
+
 test("a flat but valid price history keeps the dashboard available with an explicit technical error", async () => {
   const rows = Array.from({ length: 35 }, (_, index) => ({ ...rowFor(index), open: 100, high: 101, low: 99, close: 100 }));
   setYahooPayload(yahooPayload(rows, 100));

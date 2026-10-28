@@ -15,7 +15,7 @@ Read this file only for Finance Analyzer UI, its Pages Functions, or related UAT
   quote and chart remain primary; technicals, options, fundamentals, news and AI
   interpretation live in research tabs. AI chat and source/method details are secondary.
 - Public Finance hashes now open the unified Watcher research workspace. See
-  `watcher-workspace.md` for current navigation, selected-symbol and free AI policy.
+  `watcher-workspace.md` for current navigation, selected-symbol and public AI policy.
   The compatibility Finance snapshot is data-only and never starts a model call.
   Legacy research components and their browser history remain available in source;
   do not erase saved history during workspace changes.
@@ -42,6 +42,10 @@ Read this file only for Finance Analyzer UI, its Pages Functions, or related UAT
   actual last valid date.
 - Option walls use a validated quote or the options chain's numeric underlying
   price; missing prices never use an average strike as a market-price substitute.
+- The VIX line endpoint validates observed daily closes independently of unused
+  OHLC fields. Latest and immediately preceding provider observations must both
+  have valid, completed closes; no older substitution, missing-to-zero conversion
+  or invented candles. Source and daily as-of date accompany the existing values.
 - Browser persistence is optional: blocked/full/corrupt storage produces a visible warning, not a route failure or a synthetic API error. Initial hydration must never write empty history over saved data. Invalid saved payloads are not silently deleted.
 - Only validated history metadata and render-safe saved results may be restored. History analysis passes its selected ticker explicitly; restored results clear valuation, technical, VIX and cache metadata that were not saved with that history entry.
 - Never use `height="100%"` for Recharts in a flex container; use an explicit
