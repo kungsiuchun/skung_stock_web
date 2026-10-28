@@ -227,6 +227,30 @@ test("provider error diagnostics cannot retain echoed questions or credentials",
   } finally { globalThis.fetch = before; console.error = beforeError; console.info = beforeInfo; sql.close(); }
 });
 
+test("public theme retains Yahoo headers, rejects upstream limits before AI and reuses its evidence cache", async () => {
+  const { db, sql } = sqlite(); const before = globalThis.fetch; let limited = true; let models = 0;
+  const env = { MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "fixture" };
+  globalThis.fetch = (async (url, init) => {
+    if (String(url).includes("finance.yahoo.com")) {
+      const headers = new Headers(init?.headers);
+      assert.match(headers.get("User-Agent") || "", /Mozilla/); assert.match(headers.get("Accept") || "", /application\/json/);
+      return limited ? new Response("rate limited", { status: 429 }) : Response.json({ news: [{ title: "Semiconductor demand reflects mixed public evidence", publisher: "Yahoo Finance", providerPublishTime: Date.parse("2026-10-27T20:00:00Z") / 1000 }] });
+    }
+    assert.match(String(url), /openrouter.ai/); models++;
+    const claim = { text: "Headlines are a narrow view; they do not establish company quality.", sourceIds: ["N"] };
+    return Response.json({ model: "openai/gpt-6-luna", usage: { cost: 0.0001 }, choices: [{ message: { content: JSON.stringify({ summary: claim, support: [claim], counterchecks: [claim], risks: [claim] }) }, finish_reason: "stop" }] });
+  }) as typeof fetch;
+  const call = () => finrobot({ request: request({ ticker: "AI semiconductor", agentProfile: "serenity", language: "en" }), env });
+  try {
+    assert.equal((await call()).status, 429); assert.equal(models, 0);
+    assert.equal(sql.prepare("SELECT count(*) AS n FROM market_cache_entries WHERE cache_key='__public_limit__:ai-day'").get()!.n, 0);
+    limited = false;
+    const first = await call(); assert.equal(first.status, 200); const body = await first.json() as any;
+    assert.equal(body.sources[0].asOf, "2026-10-27T20:00:00.000Z"); assert.equal(body.lens, "serenity");
+    const second = await call(); assert.equal(second.status, 200); assert.equal((await second.json() as any).cache.status, "hit"); assert.equal(models, 1);
+  } finally { globalThis.fetch = before; sql.close(); }
+});
+
 test("owner auth requires verified allowed email, validates OAuth state, signs sessions and revokes browser cookie", async () => {
   const env = { GITHUB_CLIENT_ID: "fixture-client", GITHUB_CLIENT_SECRET: "fixture-secret", STOCKS_WATCHER_SESSION_SECRET: "fixture-session-secret", STOCKS_WATCHER_ALLOWED_EMAIL: "owner@example.test" };
   const start = await login({ request: new Request("https://example.test/api/login"), env });

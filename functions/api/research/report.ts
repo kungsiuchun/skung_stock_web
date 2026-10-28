@@ -7,8 +7,9 @@ import { reserveMarketCacheRefreshQuota } from "../../../src/lib/stocks-watcher-
 import type { WatcherFinancialStatements, R2BucketLike } from "../../../src/lib/stocks-watcher-valuation-data";
 import type { RobinhoodOptionsR2BucketLike } from "../../../src/lib/stocks-watcher-robinhood-options";
 import { renderResearchReport, researchReportSchema, validateResearchReport, type ResearchReportSections, type ResearchReportFacts } from "../../../src/lib/research-report";
-import { BoundedBodyError, readBoundedText, fetchBoundedText } from "../../../src/lib/bounded-body";
+import { BoundedBodyError, readBoundedText } from "../../../src/lib/bounded-body";
 import { isVerifiedResearchModel } from "../../../src/lib/research-model-policy";
+import { yahooJson, YahooDataError } from "../../../src/lib/stocks-native-yahoo";
 
 export interface ResearchEnv extends ResearchModelEnv { VALUATION_DATA?: R2BucketLike; OPTIONS_SNAPSHOT_DATA?: RobinhoodOptionsR2BucketLike }
 interface PublishedResearchReport {
@@ -136,9 +137,7 @@ const themeTarget = (value: unknown) => {
 };
 
 const loadPublicThemeEvidence = async (target: string): Promise<PublicThemeEvidence> => {
-  const { response, text } = await fetchBoundedText(`https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(target)}&newsCount=8&quotesCount=0`, {}, 512 * 1024);
-  if (!response.ok) throw new Error(`Yahoo theme search is unavailable (HTTP ${response.status}).`);
-  const data = JSON.parse(text) as { news?: Array<{ title?: unknown; publisher?: unknown; providerPublishTime?: unknown }> };
+  const data = await yahooJson<{ news?: Array<{ title?: unknown; publisher?: unknown; providerPublishTime?: unknown }> }>(`https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(target)}&newsCount=8&quotesCount=0`, {}, 512 * 1024);
   const headlines = (Array.isArray(data.news) ? data.news : []).flatMap(item => {
     const publishedAt = typeof item.providerPublishTime === "number" && Number.isFinite(item.providerPublishTime)
       ? new Date(item.providerPublishTime * 1000)
@@ -170,7 +169,11 @@ export async function runPublicThemeReport(request: Request, env: ResearchEnv, b
   const language = String(body.language ?? "zh-TW");
   if (!["zh-TW", "en"].includes(language)) throw new PublicResearchLimitError("Invalid report language.", 400);
   const maxClaimChars = language === "en" ? 320 : 80;
-  const evidence = await loadPublicThemeEvidence(target);
+  const evidence = await loadPublicThemeEvidence(target).catch(error => {
+    if (error instanceof YahooDataError) throw new PublicResearchLimitError(error.message, error.status);
+    if (error instanceof BoundedBodyError) throw new PublicResearchLimitError("Yahoo theme response exceeded its time or size limit.", error.kind === "timeout" ? 504 : 502);
+    throw error;
+  });
   if (!env.MARKET_CACHE_DB) throw new PublicResearchLimitError("Shared report caching and usage limits are unavailable.", 503);
   const versionBytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(evidence)));
   const version = Array.from(new Uint8Array(versionBytes), b => b.toString(16).padStart(2, "0")).join("");

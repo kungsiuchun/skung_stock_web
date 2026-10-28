@@ -46,6 +46,10 @@ Read this file only for Finance Analyzer UI, its Pages Functions, or related UAT
   OHLC fields. Latest and immediately preceding provider observations must both
   have valid, completed closes; no older substitution, missing-to-zero conversion
   or invented candles. Source and daily as-of date accompany the existing values.
+- Public fundamentals shares the bounded Yahoo session transport. Send only
+  cookie name/value pairs; never forward Set-Cookie attributes or cache an empty/
+  HTML crumb. Preserve source identity and the missing-result 404 contract.
+  Upstream rate limits remain 429; other upstream failures are 502/504.
 - Browser persistence is optional: blocked/full/corrupt storage produces a visible warning, not a route failure or a synthetic API error. Initial hydration must never write empty history over saved data. Invalid saved payloads are not silently deleted.
 - Only validated history metadata and render-safe saved results may be restored. History analysis passes its selected ticker explicitly; restored results clear valuation, technical, VIX and cache metadata that were not saved with that history entry.
 - Never use `height="100%"` for Recharts in a flex container; use an explicit

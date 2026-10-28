@@ -40,7 +40,7 @@
     "test:mobile-scroll:uat": "node tests/mobile-scroll.uat.cjs",
     "test:caption:uat": "node tests/ai-caption.uat.cjs",
     "test:portfolio-shell:uat": "node tests/portfolio-shell.uat.cjs",
-    "test:finance-ui": "node --import tsx --test tests/browser-storage.test.ts tests/finance-dashboard-persistence.test.ts tests/finance-dashboard-state.test.ts tests/finance-dashboard-snapshot.test.ts tests/finance-dashboard-loading.test.ts tests/finance-dashboard-narrative.test.ts tests/finance-dashboard-ai-decision.test.ts tests/finance-analyzer-contract.test.ts tests/finance-yahoo-normalization.test.ts tests/market-data-cache.test.ts tests/candlestick-pattern-api.test.ts tests/candlestick-pattern-client.test.ts tests/candlestick-patterns.test.ts tests/trader-risk-snapshot.test.ts",
+    "test:finance-ui": "node --import tsx --test tests/browser-storage.test.ts tests/finance-dashboard-persistence.test.ts tests/finance-dashboard-state.test.ts tests/finance-dashboard-snapshot.test.ts tests/finance-dashboard-loading.test.ts tests/finance-dashboard-narrative.test.ts tests/finance-dashboard-ai-decision.test.ts tests/finance-analyzer-contract.test.ts tests/finance-yahoo-normalization.test.ts tests/yahoo-public-transport.test.ts tests/market-data-cache.test.ts tests/candlestick-pattern-api.test.ts tests/candlestick-pattern-client.test.ts tests/candlestick-patterns.test.ts tests/trader-risk-snapshot.test.ts",
     "test:finance-ui:uat": "node tests/finance-reliability.uat.cjs",
     "test:settle-up:uat": "node tests/settle-up-safety.uat.cjs",
     "deploy": "npm run deploy:production --",
