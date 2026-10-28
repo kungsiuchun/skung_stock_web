@@ -5,7 +5,7 @@ compatibility_date = "2024-04-01"
 [vars]
 # Fixed, zero-price public model: bounded JSON output without mandatory reasoning.
 # Never reuse the independently configured SPX/legacy model setting.
-PUBLIC_RESEARCH_MODEL = "google/gemma-4-31b-it:free"
+PUBLIC_RESEARCH_MODEL = "openai/gpt-6-luna"
 
 [[kv_namespaces]]
 binding = "SPX_MEMORY"

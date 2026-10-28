@@ -49,25 +49,28 @@
 - Public chat and legacy FinRobot / Trading Agent / stock analysis endpoints share
   the same service. Finance snapshot loading is data-only. Public social sentiment
   does not call Adanos, and the Alpha Vantage credential fallback has been removed.
-- Only `openrouter/free` or explicitly free models, zero-price provider bounds, no provider fallback, one
-  request, 1,536 output-token cap and forty-five-second timeout. Paid model
-  configuration stops generation. Reserve at most forty attempts/day and ten/minute
-  atomically, including failed attempts; missing/corrupt quota state fails closed.
-- Public model policy uses `PUBLIC_RESEARCH_MODEL` (default `openrouter/free`).
+- Public model policy uses `PUBLIC_RESEARCH_MODEL` (default `openai/gpt-6-luna`).
   The legacy `OPENROUTER_MODEL` belongs to other flows and cannot select or disable
   the public model. Do not synchronize or modify production secrets for this split.
-- Requested and returned model identities must match the checked-in verified-free
-  catalog in `free-research-models.ts`; a `:free` suffix alone is insufficient.
-  Each response must report numeric zero cost. Missing proof rejects the output.
-  Refresh that catalog from the official model API when selecting another model;
-  there is no runtime catalog polling or automatic provider substitution.
-- The configuration selects `google/gemma-4-31b-it:free`, with reasoning disabled
-  and temperature zero. This endpoint declares JSON mode rather than native
-  constrained JSON Schema; its complete dynamic schema is supplied in the trusted
-  system message and every result still passes strict server validation. Other
-  schema-capable paths retain native JSON Schema. Provider routing requires all
-  requested parameters, with zero prices and no fallback. Capability metadata
-  alone does not prove a successful live response.
+- The only approved paid model is GPT-6 Luna (including its verified dated returned
+  identity). Route to OpenAI standard, excluding Flex/Fast, with provider price
+  ceilings of $0.10/M input and $0.50/M output tokens, native JSON Schema and
+  reasoning effort `none`. Omit unsupported temperature. No tools, automatic
+  provider substitution or retry. Cap output at 1,536 tokens and time at 45 seconds.
+  Explicit verified-free configurations retain zero-price/identity checks; unknown
+  or other paid models fail closed. There is no runtime model-catalog polling.
+- Before sending a paid request, atomically reserve conservative micro-USD in the
+  existing D1 counter, with a global $0.10 UTC-day admission ceiling. Reserve
+  `ceil((UTF8 payload bytes + 4096) * 0.15 + 1536 * 0.6)` micro-USD: byte-bounded
+  input plus schema/template overhead, cache-write pricing and a 20% margin.
+  Reject payloads over 64KB, below the long-context premium threshold. Unused or
+  failed reservations are never refunded; actual charges can be lower and the
+  site can pause early. No new table, resource, secret or SPX policy change.
+- Reserve forty attempts/day and ten/minute as well, including failed attempts.
+  Missing/corrupt quota state fails closed. Each response must prove a finite,
+  nonnegative numeric cost within its reservation, including any reported upstream
+  inference cost; free paths require zero. Shared cache hits do not call a model
+  or reserve another AI cost. The guard covers this service, not the entire account.
 - Owner OAuth accepts only verified allowlisted GitHub emails. Provider exchanges
   have bounded deadlines; malformed/provider failures return explicit JSON errors.
 - Reports validate a structured summary/support/counterchecks/risks contract and
@@ -81,7 +84,7 @@
   and common quantified amounts/durations after Unicode normalization. These
   bounded checks do not prove every semantic interpretation: actual outputs
   still require numerical/source review during acceptance.
-- Report prompt version 7 and theme scope version 3 exclude earlier numerical
+- Report prompt version 8 and theme scope version 4 exclude earlier numerical
   prose. Chat returns facts separately and never adds those figures to model
   history; the browser renders them in a source disclosure.
 - Each stock/lens generation prepares both report languages from identical public
@@ -90,7 +93,7 @@
   that bundle while its evidence identity remains the same. A partly valid bundle
   is rejected, never published. Chat and theme reports keep their own contracts.
 - Minimal model receipts record the schema fingerprint, format, model/provider,
-  generation ID, finish reason and zero-cost/token metadata. They do not log
+  generation ID, finish reason and reserved/actual cost and token metadata. They do not log
   prompts, questions, report prose or private conversation history.
 - Schema and runtime limits enforce one claim per report section, at most eighty
   characters for Chinese or three hundred and twenty for English. Chat has its

@@ -6,7 +6,7 @@ import { BoundedBodyError, readBoundedText, fetchBoundedText } from "../src/lib/
 import { validateMarketContext } from "../src/lib/market-context";
 import { MARKET_BREADTH_SECTORS } from "../src/lib/market-breadth";
 import { validateMarketBreadthStatus, MARKET_BREADTH_STATE_KEYS } from "../src/lib/market-breadth-r2";
-import { callFreeResearchModel } from "../functions/api/research/free-model";
+import { callResearchModel } from "../functions/api/research/model";
 import { loadResearchEvidence, projectResearchTechnicals, researchNarrativeEvidence, readResearchBody, onRequestPost as report } from "../functions/api/research/report";
 import { publicResearchChat as chat } from "../functions/api/research/chat-service";
 import { onRequestPost as admin } from "../functions/api/stocks-intelligence-watcher/admin";
@@ -188,7 +188,7 @@ test("malformed model JSON stays upstream failure and expired reports retain pro
   const envelope = (content: string) => Response.json({ model, usage: { cost: 0 }, choices: [{ finish_reason: "stop", message: { content } }] });
   for (const mode of ["chat-content", "report-envelope", "expired"]) {
     const { db, sql } = sqlite();
-    const env = { MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "fixture-only", VALUATION_DATA: { get: async () => null } };
+    const env = { MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "fixture-only", PUBLIC_RESEARCH_MODEL: "openrouter/free", VALUATION_DATA: { get: async () => null } };
     let expired = false; let modelCalls = 0;
     globalThis.fetch = (async url => {
       if (String(url).includes("openrouter.ai")) {
@@ -219,12 +219,12 @@ test("free models must prove a verified returned identity and numeric zero costs
   let payload: any;
   globalThis.fetch = (async () => { calls++; return Response.json({ choices: [{ message: { content: "answer" }, finish_reason: "stop" }], ...payload }); }) as typeof fetch;
   try {
-    await assert.rejects(callFreeResearchModel({ ...env, PUBLIC_RESEARCH_MODEL: "invented/model:free" }, []), /not verified free/); assert.equal(calls, 0);
+    await assert.rejects(callResearchModel({ ...env, PUBLIC_RESEARCH_MODEL: "invented/model:free" }, []), /not approved/); assert.equal(calls, 0);
     for (const invalid of [{ model: "paid/provider", usage: { cost: 0 } }, { usage: { cost: 0 } }, { model, usage: {} }, { model, usage: { cost: "0" } }, { model, usage: { cost: 1 } }, { model, usage: { cost: null } }, { model, usage: { cost: 0, cost_details: { upstream_inference_cost: 1 } } }]) {
-      payload = invalid; await assert.rejects(callFreeResearchModel(env, []), /unverified|zero cost/);
+      payload = invalid; await assert.rejects(callResearchModel(env, []), /unverified|reserved budget/);
     }
     payload = { model, usage: { cost: 0, cost_details: { upstream_inference_cost: null } } };
-    assert.equal((await callFreeResearchModel(env, [])).model, model); assert.equal(calls, 8);
+    assert.equal((await callResearchModel(env, [])).model, model); assert.equal(calls, 8);
   } finally { globalThis.fetch = before; sql.close(); }
 });
 

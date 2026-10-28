@@ -16,7 +16,7 @@ import { onRequestGet as callback } from "../functions/api/stocks-intelligence-w
 import { onRequestGet as session } from "../functions/api/stocks-intelligence-watcher/auth/session";
 import { onRequestPost as logout } from "../functions/api/stocks-intelligence-watcher/auth/logout";
 import { onRequest as middleware } from "../functions/api/_middleware";
-import { callFreeResearchModel } from "../functions/api/research/free-model";
+import { callResearchModel } from "../functions/api/research/model";
 
 const request = (body: unknown, path = "/api/research/report") => new Request(`https://example.test${path}`, { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json" } });
 const sqlite = () => {
@@ -59,7 +59,7 @@ test("explicit free model disables reasoning, retains zero prices and reports se
     return Response.json({ choices: [{ message: { content: "Dated evidence [Q]." }, finish_reason: "stop" }], model, usage: { cost: 0 } });
   }) as typeof fetch;
   try {
-    const result = await callFreeResearchModel({ MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "fixture-key", PUBLIC_RESEARCH_MODEL: model, OPENROUTER_MODEL: "legacy/paid" }, []);
+    const result = await callResearchModel({ MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "fixture-key", PUBLIC_RESEARCH_MODEL: model, OPENROUTER_MODEL: "legacy/paid" }, []);
     assert.equal(result.model, model);
   } finally { globalThis.fetch = before; sql.close(); }
 });
@@ -102,7 +102,7 @@ test("public research agent and legacy report aliases share verified evidence/ca
   const env = { MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "fixture-key", OPENROUTER_MODEL: "legacy/paid", VALUATION_DATA: { get: async () => null } };
   globalThis.fetch = (async (url, init) => {
     if (String(url).includes("openrouter.ai")) {
-      models++; const payload = JSON.parse(init!.body as string); assert.equal(payload.model, "openrouter/free"); assert.equal(payload.provider.max_price.prompt, 0);
+      models++; const payload = JSON.parse(init!.body as string); assert.equal(payload.model, "openai/gpt-6-luna"); assert.equal(payload.provider.max_price.prompt, 0.1);
       assert.ok(!JSON.stringify(payload).includes("fixture-private-memory"));
       if (payload.messages?.[0]?.content.includes("equity evidence analyst")) {
         const evidence = JSON.parse(payload.messages.at(-1).content);
@@ -118,7 +118,7 @@ test("public research agent and legacy report aliases share verified evidence/ca
       const claim = invalidChat ? { text: "Invented financial evidence [F]", sourceIds: ["F"] } : { text: "Only dated public evidence is available.", sourceIds: sourceIds.slice(0, Math.min(2, sourceIds.length)) };
       const sections = { summary: claim, support: [claim], counterchecks: [claim], risks: [claim] };
       const content = JSON.stringify(schema?.properties?.["zh-TW"] ? { "zh-TW": sections, en: sections } : schema?.properties?.summary ? sections : claim);
-      return Response.json({ choices: [{ message: { content }, finish_reason: "stop" }], model: "nvidia/nemotron-3.5-super-vl:free", usage: { cost: 0 } });
+      return Response.json({ choices: [{ message: { content }, finish_reason: "stop" }], model: "openai/gpt-6-luna-20260922", usage: { cost: 0.001 } });
     }
     if (String(url).includes("/v1/finance/search")) return Response.json({ news: [{ title: "AI semiconductor demand remains a dated public theme", publisher: "Yahoo Finance", providerPublishTime: Date.parse(asOf) / 1000 }] });
     assert.match(String(url), /yahoo\.com/); return Response.json(chart);
@@ -126,12 +126,14 @@ test("public research agent and legacy report aliases share verified evidence/ca
   try {
     const first = await report({ request: request({ symbol: "NVDA" }), env }); assert.equal(first.status, 200);
     const published = (await first.json() as any).report;
+    const costAfterFirst = (sql.prepare("SELECT payload_json FROM market_cache_entries WHERE cache_key='__public_limit__:ai-cost-micro-usd'").get() as any).payload_json;
     assert.equal(published.sources[0].asOf, new Date(asOf).toISOString());
     const legacy = [await finrobot({ request: request({ ticker: "NVDA" }), env }), await trading({ request: request({ stock_code: "NVDA" }), env }), await stock({ request: new Request("https://example.test/api/stock/NVDA"), env, params: { symbol: "NVDA" } })];
     for (const response of legacy) { assert.equal(response.status, 200); assert.ok(JSON.stringify(await response.json()).includes(published.evidenceVersion)); }
     const tradingBody = await trading({ request: request({ stock_code: "NVDA" }), env }).then(response => response.json() as Promise<any>);
     assert.ok(["fundamentals_report", "market_report", "sentiment_report", "quant_report", "manager_report"].every(key => typeof tradingBody.results[key] === "string" && tradingBody.results[key].length > 0));
     assert.equal(models, 1);
+    assert.equal((sql.prepare("SELECT payload_json FROM market_cache_entries WHERE cache_key='__public_limit__:ai-cost-micro-usd'").get() as any).payload_json, costAfterFirst, "Legacy cache aliases must not reserve another paid call");
     const serenity = await finrobot({ request: request({ ticker: "AI semiconductor", agentProfile: "serenity" }), env });
     assert.equal(serenity.status, 200); assert.ok((await serenity.json() as any).report.includes("AI semiconductor")); assert.equal(models, 2);
     const reply = await chat({ request: request({ symbol: "NVDA", message: "What is missing?", language: "en" }), env });
@@ -147,7 +149,7 @@ test("public research agent and legacy report aliases share verified evidence/ca
     const rejected = await chat({ request: request({ symbol: "NVDA", message: "What is missing?", language: "en" }), env });
     assert.equal(rejected.status, 502); assert.equal(models, 5); assert.equal((await rejected.json() as any).success, false);
     invalidChat = false;
-    sql.exec(`UPDATE market_cache_entries SET cache_key=replace(cache_key, '"prompt":7', '"prompt":6') WHERE scope='research-report-v2'`);
+    sql.exec(`UPDATE market_cache_entries SET cache_key=replace(cache_key, '"prompt":8', '"prompt":7') WHERE scope='research-report-v2'`);
     const afterPromptChange = await report({ request: request({ symbol: "NVDA" }), env });
     assert.equal(afterPromptChange.status, 200); assert.equal(models, 6);
     assert.equal((await afterPromptChange.json() as any).report.cache.status, "refreshed");
@@ -157,7 +159,7 @@ test("public research agent and legacy report aliases share verified evidence/ca
 test("public model rejects a provider cost that is not a finite numeric zero", async () => {
   const { db, sql } = sqlite(); const before = globalThis.fetch;
   globalThis.fetch = (async () => Response.json({ choices: [{ message: { content: "answer" }, finish_reason: "stop" }], model: "nvidia/nemotron-3.5-super-vl:free", usage: { cost: "0" } })) as typeof fetch;
-  try { await assert.rejects(callFreeResearchModel({ MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "fixture-key" }, []), /did not prove zero cost/); }
+  try { await assert.rejects(callResearchModel({ MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "fixture-key", PUBLIC_RESEARCH_MODEL: "openrouter/free" }, []), /did not prove a cost/); }
   finally { globalThis.fetch = before; sql.close(); }
 });
 
@@ -217,10 +219,10 @@ test("provider error diagnostics cannot retain echoed questions or credentials",
   console.info = (...values) => logs.push(values.join(" "));
   globalThis.fetch = (async () => Response.json({ error: { message: `${question} ${key}`, metadata: { provider_name: question, raw: JSON.stringify({ status: 429, title: question }) } } }, { status: 400 })) as typeof fetch;
   try {
-    await assert.rejects(callFreeResearchModel({ MARKET_CACHE_DB: db, OPENROUTER_API_KEY: key, PUBLIC_RESEARCH_MODEL: "google/gemma-4-31b-it:free" }, [{ role: "user", content: question }]), /HTTP 400/);
+    await assert.rejects(callResearchModel({ MARKET_CACHE_DB: db, OPENROUTER_API_KEY: key, PUBLIC_RESEARCH_MODEL: "google/gemma-4-31b-it:free" }, [{ role: "user", content: question }]), /HTTP 400/);
     assert.ok(logs.some(value => value.includes('"upstreamStatus":429')));
     globalThis.fetch = (async () => Response.json({ id: question, provider: question, model: "google/gemma-4-31b-it:free", choices: [{ message: { content: "Public evidence." }, finish_reason: question }], usage: { cost: 0, completion_tokens: question, completion_tokens_details: { reasoning_tokens: key } } })) as typeof fetch;
-    await callFreeResearchModel({ MARKET_CACHE_DB: db, OPENROUTER_API_KEY: key, PUBLIC_RESEARCH_MODEL: "google/gemma-4-31b-it:free" }, [{ role: "user", content: question }]);
+    await callResearchModel({ MARKET_CACHE_DB: db, OPENROUTER_API_KEY: key, PUBLIC_RESEARCH_MODEL: "google/gemma-4-31b-it:free" }, [{ role: "user", content: question }]);
     assert.ok(!logs.join(" ").includes(question)); assert.ok(!logs.join(" ").includes(key));
   } finally { globalThis.fetch = before; console.error = beforeError; console.info = beforeInfo; sql.close(); }
 });

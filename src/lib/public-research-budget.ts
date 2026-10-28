@@ -1,5 +1,6 @@
 import type { D1DatabaseLike } from "./spx-recap-d1";
 import { reserveMarketCacheRefreshQuota } from "./stocks-watcher-refresh-quota";
+import { PUBLIC_RESEARCH_DAILY_MICRO_USD } from "./research-model-policy";
 
 export class PublicResearchLimitError extends Error {
   constructor(message: string, public status = 429, public retryAt?: string) { super(message); }
@@ -8,6 +9,10 @@ export class PublicResearchLimitError extends Error {
 /** Fixed keys bound retention. D1 serializes each conditional increment across isolates. */
 export async function reservePublicCounter(db: D1DatabaseLike | undefined, key: string, window: string, limit: number, units = 1, now = new Date()) {
   if (!Number.isSafeInteger(limit) || !Number.isSafeInteger(units) || units < 1 || units > limit) throw new PublicResearchLimitError("Invalid usage reservation.", 503);
+  const windowFormat = window.length === 7 ? "%Y-%m" : window.length === 10 ? "%Y-%m-%d" : window.length === 16 ? "%Y-%m-%dT%H:%M" : null;
+  const windowSuffix = window.length === 7 ? "-01" : window.length === 10 ? "" : ":00Z";
+  const parsedWindow = Date.parse(window + (window.length === 7 ? "-01T00:00Z" : window.length === 10 ? "T00:00Z" : ":00Z"));
+  if (!windowFormat || !Number.isFinite(parsedWindow) || new Date(parsedWindow).toISOString().slice(0, window.length) !== window) throw new PublicResearchLimitError("Invalid usage window.", 503);
   if (!db) throw new PublicResearchLimitError("Usage limits cannot be verified. This feature is paused.", 503);
   // Includes this counter's indexed write and the quota guard itself.
   const budget = await reserveMarketCacheRefreshQuota(db, { cacheEntryWrites: 1, loaderRowsRead: 1 }, now);
@@ -22,23 +27,26 @@ export async function reservePublicCounter(db: D1DatabaseLike | undefined, key: 
         cached_at = excluded.cached_at, expires_at = excluded.expires_at
       WHERE json_valid(payload_json) AND json_type(payload_json, '$.used') = 'integer'
         AND json_type(payload_json, '$.window') = 'text' AND json_extract(payload_json, '$.used') >= 0
+        AND json_extract(payload_json, '$.used') <= ?
+        AND length(json_extract(payload_json, '$.window')) = ?
+        AND strftime(?, json_extract(payload_json, '$.window') || ?, '+0 days') = json_extract(payload_json, '$.window')
         AND (json_extract(payload_json, '$.window') < ? OR
           (json_extract(payload_json, '$.window') = ? AND json_extract(payload_json, '$.used') + ? <= ?))
       RETURNING payload_json`).bind(`__public_limit__:${key}`, window, units, now.toISOString(),
-      new Date(now.getTime() + 62 * 86400000).toISOString(), now.toISOString(), window, window, units, units, window, window, units, limit)
+      new Date(now.getTime() + 62 * 86400000).toISOString(), now.toISOString(), window, window, units, units, limit, window.length, windowFormat, windowSuffix, window, window, units, limit)
       .first<{ payload_json: string }>();
   } catch { throw new PublicResearchLimitError("Usage limits cannot be verified. This feature is paused.", 503); }
   if (!row) {
-    let current: { payload_json: string } | null;
-    try { current = await db.prepare("SELECT payload_json FROM market_cache_entries WHERE cache_key = ?").bind(`__public_limit__:${key}`).first<{ payload_json: string }>(); }
+    let current: { payload_json: string; used_type: string } | null;
+    try { current = await db.prepare("SELECT payload_json, CASE WHEN json_valid(payload_json) THEN json_type(payload_json, '$.used') END AS used_type FROM market_cache_entries WHERE cache_key = ?").bind(`__public_limit__:${key}`).first<{ payload_json: string; used_type: string }>(); }
     catch { throw new PublicResearchLimitError("Usage limits cannot be verified.", 503); }
     let usage: { window?: unknown; used?: unknown } = {};
     try { const parsed = JSON.parse(current?.payload_json || "{}"); usage = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}; } catch { /* Invalid stored JSON is rejected below. */ }
-    if (usage.window !== window || typeof usage.used !== "number" || !Number.isInteger(usage.used) || usage.used < 0) throw new PublicResearchLimitError("Usage limit state is invalid. This feature is paused.", 503);
+    if (usage.window !== window || current?.used_type !== "integer" || typeof usage.used !== "number" || !Number.isSafeInteger(usage.used) || usage.used < 0 || usage.used > limit) throw new PublicResearchLimitError("Usage limit state is invalid. This feature is paused.", 503);
     const reset = new Date(window.length === 7 ? `${window}-01T00:00Z` : window.length === 10 ? `${window}T00:00Z` : `${window}:00Z`);
     if (window.length === 7) reset.setUTCMonth(reset.getUTCMonth() + 1);
     else reset.setTime(reset.getTime() + (window.length === 10 ? 86400000 : 60000));
-    throw new PublicResearchLimitError(`The shared free allowance has been reached. Resets ${reset.toISOString()}.`, 429, reset.toISOString());
+    throw new PublicResearchLimitError(`The shared allowance has been reached. Resets ${reset.toISOString()}.`, 429, reset.toISOString());
   }
   const value = JSON.parse(row.payload_json) as { window: string; used: number };
   if (value.window !== window || !Number.isInteger(value.used) || value.used < units || value.used > limit) {
@@ -52,6 +60,10 @@ export async function reservePublicAiAttempt(db: D1DatabaseLike | undefined, now
   const day = await reservePublicCounter(db, "ai-day", now.toISOString().slice(0, 10), 40, 1, now);
   await reservePublicCounter(db, "ai-minute", now.toISOString().slice(0, 16), 10, 1, now);
   return day;
+}
+
+export async function reservePublicAiCost(db: D1DatabaseLike | undefined, microUsd: number, now = new Date()) {
+  return reservePublicCounter(db, "ai-cost-micro-usd", now.toISOString().slice(0, 10), PUBLIC_RESEARCH_DAILY_MICRO_USD, microUsd, now);
 }
 
 const r2Credits = new WeakMap<D1DatabaseLike, { month: string; remaining: number; pending: Promise<void> | null }>();

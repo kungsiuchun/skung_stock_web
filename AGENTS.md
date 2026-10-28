@@ -52,7 +52,7 @@ npm run deploy
 
 Before changing a feature, read only its matching guide:
 
-- Unified Watcher workspace / public free AI / market summary: `docs/agents/watcher-workspace.md`
+- Unified Watcher workspace / budgeted public AI / market summary: `docs/agents/watcher-workspace.md`
 - Finance Analyzer UI/agent: `docs/agents/finance-dashboard.md`
 - Shared D1 market cache: `docs/agents/market-data-cache.md`
 - S&P 500 market breadth: `docs/agents/market-breadth.md`
