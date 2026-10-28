@@ -3,7 +3,7 @@ pages_build_output_dir = "./dist"
 compatibility_date = "2024-04-01"
 
 [vars]
-# Fixed, zero-price public model: bounded JSON output without mandatory reasoning.
+# Approved low-cost public model, with a global USD0.10/day reservation ceiling.
 # Never reuse the independently configured SPX/legacy model setting.
 PUBLIC_RESEARCH_MODEL = "openai/gpt-6-luna"
 
