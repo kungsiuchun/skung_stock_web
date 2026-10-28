@@ -4,8 +4,9 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { calculateTradePlan, parseWorkspaceSaved, EMPTY_WORKSPACE_SAVED, readWorkspaceRoute, workspaceHref, parseWorkspaceHistory, deriveWorkspaceEvidence, parseWorkspaceQuotes } from "../src/lib/watcher-workspace";
 import { persistWorkspaceSaved, createWorkspaceClient } from "../src/hooks/use-watcher-workspace";
-import { reservePublicCounter, reservePublicAiAttempt, reservePublicR2Read } from "../src/lib/public-research-budget";
-import { callFreeResearchModel } from "../functions/api/research/free-model";
+import { reservePublicCounter, reservePublicAiAttempt, reservePublicAiCost, reservePublicR2Read } from "../src/lib/public-research-budget";
+import { researchCostReservation, PUBLIC_RESEARCH_DAILY_MICRO_USD } from "../src/lib/research-model-policy";
+import { callResearchModel } from "../functions/api/research/model";
 import { runPublicReport } from "../functions/api/research/report";
 import { onRequest as middleware } from "../functions/api/_middleware";
 import { onRequest as marketContextApi } from "../functions/api/market-context";
@@ -152,16 +153,84 @@ test("AI enforces 40/day and 10/minute, and public R2 reads use the same D1 safe
   sql.close();
 });
 
-test("public model pins free routing, bounds output/time, rejects paid config and never retries provider failures", async () => {
+test("explicit free routing rejects unapproved models and never retries provider failures", async () => {
   const { db, sql } = sqliteD1(); const original = globalThis.fetch; let calls = 0;
   try {
     globalThis.fetch = (async (_url, init) => { calls++; const body = JSON.parse(init!.body as string); assert.equal(body.model, "openrouter/free"); assert.equal(body.max_tokens, 1536); assert.deepEqual(body.provider.max_price, { prompt: 0, completion: 0 }); assert.ok(init?.signal); return new Response("{}", { status: 429 }); }) as typeof fetch;
-    await assert.rejects(callFreeResearchModel({ MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "test-key", PUBLIC_RESEARCH_MODEL: "openai/paid" }, []), /not verified free/);
+    await assert.rejects(callResearchModel({ MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "test-key", PUBLIC_RESEARCH_MODEL: "openai/paid" }, []), /not approved/);
     assert.equal(calls, 0);
-    await assert.rejects(callFreeResearchModel({ MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "test-key", OPENROUTER_MODEL: "legacy/paid" }, []), /No retry/);
+    await assert.rejects(callResearchModel({ MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "test-key", PUBLIC_RESEARCH_MODEL: "openrouter/free", OPENROUTER_MODEL: "legacy/paid" }, []), /No retry/);
     assert.equal(calls, 1);
-    await assert.rejects(callFreeResearchModel({ OPENROUTER_API_KEY: "test-key" }, [])); assert.equal(calls, 1);
+    await assert.rejects(callResearchModel({ OPENROUTER_API_KEY: "test-key" }, [])); assert.equal(calls, 1);
   } finally { globalThis.fetch = original; sql.close(); }
+});
+
+test("paid AI money reservations serialize, reset at UTC midnight and reject corrupt counters", async () => {
+  const { db, sql } = sqliteD1();
+  const now = new Date("2026-10-27T23:59:00Z");
+  try {
+    const results = await Promise.allSettled(Array.from({ length: 30 }, () => reservePublicAiCost(db, 10_000, now)));
+    assert.equal(results.filter(row => row.status === "fulfilled").length, 10);
+    const read = () => JSON.parse((sql.prepare("SELECT payload_json FROM market_cache_entries WHERE cache_key='__public_limit__:ai-cost-micro-usd'").get() as any).payload_json);
+    assert.equal(read().used, PUBLIC_RESEARCH_DAILY_MICRO_USD);
+    await assert.rejects(reservePublicAiCost(db, 1, now), (error: any) => error.status === 429 && error.retryAt === "2026-10-28T00:00:00.000Z");
+    assert.equal((await reservePublicAiCost(db, 1234, new Date("2026-10-28T00:00:00Z"))).used, 1234);
+    await assert.rejects(reservePublicAiCost(db, 1, now));
+    sql.exec("UPDATE market_cache_entries SET payload_json='{}' WHERE cache_key='__public_limit__:ai-cost-micro-usd'");
+    await assert.rejects(reservePublicAiCost(db, 1, new Date("2026-10-29T00:00:00Z")), /invalid/);
+    await assert.rejects(reservePublicAiCost(undefined, 1, now));
+    for (const units of [0, -1, 1.5, Infinity, 100_001]) await assert.rejects(reservePublicAiCost(db, units, now));
+    for (const payload of ['{"window":"2026-10-26","used":100001}', '{"window":"2026-02-30","used":1000}', '{"window":"2026-10-27","used":1e0}', '{"window":"2026-10-27","used":100001}']) {
+      sql.prepare("UPDATE market_cache_entries SET payload_json=? WHERE cache_key='__public_limit__:ai-cost-micro-usd'").run(payload);
+      await assert.rejects(reservePublicAiCost(db, 1000, now), (error: any) => error.status === 503);
+      assert.equal((sql.prepare("SELECT payload_json FROM market_cache_entries WHERE cache_key='__public_limit__:ai-cost-micro-usd'").get() as any).payload_json, payload);
+    }
+  } finally { sql.close(); }
+});
+
+test("paid model reserves before sending, uses native schema and never refunds provider failures", async () => {
+  const { db, sql } = sqliteD1(); const before = globalThis.fetch; let calls = 0; let fail = true; let reserved = 0;
+  const usage = () => JSON.parse((sql.prepare("SELECT payload_json FROM market_cache_entries WHERE cache_key='__public_limit__:ai-cost-micro-usd'").get() as any).payload_json).used;
+  globalThis.fetch = (async (_url, init) => {
+    calls++; const payload = JSON.parse(String(init?.body));
+    assert.equal(payload.model, "openai/gpt-6-luna"); assert.equal(payload.temperature, undefined);
+    assert.deepEqual(payload.reasoning, { effort: "none" }); assert.equal(payload.max_tokens, 1536);
+    assert.deepEqual(payload.provider, { only: ["openai"], ignore: ["openai/flex", "openai/fast"], max_price: { prompt: 0.1, completion: 0.5 }, allow_fallbacks: false, require_parameters: true });
+    assert.equal(payload.response_format.type, "json_schema"); assert.equal(payload.response_format.json_schema.strict, true);
+    reserved += researchCostReservation(String(init?.body)); assert.equal(usage(), reserved);
+    return fail ? new Response("provider down", { status: 503 }) : Response.json({ model: "openai/gpt-6-luna-20260922", choices: [{ message: { content: "{}" }, finish_reason: "stop" }], usage: { cost: 0.0001, cost_details: { upstream_inference_cost: 0.0001 } } });
+  }) as typeof fetch;
+  const env = { MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "fixture", OPENROUTER_MODEL: "legacy/expensive" };
+  try {
+    await assert.rejects(callResearchModel(env, [], true, { type: "object" }), /HTTP 503/);
+    assert.equal(calls, 1); assert.equal(usage(), reserved);
+    fail = false;
+    assert.equal((await callResearchModel(env, [], true, { type: "object" })).model, "openai/gpt-6-luna-20260922");
+    assert.equal(calls, 2); assert.equal(usage(), reserved);
+    sql.prepare("UPDATE market_cache_entries SET payload_json=json_set(payload_json,'$.used',100000) WHERE cache_key='__public_limit__:ai-cost-micro-usd'").run();
+    await assert.rejects(callResearchModel(env, [], true, { type: "object" }), (error: any) => error.status === 429);
+    assert.equal(calls, 2, "Budget denial must precede the provider request");
+    await assert.rejects(callResearchModel(env, [{ role: "user", content: "測試".repeat(16000) }]), /cost limit/);
+    assert.equal(calls, 2); assert.ok(researchCostReservation("測試".repeat(20)) > researchCostReservation("ab".repeat(20)));
+  } finally { globalThis.fetch = before; sql.close(); }
+});
+
+test("paid model rejects mismatched identities and absent, negative or unreserved charges", async () => {
+  const { db, sql } = sqliteD1(); const before = globalThis.fetch; let data: any;
+  globalThis.fetch = (async () => Response.json({ choices: [{ message: { content: "{}" }, finish_reason: "stop" }], ...data })) as typeof fetch;
+  try {
+    for (const invalid of [
+      { model: "openai/expensive", usage: { cost: 0 } },
+      { model: "openai/gpt-6-luna", usage: {} },
+      { model: "openai/gpt-6-luna", usage: { cost: "0.001" } },
+      { model: "openai/gpt-6-luna", usage: { cost: -0.001 } },
+      { model: "openai/gpt-6-luna", usage: { cost: 0.1 } },
+      { model: "openai/gpt-6-luna", usage: { cost: 0, cost_details: { upstream_inference_cost: 0.1 } } },
+    ]) {
+      data = invalid;
+      await assert.rejects(callResearchModel({ MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "fixture" }, []), /unverified|reserved budget/);
+    }
+  } finally { globalThis.fetch = before; sql.close(); }
 });
 
 test("reports cache only server evidence and reuse one generation across public report lenses' legacy routes", async () => {
@@ -171,12 +240,12 @@ test("reports cache only server evidence and reuse one generation across public 
   const chart = { chart: { result: [{ meta: { regularMarketPrice: 200, regularMarketTime: Date.parse(quoteAsOf) / 1000, regularMarketPreviousClose: 198, symbol: "NVDA", currency: "USD" }, timestamp: timestamps, indicators: { quote: [{ open: timestamps.map(() => 199), high: timestamps.map(() => 202), low: timestamps.map(() => 198), close: timestamps.map(() => 200), volume: timestamps.map(() => 1000) }] } }] } };
   try {
     globalThis.fetch = (async (input, init) => {
-      if (String(input).includes("openrouter.ai")) { models++; const body = JSON.parse(init!.body as string); assert.ok(!JSON.stringify(body).includes("my private thesis")); assert.equal(body.response_format.type, "json_schema"); assert.deepEqual(body.response_format.json_schema.schema.properties.summary.properties.sourceIds.items.enum, ["Q", "T"]); const claim = { text: "Price evidence is dated; published financials are unavailable.", sourceIds: ["Q", "T"] }; return Response.json({ choices: [{ message: { content: JSON.stringify({ summary: claim, support: [claim], counterchecks: [claim], risks: [claim] }) }, finish_reason: "stop" }], model: "nvidia/nemotron-3.5-super-vl:free", usage: { cost: 0 } }); }
+      if (String(input).includes("openrouter.ai")) { models++; const body = JSON.parse(init!.body as string); assert.ok(!JSON.stringify(body).includes("my private thesis")); assert.equal(body.response_format.type, "json_schema"); assert.deepEqual(body.response_format.json_schema.schema.properties["zh-TW"].properties.summary.properties.sourceIds.items.enum, ["Q", "T"]); const claim = { text: "Price evidence is dated; published financials are unavailable.", sourceIds: ["Q", "T"] }; const sections = { summary: claim, support: [claim], counterchecks: [claim], risks: [claim] }; return Response.json({ choices: [{ message: { content: JSON.stringify({ "zh-TW": sections, en: sections }) }, finish_reason: "stop" }], model: "nvidia/nemotron-3.5-super-vl:free", usage: { cost: 0 } }); }
       assert.match(String(input), /yahoo\.com/); return Response.json(chart);
     }) as typeof fetch;
     const request = new Request("https://example.test/api/research/report");
-    const first = await runPublicReport(request, { MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "test-key", VALUATION_DATA: { get: async () => null } }, { symbol: "NVDA" });
-    const second = await runPublicReport(request, { MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "test-key", VALUATION_DATA: { get: async () => null } }, { symbol: "NVDA" });
+    const first = await runPublicReport(request, { MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "test-key", PUBLIC_RESEARCH_MODEL: "openrouter/free", VALUATION_DATA: { get: async () => null } }, { symbol: "NVDA" });
+    const second = await runPublicReport(request, { MARKET_CACHE_DB: db, OPENROUTER_API_KEY: "test-key", PUBLIC_RESEARCH_MODEL: "openrouter/free", VALUATION_DATA: { get: async () => null } }, { symbol: "NVDA" });
     assert.equal(first.content, second.content); assert.equal(second.cache.status, "hit"); assert.equal(models, 1);
     assert.ok(first.gaps.length); assert.equal(first.sources[0].asOf, new Date(quoteAsOf).toISOString());
   } finally { globalThis.fetch = original; sql.close(); }
