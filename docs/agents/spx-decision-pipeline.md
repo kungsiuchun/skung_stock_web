@@ -77,6 +77,11 @@ the scheduler Durable Object, D1 ledger, or Telegram delivery.
 
 ## Local verification
 
+- Recap metrics summarize retained structured callouts. SPX direction points
+  are not broker fills, option returns or returns after costs. Callout win rate
+  excludes flat closes; keep that distinction separate from the 15-minute proxy.
+  Missing/blank prices and points remain unavailable, never zero or flat closes.
+
 - Board request/navigation/playback state is owned by
   `src/hooks/use-spx-gex-board.ts`; Board response validation lives in
   `src/lib/spx-board-response.ts`. Presentation must not cast arbitrary JSON

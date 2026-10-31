@@ -105,13 +105,17 @@ export const stableHash = (value: string) => {
 };
 
 const includesAny = (value: string, needles: string[]) => needles.some((needle) => value.includes(needle));
+const observedNumber = (value: unknown): number | null => {
+  const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+};
 
 export const classifyStatus = (item: ActionLogItem): TimelineStatus => {
   const action = item.action || "";
   const actionLower = action.toLowerCase();
-  const pnl = Number(item.pnl);
+  const pnl = observedNumber(item.pnl);
 
-  if (Number.isFinite(pnl)) {
+  if (pnl !== null) {
     if (pnl > 0) return "win";
     if (pnl < 0) return "loss";
     return "flat";
@@ -182,10 +186,10 @@ export const normalizeTimeline = (items: ActionLogItem[], selectedDate: string):
       ordinal,
       time: formatTime(item.time),
       timestamp: item.time || null,
-      price: Number.isFinite(Number(item.price)) ? Number(item.price) : null,
+      price: observedNumber(item.price),
       action: item.action || "未命名訊號",
       reasoning: item.reasoning || "未提供理由",
-      pnl: Number.isFinite(Number(item.pnl)) ? Number(item.pnl) : null,
+      pnl: observedNumber(item.pnl),
       status,
       eventType,
       positionSide,
@@ -272,7 +276,7 @@ export const buildDerivedAudit = (selectedDate: string, timeline: TimelineItem[]
 
   const auditLines = timeline.map((item) => {
     const price = item.price === null ? "N/A" : item.price.toFixed(2);
-    const pnl = item.pnl === null ? "" : ` | PnL ${item.pnl > 0 ? "+" : ""}${item.pnl.toFixed(2)} pts`;
+    const pnl = item.pnl === null ? "" : ` | SPX 方向點數 ${item.pnl > 0 ? "+" : ""}${item.pnl.toFixed(2)} pts`;
     return `- ${item.time} ET: ${item.action} @ ${price}${pnl}。${item.reasoning}`;
   });
 
@@ -280,21 +284,22 @@ export const buildDerivedAudit = (selectedDate: string, timeline: TimelineItem[]
     `## 每日審計報告`,
     ``,
     `**美東日期：${selectedDate} | 標的：SPX**`,
+    `依結構化 callout 記錄計算 SPX 方向點數，並非券商成交、選擇權損益或扣費後報酬。`,
     ``,
     `### 1. 戰績總覽`,
     `- 系統總播報次數：${summary.totalCallouts} 次`,
-    `- 實際出手次數：${summary.tradesTaken} 次`,
-    `- 盈利/成功次數：${summary.wins} 次`,
-    `- 止損/失敗次數：${summary.losses} 次`,
+    `- Callout 交易計數：${summary.tradesTaken} 次`,
+    `- 正向點數平倉：${summary.wins} 次`,
+    `- 負向點數平倉：${summary.losses} 次`,
     `- 平手離場：${summary.flatCloses} 次`,
     `- 主動空倉防守：${summary.defensiveHolds} 次`,
-    `- 真實交易勝率：${winRate}`,
-    `- 淨 PnL：${summary.totalPnlPoints > 0 ? "+" : ""}${summary.totalPnlPoints} pts`,
+    `- Callout 勝率（不含持平）：${winRate}`,
+    `- SPX 方向累計點數：${summary.totalPnlPoints > 0 ? "+" : ""}${summary.totalPnlPoints} pts`,
     ``,
-    `### 2. 今日最佳時刻`,
+    `### 2. 最高方向點數紀錄`,
     best
-      ? `- ${best.time} ET：${best.action}，PnL ${best.pnl && best.pnl > 0 ? "+" : ""}${best.pnl?.toFixed(2)} pts。${best.reasoning}`
-      : `- N/A。今日沒有可計算 PnL 的平倉紀錄，唔好硬吹勝率。`,
+      ? `- ${best.time} ET：${best.action}，SPX 方向點數 ${best.pnl && best.pnl > 0 ? "+" : ""}${best.pnl?.toFixed(2)} pts。${best.reasoning}`
+      : `- N/A。今日沒有帶方向點數的平倉紀錄。`,
     ``,
     `### 3. 每日審計清單`,
     ...auditLines,

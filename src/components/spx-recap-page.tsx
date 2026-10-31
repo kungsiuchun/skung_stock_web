@@ -312,7 +312,7 @@ export function SPXRecapPage() {
               SPX Recap
             </div>
             <h1 className="text-3xl font-black tracking-normal text-white sm:text-5xl">每日情報</h1>
-            <p className="mt-2 text-sm text-zinc-500">Telegram bot 歷史績效與 0DTE 審計報告</p>
+            <p className="mt-2 text-sm text-zinc-500">Telegram 播報紀錄與 SPX 方向點數審計</p>
           </div>
 
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -331,6 +331,7 @@ export function SPXRecapPage() {
             <label className="inline-flex h-11 items-center gap-2 border border-white/10 bg-[#101118] px-3 text-sm font-bold text-zinc-200">
               <CalendarDays className="h-4 w-4 text-zinc-500" />
               <select
+                aria-label="SPX recap date"
                 value={selectedDate}
                 onChange={(event) => void fetchRecap(event.target.value, rangeFrom, rangeTo)}
                 className="min-w-[9.5rem] bg-transparent text-white outline-none"
@@ -373,25 +374,25 @@ export function SPXRecapPage() {
           <>
             <section className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <KpiCard
-                label="真實勝率"
+                label="Callout 勝率（不含持平）"
                 value={winRate}
                 accent="border-amber-500/35"
                 icon={<BarChart3 className="h-5 w-5" />}
               />
               <KpiCard
-                label="實際出手"
+                label="Callout 交易計數"
                 value={String(summary.tradesTaken)}
                 accent="border-violet-500/25"
                 icon={<Target className="h-5 w-5" />}
               />
               <KpiCard
-                label="盈利 / 止損"
+                label="正向 / 負向點數平倉"
                 value={`${summary.wins} / ${summary.losses}`}
                 accent="border-emerald-500/25"
                 icon={<CheckCircle2 className="h-5 w-5" />}
               />
               <KpiCard
-                label="淨 PnL"
+                label="SPX 方向累計點數"
                 value={pnlText}
                 accent={summary.totalPnlPoints >= 0 ? "border-emerald-500/35" : "border-rose-500/35"}
                 icon={
@@ -399,6 +400,8 @@ export function SPXRecapPage() {
                 }
               />
             </section>
+
+            <p className="mb-5 text-xs leading-6 text-zinc-400">依結構化 callout 記錄計算 SPX 方向點數，並非券商成交、選擇權損益或扣費後報酬。勝率不含持平紀錄。</p>
 
             <section className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4">
               <div className="border border-white/10 bg-[#0f1016] px-4 py-3">
@@ -426,10 +429,11 @@ export function SPXRecapPage() {
                     <BarChart3 className="h-4 w-4 text-amber-300" />
                     Range Analytics
                   </div>
-                  <p className="mt-1 text-xs text-zinc-500">只計結構化 callout / PnL，唔用 AI 補數。</p>
+                  <p className="mt-1 text-xs text-zinc-500">區間統計只採已保存的結構化 callout 及其 SPX 方向點數。</p>
                 </div>
                 <div className="flex flex-col gap-2 sm:flex-row">
                   <select
+                    aria-label="Range start date"
                     value={rangeFrom}
                     onChange={(event) => setRangeFrom(event.target.value)}
                     className="h-9 border border-white/10 bg-[#08090d] px-3 text-xs font-bold text-white outline-none"
@@ -442,6 +446,7 @@ export function SPXRecapPage() {
                     ))}
                   </select>
                   <select
+                    aria-label="Range end date"
                     value={rangeTo}
                     onChange={(event) => setRangeTo(event.target.value)}
                     className="h-9 border border-white/10 bg-[#08090d] px-3 text-xs font-bold text-white outline-none"
@@ -465,7 +470,7 @@ export function SPXRecapPage() {
 
               <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
                 <div className="border border-white/10 bg-black/20 p-3">
-                  <p className="mb-3 text-xs font-bold uppercase tracking-[0.16em] text-zinc-500">PnL Equity Curve</p>
+                  <p className="mb-3 text-xs font-bold uppercase tracking-[0.16em] text-zinc-500">Cumulative SPX points</p>
                   <ResponsiveContainer width="100%" height={260}>
                     <LineChart data={equityData} margin={{ top: 10, right: 12, left: -18, bottom: 0 }}>
                       <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
@@ -475,12 +480,12 @@ export function SPXRecapPage() {
                         contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.14)", color: "#fff" }}
                         labelStyle={{ color: "#fbbf24" }}
                       />
-                      <Line type="monotone" dataKey="cumulative" stroke="#34d399" strokeWidth={2} dot={{ r: 3 }} />
+                      <Line type="monotone" dataKey="cumulative" name="Cumulative SPX points" stroke="#34d399" strokeWidth={2} dot={{ r: 3 }} />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
                 <div className="border border-white/10 bg-black/20 p-3">
-                  <p className="mb-3 text-xs font-bold uppercase tracking-[0.16em] text-zinc-500">Daily PnL</p>
+                  <p className="mb-3 text-xs font-bold uppercase tracking-[0.16em] text-zinc-500">Daily SPX points</p>
                   <ResponsiveContainer width="100%" height={260}>
                     <BarChart data={equityData} margin={{ top: 10, right: 12, left: -18, bottom: 0 }}>
                       <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
@@ -490,7 +495,7 @@ export function SPXRecapPage() {
                         contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.14)", color: "#fff" }}
                         labelStyle={{ color: "#fbbf24" }}
                       />
-                      <Bar dataKey="dailyPnl" radius={[2, 2, 0, 0]}>
+                      <Bar dataKey="dailyPnl" name="Daily SPX points" radius={[2, 2, 0, 0]}>
                         {equityData.map((item) => (
                           <Cell key={item.fullDate} fill={item.dailyPnl >= 0 ? "#34d399" : "#fb7185"} />
                         ))}
@@ -563,6 +568,7 @@ export function SPXRecapPage() {
                     Callout Table
                   </div>
                   <select
+                    aria-label="Callout status filter"
                     value={statusFilter}
                     onChange={(event) => setStatusFilter(event.target.value as TimelineStatus | "all")}
                     className="h-9 border border-white/10 bg-[#08090d] px-3 text-xs font-bold text-white outline-none"
@@ -583,7 +589,7 @@ export function SPXRecapPage() {
                         <th className="px-3 py-2">Status</th>
                         <th className="px-3 py-2">Side</th>
                         <th className="px-3 py-2">Price</th>
-                        <th className="px-3 py-2">PnL</th>
+                        <th className="px-3 py-2">SPX Δ (pts)</th>
                         <th className="px-3 py-2">Action</th>
                       </tr>
                     </thead>
@@ -637,12 +643,12 @@ export function SPXRecapPage() {
                     <tr>
                       <th className="px-3 py-2">Date</th>
                       <th className="px-3 py-2">Callouts</th>
-                      <th className="px-3 py-2">Trades</th>
+                      <th className="px-3 py-2">Callout count</th>
                       <th className="px-3 py-2">W/L/F</th>
                       <th className="px-3 py-2">Defense</th>
                       <th className="px-3 py-2">IC</th>
-                      <th className="px-3 py-2">Win Rate</th>
-                      <th className="px-3 py-2">PnL</th>
+                      <th className="px-3 py-2">Callout win rate</th>
+                      <th className="px-3 py-2">SPX Δ (pts)</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -690,7 +696,7 @@ export function SPXRecapPage() {
                       <p className="mt-1 font-mono text-lg font-black text-white">{formatPrice(selectedItem.price)}</p>
                     </div>
                     <div className={`border bg-black/20 px-4 py-3 ${statusMeta[selectedItem.status].border}`}>
-                      <p className="text-xs text-zinc-500">狀態 / PnL</p>
+                      <p className="text-xs text-zinc-500">狀態 / SPX 方向點數</p>
                       <p className={`mt-1 text-lg font-black ${statusMeta[selectedItem.status].text}`}>
                         {statusMeta[selectedItem.status].label} · {formatPnl(selectedItem.pnl)}
                       </p>
