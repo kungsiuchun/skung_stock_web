@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import type { D1DatabaseLike } from "../src/lib/spx-recap-d1";
 import { onRequest as watcher } from "../functions/api/stocks-intelligence-watcher";
 import { onRequestPost as report } from "../functions/api/research/report";
-import { publicResearchChat as chat } from "../functions/api/research/chat-service";
+import { publicResearchChat as chat, chatNarrativeEvidence } from "../functions/api/research/chat-service";
 import { onRequestPost as legacyChat } from "../functions/api/agent/chat";
 import { onRequestPost as finrobot } from "../functions/api/finrobot";
 import { onRequestPost as trading } from "../functions/api/trading-agent/query";
@@ -19,6 +19,17 @@ import { onRequest as middleware } from "../functions/api/_middleware";
 import { callResearchModel } from "../functions/api/research/model";
 
 const request = (body: unknown, path = "/api/research/report") => new Request(`https://example.test${path}`, { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json" } });
+test("chat distinguishes completed valid-row checks from excluded invalid rows without changing report evidence", () => {
+  for (const invalidBarCount of [0, 2]) {
+    const input = { symbol: "NVDA", quote: { changePercent: null }, technical: { invalidBarCount, dailyRange20: {} }, financials: null, sources: [] } as unknown as Parameters<typeof chatNarrativeEvidence>[0];
+    const before = JSON.stringify(input), projected = chatNarrativeEvidence(input);
+    assert.equal(projected.priceEvidence.dailyBarValidation, invalidBarCount
+      ? "invalid_rows_excluded_technical_metrics_unavailable"
+      : "all_supplied_rows_passed_validation_no_invalid_rows_found");
+    assert.ok(!("invalidBarsExcluded" in projected.priceEvidence));
+    assert.equal(JSON.stringify(input), before, "Chat projection must preserve report evidence/cache identity");
+  }
+});
 const sqlite = () => {
   const sql = new DatabaseSync(":memory:");
   sql.exec(readFileSync(new URL("../migrations/0009_market_data_cache.sql", import.meta.url), "utf8"));
@@ -104,6 +115,12 @@ test("public research agent and legacy report aliases share verified evidence/ca
     if (String(url).includes("openrouter.ai")) {
       models++; const payload = JSON.parse(init!.body as string); assert.equal(payload.model, "openai/gpt-6-luna"); assert.equal(payload.provider.max_price.prompt, 0.1);
       assert.ok(!JSON.stringify(payload).includes("fixture-private-memory"));
+      if (payload.messages[0].content.startsWith("Answer about")) {
+        const system = payload.messages[0].content as string;
+        const evidence = JSON.parse(system.slice(system.lastIndexOf("Evidence: ") + "Evidence: ".length));
+        assert.equal(evidence.priceEvidence.dailyBarValidation, "all_supplied_rows_passed_validation_no_invalid_rows_found");
+        assert.ok(!("invalidBarsExcluded" in evidence.priceEvidence), "No negative boolean that can imply validation was skipped");
+      }
       if (payload.messages?.[0]?.content.includes("equity evidence analyst")) {
         const evidence = JSON.parse(payload.messages.at(-1).content);
         assert.equal(evidence.priceEvidence.dailyCloseRange, "inside_observed_range");
