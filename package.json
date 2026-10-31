@@ -24,7 +24,7 @@
     "test:finance-agent-public-smoke": "node --import tsx --test --test-name-pattern=\"public research agent\" tests/watcher-api-contract.test.ts",
     "test:quant-strategies": "node --import tsx --test tests/quant-strategies.test.ts",
     "quant:audit": "tsx scripts/quant-strategy-audit.ts",
-    "test:stocks-watcher": "node --import tsx --test tests/stocks-intelligence-watcher.test.ts tests/stocks-watcher-runtime-cost.test.ts tests/stocks-watcher-robinhood-options.test.ts tests/fomc-rate-probability.test.ts tests/stocks-watcher-macro.test.ts tests/stocks-watcher-news.test.ts tests/watcher-workspace.test.ts",
+    "test:stocks-watcher": "node --import tsx --test tests/stocks-intelligence-watcher.test.ts tests/stocks-watcher-options-loading.test.ts tests/stocks-watcher-runtime-cost.test.ts tests/stocks-watcher-robinhood-options.test.ts tests/fomc-rate-probability.test.ts tests/stocks-watcher-macro.test.ts tests/stocks-watcher-news.test.ts tests/watcher-workspace.test.ts",
     "test:watcher-workspace": "node --import tsx --test tests/watcher-workspace.test.ts",
     "test:watcher-api": "node --import tsx --test tests/watcher-api-contract.test.ts tests/watcher-boundaries.test.ts",
     "test:functions-bundle": "wrangler pages functions build functions --outdir .tmp/functions-bundle",

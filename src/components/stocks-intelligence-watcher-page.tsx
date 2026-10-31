@@ -283,6 +283,7 @@ export function StocksIntelligenceWatcherPage({ embeddedSymbol, embedded = false
   const [fearGreedState, setFearGreedState] = useState<FearGreedPanelState>({ loading: false, error: null, data: null, cache: null });
   const fearGreedLoadedRef = useRef(false);
   const [subTabPanelState, setSubTabPanelState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
+  const optionsSubTabRequestRef = useRef(0);
   const [selectedExpiry, setSelectedExpiry] = useState<string | null>(embeddedExpiry || null);
   const [priceRange, setPriceRange] = useState<StocksWatcherPriceRange>(embeddedRange || "3mo");
   const [expiryOverviewState, setExpiryOverviewState] = useState<AsyncPanelState>({ loading: false, error: null, data: null });
@@ -921,10 +922,10 @@ export function StocksIntelligenceWatcherPage({ embeddedSymbol, embedded = false
     setChartTooltip(null);
     if (activeSubTab === "Overview") {
       void loadExpiryOverview(normalizedExpiry);
-    } else {
+    } else if (normalizedExpiry !== normalizeExpiryDate(currentExpiry)) {
       setSubTabPanelState({ loading: true, error: null, data: null });
     }
-  }, [activeSubTab, loadExpiryOverview, onEmbeddedExpiryChange]);
+  }, [activeSubTab, currentExpiry, loadExpiryOverview, onEmbeddedExpiryChange]);
 
   useEffect(() => {
     if (!embedded) return;
@@ -979,6 +980,7 @@ export function StocksIntelligenceWatcherPage({ embeddedSymbol, embedded = false
 
   const loadOptionsSubTab = useCallback(async (subTab: OptionsSubTab, force = false) => {
     if (subTab === "Overview") return;
+    const requestId = ++optionsSubTabRequestRef.current;
     const symbol = normalizeSymbol(selectedSymbol);
     const cacheKey = getStocksWatcherOptionsSubTabCacheKey(symbol, currentExpiry, subTab);
     const cached = force ? null : tabDataCache.current.get(cacheKey);
@@ -991,9 +993,9 @@ export function StocksIntelligenceWatcherPage({ embeddedSymbol, embedded = false
     try {
       const data = await runToolBundle(getStocksWatcherOptionsSubTabToolPlan(subTab, symbol, currentExpiry));
       tabDataCache.current.set(cacheKey, { data, fetchedAt: Date.now() });
-      setSubTabPanelState({ loading: false, error: null, data });
+      if (requestId === optionsSubTabRequestRef.current) setSubTabPanelState({ loading: false, error: null, data });
     } catch (requestError) {
-      setSubTabPanelState({
+      if (requestId === optionsSubTabRequestRef.current) setSubTabPanelState({
         loading: false,
         error: requestError instanceof Error ? requestError.message : String(requestError),
         data: null,
