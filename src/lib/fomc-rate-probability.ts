@@ -1,5 +1,9 @@
 export const POLYMARKET_FOMC_DECISION_URL = "https://gamma-api.polymarket.com/public-search?q=fed%20rate%20decision";
 export const POLYMARKET_EVENT_URL = (slug: string) => `https://polymarket.com/event/${slug}`;
+export const FEDERAL_RESERVE_FOMC_CALENDAR_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm";
+export const formatFomcMarketDeadline = (closesAt: string) => new Intl.DateTimeFormat("en-US", {
+  month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short", timeZone: "America/New_York",
+}).format(new Date(timestamp(closesAt, "event end date")));
 
 type OutcomeKey = "cut" | "hold" | "hike";
 
@@ -28,6 +32,7 @@ export interface FomcRateProbabilityResponse {
     eventSlug: string;
     title: string;
     date: string;
+    dateBasis?: "market_close_utc";
     closesAt: string;
     observedAt: string;
     rawProbabilityTotal: number;
@@ -51,7 +56,7 @@ const labelFor: Record<OutcomeKey, "Cut" | "Hold" | "Hike"> = { cut: "Cut", hold
 const roundedPercent = (value: number) => Number((value * 100).toFixed(1));
 
 const finiteNumber = (value: unknown, label: string) => {
-  const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  const number = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : Number.NaN;
   if (!Number.isFinite(number)) throw new FomcRateProbabilityError(`Polymarket ${label} is invalid.`);
   return number;
 };
@@ -133,7 +138,7 @@ export const buildFomcRateProbabilityResponse = (input: { events: PolymarketFomc
   const slug = requiredString(next.event.slug, "event slug");
 
   return {
-    meeting: { eventSlug: slug, title: next.title, date: next.closesAt.slice(0, 10), closesAt: next.closesAt, observedAt, rawProbabilityTotal, outcomes, noHikeProbability: Number((cut + hold).toFixed(1)), volume: Number(finiteNumber(next.event.volume, "event volume").toFixed(2)) },
+    meeting: { eventSlug: slug, title: next.title, date: new Date(next.closesAt).toISOString().slice(0, 10), dateBasis: "market_close_utc", closesAt: next.closesAt, observedAt, rawProbabilityTotal, outcomes, noHikeProbability: Number((cut + hold).toFixed(1)), volume: Number(finiteNumber(next.event.volume, "event volume").toFixed(2)) },
     source: { provider: "Polymarket", label: "Fed decision prediction markets", type: "prediction-market implied", url: POLYMARKET_EVENT_URL(slug), fetchedAt: input.fetchedAt },
   };
 };

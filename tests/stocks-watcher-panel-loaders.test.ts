@@ -126,6 +126,7 @@ const fomcData: FomcRateProbabilityResponse = {
     eventSlug: "fed-decision",
     title: "Fed Decision in October?",
     date: "2026-10-28",
+    dateBasis: "market_close_utc",
     closesAt: "2026-10-28T18:00:00.000Z",
     observedAt: "2026-10-18T00:00:00.000Z",
     rawProbabilityTotal: 1,
@@ -234,6 +235,17 @@ test("Fixed Income loaders enforce complete Treasury and FOMC provider contracts
 
   const fomc = await loadStocksWatcherFomc(fetchResponse(() => response(JSON.stringify(fomcData))));
   assert.equal(fomc.meeting.eventSlug, fomcData.meeting.eventSlug);
+  const legacyFomc = structuredClone(fomcData) as any;
+  delete legacyFomc.meeting.dateBasis;
+  assert.equal((await loadStocksWatcherFomc(fetchResponse(() => response(JSON.stringify(legacyFomc))))).meeting.closesAt, fomcData.meeting.closesAt);
+  const offsetFomc = { ...fomcData, meeting: { ...fomcData.meeting, title: "Fed Decision in December?", date: "2026-12-10", closesAt: "2026-12-09T23:59:00-05:00" } };
+  assert.equal((await loadStocksWatcherFomc(fetchResponse(() => response(JSON.stringify(offsetFomc))))).meeting.date, "2026-12-10");
+  const legacyOffsetFomc = structuredClone(offsetFomc);
+  delete legacyOffsetFomc.meeting.dateBasis;
+  legacyOffsetFomc.meeting.date = "2026-12-09";
+  assert.equal((await loadStocksWatcherFomc(fetchResponse(() => response(JSON.stringify(legacyOffsetFomc))))).meeting.closesAt, offsetFomc.meeting.closesAt);
+  await assert.rejects(() => loadStocksWatcherFomc(fetchResponse(() => response(JSON.stringify({ ...offsetFomc, meeting: { ...offsetFomc.meeting, date: "2026-12-09" } })))), /meeting\.date/);
+  await assert.rejects(() => loadStocksWatcherFomc(fetchResponse(() => response(JSON.stringify({ ...fomcData, meeting: { ...fomcData.meeting, dateBasis: "official_meeting" } })))), /meeting\.dateBasis/);
   const staleFomc = await loadStocksWatcherFomc(fetchResponse(() => response(JSON.stringify(fomcData), 206)));
   assert.equal(staleFomc.meeting.outcomes.length, 3);
   for (const observedAt of ["2026-10-19T06:33:13.576075Z", "2026-10-19T06:33:13.576075123Z"]) {
