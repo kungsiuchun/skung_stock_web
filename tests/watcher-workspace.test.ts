@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { scrollWorkspaceTable } from "../src/components/watcher-workspace-scroll";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { calculateTradePlan, parseWorkspaceSaved, EMPTY_WORKSPACE_SAVED, readWorkspaceRoute, workspaceHref, parseWorkspaceHistory, deriveWorkspaceEvidence, parseWorkspaceQuotes } from "../src/lib/watcher-workspace";
@@ -16,6 +17,16 @@ import type { MarketBreadthSnapshot } from "../src/lib/market-breadth";
 import { quoteRowFromYahooChartResult, NativeStocksYahooClient } from "../src/lib/stocks-native-yahoo";
 import { validateResearchReport } from "../src/lib/research-report";
 import { buildStocksWatcherSnapshotFromNative } from "../src/lib/stocks-intelligence-watcher";
+
+test("table arrow keys move horizontally without intercepting Tab or browser shortcuts", () => {
+  let left = 0, prevented = 0;
+  const key = (key: string, modifiers = {}) => scrollWorkspaceTable({ key, ...modifiers, preventDefault: () => { prevented++; }, currentTarget: { scrollBy: (options: ScrollToOptions) => { left += options.left || 0; } } } as unknown as Parameters<typeof scrollWorkspaceTable>[0]);
+  key("ArrowRight"); assert.equal(left, 120);
+  key("ArrowLeft"); assert.equal(left, 0);
+  for (const name of ["Tab", "ArrowUp", "ArrowDown", "Enter"]) key(name);
+  for (const name of ["altKey", "ctrlKey", "metaKey", "shiftKey"]) key("ArrowLeft", { [name]: true });
+  assert.equal(left, 0); assert.equal(prevented, 2);
+});
 
 function sqliteD1() {
   const sql = new DatabaseSync(":memory:");

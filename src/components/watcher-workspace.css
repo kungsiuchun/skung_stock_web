@@ -21,3 +21,4 @@
 .ww-tabs{scrollbar-width:none}.ww-tabs::-webkit-scrollbar{display:none}
 .ww-app[data-theme=light] .ww-embedded :is([class*="text-rose-100"],[class*="text-rose-200"],[class*="text-rose-300"],[class*="text-rose-400"]){color:var(--ww-red)}
 @media(max-width:600px){.ww-navigation{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));padding:0;overflow:visible}.ww-navigation>a{position:relative;display:flex;flex-direction:column;justify-content:center;gap:4px;padding:8px 2px;min-height:58px}.ww-navigation>a svg{width:16px;height:16px}.ww-nav-label{font-size:0}.ww-nav-label:after{content:attr(data-short);font-size:9px}.ww-navigation small{position:absolute;right:7px;top:4px;font-size:8px}.ww-navigation-note{display:none}}
+.ww-app .ww-scroll:focus-visible{outline:2px solid var(--ww-blue);outline-offset:3px}
