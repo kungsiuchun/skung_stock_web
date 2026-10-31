@@ -312,7 +312,9 @@ const validateFomcResponse = (value: unknown): value is FomcRateProbabilityRespo
   expectIsoDate(meeting.date, source, "meeting.date");
   expectTimestamp(meeting.closesAt, source, "meeting.closesAt");
   expectTimestamp(meeting.observedAt, source, "meeting.observedAt");
-  requireValid(meeting.date === (meeting.closesAt as string).slice(0, 10), source, "meeting.date");
+  requireValid(meeting.dateBasis === undefined || meeting.dateBasis === "market_close_utc", source, "meeting.dateBasis");
+  requireValid(meeting.date === new Date(meeting.closesAt as string).toISOString().slice(0, 10)
+    || (meeting.dateBasis === undefined && meeting.date === (meeting.closesAt as string).slice(0, 10)), source, "meeting.date");
   expectFiniteNumber(meeting.rawProbabilityTotal, source, "meeting.rawProbabilityTotal");
   const outcomes = expectArray(meeting.outcomes, source, "meeting.outcomes");
   requireValid(outcomes.length === Object.keys(FOMC_OUTCOME_LABELS).length, source, "meeting.outcomes");
