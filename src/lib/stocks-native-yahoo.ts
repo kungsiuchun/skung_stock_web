@@ -210,7 +210,8 @@ export const yahooJson = async <T>(url: string, options: RequestInit = {}, maxBy
   if (!response.ok) {
     throw new YahooDataError(`Yahoo request failed HTTP ${response.status}.`, response.status === 429 ? 429 : 502);
   }
-  return JSON.parse(text) as T;
+  try { return JSON.parse(text) as T; }
+  catch { throw new YahooDataError("Yahoo response was not valid JSON."); }
 };
 
 const getYahooSession = async () => {
