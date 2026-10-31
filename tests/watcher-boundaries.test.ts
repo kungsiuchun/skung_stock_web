@@ -91,7 +91,7 @@ test("options reject wrong provider identities and keep missing sweep ratios dis
   let symbol = "AAPL", expiry = "2026-10-30", spot: number | null = 200;
   const chain = () => ({ optionChain: { result: [{ quote: { symbol, regularMarketPrice: spot }, expirationDates: [Date.parse(expiry) / 1000], options: [{ expirationDate: Date.parse(expiry) / 1000, calls: [{ strike: 180, openInterest: null, volume: 10 }], puts: [{ strike: 180, openInterest: 20, volume: null }, { strike: 185, openInterest: 20, volume: 0 }] }] }] } });
   globalThis.fetch = (async url => {
-    if (String(url).startsWith("https://fc.yahoo.com")) return new Response("", { headers: { "set-cookie": "fixture-only" } });
+    if (String(url).startsWith("https://fc.yahoo.com")) return new Response("", { headers: { "set-cookie": "fixture=only; Path=/" } });
     if (String(url).includes("/getcrumb")) return new Response("fixture-crumb");
     if (String(url).includes("/finance/options/")) return Response.json(chain());
     throw new Error("Unexpected mock route");

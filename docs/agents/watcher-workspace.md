@@ -92,6 +92,9 @@
   response still contains only the requested language; switching language reuses
   that bundle while its evidence identity remains the same. A partly valid bundle
   is rejected, never published. Chat and theme reports keep their own contracts.
+- Theme headlines use the existing bounded Yahoo transport and source dates.
+  Upstream rate/size/time failures stop before any model allowance or money is
+  reserved; a failed data lookup is not a real model attempt.
 - Minimal model receipts record the schema fingerprint, format, model/provider,
   generation ID, finish reason and reserved/actual cost and token metadata. They do not log
   prompts, questions, report prose or private conversation history.

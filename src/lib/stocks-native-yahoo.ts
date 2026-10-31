@@ -194,7 +194,11 @@ const normalizeToolTicker = (params: Record<string, unknown>, fallback = DEFAULT
     fallback,
   );
 
-const yahooJson = async <T>(url: string, options: RequestInit = {}) => {
+export class YahooDataError extends Error {
+  constructor(message: string, public status = 502) { super(message); }
+}
+
+export const yahooJson = async <T>(url: string, options: RequestInit = {}, maxBytes = 2 * 1024 * 1024) => {
   const { response, text } = await fetchBoundedText(url, {
     ...options,
     headers: {
@@ -202,11 +206,12 @@ const yahooJson = async <T>(url: string, options: RequestInit = {}) => {
       Accept: "application/json,text/plain,*/*",
       ...(options.headers || {}),
     },
-  });
+  }, maxBytes);
   if (!response.ok) {
-    throw new Error(`Yahoo request failed ${response.status}: ${text.slice(0, 180)}`);
+    throw new YahooDataError(`Yahoo request failed HTTP ${response.status}.`, response.status === 429 ? 429 : 502);
   }
-  return JSON.parse(text) as T;
+  try { return JSON.parse(text) as T; }
+  catch { throw new YahooDataError("Yahoo response was not valid JSON."); }
 };
 
 const getYahooSession = async () => {
@@ -216,7 +221,11 @@ const getYahooSession = async () => {
   const { response: cookieResponse } = await fetchBoundedText("https://fc.yahoo.com", {
     headers: { "User-Agent": YAHOO_UA },
   }, 64 * 1024);
-  const cookie = cookieResponse.headers.get("set-cookie") || "";
+  const cookieHeaders = (cookieResponse.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie?.() || [cookieResponse.headers.get("set-cookie") || ""];
+  const pairs = cookieHeaders.flatMap(value => value.split(/,(?=\s*[^;,\s=]+=)/))
+    .map(value => value.split(";")[0].trim()).filter(value => /^[^\s;,=]+=[^\s;,]+$/.test(value));
+  const cookie = [...new Map(pairs.map(pair => [pair.slice(0, pair.indexOf("=")), pair])).values()].join("; ");
+  if (!cookie) throw new YahooDataError("Yahoo did not provide a valid session cookie.");
   const { response: crumbResponse, text: crumb } = await fetchBoundedText("https://query2.finance.yahoo.com/v1/test/getcrumb", {
     headers: {
       "User-Agent": YAHOO_UA,
@@ -224,8 +233,9 @@ const getYahooSession = async () => {
     },
   }, 4096);
   if (!crumbResponse.ok) {
-    throw new Error(`Yahoo crumb request failed ${crumbResponse.status}`);
+    throw new YahooDataError(`Yahoo crumb request failed HTTP ${crumbResponse.status}.`, crumbResponse.status === 429 ? 429 : 502);
   }
+  if (!/^[A-Za-z0-9._~+/=-]{1,256}$/.test(crumb.trim())) throw new YahooDataError("Yahoo returned an invalid session crumb.");
 
   yahooSession = {
     cookie,
@@ -235,7 +245,7 @@ const getYahooSession = async () => {
   return yahooSession;
 };
 
-const yahooAuthedJson = async <T>(url: string) => {
+export const yahooAuthedJson = async <T>(url: string) => {
   const session = await getYahooSession();
   const separator = url.includes("?") ? "&" : "?";
   return yahooJson<T>(`${url}${separator}crumb=${encodeURIComponent(session.crumb)}`, {
