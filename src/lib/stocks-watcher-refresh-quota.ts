@@ -14,7 +14,9 @@ export const STOCKS_WATCHER_CACHE_REFRESH_READ_RESERVE = 3;
 export const STOCKS_WATCHER_CACHE_REFRESH_WRITE_RESERVE = 2 * MARKET_CACHE_WRITE_INDEX_AMPLIFICATION;
 /** The production curated universe is explicitly capped at twenty active assets. */
 export const STOCKS_WATCHER_TRACKED_ASSET_READ_RESERVE = 20;
-export const STOCKS_WATCHER_SNAPSHOT_LOADER_READ_RESERVE = STOCKS_WATCHER_TRACKED_ASSET_READ_RESERVE + 1;
+/** At most nine tool-cache lookups; misses run under the snapshot's single reservation. */
+export const STOCKS_WATCHER_SNAPSHOT_TOOL_READ_RESERVE = 9;
+export const STOCKS_WATCHER_SNAPSHOT_LOADER_READ_RESERVE = STOCKS_WATCHER_TRACKED_ASSET_READ_RESERVE + 1 + STOCKS_WATCHER_SNAPSHOT_TOOL_READ_RESERVE;
 
 const utcDay = (now: Date) => now.toISOString().slice(0, 10);
 

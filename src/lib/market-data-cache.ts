@@ -323,6 +323,15 @@ const readRow = async (db: D1DatabaseLike, cacheKey: string) =>
     .bind(cacheKey)
     .first<MarketCacheRow>();
 
+/** A snapshot's outer reservation owns these bounded indexed reads; this never writes. */
+export const readFreshMarketCache = async <T>(options: Pick<ResolveMarketCacheOptions<T>, "db" | "scope" | "symbol" | "params" | "validate" | "now">): Promise<T | null> => {
+  if (!options.db) return null;
+  const row = await readRow(options.db, buildMarketCacheKey(options.scope, options.symbol, options.params));
+  if (!row || !Number.isFinite(Date.parse(row.expires_at)) || Date.parse(row.expires_at) <= (options.now?.() || new Date()).getTime()) return null;
+  const value = parseRow<T>(row);
+  return options.validate && !options.validate(value) ? null : value;
+};
+
 const metaNumberFrom = (result: unknown, key: string) => {
   if (!result || typeof result !== "object") return null;
   const record = result as Record<string, unknown>;

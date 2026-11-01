@@ -9,12 +9,16 @@ import {
   normalizeStocksWatcherSymbol,
   listNativeStocksTools,
   validateNativeStocksToolParams,
+  YahooDataError,
+  resolveStocksWatcherYahooSymbol,
+  type StocksNativeToolResult,
 } from "../../src/lib/stocks-native-yahoo";
 import {
   classifyMarketCacheDataset,
   getMarketCacheDatasetTtlMs,
   MarketCacheQuotaExceededError,
   resolveMarketCache,
+  readFreshMarketCache,
   type MarketCacheDataset,
 } from "../../src/lib/market-data-cache";
 import type { D1DatabaseLike } from "../../src/lib/spx-recap-d1";
@@ -117,7 +121,7 @@ const requestIdFor = (request: Request) => {
   }
 };
 
-const watcherQuotaFailure = (error: unknown) => {
+export const watcherQuotaFailure = (error: unknown) => {
   if (error instanceof PublicResearchLimitError) return { status: error.status, errorCode: "PUBLIC_USAGE_LIMIT" as const, error: error.message, quota: { reason: "public_usage_limit" } };
   if (!(error instanceof MarketCacheQuotaExceededError)) return null;
   const { decision } = error;
@@ -348,6 +352,37 @@ export const attachPublishedWatcherData = async (
   };
 };
 
+const validNativeToolValue = (tool: string, params: Record<string, unknown>, value: { raw?: unknown }) => {
+  const raw = value?.raw as Record<string, unknown> | null;
+  if (!raw || raw.source !== "native_yahoo") return false;
+  const symbol = toolSymbol(params);
+  const quoteValid = (value: unknown, expected?: string) => {
+    const quote = value as { symbol?: string; price?: number; currency?: string; asOf?: string } | null;
+    return Boolean(quote && typeof quote.symbol === "string" && (!expected || quote.symbol === expected)
+      && typeof quote.price === "number" && Number.isFinite(quote.price) && quote.price > 0
+      && typeof quote.currency === "string" && /^[A-Z]{3}$/.test(quote.currency)
+      && typeof quote.asOf === "string" && Number.isFinite(Date.parse(quote.asOf)));
+  };
+  if (tool === "get_quotes") {
+    const expected = (getNativeStocksToolCacheParams(tool, params) as Record<string, unknown>).tickers;
+    return Array.isArray(expected) && Array.isArray(raw.quotes) && raw.quotes.length > 0 && raw.quotes.every(quote => quoteValid(quote) && expected.includes((quote as { symbol: string }).symbol));
+  }
+  if (tool === "get_stock_stats") return quoteValid(raw.quote, symbol)
+    && (raw.summary as { price?: { symbol?: string } } | null)?.price?.symbol === resolveStocksWatcherYahooSymbol(symbol).yahooSymbol;
+  if (raw.quote && !quoteValid(raw.quote, symbol)) return false;
+  if (raw.ticker && raw.ticker !== symbol) return false;
+  if (raw.chain && (raw.chain as { symbol?: string }).symbol !== symbol) return false;
+  const required = ({ get_options: "chain", get_options_gex: "exposures", get_intraday: "history", get_stock_history: "history", market_breadth: "quotes", basket_relative_strength: "ranked", pre_event_brief: "stats", earnings_vol_crush: "stats" } as Record<string, string>)[tool];
+  return !required || Boolean(raw[required] && (!Array.isArray(raw[required]) || (raw[required] as unknown[]).length));
+};
+
+const completeQuoteBatch = (params: Record<string, unknown>, value: { raw?: unknown }) => {
+  const raw = value?.raw as { partial?: boolean; quotes?: Array<{ symbol: string }> } | null;
+  const expected = (getNativeStocksToolCacheParams("get_quotes", params) as Record<string, unknown>).tickers;
+  const symbols = new Set(raw?.quotes?.map(quote => quote.symbol));
+  return raw?.partial !== true && Array.isArray(expected) && symbols.size === expected.length && expected.every(symbol => symbols.has(symbol));
+};
+
 const callNativeTool = async (
   tool: string,
   params: Record<string, unknown>,
@@ -454,6 +489,7 @@ const callNativeTool = async (
     params: { ...cacheParams, dataSchema: "observed-v3" },
     dataset,
     ttlMs: getMarketCacheDatasetTtlMs(dataset),
+    validate: value => validNativeToolValue(tool, params, value),
     refreshQuotaGuard: env.MARKET_CACHE_DB
       ? () => reserveStocksWatcherCacheRefreshQuota(env.MARKET_CACHE_DB!)
       : undefined,
@@ -464,6 +500,7 @@ const callNativeTool = async (
       return { text: result.text, raw: result.raw };
     },
   });
+  const partialQuotes = tool === "get_quotes" && !completeQuoteBatch(params, resolved.value);
   return json(
     {
       ok: true,
@@ -471,7 +508,7 @@ const callNativeTool = async (
       tool,
       params,
       text: resolved.value.text,
-      raw: resolved.value.raw,
+      raw: partialQuotes ? { ...(resolved.value.raw as Record<string, unknown>), partial: true } : resolved.value.raw,
       calledAt: new Date().toISOString(),
       cache: resolved.cache,
       observability: {
@@ -486,6 +523,7 @@ const callNativeTool = async (
       } satisfies WatcherApiObservability,
     },
     {
+      status: partialQuotes || resolved.cache.status === "stale" ? 206 : 200,
       headers: {
         "X-Request-ID": requestId,
         "X-Market-Dataset": dataset,
@@ -495,11 +533,16 @@ const callNativeTool = async (
   );
 };
 
-/**
- * `tracked_assets` is the only public Watcher-universe authority. Deliberately
- * do not fall back to the retired static list: an unavailable D1 binding or an
- * empty/invalid curated list must remain visible as an API failure.
- */
+/** Reuse the public tool cache without presenting stale or failed reads as fresh data. */
+export const readFreshWatcherTool = async (tool: string, params: Record<string, unknown>, env: Env, requestId: string) => {
+  const response = await callNativeTool(tool, params, env, requestId);
+  const body = await response.json() as { ok: boolean; text: string; raw: unknown; error?: string; cache: { status: string; refreshError?: string } };
+  if (response.status !== 200 || !body.ok || body.cache.status === "stale")
+    throw new YahooDataError(body.cache?.refreshError || body.error || `Fresh ${tool} data is unavailable.`, body.cache?.status === "stale" || response.status === 206 ? 503 : response.status >= 400 ? response.status : 502);
+  return { text: body.text, raw: body.raw, cache: body.cache };
+};
+
+/** `tracked_assets` is the only public Watcher-universe authority. */
 const callTrackedWatchlist = async (env: Env, requestId: string) => {
   const startedAt = Date.now();
   const tool = "get_watchlist";
@@ -693,7 +736,7 @@ export async function onRequest(context: { request: Request; env?: Env }) {
       db: env.MARKET_CACHE_DB,
       scope,
       symbol,
-      params: optionsOnly ? { symbol, surface: "options", schema: 3 } : { symbol, gexDataSchema: "observed-v3" },
+      params: optionsOnly ? { symbol, surface: "options", schema: 4 } : { symbol, gexDataSchema: "shared-tool-v4" },
       dataset,
       ttlMs: getMarketCacheDatasetTtlMs(dataset),
       refreshQuotaGuard: env.MARKET_CACHE_DB
@@ -706,9 +749,19 @@ export async function onRequest(context: { request: Request; env?: Env }) {
       sourceAsOf: (snapshot) => snapshot.quote.asOf,
       load: async () => {
         const published = await resolveCuratedRobinhoodOptions(env, symbol);
+        const native = new NativeStocksYahooClient();
+        const callTool = async (tool: string, params: Record<string, unknown>) => {
+          const cacheParams = getNativeStocksToolCacheParams(tool, params);
+          const usable = (value: StocksNativeToolResult) => validNativeToolValue(tool, params, value) && (tool !== "get_quotes" || completeQuoteBatch(params, value));
+          const cached = await readFreshMarketCache<StocksNativeToolResult>({ db: env.MARKET_CACHE_DB, scope: "stocks-watcher-tool", symbol: getNativeStocksToolCacheSymbol(cacheParams), params: { ...cacheParams, dataSchema: "observed-v3" }, validate: usable });
+          if (cached) return cached;
+          const result = await native.callTool(tool, params);
+          if (!usable(result)) throw new YahooDataError(`Invalid or incomplete ${tool} source data.`);
+          return result;
+        };
         const snapshot = await buildStocksWatcherSnapshotFromNative(
             symbol,
-            new NativeStocksYahooClient(),
+            { listTools: async () => listNativeStocksTools(), failOnToolError: true, callTool, callToolText: async (tool, params) => (await callTool(tool, params)).text },
             published.curated
               ? "snapshot" in published
                 ? { snapshot: published.snapshot }

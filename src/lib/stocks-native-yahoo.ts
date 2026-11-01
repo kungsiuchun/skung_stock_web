@@ -637,7 +637,7 @@ const markdownExposure = (chain: OptionChain, greek: "gex" | "dex", topRows = 12
 
 const latestQuoteSummaryText = async (ticker: string) => {
   const quote = await fetchQuote(ticker);
-  const summary = await fetchQuoteSummary(ticker).catch(() => null);
+  const summary = await fetchQuoteSummary(ticker);
   const stats = summary?.defaultKeyStatistics || {};
   const financial = summary?.financialData || {};
   const profile = summary?.assetProfile || {};
@@ -1187,10 +1187,10 @@ export const getNativeStocksToolCacheParams = (
   if (["get_watchlist", "list_memories", "share_html"].includes(canonicalName)) return { tool: canonicalName };
   if (canonicalName === "save_memory") return { tool: canonicalName, params };
   if (canonicalName === "get_quotes") {
-    const requested = String(params.tickers || "").trim()
-      .split(",")
+    const rawTickers = String(params.tickers || "").trim();
+    const requested = rawTickers ? rawTickers.split(",")
       .map((item) => normalizeStocksWatcherSymbol(item))
-      .filter(Boolean);
+      .filter(Boolean) : [];
     return { tool: canonicalName, tickers: Array.from(new Set(requested.length > 0 ? requested : STOCKS_WATCHER_QUOTE_SYMBOLS)), quoteSchemaVersion: "quality-v2" };
   }
   if (["get_intraday", "get_stock_stats", "get_beta", "earnings_vol_crush"].includes(canonicalName)) return { tool: canonicalName, ticker: context.ticker };
