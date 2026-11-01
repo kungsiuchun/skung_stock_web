@@ -17,8 +17,51 @@ import { onRequestGet as session } from "../functions/api/stocks-intelligence-wa
 import { onRequestPost as logout } from "../functions/api/stocks-intelligence-watcher/auth/logout";
 import { onRequest as middleware } from "../functions/api/_middleware";
 import { callResearchModel } from "../functions/api/research/model";
+import { onRequest as fundamentals } from "../functions/api/fundamentals";
+import { NativeStocksYahooClient } from "../src/lib/stocks-native-yahoo";
 
 const request = (body: unknown, path = "/api/research/report") => new Request(`https://example.test${path}`, { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json" } });
+test("legacy reads reuse successful tool data while the upstream provider is unavailable", async (t) => {
+  for (const surface of ["options snapshot", "fundamentals", "expired fundamentals", "corrupt fundamentals"]) await t.test(surface, async (step) => {
+    const { db, sql } = sqlite();sql.exec(readFileSync(new URL("../migrations/0012_stocks_watcher_tracking.sql", import.meta.url), "utf8"));
+    const quote = { symbol: "NVDA", name: "NVIDIA", price: 200, change: -1, changePercent: -0.5, currency: "USD", asOf: "2026-10-30T20:00:00.000Z" };
+    const chain = { symbol: "NVDA", spot: 200, selectedExpiry: "2026-11-02", expiries: ["2026-11-02"], calls: [{ contractSymbol: "NVDA261102C00200000", strike: 200, openInterest: 10, volume: 20 }], puts: [{ contractSymbol: "NVDA261102P00200000", strike: 200, openInterest: 15, volume: 30 }] };
+    let providerCalls=0,blocked=false;
+    step.mock.method(NativeStocksYahooClient.prototype,"callTool",async (tool: string) => {
+      providerCalls++;if(blocked)throw new Error("Fixture provider is unavailable");
+      const raw = tool === "get_quotes" ? { quotes: [quote] } : tool === "get_options" ? { chain, exposures: [{ strike: 200, callOpenInterest: 10, putOpenInterest: 15, callGex: 20, putGex: -30, netGex: -10, netDex: -5, callVolume: 20, putVolume: 30 }] } : { quote, summary: { price: { symbol: "NVDA", regularMarketPrice: { raw: 200, fmt: "200.00" } } } };
+      return {text:"Fixture public source data",raw:{source:"native_yahoo",...raw}};
+    });
+    step.mock.method(globalThis,"fetch",async () => {throw new Error("Direct provider reads are blocked");});
+    try {
+      for(const [tool,params] of [["get_quotes",{tickers:"NVDA"}],["get_options",{ticker:"NVDA",strikesAroundAtm:25}],["get_stock_stats",{ticker:"NVDA"}]] as const){const warmed=await watcher({request:request({tool,params}),env:{MARKET_CACHE_DB:db}});assert.equal(warmed.status,200);}
+      if(surface.startsWith("expired")||surface.startsWith("corrupt")){
+        const row=sql.prepare("SELECT cache_key,payload_json FROM market_cache_entries WHERE scope='stocks-watcher-tool'").all().find(row=>Boolean(JSON.parse(String(row.payload_json)).raw?.summary))!;
+        if(surface.startsWith("expired"))sql.prepare("UPDATE market_cache_entries SET expires_at='2000-01-01' WHERE cache_key=?").run(row.cache_key);
+        else {const value=JSON.parse(String(row.payload_json));value.raw.summary=null;sql.prepare("UPDATE market_cache_entries SET payload_json=? WHERE cache_key=?").run(JSON.stringify(value),row.cache_key);}
+      }
+      blocked=true;const before=providerCalls;
+      const response=surface==="options snapshot" ? await watcher({request:new Request("https://example.test/api/stocks-intelligence-watcher?symbol=NVDA&surface=options"),env:{MARKET_CACHE_DB:db}}) : await fundamentals({request:new Request("https://example.test/api/fundamentals?symbol=NVDA"),env:{MARKET_CACHE_DB:db}});
+      if(surface.startsWith("expired")||surface.startsWith("corrupt")){assert.equal(response.status,surface.startsWith("expired")?503:502);assert.equal(providerCalls,before+1);assert.ok((await response.json() as any).error);return;}
+      assert.equal(response.status,200);const body=await response.json() as any;
+      if(surface==="options snapshot"){assert.equal(body.quote.price,200);assert.deepEqual(body.availableExpiries,["2026-11-02"]);assert.ok(body.strikes.length>0);}
+      else {assert.equal(body.symbol,"NVDA");assert.equal(body.current_price,"200");assert.equal(body.cache.status,"hit");assert.equal(body.quoteCache.status,"hit");assert.equal(body.sourceAsOf,quote.asOf);}
+      assert.equal(providerCalls,before,"fresh shared tool data must not trigger another provider read");
+    } finally {sql.close();}
+  });
+});
+
+test("native stock statistics do not swallow a Yahoo summary rate limit", async (t) => {
+  t.mock.method(globalThis,"fetch",async (input: RequestInfo | URL) => {
+    const url=String(input);
+    if(url.startsWith("https://fc.yahoo.com"))return new Response("",{headers:{"set-cookie":"fixture=only; Path=/"}});
+    if(url.includes("/getcrumb"))return new Response("fixture-crumb");
+    if(url.includes("quoteSummary"))return new Response("limited",{status:429});
+    if(url.includes("/chart/"))return Response.json({chart:{result:[{meta:{symbol:"NVDA",currency:"USD",regularMarketPrice:200,regularMarketTime:1793380800,chartPreviousClose:201,exchangeName:"NMS"}}]}});
+    throw new Error("Unexpected fixture request");
+  });
+  await assert.rejects(new NativeStocksYahooClient().callTool("get_stock_stats",{ticker:"NVDA"}),/429/);
+});
 test("chat distinguishes completed valid-row checks from excluded invalid rows without changing report evidence", () => {
   for (const invalidBarCount of [0, 2]) {
     const input = { symbol: "NVDA", quote: { changePercent: null }, technical: { invalidBarCount, dailyRange20: {} }, financials: null, sources: [] } as unknown as Parameters<typeof chatNarrativeEvidence>[0];

@@ -9,6 +9,8 @@ import {
   normalizeStocksWatcherSymbol,
   listNativeStocksTools,
   validateNativeStocksToolParams,
+  YahooDataError,
+  resolveStocksWatcherYahooSymbol,
 } from "../../src/lib/stocks-native-yahoo";
 import {
   classifyMarketCacheDataset,
@@ -117,7 +119,7 @@ const requestIdFor = (request: Request) => {
   }
 };
 
-const watcherQuotaFailure = (error: unknown) => {
+export const watcherQuotaFailure = (error: unknown) => {
   if (error instanceof PublicResearchLimitError) return { status: error.status, errorCode: "PUBLIC_USAGE_LIMIT" as const, error: error.message, quota: { reason: "public_usage_limit" } };
   if (!(error instanceof MarketCacheQuotaExceededError)) return null;
   const { decision } = error;
@@ -454,6 +456,12 @@ const callNativeTool = async (
     params: { ...cacheParams, dataSchema: "observed-v3" },
     dataset,
     ttlMs: getMarketCacheDatasetTtlMs(dataset),
+    validate: tool === "get_stock_stats" ? value => {
+      const raw = value?.raw as { quote?: { symbol?: string; price?: number }; summary?: { price?: { symbol?: string } } };
+      return raw?.quote?.symbol === toolSymbol(params)
+        && typeof raw.quote.price === "number" && Number.isFinite(raw.quote.price) && raw.quote.price > 0
+        && raw.summary?.price?.symbol === resolveStocksWatcherYahooSymbol(toolSymbol(params)).yahooSymbol;
+    } : undefined,
     refreshQuotaGuard: env.MARKET_CACHE_DB
       ? () => reserveStocksWatcherCacheRefreshQuota(env.MARKET_CACHE_DB!)
       : undefined,
@@ -500,6 +508,15 @@ const callNativeTool = async (
  * do not fall back to the retired static list: an unavailable D1 binding or an
  * empty/invalid curated list must remain visible as an API failure.
  */
+/** Reuse the public tool cache without presenting stale or failed reads as fresh data. */
+export const readFreshWatcherTool = async (tool: string, params: Record<string, unknown>, env: Env, requestId: string) => {
+  const response = await callNativeTool(tool, params, env, requestId);
+  const body = await response.json() as { ok: boolean; text: string; raw: unknown; error?: string; cache: { status: string; refreshError?: string } };
+  if (response.status !== 200 || !body.ok || body.cache.status === "stale")
+    throw new YahooDataError(body.cache?.refreshError || body.error || `Fresh ${tool} data is unavailable.`, body.cache?.status === "stale" || response.status === 206 ? 503 : response.status >= 400 ? response.status : 502);
+  return { text: body.text, raw: body.raw, cache: body.cache };
+};
+
 const callTrackedWatchlist = async (env: Env, requestId: string) => {
   const startedAt = Date.now();
   const tool = "get_watchlist";
@@ -693,7 +710,7 @@ export async function onRequest(context: { request: Request; env?: Env }) {
       db: env.MARKET_CACHE_DB,
       scope,
       symbol,
-      params: optionsOnly ? { symbol, surface: "options", schema: 3 } : { symbol, gexDataSchema: "observed-v3" },
+      params: optionsOnly ? { symbol, surface: "options", schema: 4 } : { symbol, gexDataSchema: "shared-tool-v4" },
       dataset,
       ttlMs: getMarketCacheDatasetTtlMs(dataset),
       refreshQuotaGuard: env.MARKET_CACHE_DB
@@ -706,9 +723,10 @@ export async function onRequest(context: { request: Request; env?: Env }) {
       sourceAsOf: (snapshot) => snapshot.quote.asOf,
       load: async () => {
         const published = await resolveCuratedRobinhoodOptions(env, symbol);
+        const callTool = (tool: string, params: Record<string, unknown>) => readFreshWatcherTool(tool, params, env, requestId);
         const snapshot = await buildStocksWatcherSnapshotFromNative(
             symbol,
-            new NativeStocksYahooClient(),
+            { listTools: async () => listNativeStocksTools(), callTool, callToolText: async (tool, params) => (await callTool(tool, params)).text },
             published.curated
               ? "snapshot" in published
                 ? { snapshot: published.snapshot }

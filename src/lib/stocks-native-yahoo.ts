@@ -637,7 +637,7 @@ const markdownExposure = (chain: OptionChain, greek: "gex" | "dex", topRows = 12
 
 const latestQuoteSummaryText = async (ticker: string) => {
   const quote = await fetchQuote(ticker);
-  const summary = await fetchQuoteSummary(ticker).catch(() => null);
+  const summary = await fetchQuoteSummary(ticker);
   const stats = summary?.defaultKeyStatistics || {};
   const financial = summary?.financialData || {};
   const profile = summary?.assetProfile || {};

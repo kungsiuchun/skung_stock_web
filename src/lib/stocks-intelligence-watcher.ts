@@ -870,9 +870,6 @@ export const buildStocksWatcherSnapshotFromNative = async (
       const result = await callToolStructuredWithVariants(client, "get_options_gex", [{ ticker: upperSymbol, expiry: frontExpiry, topRows: 20 }], toolRuns);
       gexRows = observedStrikeRows(result.raw);
     }
-    if (options.surface !== "options") await callToolWithVariants(client, "get_options_0dte", [
-      { ticker: upperSymbol },
-    ], toolRuns);
   }
   const deferred = { text: "", raw: null };
   const intradayResult = options.surface === "options" ? deferred : await callToolStructuredWithVariants(client, "get_intraday", [

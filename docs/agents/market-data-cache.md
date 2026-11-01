@@ -5,6 +5,12 @@ snapshot caching, or migration `0009_market_data_cache.sql`.
 
 - Watcher and Finance Analyzer use the optional `MARKET_CACHE_DB` D1 binding as
   a 60-second shared market snapshot cache.
+- Legacy Watcher snapshots read through the same tool cache as individual tool
+  requests. Fundamentals reuses the 24-hour stock-statistics entry and a separate
+  60-second quote entry, retaining both source times. These assembled reads reject
+  stale tool responses and corrupt/absent stock summaries; provider failures must
+  never be cached as a successful empty summary. Without D1, fundamentals keeps
+  its explicit direct-provider contract.
 - Keep it separate from `SPX_RECAP_DB`, which is an SPX decision/audit ledger.
 - Production binds `MARKET_CACHE_DB` to `market-cache-db`
   (`c629da02-21ce-4b1c-87f2-59ba54be922e`). Apply only migration `0009` to it;
