@@ -882,15 +882,15 @@ function PriceActionChartCanvas({
       ref={containerRef}
       data-pa-chart-expanded={expanded ? "true" : "false"}
     >
-      <div className="flex items-center justify-between border-b border-[#123142] bg-black/30 px-3 py-2">
-        <div className="flex items-center gap-3 font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200/75">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#123142] bg-black/30 px-3 py-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200/75">
           <span>{candles.length} candles</span>
           <span>{visibleCandles.length} visible</span>
           <span>{signalDensity === "actionable" ? `${actionablePatternCount} actionable` : `${patterns.length} visible patterns`}</span>
           {signalDensity === "actionable" && selectedOverrideCount > 0 && <span>+ {selectedOverrideCount} selected</span>}
           <span>{totalPatternCount} detected</span>
         </div>
-        <div className="relative flex items-center gap-1">
+        <div className="relative flex shrink-0 items-center gap-1">
           <button type="button" className="h-7 w-7 border border-white/10 text-zinc-300 hover:bg-white/10" onClick={() => setZoom((value) => Math.min(candles.length, Math.round(value * 1.2)))} title="Zoom out">
             <ZoomOut className="mx-auto h-3.5 w-3.5" />
           </button>
