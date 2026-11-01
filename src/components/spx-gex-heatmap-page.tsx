@@ -13,6 +13,7 @@ import { SpxBoardOverview, type PressureOverview } from "./spx-board-overview";
 import { SpxPriceActionCompass } from "./spx-price-action-compass";
 import { SpxGexPressureMatrix } from "./spx-gex-pressure-matrix";
 import { SpxGexInlineTooltip, SpxGexTooltip, SpxGexTooltipSection } from "./spx-gex-tooltip";
+import { scrollWorkspaceTable } from "./watcher-workspace-scroll";
 
 interface ActiveGexAuditCell {
   key: string;
@@ -678,7 +679,7 @@ export function SPXGexHeatmapPage() {
               </div>
             </div>
 
-            <div className="overflow-x-auto bg-[#030910]" data-spx-gex-heatmap-board="true" onScroll={() => setActiveAuditCell(null)}>
+            <div className="ww-scroll overflow-x-auto bg-[#030910]" tabIndex={0} role="region" aria-label="SPX exposure table; use left and right arrow keys to scroll" onKeyDown={scrollWorkspaceTable} data-spx-gex-heatmap-board="true" onScroll={() => setActiveAuditCell(null)}>
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#123142] bg-[#06111a] px-3 py-2">
                 <div className="flex flex-wrap items-center gap-3 font-mono text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200/70">
                   <span>{visibleStrikes.length} / {heatmap.strikes.length} strikes</span>
