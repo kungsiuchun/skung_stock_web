@@ -292,6 +292,58 @@ test("owner auth requires verified allowed email, validates OAuth state, signs s
   } finally { globalThis.fetch = fetchBefore; }
 });
 
+test("OAuth provider failures return bounded JSON errors without creating a session", async (t) => {
+  const env = { GITHUB_CLIENT_ID: "fixture-client", GITHUB_CLIENT_SECRET: "fixture-secret", STOCKS_WATCHER_SESSION_SECRET: "fixture-session-secret", STOCKS_WATCHER_ALLOWED_EMAIL: "owner@example.test" };
+  const cases = [
+    { name: "provider denied", denied: true, status: 400, error: "AUTH_PROVIDER_DENIED", calls: 0 },
+    { name: "token HTTP failure", token: () => new Response(null, { status: 503 }), error: "AUTH_GITHUB_TOKEN_FAILED", calls: 1 },
+    { name: "missing token", token: () => Response.json({}), error: "AUTH_GITHUB_TOKEN_MISSING", calls: 1 },
+    { name: "malformed token JSON", token: () => new Response("{broken"), error: "AUTH_PROVIDER_UNAVAILABLE", calls: 1 },
+    { name: "null token JSON", token: () => Response.json(null), error: "AUTH_PROVIDER_UNAVAILABLE", calls: 1 },
+    { name: "profile HTTP failure", emails: () => new Response(null, { status: 503 }), error: "AUTH_GITHUB_PROFILE_FAILED", calls: 2 },
+    { name: "invalid profile shape", emails: () => Response.json({ email: "owner@example.test" }), error: "AUTH_GITHUB_PROFILE_INVALID", calls: 2 },
+    { name: "malformed profile JSON", emails: () => new Response("{broken"), error: "AUTH_PROVIDER_UNAVAILABLE", calls: 2 },
+    { name: "token timeout", timeoutAt: 1, error: "AUTH_PROVIDER_UNAVAILABLE", calls: 1 },
+    { name: "profile timeout", timeoutAt: 2, error: "AUTH_PROVIDER_UNAVAILABLE", calls: 2 },
+  ];
+  for (const scenario of cases) await t.test(scenario.name, async (step) => {
+    const fetchBefore = globalThis.fetch;
+    let calls = 0, deadlines = 0;
+    if (scenario.timeoutAt) step.mock.method(AbortSignal, "timeout", (milliseconds: number) => {
+      assert.equal(milliseconds, 10000, "each provider exchange has a ten-second deadline");
+      deadlines++;
+      return deadlines === scenario.timeoutAt
+        ? AbortSignal.abort(new DOMException("Fixture deadline", "TimeoutError"))
+        : new AbortController().signal;
+    });
+    globalThis.fetch = (async (url, init) => {
+      calls++;
+      assert.ok(init?.signal instanceof AbortSignal);
+      init.signal.throwIfAborted();
+      if (calls === 1) {
+        assert.equal(String(url), "https://github.com/login/oauth/access_token");
+        assert.equal(init.method, "POST");
+        return scenario.token?.() || Response.json({ access_token: "fixture-token" });
+      }
+      assert.equal(calls, 2, "a failed OAuth exchange must not retry");
+      assert.equal(String(url), "https://api.github.com/user/emails");
+      return scenario.emails?.() || Response.json([{ email: "owner@example.test", verified: true }]);
+    }) as typeof fetch;
+    try {
+      const url = "https://example.test/api/callback?state=fixture-state&code=fixture" + (scenario.denied ? "&error=access_denied" : "");
+      const response = await callback({ request: new Request(url, { headers: { Cookie: "stocks_watcher_oauth_state=fixture-state" } }), env });
+      assert.equal(response.status, scenario.status || 502);
+      assert.deepEqual(await response.json(), { ok: false, error: scenario.error });
+      assert.equal(response.headers.get("Cache-Control"), "no-store");
+      assert.match(response.headers.get("Content-Type")!, /application\/json/);
+      assert.equal(response.headers.get("Set-Cookie"), null, "failure cannot mint a session");
+      assert.equal(response.headers.get("Location"), null);
+      assert.equal(calls, scenario.calls);
+      if (scenario.timeoutAt) assert.equal(deadlines, scenario.timeoutAt);
+    } finally { globalThis.fetch = fetchBefore; }
+  });
+});
+
 test("isolated admin writes queue coverage idempotently and prune only expired cache rows", async () => {
   const { db, sql } = sqlite(); const objects = new Map<string, unknown>();
   const env = { STOCKS_WATCHER_ADMIN_TOKEN: "fixture-admin", MARKET_CACHE_DB: db, VALUATION_DATA: {
