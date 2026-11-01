@@ -169,7 +169,7 @@ test("ignored POST parameters cannot create additional market-cache entries", as
   globalThis.fetch = async (input) => new Response(JSON.stringify({
     chart: {
       result: [{
-        meta: { symbol: decodeURIComponent(new URL(String(input)).pathname.split("/").at(-1)!), currency: "USD", regularMarketPrice: 180, regularMarketPreviousClose: 179 },
+        meta: { symbol: decodeURIComponent(new URL(String(input)).pathname.split("/").at(-1)!), currency: "USD", regularMarketPrice: 180, regularMarketPreviousClose: 179, regularMarketTime: 1_700_000_000 },
         timestamp: [1_700_000_000],
         indicators: { quote: [{ open: [179], high: [181], low: [178], close: [180], volume: [100] }] },
       }],
@@ -206,7 +206,7 @@ test("ignored ticker input reuses the default quotes market-cache entry", async 
     return new Response(JSON.stringify({
       chart: {
         result: [{
-          meta: { symbol: decodeURIComponent(new URL(String(input)).pathname.split("/").at(-1)!), currency: "USD", regularMarketPrice: 180, regularMarketPreviousClose: 179 },
+          meta: { symbol: decodeURIComponent(new URL(String(input)).pathname.split("/").at(-1)!), currency: "USD", regularMarketPrice: 180, regularMarketPreviousClose: 179, regularMarketTime: 1_700_000_000 },
           timestamp: [1_700_000_000],
           indicators: { quote: [{ open: [179], high: [181], low: [178], close: [180], volume: [100] }] },
         }],
@@ -231,6 +231,11 @@ test("ignored ticker input reuses the default quotes market-cache entry", async 
     assert.equal([...db.rows.keys()].filter((key) => !key.startsWith("__market_cache_refresh_quota__")).length, 1);
     assert.equal(db.refreshQuotaReservations, 1);
     assert.ok(quoteLoads > 0);
+    const explicit = await stocksWatcherApi({request:new Request("https://example.com/api/stocks-intelligence-watcher",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tool:"get_quotes",params:{tickers:"NVDA"}})}),env:{MARKET_CACHE_DB:db}});
+    assert.equal(explicit.status,200);
+    const explicitBody = await explicit.json() as {raw:{quotes:Array<{symbol:string}>}};
+    assert.deepEqual(explicitBody.raw.quotes.map(row=>row.symbol),["NVDA"],"a single-ticker request cannot reuse the default-universe cache identity");
+    assert.equal([...db.rows.keys()].filter(key=>!key.startsWith("__market_cache_refresh_quota__")).length,2);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -353,7 +358,7 @@ test("ignored market selection reuses one market breadth cache entry", async () 
     return new Response(JSON.stringify({
       chart: {
         result: [{
-          meta: { symbol: decodeURIComponent(new URL(String(input)).pathname.split("/").at(-1)!), currency: "USD", regularMarketPrice: 180, regularMarketPreviousClose: 179 },
+          meta: { symbol: decodeURIComponent(new URL(String(input)).pathname.split("/").at(-1)!), currency: "USD", regularMarketPrice: 180, regularMarketPreviousClose: 179, regularMarketTime: 1_700_000_000 },
           timestamp: [1_700_000_000],
           indicators: { quote: [{ open: [179], high: [181], low: [178], close: [180], volume: [100] }] },
         }],
@@ -391,7 +396,7 @@ test("normalized ticker and ignored signal intent reuse market-cache entries", a
     if (url.includes("/v8/finance/chart/")) {
       chartLoads += 1;
       return new Response(JSON.stringify({ chart: { result: [{
-        meta: { symbol: decodeURIComponent(new URL(String(input)).pathname.split("/").at(-1)!), currency: "USD", regularMarketPrice: 180, regularMarketPreviousClose: 179 },
+        meta: { symbol: decodeURIComponent(new URL(String(input)).pathname.split("/").at(-1)!), currency: "USD", regularMarketPrice: 180, regularMarketPreviousClose: 179, regularMarketTime: 1_700_000_000 },
         timestamp: [1_700_000_000],
         indicators: { quote: [{ open: [179], high: [181], low: [178], close: [180], volume: [100] }] },
       }], error: null } }));

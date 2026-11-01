@@ -29,7 +29,7 @@ export async function onRequest(context: any) {
     return json(normalizeYahooFundamentals(symbol, result));
   } catch (error) {
     const quota = watcherQuotaFailure(error);
-    if (quota) return json({ error: quota.error, quota: quota.quota }, quota.status);
+    if (quota) return json({ error: quota.error, errorCode: quota.errorCode, quota: quota.quota }, quota.status);
     const status = error instanceof YahooDataError ? error.status : error instanceof BoundedBodyError && error.kind === "timeout" ? 504 : 502;
     return json({ error: error instanceof Error ? error.message : "Yahoo fundamentals unavailable." }, status);
   }

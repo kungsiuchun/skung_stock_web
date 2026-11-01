@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import type { D1DatabaseLike } from "../src/lib/spx-recap-d1";
-import { onRequest as watcher } from "../functions/api/stocks-intelligence-watcher";
+import { onRequest as watcher, readFreshWatcherTool } from "../functions/api/stocks-intelligence-watcher";
 import { onRequestPost as report } from "../functions/api/research/report";
 import { publicResearchChat as chat, chatNarrativeEvidence } from "../functions/api/research/chat-service";
 import { onRequestPost as legacyChat } from "../functions/api/agent/chat";
@@ -19,10 +19,11 @@ import { onRequest as middleware } from "../functions/api/_middleware";
 import { callResearchModel } from "../functions/api/research/model";
 import { onRequest as fundamentals } from "../functions/api/fundamentals";
 import { NativeStocksYahooClient } from "../src/lib/stocks-native-yahoo";
+import { D1_DAILY_COST_MODELS } from "../src/lib/d1-free-tier-budget";
 
 const request = (body: unknown, path = "/api/research/report") => new Request(`https://example.test${path}`, { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json" } });
 test("legacy reads reuse successful tool data while the upstream provider is unavailable", async (t) => {
-  for (const surface of ["options snapshot", "fundamentals", "expired fundamentals", "corrupt fundamentals"]) await t.test(surface, async (step) => {
+  for (const surface of ["options snapshot", "fundamentals", "expired fundamentals", "corrupt fundamentals", "wrong source fundamentals", "wrong source quote", "expired options snapshot"]) await t.test(surface, async (step) => {
     const { db, sql } = sqlite();sql.exec(readFileSync(new URL("../migrations/0012_stocks_watcher_tracking.sql", import.meta.url), "utf8"));
     const quote = { symbol: "NVDA", name: "NVIDIA", price: 200, change: -1, changePercent: -0.5, currency: "USD", asOf: "2026-10-30T20:00:00.000Z" };
     const chain = { symbol: "NVDA", spot: 200, selectedExpiry: "2026-11-02", expiries: ["2026-11-02"], calls: [{ contractSymbol: "NVDA261102C00200000", strike: 200, openInterest: 10, volume: 20 }], puts: [{ contractSymbol: "NVDA261102P00200000", strike: 200, openInterest: 15, volume: 30 }] };
@@ -35,20 +36,45 @@ test("legacy reads reuse successful tool data while the upstream provider is una
     step.mock.method(globalThis,"fetch",async () => {throw new Error("Direct provider reads are blocked");});
     try {
       for(const [tool,params] of [["get_quotes",{tickers:"NVDA"}],["get_options",{ticker:"NVDA",strikesAroundAtm:25}],["get_stock_stats",{ticker:"NVDA"}]] as const){const warmed=await watcher({request:request({tool,params}),env:{MARKET_CACHE_DB:db}});assert.equal(warmed.status,200);}
-      if(surface.startsWith("expired")||surface.startsWith("corrupt")){
-        const row=sql.prepare("SELECT cache_key,payload_json FROM market_cache_entries WHERE scope='stocks-watcher-tool'").all().find(row=>Boolean(JSON.parse(String(row.payload_json)).raw?.summary))!;
+      if(surface.startsWith("expired")||surface.startsWith("corrupt")||surface.startsWith("wrong source")){
+        const row=sql.prepare("SELECT cache_key,payload_json FROM market_cache_entries WHERE scope='stocks-watcher-tool'").all().find(row=>{const raw=JSON.parse(String(row.payload_json)).raw;return surface==="expired options snapshot"?Boolean(raw.chain):surface==="wrong source quote"?Boolean(raw.quotes):Boolean(raw.summary);})!;
         if(surface.startsWith("expired"))sql.prepare("UPDATE market_cache_entries SET expires_at='2000-01-01' WHERE cache_key=?").run(row.cache_key);
-        else {const value=JSON.parse(String(row.payload_json));value.raw.summary=null;sql.prepare("UPDATE market_cache_entries SET payload_json=? WHERE cache_key=?").run(JSON.stringify(value),row.cache_key);}
+        else {const value=JSON.parse(String(row.payload_json));if(surface.startsWith("wrong source"))value.raw.source="wrong_provider";else value.raw.summary=null;sql.prepare("UPDATE market_cache_entries SET payload_json=? WHERE cache_key=?").run(JSON.stringify(value),row.cache_key);}
       }
       blocked=true;const before=providerCalls;
-      const response=surface==="options snapshot" ? await watcher({request:new Request("https://example.test/api/stocks-intelligence-watcher?symbol=NVDA&surface=options"),env:{MARKET_CACHE_DB:db}}) : await fundamentals({request:new Request("https://example.test/api/fundamentals?symbol=NVDA"),env:{MARKET_CACHE_DB:db}});
-      if(surface.startsWith("expired")||surface.startsWith("corrupt")){assert.equal(response.status,surface.startsWith("expired")?503:502);assert.equal(providerCalls,before+1);assert.ok((await response.json() as any).error);return;}
+      const response=surface.includes("options snapshot") ? await watcher({request:new Request("https://example.test/api/stocks-intelligence-watcher?symbol=NVDA&surface=options"),env:{MARKET_CACHE_DB:db}}) : await fundamentals({request:new Request("https://example.test/api/fundamentals?symbol=NVDA"),env:{MARKET_CACHE_DB:db}});
+      if(surface.startsWith("expired")||surface.startsWith("corrupt")||surface.startsWith("wrong source")){assert.equal(response.status,surface==="expired fundamentals"?503:502);assert.equal(providerCalls,before+1);assert.ok((await response.json() as any).error);if(surface.includes("snapshot"))assert.equal(sql.prepare("SELECT count(*) AS n FROM market_cache_entries WHERE scope='stocks-watcher-options-bootstrap'").get()!.n,0);return;}
       assert.equal(response.status,200);const body=await response.json() as any;
       if(surface==="options snapshot"){assert.equal(body.quote.price,200);assert.deepEqual(body.availableExpiries,["2026-11-02"]);assert.ok(body.strikes.length>0);}
       else {assert.equal(body.symbol,"NVDA");assert.equal(body.current_price,"200");assert.equal(body.cache.status,"hit");assert.equal(body.quoteCache.status,"hit");assert.equal(body.sourceAsOf,quote.asOf);}
       assert.equal(providerCalls,before,"fresh shared tool data must not trigger another provider read");
     } finally {sql.close();}
   });
+});
+
+test("cold legacy snapshots reserve one cache write and account for bounded tool-cache reads", async (t) => {
+  const {db,sql}=sqlite();sql.exec(readFileSync(new URL("../migrations/0012_stocks_watcher_tracking.sql",import.meta.url),"utf8"));
+  const quote={symbol:"NVDA",price:200,currency:"USD",asOf:"2026-10-30T20:00:00Z",change:-1,changePercent:-0.5};
+  const summary={price:{symbol:"NVDA"}},history=[{date:"2026-10-30",open:201,high:202,low:199,close:200,volume:100}];
+  const chain={symbol:"NVDA",spot:200,selectedExpiry:"2026-11-02",expiries:["2026-11-02"],calls:[{strike:200,volume:10,openInterest:20}],puts:[{strike:200,volume:20,openInterest:10}]};
+  t.mock.method(NativeStocksYahooClient.prototype,"callTool",async(tool:string)=>({text:"Explicit isolated fixture",raw:{source:"native_yahoo",...(tool==="get_quotes"?{quotes:[quote]}:tool==="get_options"?{chain,exposures:[{strike:200,callOpenInterest:20,putOpenInterest:10,callVolume:10,putVolume:20,callGex:20,putGex:-10,netGex:10}]}:tool==="market_breadth"?{quotes:[quote]}:tool==="basket_relative_strength"?{ranked:[quote]}:tool==="get_intraday"||tool==="get_stock_history"?{ticker:"NVDA",history}:{stats:{quote,summary},historyTail:history,news:[],earnings:{source:"fixture"}})}}));
+  t.mock.method(globalThis,"fetch",async()=>{throw new Error("No external calls in cost fixture");});
+  try{const response=await watcher({request:new Request("https://example.test/api/stocks-intelligence-watcher?symbol=NVDA"),env:{MARKET_CACHE_DB:db}});assert.equal(response.status,200);const body=await response.json() as any;assert.ok(body.strikes.length>0&&body.history.length>0);const counter=JSON.parse(String(sql.prepare("SELECT payload_json FROM market_cache_entries WHERE scope='market-cache-quota'").get()!.payload_json));assert.equal(counter.rowsWritten,10,"only the outer snapshot reserves indexed writes");assert.equal(counter.rowsRead,D1_DAILY_COST_MODELS.find(row=>row.name==="watcher_cold_or_refresh")!.rowsReadPerRun);assert.equal(sql.prepare("SELECT count(*) AS n FROM market_cache_entries WHERE scope='stocks-watcher-tool'").get()!.n,0,"cold snapshot assembly does not fill each individual tool cache");}
+  finally{sql.close();}
+});
+
+test("partial quote batches retain available rows but never become complete HTTP200 or core evidence", async (t) => {
+  const {db,sql}=sqlite();let calls=0,blocked=false;
+  t.mock.method(NativeStocksYahooClient.prototype,"callTool",async()=>{calls++;if(blocked)throw new Error("Provider blocked");return{text:"Partial fixture: other symbols unavailable",raw:{source:"native_yahoo",partial:true,quotes:[{symbol:"NVDA",price:200,currency:"USD",asOf:"2026-10-30T20:00:00Z"}],errors:[{symbol:"AAPL",message:"Fixture unavailable"}]}};});
+  const call=()=>watcher({request:request({tool:"get_quotes",params:{}}),env:{MARKET_CACHE_DB:db}});
+  try{const first=await call();assert.equal(first.status,206);assert.equal((await first.json() as any).raw.partial,true);blocked=true;const second=await call();assert.equal(second.status,206);const body=await second.json() as any;assert.equal(body.cache.status,"hit");assert.equal(body.raw.quotes.length,1);await assert.rejects(readFreshWatcherTool("get_quotes",{},{MARKET_CACHE_DB:db},"fixture"),(error:any)=>error.status===503);assert.equal(calls,1,"reuse labelled partial rows without re-requesting the failed universe");}
+  finally{sql.close();}
+});
+
+test("snapshot and fundamentals preserve quota refusal classifications without provider calls", async (t) => {
+  let calls=0;t.mock.method(NativeStocksYahooClient.prototype,"callTool",async()=>{calls++;throw new Error("No provider call allowed");});
+  for(const route of ["snapshot","fundamentals"]){const {db,sql}=sqlite();const today=new Date().toISOString().slice(0,10),at=new Date().toISOString();sql.prepare("INSERT INTO market_cache_entries(cache_key,scope,symbol,schema_version,payload_json,cached_at,expires_at) VALUES (?,'market-cache-quota','MARKET',1,?,?,?)").run("__market_cache_refresh_quota__:"+today,JSON.stringify({dayUtc:today,rowsRead:1000000,rowsWritten:0}),at,at);try{const response=route==="snapshot"?await watcher({request:new Request("https://example.test/api/stocks-intelligence-watcher?symbol=NVDA&surface=options"),env:{MARKET_CACHE_DB:db}}):await fundamentals({request:new Request("https://example.test/api/fundamentals?symbol=NVDA"),env:{MARKET_CACHE_DB:db}});assert.equal(response.status,429);assert.equal((await response.json() as any).errorCode,"D1_SAFETY_CUTOFF");}finally{sql.close();}}
+  assert.equal(calls,0);
 });
 
 test("native stock statistics do not swallow a Yahoo summary rate limit", async (t) => {

@@ -182,6 +182,7 @@ export interface StocksWatcherToolClient {
   listTools: () => Promise<StocksNativeToolSummary[]>;
   callToolText: (name: string, args: Record<string, unknown>) => Promise<string>;
   callTool?: (name: string, args: Record<string, unknown>) => Promise<StocksNativeToolResult>;
+  failOnToolError?: boolean;
 }
 
 const DEFAULT_WATCHLIST = [...STOCKS_WATCHER_SYMBOLS];
@@ -601,6 +602,7 @@ const callToolWithVariants = async (
       toolRuns.push({ name, status: "ok", detail: Object.keys(args).join(", ") || "no args" });
       return text;
     } catch (error) {
+      if (client.failOnToolError) throw error;
       lastError = error instanceof Error ? error.message : String(error);
     }
   }
@@ -627,6 +629,7 @@ const callToolStructuredWithVariants = async (
       toolRuns.push({ name, status: "ok", detail: Object.keys(args).join(", ") || "no args" });
       return result;
     } catch (error) {
+      if (client.failOnToolError) throw error;
       lastError = error instanceof Error ? error.message : String(error);
     }
   }

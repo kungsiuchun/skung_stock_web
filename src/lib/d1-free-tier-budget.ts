@@ -144,7 +144,7 @@ export const D1_DAILY_COST_MODELS: readonly D1DailyCostModel[] = [
   { name: "gex_heatmap_refresh", database: "SPX_RECAP_DB", runs: 390, rowsReadPerRun: 120, rowsWrittenPerRun: 10 },
   { name: "spx_collection_scheduler", database: "SPX_RECAP_DB", runs: 27, rowsReadPerRun: 150, rowsWrittenPerRun: 80 },
   { name: "robinhood_eod_status", database: "SPX_RECAP_DB", runs: 1, rowsReadPerRun: 50, rowsWrittenPerRun: 20 },
-  { name: "watcher_cold_or_refresh", database: "MARKET_CACHE_DB", runs: 500, rowsReadPerRun: 23, rowsWrittenPerRun: 10 },
+  { name: "watcher_cold_or_refresh", database: "MARKET_CACHE_DB", runs: 500, rowsReadPerRun: 33, rowsWrittenPerRun: 10 },
   { name: "finance_candlestick_backtest_refresh", database: "MARKET_CACHE_DB", runs: 500, rowsReadPerRun: 3, rowsWrittenPerRun: 10 },
   { name: "bounded_cache_maintenance", database: "MARKET_CACHE_DB", runs: 4, rowsReadPerRun: 100, rowsWrittenPerRun: 50 },
 ];
