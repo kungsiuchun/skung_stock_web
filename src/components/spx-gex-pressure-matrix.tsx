@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Activity, AlertTriangle, TrendingUp } from "lucide-react";
 import { formatSpxGexCompactExposure } from "@/lib/spx-gex-heatmap";
 import { isFreshSpx0DteSample, shouldRefreshSpxCurrentSession } from "@/lib/spx-price-action-compass";
@@ -109,7 +109,6 @@ const CELL_WIDTH = 35;
 const ROW_HEIGHT = 25;
 const STRIKE_WIDTH = 82;
 const CURRENT_GEX_WIDTH = 120;
-const MATRIX_HEADER_HEIGHT = 45;
 const TOOLTIP_ID = "spx-gex-pressure-cell-tooltip";
 const TOOLTIP_WIDTH = 320;
 const TOOLTIP_HEIGHT = 150;
@@ -157,23 +156,19 @@ const stateGlyph = (state: SpxGexPressureState) => {
 };
 
 const stateColor = (state: SpxGexPressureState, currentGex?: number | null) => {
-  if (state === "FLIP_TO_POSITIVE" || state === "FLIP_TO_NEGATIVE") return "#fbbf24";
-  if (state === "NO_DATA" || state === "NO_BASELINE" || state === "OUTSIDE_COVERAGE") return "#475569";
-  if ((currentGex || 0) > 0) return "#4ade80";
-  if ((currentGex || 0) < 0) return "#f472b6";
-  return "#64748b";
+  if (state === "FLIP_TO_POSITIVE" || state === "FLIP_TO_NEGATIVE") return "var(--ww-amber, #e7bb72)";
+  if (state === "NO_DATA" || state === "NO_BASELINE" || state === "OUTSIDE_COVERAGE") return "var(--ww-muted, #93a7bd)";
+  if ((currentGex || 0) > 0) return "var(--ww-green, #55c8a0)";
+  if ((currentGex || 0) < 0) return "var(--ww-red, #ee8793)";
+  return "var(--ww-muted, #93a7bd)";
 };
 
 const cellBackground = (cell: SpxGexPressureCell, missingSlot: boolean) => {
   if (missingSlot) {
-    return "repeating-linear-gradient(135deg, rgba(71,85,105,.16) 0 4px, rgba(15,23,42,.55) 4px 8px)";
+    return "var(--ww-raised, #0c1b2b)";
   }
-  if (cell.state === "NO_DATA" || cell.state === "OUTSIDE_COVERAGE") return "rgba(15, 28, 42, 0.72)";
-  if (cell.state === "NO_BASELINE") return "rgba(51, 65, 85, 0.38)";
-  const alpha = 0.18 + (cell.intensityPct / 100) * 0.68;
-  if (cell.state === "FLIP_TO_POSITIVE" || cell.state === "FLIP_TO_NEGATIVE") return `rgba(245, 158, 11, ${alpha})`;
-  if ((cell.currentGex || 0) >= 0) return `rgba(22, 163, 74, ${alpha})`;
-  return `rgba(190, 24, 93, ${alpha})`;
+  if (cell.state === "NO_DATA" || cell.state === "OUTSIDE_COVERAGE" || cell.state === "NO_BASELINE") return "var(--ww-raised, #0c1b2b)";
+  return `color-mix(in srgb, ${stateColor(cell.state, cell.currentGex)} ${24 + (cell.intensityPct / 100) * 26}%, var(--ww-surface, #08131f))`;
 };
 
 const etClock = (now = new Date()) => {
@@ -192,12 +187,11 @@ const formatEtTime = (value: string) => new Intl.DateTimeFormat("en-US", {
   hourCycle: "h23",
 }).format(new Date(value));
 
-const MoverTape = ({ movers, latestTime, matrixHeight }: { movers: SpxGexPressureMover[]; latestTime: string; matrixHeight: number }) => {
+const MoverTape = ({ movers, latestTime }: { movers: SpxGexPressureMover[]; latestTime: string }) => {
   const topMover = movers[0] || null;
   return (
     <aside
-      className="flex flex-col overflow-hidden border-t border-[#123142] bg-[#040a12] p-3 2xl:h-[var(--spx-pressure-matrix-height)] 2xl:border-l 2xl:border-t-0"
-      style={{ "--spx-pressure-matrix-height": `${matrixHeight}px` } as CSSProperties}
+      className="border-t border-[#123142] bg-[#040a12] p-3"
       data-spx-gex-mover-tape="true"
       aria-labelledby="spx-gex-mover-tape-title"
     >
@@ -207,7 +201,7 @@ const MoverTape = ({ movers, latestTime, matrixHeight }: { movers: SpxGexPressur
         </div>
         <span className="font-mono text-[10px] tabular-nums text-zinc-500">Latest {latestTime} ET</span>
       </div>
-      <ol className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1" aria-label="Latest GEX movers ranked by absolute delta">
+      <ol className="mt-3 grid gap-x-5 sm:grid-cols-2 xl:grid-cols-3" aria-label="Latest GEX movers ranked by absolute delta">
         {!topMover ? (
           <li className="py-10 text-center text-xs text-zinc-500">No comparable baseline movers.</li>
         ) : (
@@ -224,7 +218,7 @@ const MoverTape = ({ movers, latestTime, matrixHeight }: { movers: SpxGexPressur
 const MoverHero = ({ mover }: { mover: SpxGexPressureMover }) => {
   const color = stateColor(mover.state, mover.currentGex);
   return (
-    <div className="border p-3" style={{ borderColor: `${color}88`, background: `${color}0f` }} data-spx-gex-latest-mover="true">
+    <div className="border p-3" style={{ borderColor: `color-mix(in srgb, ${color} 45%, transparent)`, background: `color-mix(in srgb, ${color} 6%, var(--ww-surface, #08131f))` }} data-spx-gex-latest-mover="true">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="font-mono text-[10px] font-black uppercase tracking-[0.14em]" style={{ color }}>Latest mover</div>
@@ -576,7 +570,6 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
     : null, [chartGeometry]);
   const matrixWidth = timelineLength * effectiveCellWidth;
   const matrixHeight = (displayPressure?.rows.length || 0) * ROW_HEIGHT;
-  const matrixGridHeight = MATRIX_HEADER_HEIGHT + matrixHeight;
   const pricePathOutsideView = chartGeometry?.segments.some((segment) => segment.some((point) => point.y < 0 || point.y > matrixHeight)) || false;
   const spotOutsideView = chartGeometry?.spotGuide ? chartGeometry.spotGuide.y < 0 || chartGeometry.spotGuide.y > matrixHeight : false;
   const oneMinuteOverlayPending = priceOverlay?.selectedDate !== selectedDate;
@@ -701,7 +694,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
               </div>
             </div>
 
-          <div className="grid 2xl:grid-cols-[minmax(0,1fr)_320px] 2xl:items-start">
+          <div className="min-w-0">
             <div
               ref={matrixScrollRef}
               className="min-w-0 self-start overflow-x-auto [scrollbar-width:none] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-200 [&::-webkit-scrollbar]:hidden"
@@ -791,7 +784,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
                               key={key}
                               type="button"
                               className="relative z-10 flex shrink-0 items-center justify-center border-b border-l border-[#102433] font-black transition-[filter] hover:brightness-150 focus-visible:z-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-200"
-                              style={{ width: effectiveCellWidth, minWidth: effectiveCellWidth, height: ROW_HEIGHT, minHeight: ROW_HEIGHT, background: cellBackground(cell, slot.status !== "READY"), color: stateColor(cell.state, cell.currentGex) }}
+                              style={{ width: effectiveCellWidth, minWidth: effectiveCellWidth, height: ROW_HEIGHT, minHeight: ROW_HEIGHT, background: cellBackground(cell, slot.status !== "READY"), color: "var(--ww-text, #f3f8ff)" }}
                               onMouseEnter={(event) => {
                                 if (!hoverSuppressedAfterScrollRef.current) activateCell(event.currentTarget, row.strike, cell, false);
                               }}
@@ -831,15 +824,15 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
                       data-spx-gex-pressure-spot-resolution={chartGeometry?.resolution || "15m-fallback"}
                       data-spx-gex-pressure-spot-point-count={chartGeometry?.pointCount || 0}
                     >
-                       {chartGeometry?.spotGuide && <line key={`${spotPulseKey || "spot"}:guide`} className={isLivePriceOverlay ? "spx-spot-live-pulse" : undefined} x1="0" x2={matrixWidth} y1={chartGeometry.spotGuide.y} y2={chartGeometry.spotGuide.y} stroke="#22d3ee" strokeWidth="1" strokeDasharray="5 4" opacity="0.72" data-spx-gex-pressure-spot-guide="true" />}
+                       {chartGeometry?.spotGuide && <line key={`${spotPulseKey || "spot"}:guide`} className={isLivePriceOverlay ? "spx-spot-live-pulse" : undefined} x1="0" x2={matrixWidth} y1={chartGeometry.spotGuide.y} y2={chartGeometry.spotGuide.y} stroke="var(--ww-blue, #22d3ee)" strokeWidth="1" strokeDasharray="5 4" opacity="0.72" data-spx-gex-pressure-spot-guide="true" />}
                        {chartGeometry?.expectedMoveRange && <>
-                         <line x1="0" x2={matrixWidth} y1={chartGeometry.expectedMoveRange.upper.y} y2={chartGeometry.expectedMoveRange.upper.y} stroke={expectedMoveIsStale ? "#fcd34d" : "#c4b5fd"} strokeWidth="1" strokeDasharray={expectedMoveIsStale ? "2 6" : "3 4"} opacity="0.88" data-spx-gex-pressure-expected-move-upper="true" />
-                         <line x1="0" x2={matrixWidth} y1={chartGeometry.expectedMoveRange.lower.y} y2={chartGeometry.expectedMoveRange.lower.y} stroke={expectedMoveIsStale ? "#fcd34d" : "#c4b5fd"} strokeWidth="1" strokeDasharray={expectedMoveIsStale ? "2 6" : "3 4"} opacity="0.88" data-spx-gex-pressure-expected-move-lower="true" />
+                         <line x1="0" x2={matrixWidth} y1={chartGeometry.expectedMoveRange.upper.y} y2={chartGeometry.expectedMoveRange.upper.y} stroke={expectedMoveIsStale ? "var(--ww-amber, #fcd34d)" : "var(--spx-em, #c4b5fd)"} strokeWidth="1" strokeDasharray={expectedMoveIsStale ? "2 6" : "3 4"} opacity="0.88" data-spx-gex-pressure-expected-move-upper="true" />
+                         <line x1="0" x2={matrixWidth} y1={chartGeometry.expectedMoveRange.lower.y} y2={chartGeometry.expectedMoveRange.lower.y} stroke={expectedMoveIsStale ? "var(--ww-amber, #fcd34d)" : "var(--spx-em, #c4b5fd)"} strokeWidth="1" strokeDasharray={expectedMoveIsStale ? "2 6" : "3 4"} opacity="0.88" data-spx-gex-pressure-expected-move-lower="true" />
                        </>}
                       {chartGeometry?.segments.map((segment, index) => (
-                        <polyline key={index} points={segment.map((point) => `${point.x},${point.y}`).join(" ")} fill="none" stroke="#22d3ee" strokeWidth="1.7" vectorEffect="non-scaling-stroke" />
+                        <polyline key={index} points={segment.map((point) => `${point.x},${point.y}`).join(" ")} fill="none" stroke="var(--ww-blue, #22d3ee)" strokeWidth="1.7" vectorEffect="non-scaling-stroke" />
                       ))}
-                      {chartGeometry?.latestPoint && <circle key={`${spotPulseKey || "spot"}:endpoint`} className={isLivePriceOverlay ? "spx-spot-live-pulse" : undefined} cx={chartGeometry.latestPoint.x} cy={chartGeometry.latestPoint.y} r="4" fill="#ecfeff" stroke="#22d3ee" strokeWidth="2" data-spx-gex-pressure-spot-endpoint="true" />}
+                      {chartGeometry?.latestPoint && <circle key={`${spotPulseKey || "spot"}:endpoint`} className={isLivePriceOverlay ? "spx-spot-live-pulse" : undefined} cx={chartGeometry.latestPoint.x} cy={chartGeometry.latestPoint.y} r="4" fill="var(--ww-surface, #ecfeff)" stroke="var(--ww-blue, #22d3ee)" strokeWidth="2" data-spx-gex-pressure-spot-endpoint="true" />}
                     </svg>
                     <span className="sr-only">{usingOneMinuteSpot ? "SPX 1-minute price overlay" : "SPX 15-minute canonical snapshot fallback overlay"}{chartGeometry?.expectedMoveRange ? ` with 0DTESPX expected move plus or minus ${chartGeometry.expectedMoveRange.value}` : ""}</span>
                   </div>
@@ -855,7 +848,10 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
               </div>
             </div>
 
-            <MoverTape movers={pressure.movers} latestTime={pressure.latest.snapshotTimeEt} matrixHeight={matrixGridHeight} />
+            <details className="border-t border-[#123142] text-xs">
+              <summary className="cursor-pointer px-3 py-3 text-cyan-200">Pressure movers · {pressure.movers.length} ranked strikes</summary>
+              <MoverTape movers={pressure.movers} latestTime={pressure.latest.snapshotTimeEt} />
+            </details>
           </div>
 
           {activeCell && (
