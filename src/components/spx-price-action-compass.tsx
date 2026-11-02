@@ -784,8 +784,8 @@ function PriceActionChartCanvas({
         const y = getY(zone.price);
         const y1 = getY(zone.maxPrice);
         const y2 = getY(zone.minPrice);
-        const color = zone.type === "support" ? "#22c55e" : zone.type === "resistance" ? "#ef4444" : "#facc15";
-        const fill = zone.type === "support" ? "#052816" : zone.type === "resistance" ? "#2a0f10" : "#2a2107";
+        const color = zone.type === "support" ? "var(--ww-green, #22c55e)" : zone.type === "resistance" ? "var(--ww-red, #ef4444)" : "var(--ww-amber, #facc15)";
+        const fill = `color-mix(in srgb, ${color} 12%, var(--ww-surface, #06111a))`;
         const label = `${zone.type === "support" ? "Support" : zone.type === "resistance" ? "Resistance" : "Flip"} ${formatPrice(zone.price)}`;
         const bandHeight = Math.max(10, Math.min(24, Math.abs(y2 - y1)));
         return { zone, y, color, fill, label, bandHeight };
@@ -824,7 +824,7 @@ function PriceActionChartCanvas({
       x2,
       yTop,
       yBottom,
-      color: isBullishPattern(pattern) ? "#22c55e" : isBearishPattern(pattern) ? "#ef4444" : "#facc15",
+      color: isBullishPattern(pattern) ? "var(--ww-green, #22c55e)" : isBearishPattern(pattern) ? "var(--ww-red, #ef4444)" : "var(--ww-amber, #facc15)",
       selected: selectedPattern?.id === pattern.id,
       labelX,
       desiredLabelY: Math.max(0, Math.min(chartHeight - PATTERN_LABEL_HEIGHT, yTop - 16)),
@@ -989,14 +989,14 @@ function PriceActionChartCanvas({
             <feDropShadow dx="0" dy="0" stdDeviation="3" floodColor="#f8fafc" floodOpacity="0.45" />
           </filter>
         </defs>
-        <rect x={0} y={0} width={width} height={height} fill="#02070d" />
-        <rect x={axisLeft} y={0} width={plotWidth} height={chartHeight + volumeHeight} fill="#06111a" />
+        <rect x={0} y={0} width={width} height={height} fill="var(--ww-bg, #02070d)" />
+        <rect x={axisLeft} y={0} width={plotWidth} height={chartHeight + volumeHeight} fill="var(--ww-surface, #06111a)" />
         {Array.from({ length: 5 }).map((_, index) => {
           const y = 12 + index * ((chartHeight - 30) / 4);
           const price = high - (index / 4) * priceRange;
           return (
             <g key={index}>
-              <line x1={axisLeft} y1={y} x2={plotRight} y2={y} stroke="#123142" strokeDasharray="3 3" />
+              <line x1={axisLeft} y1={y} x2={plotRight} y2={y} stroke="var(--ww-line, #123142)" strokeDasharray="3 3" />
               <text x={axisLeft - 6} y={y + 3} textAnchor="end" className="fill-slate-400 font-mono text-[10px]">
                 {price.toFixed(1)}
               </text>
@@ -1013,7 +1013,7 @@ function PriceActionChartCanvas({
               <rect x={axisLeft} y={bandY} width={plotWidth} height={bandHeight} fill={fill} opacity={0.72} />
               <line x1={axisLeft} y1={y} x2={plotRight} y2={y} stroke={color} strokeOpacity={0.9} strokeDasharray="7 5" strokeWidth={1.25} />
               <g data-pa-zone-label="true" transform={`translate(${labelX} ${labelY - 9})`}>
-                <rect width={labelWidth} height={18} fill="#02070d" stroke={color} strokeOpacity={0.85} />
+                <rect width={labelWidth} height={18} fill="var(--ww-bg, #02070d)" stroke={color} strokeOpacity={0.85} />
                 <text x={8} y={12} className="fill-zinc-100 font-mono text-[10px] font-black">
                   {label}
                 </text>
@@ -1032,7 +1032,7 @@ function PriceActionChartCanvas({
           const yHigh = getY(candle.high);
           const yLow = getY(candle.low);
           const bullish = candle.close >= candle.open;
-          const color = bullish ? "#22c55e" : "#ef4444";
+          const color = bullish ? "var(--ww-green, #22c55e)" : "var(--ww-red, #ef4444)";
           const bodyTop = Math.min(yOpen, yClose);
           const bodyHeight = Math.max(1, Math.abs(yOpen - yClose));
           const volumeY = getVolY(candle.volume);
@@ -1084,8 +1084,8 @@ function PriceActionChartCanvas({
             data-pa-pattern-id={pattern.id}
             data-pa-selected-pattern={selected ? "true" : undefined}
           >
-            <rect x={labelX} y={labelY} width={labelWidth} height={PATTERN_LABEL_HEIGHT} fill={selected ? color : "#02070d"} stroke={color} />
-            <text x={labelX + 5} y={labelY + 11} className="pointer-events-none fill-white font-mono text-[9px] font-black">
+            <rect x={labelX} y={labelY} width={labelWidth} height={PATTERN_LABEL_HEIGHT} fill={selected ? color : "var(--ww-bg, #02070d)"} stroke={color} />
+            <text x={labelX + 5} y={labelY + 11} style={{ fill: selected ? "var(--ww-bg, #02070d)" : "var(--ww-text, #fff)" }} className="pointer-events-none font-mono text-[9px] font-black">
               {pattern.label}
             </text>
           </g>
@@ -1101,7 +1101,7 @@ function PriceActionChartCanvas({
             const x = getX(visibleIndex);
             const highLabel = label.label === "HH" || label.label === "LH";
             const y = highLabel ? getY(candle.high) - 18 : getY(candle.low) + 22;
-            const color = highLabel ? "#22c55e" : "#ef4444";
+            const color = highLabel ? "var(--ww-green, #22c55e)" : "var(--ww-red, #ef4444)";
             return (
               <g key={`${label.index}-${label.label}`} pointerEvents="none" data-pa-structure-label="true">
                 <circle cx={x} cy={y} r={8} fill={color} />
@@ -1339,7 +1339,7 @@ const MetricChip = ({ label, value }: { label: string; value: string }) => (
 );
 
 const PatternDiagram = ({ pattern, candles }: { pattern: SpxPriceActionPattern; candles: SpxPriceActionCandle[] }) => {
-  const color = isBullishPattern(pattern) ? "#22c55e" : isBearishPattern(pattern) ? "#ef4444" : "#facc15";
+  const color = isBullishPattern(pattern) ? "var(--ww-green, #22c55e)" : isBearishPattern(pattern) ? "var(--ww-red, #ef4444)" : "var(--ww-amber, #facc15)";
   const values = candles.length > 0 ? candles : [];
   const high = Math.max(...values.map((candle) => candle.high), pattern.price + 1);
   const low = Math.min(...values.map((candle) => candle.low), pattern.price - 1);
@@ -1352,12 +1352,12 @@ const PatternDiagram = ({ pattern, candles }: { pattern: SpxPriceActionPattern; 
   return (
     <div className="border border-white/10 bg-white/[0.03] p-3">
       <svg viewBox="0 0 520 150" width="100%" height="150" data-pa-pattern-diagram="true">
-        <rect x={0} y={0} width={520} height={150} fill="#06111a" />
+        <rect x={0} y={0} width={520} height={150} fill="var(--ww-surface, #06111a)" />
         <line x1={20} y1={getY(pattern.price)} x2={500} y2={getY(pattern.price)} stroke="#818cf8" strokeDasharray="4 3" />
         {values.map((candle, index) => {
           const x = startX + index * candleSlot;
           const bullish = candle.close >= candle.open;
-          const candleColor = bullish ? "#22c55e" : "#ef4444";
+          const candleColor = bullish ? "var(--ww-green, #22c55e)" : "var(--ww-red, #ef4444)";
           return (
             <g key={`${candle.time}-${index}`}>
               <line x1={x} y1={getY(candle.high)} x2={x} y2={getY(candle.low)} stroke={candleColor} />

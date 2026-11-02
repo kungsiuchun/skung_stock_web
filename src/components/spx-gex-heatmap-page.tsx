@@ -100,24 +100,19 @@ const cellAuditLines = (cell: SpxGexHeatmapCell | undefined) => {
 };
 
 const cellStyle = (value: number | null | undefined, max: number) => {
-  if (typeof value !== "number" || !Number.isFinite(value)) return { backgroundColor: "#07111a", color: "#526171" };
+  if (typeof value !== "number" || !Number.isFinite(value)) return { backgroundColor: "var(--ww-raised, #07111a)", color: "var(--ww-muted, #93a7bd)" };
   const strength = Math.min(1, Math.abs(value) / Math.max(1, max));
-  if (value >= 0) {
-    const green = Math.round(52 + 175 * strength);
-    return { backgroundColor: `rgb(${Math.round(12 + 48 * strength)}, ${green}, ${Math.round(46 + 28 * strength)})`, color: "#f7fff8" };
-  }
-  const red = Math.round(88 + 178 * strength);
-  return { backgroundColor: `rgb(${red}, ${Math.round(28 + 34 * strength)}, ${Math.round(46 + 28 * strength)})`, color: "#fff7f7" };
+  const color = value >= 0 ? "var(--ww-green, #55c8a0)" : "var(--ww-red, #ee8793)";
+  return { backgroundColor: `color-mix(in srgb, ${color} ${16 + strength * 34}%, var(--ww-surface, #08131f))`, color: "var(--ww-text, #f3f8ff)" };
 };
 
 const cellStyleForCell = (cell: SpxGexHeatmapCell | undefined, max: number) => {
-  if (!cell) return { backgroundColor: "#04101a", color: "#334454" };
+  if (!cell) return cellStyle(null, max);
   if (typeof cell.netGex === "number" && Number.isFinite(cell.netGex)) return cellStyle(cell.netGex, max);
-  if (cell.pricingQuality === "unpriced") return { backgroundColor: "#151923", color: "#a7b0bd" };
-  return { backgroundColor: "#07111a", color: "#526171" };
+  return cellStyle(null, max);
 };
 
-const exposureColor = (value: number) => value >= 0 ? "#d000d4" : "#20d6c8";
+const exposureColor = (value: number) => value >= 0 ? "var(--ww-green, #55c8a0)" : "var(--ww-red, #ee8793)";
 
 const exposureState = (value: number | null | undefined) => {
   if (typeof value !== "number" || !Number.isFinite(value)) return "missing";
@@ -421,7 +416,7 @@ export function SPXGexHeatmapPage() {
   );
 
   return (
-    <section className="h-full min-w-0 w-full overflow-x-hidden overflow-y-auto bg-[#060d16] px-3 pb-8 pt-4 text-white sm:px-5 lg:px-7" data-spx-gex-navigation-mode={navigationMode}>
+    <section className="spx-board min-w-0 w-full bg-[#060d16] px-3 pb-8 pt-4 text-white sm:px-5 lg:px-7" data-spx-gex-navigation-mode={navigationMode}>
       <div className="mx-auto flex w-full max-w-[1800px] flex-col gap-4">
         <header className="flex flex-col gap-3 border-b border-slate-700/60 pb-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -701,7 +696,7 @@ export function SPXGexHeatmapPage() {
                   ))}
                 </div>
               </div>
-              <table className="w-full min-w-[1540px] table-fixed border-collapse font-mono text-[11px]">
+              <table className="spx-exposure-table w-full table-fixed border-collapse font-mono text-xs" style={{ minWidth: 1006 + heatmap.selectedExpiries.length * 84 }}>
                 <thead className="sticky top-0 z-20">
                   <tr>
                     <HeaderCell width="70px">STRIKE</HeaderCell>
@@ -709,10 +704,10 @@ export function SPXGexHeatmapPage() {
                       <HeaderCell key={expiry}>{expiry.slice(5)}</HeaderCell>
                     ))}
                     <HeaderCell width="76px">STRIKE</HeaderCell>
-                    <HeaderCell width="365px">NET GEX / STRUCTURE</HeaderCell>
-                    <HeaderCell width="220px">DEX</HeaderCell>
-                    <HeaderCell width="220px">VEX</HeaderCell>
-                    <HeaderCell width="220px">CEX</HeaderCell>
+                    <HeaderCell width="320px">NET GEX / STRUCTURE</HeaderCell>
+                    <HeaderCell width="180px">DEX</HeaderCell>
+                    <HeaderCell width="180px">VEX</HeaderCell>
+                    <HeaderCell width="180px">CEX</HeaderCell>
                   </tr>
                 </thead>
                 <tbody>
@@ -773,7 +768,7 @@ export function SPXGexHeatmapPage() {
                         })}
                         <StrikeCell strike={strike} isSpotStrike={isSpotStrike} />
                         <td className="border border-[#102433] bg-[#050c14] px-1.5 py-[2px]">
-                          <div className="grid grid-cols-[150px_72px_1fr] items-center gap-2">
+                          <div className="grid grid-cols-[100px_80px_1fr] items-center gap-2">
                             {typeof profile?.netGex === "number" && Number.isFinite(profile.netGex) ? <ExposureBar value={profile.netGex} max={maxGex} /> : <div className="h-2.5 bg-[#07111b]" />}
                             <span className="text-right font-black text-cyan-100">{formatSignedCompact(profile?.netGex)}</span>
                             <span className="flex min-h-4 flex-wrap items-center gap-1 overflow-hidden">
