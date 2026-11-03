@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildAuditTelegramMessages,
   buildSpxDecisionTelegramPayload,
   buildTelegramSendPayload,
   assessMarketDataQuality,
@@ -73,6 +74,91 @@ test("SPX decision Telegram payload escapes model punctuation before HTML delive
 
   const auditPayload = buildTelegramSendPayload("chat", "<b>audit</b>");
   assert.equal(auditPayload.parse_mode, "HTML");
+});
+
+const telegramVisibleText = (html: string) => html.replace(/<[^>]*>/g, '')
+  .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+
+test("audit Telegram parts preserve all text, HTML entities and emoji within the parsed length limit", () => {
+  const notice = '\n\n⚠️ 儲存｜D1 已保存；KV 鏡像重試後仍失敗。';
+  for (const report of ['', '短報告 <SPX> & test', '審'.repeat(4121), '😀<&>\n'.repeat(3000), '字'.repeat(4040) + '😀尾段\\n結束']) {
+    const messages = buildAuditTelegramMessages('2026-11-03', report, notice);
+    const bodies = messages.map((message, index) => {
+      assert.ok(telegramVisibleText(message).length <= 4096);
+      assert.match(message, /^📅 <b>【每日審計清單】 \(2026-11-03\)<\/b>/);
+      if (messages.length > 1) assert.ok(message.includes(` (${index + 1}/${messages.length})`));
+      assert.equal(message.endsWith(notice), index === messages.length - 1);
+      const body = telegramVisibleText(message.match(/<pre>([\s\S]*)<\/pre>/)![1]);
+      assert.doesNotMatch(body, /^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/);
+      return body;
+    });
+    assert.equal(bodies.join(''), report.replace(/\\n/g, '\n'));
+  }
+  const single = buildAuditTelegramMessages('2026-11-03', '正常報告');
+  assert.deepEqual(single, ['📅 <b>【每日審計清單】 (2026-11-03)</b>\n\n<pre>正常報告</pre>']);
+});
+
+test("audit delivery saves the complete report before sending and reports partial delivery accurately", async (t) => {
+  for (const scenario of ['success', 'partial failure', 'failure notification rejected']) {
+    await t.test(scenario, async (t) => {
+      const report = '審'.repeat(9000);
+      let savedReport: unknown;
+      let modelCalls = 0;
+      const telegramBodies: Array<{ text: string; parse_mode: string }> = [];
+      const db = {
+        prepare(sql: string) {
+          let values: unknown[] = [];
+          return {
+            bind(...args: unknown[]) { values = args; return this; },
+            async run() {
+              if (/INSERT INTO spx_audits/.test(sql)) savedReport = values[1];
+              return { meta: { changes: 0 } };
+            },
+            async first() { return { count: 0 }; },
+          };
+        },
+      };
+      t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).includes('openrouter.ai')) {
+          modelCalls += 1;
+          return Response.json({ choices: [{ message: { content: report } }] });
+        }
+        assert.match(String(input), /^https:\/\/api.telegram.org\//);
+        assert.equal(savedReport, report, 'full D1 report must be saved before any Telegram request');
+        const payload = JSON.parse(String(init?.body));
+        telegramBodies.push(payload);
+        assert.equal(payload.parse_mode, 'HTML');
+        assert.ok(telegramVisibleText(payload.text).length <= 4096);
+        if (scenario !== 'success' && (telegramBodies.length === 2
+          || scenario === 'failure notification rejected' && telegramBodies.length === 3)) {
+          return Response.json({ description: 'Bad Request: test delivery rejected' }, { status: 400 });
+        }
+        return Response.json({ result: { message_id: telegramBodies.length } });
+      });
+      const kvWrites = new Map<string, string>();
+      const result = await runEndOfDayAudit({
+        TELEGRAM_TOKEN: 'test-token', TELEGRAM_CHAT_ID: 'test-chat', OPENROUTER_API_KEY: 'test-key',
+        SPX_RECAP_DB: db,
+        SPX_MEMORY: {
+          get: async () => JSON.stringify({ actionLog: [] }),
+          put: async (key: string, value: string) => { kvWrites.set(key, value); },
+        },
+      } as any, new Date('2026-11-03T21:15:00Z'));
+      assert.equal(modelCalls, 1, 'delivery failure must not regenerate the report');
+      assert.equal(JSON.parse(kvWrites.get('spx_audit_2026-11-03')!).report, report);
+      if (scenario === 'success') {
+        assert.equal(result.status, 'COMPLETED');
+        assert.equal(telegramBodies.length, 3);
+        assert.equal(telegramBodies.map(({ text }) => telegramVisibleText(text.match(/<pre>([\s\S]*)<\/pre>/)![1])).join(''), report);
+      } else {
+        assert.deepEqual(result, { status: 'FAILED', date: '2026-11-03', failureCode: 'AUDIT_DELIVERY_FAILED' });
+        assert.equal(telegramBodies.length, 3, 'stop at failed part; only the failure notice may follow');
+        assert.match(telegramBodies[2].text, /審計發送失敗/);
+        assert.match(telegramBodies[2].text, /報告已保存至 D1；Telegram 已確認送出 1\/3 段/);
+        assert.doesNotMatch(telegramBodies[2].text, /審計生成失敗/);
+      }
+    });
+  }
 });
 
 function assertCleanVisibleReasoning(text: string) {

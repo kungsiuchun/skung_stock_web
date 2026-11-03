@@ -2695,6 +2695,30 @@ export const buildTelegramSendPayload = (chatId: string, text: string, parseMode
 export const buildSpxDecisionTelegramPayload = (chatId: string, text: string) =>
   buildTelegramSendPayload(chatId, tgEscape(text), "HTML");
 
+export function buildAuditTelegramMessages(date: string, report: string, storageNotice = ""): string[] {
+  const heading = `📅 <b>【每日審計清單】 (${tgEscape(date)})</b>`;
+  const text = report.replace(/\\n/g, '\n');
+  // Reserve the longest possible part label and count UTF-16 units conservatively.
+  // Telegram's 4096-character limit applies AFTER HTML entities are parsed.
+  const bodyLimit = 4096 - heading.length - ` (${text.length}/${text.length})`.length
+    - '\n\n<pre></pre>'.length - storageNotice.length;
+  if (bodyLimit < 2) throw new Error('audit_telegram_header_too_long');
+  const parts: string[] = [];
+  let part = '';
+  for (const character of text) {
+    if (part.length + character.length > bodyLimit) {
+      parts.push(part);
+      part = '';
+    }
+    part += character;
+  }
+  parts.push(part);
+  return parts.map((body, index) => {
+    const label = parts.length > 1 ? ` (${index + 1}/${parts.length})` : '';
+    return `${heading}${label}\n\n<pre>${tgEscape(body)}</pre>${index === parts.length - 1 ? storageNotice : ''}`;
+  });
+}
+
 async function sendTelegramMessage(token: string, chatId: string, text: string, parseMode: "HTML" | null = "HTML") {
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
   const res = await fetchWithTimeout(url, {
@@ -4075,6 +4099,9 @@ export async function runEndOfDayAudit(env: Env, now: Date = new Date(), options
   }
   const memory: DailyMemory = JSON.parse(rawMemory);
 
+  let stage: 'generation' | 'storage' | 'delivery' = 'generation';
+  let deliveredParts = 0;
+  let totalParts = 0;
   try {
     const response = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
@@ -4112,6 +4139,7 @@ export async function runEndOfDayAudit(env: Env, now: Date = new Date(), options
     }
 
     const generatedAt = new Date().toISOString();
+    stage = 'storage';
     const auditPayload = JSON.stringify({
       date: etDateStr,
       generatedAt,
@@ -4149,14 +4177,25 @@ export async function runEndOfDayAudit(env: Env, now: Date = new Date(), options
     }
 
     const storageNotice = kvMirrorFailures.length ? '\n\n⚠️ 儲存｜D1 已保存；KV 鏡像重試後仍失敗。' : '';
-    const finalMsg = `📅 <b>【每日審計清單】 (${etDateStr})</b>\n\n<pre>${tgEscape(report)}</pre>${storageNotice}`;
-
-    await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, finalMsg);
+    stage = 'delivery';
+    const messages = buildAuditTelegramMessages(etDateStr, report, storageNotice);
+    totalParts = messages.length;
+    for (const message of messages) {
+      await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, message);
+      deliveredParts += 1;
+    }
     return { status: 'COMPLETED', date: etDateStr, kvMirrorFailures };
   } catch (e: any) {
-    console.error('[AUDIT] Failed to generate audit', e);
-    await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, `❌ <b>[審計失敗]</b> ${tgEscape(e.message || String(e))}`);
-    return { status: 'FAILED', date: etDateStr, failureCode: classifySpxOperationalFailure(e, 'AUDIT_FAILED') };
+    console.error(`[AUDIT] ${stage} failed; delivered=${deliveredParts}/${totalParts}`, e);
+    const label = stage === 'delivery' ? '審計發送失敗' : stage === 'storage' ? '審計儲存失敗' : '審計生成失敗';
+    const savedNotice = stage === 'delivery' ? `報告已保存至 D1；Telegram 已確認送出 ${deliveredParts}/${totalParts} 段。\n` : '';
+    try {
+      await sendTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID,
+        `❌ <b>[${label}]</b> ${savedNotice}${tgEscape(compactModelText(e.message || String(e), 180))}`);
+    } catch (notificationError) {
+      console.error('[AUDIT] Failure notification delivery failed', notificationError);
+    }
+    return { status: 'FAILED', date: etDateStr, failureCode: classifySpxOperationalFailure(e, stage === 'delivery' ? 'AUDIT_DELIVERY_FAILED' : 'AUDIT_FAILED') };
   }
 }
 
