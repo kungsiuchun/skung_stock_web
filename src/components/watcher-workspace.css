@@ -35,4 +35,5 @@
 .ww-spx-embedded svg text:is([class*="fill-slate-"],[class*="fill-zinc-4"]){fill:var(--ww-muted)}
 .ww-spx-embedded svg text[class*="fill-zinc-100"]{fill:var(--ww-text)}
 .ww-spx-embedded svg text[class*="fill-indigo-"]{fill:var(--ww-blue)}
+.ww-app [data-pa-side-pattern]{display:block}
 .ww-app[data-theme=light] .spx-board{--spx-em:#6d28d9}

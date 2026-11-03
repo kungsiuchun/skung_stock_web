@@ -475,9 +475,9 @@ export function SpxPriceActionCompass({
                     data-pa-pattern-end-index={pattern.toIndex}
                     data-pa-side-pattern-active={selectedPattern?.id === pattern.id ? "true" : undefined}
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-xs font-black text-white">{pattern.label}</span>
-                      <span className="font-mono text-[10px]" title="Pattern match score, not a probability of profit">Match {Math.round(pattern.confidence * 100)}/100</span>
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="break-words text-xs font-black text-white">{pattern.label}</span>
+                      <span className="shrink-0 whitespace-nowrap font-mono text-[10px]" title="Pattern match score, not a probability of profit">Match {Math.round(pattern.confidence * 100)}/100</span>
                     </div>
                     {signalDensity === "actionable" && <ActionableMeta candidate={actionableById.get(pattern.id)} rank={topPatterns.findIndex((item) => item.id === pattern.id) + 1} />}
                     <div className="mt-1 font-mono text-[10px] text-zinc-500">
