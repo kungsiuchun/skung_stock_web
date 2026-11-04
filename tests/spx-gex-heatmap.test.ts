@@ -52,6 +52,7 @@ import {
   toSpxGexPressureFrame,
 } from "../src/lib/spx-gex-pressure-matrix";
 import { parseSpxGexBoardSelection, resolveSpxGexBoardNavigationMode } from "../src/components/spx-gex-heatmap-page";
+import { getSpxPressureCellStyle } from "../src/components/spx-gex-pressure-matrix";
 import { getSpxGexTooltipPosition } from "../src/lib/spx-gex-tooltip";
 import { parseJsonResponse, SafeJsonResponseError } from "../src/lib/safe-json-response";
 import { getSpxSpotLivePulseKey } from "../src/lib/spx-spot-live-pulse";
@@ -2996,5 +2997,39 @@ describe("SPX GEX pressure API", () => {
     assert.equal(malformedPayload.status, "ERROR");
     assert.equal(malformedPayload.errorCode, "SPX_GEX_PRESSURE_BUILD_FAILED");
     assert.deepEqual(malformedPayload.invalidSnapshots, []);
+  });
+});
+
+describe("approved SPX pressure colors", () => {
+  it("uses the approved positive/negative anchors and keeps glyph contrast across both complete ramps", () => {
+    const luminance = (rgb: number[]) => rgb.map(v => v / 255 <= 0.04045 ? v / 255 / 12.92 : ((v / 255 + 0.055) / 1.055) ** 2.4)
+      .reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0);
+    for (const sign of [1, -1]) for (let intensityPct = 0; intensityPct <= 100; intensityPct++) {
+      const style = getSpxPressureCellStyle({ state: sign > 0 ? "POSITIVE_WEAKER" : "NEGATIVE_DEEPER", currentGex: sign, intensityPct }, false);
+      const backgrounds = [...style.background.matchAll(/rgb\(([\d ]+)\)/g)].map(m => m[1].split(" ").map(Number));
+      const foregrounds = style.color.match(/#(?:fff|000)/g)!;
+      assert.equal(backgrounds.length, 2);
+      for (let theme = 0; theme < 2; theme++) {
+        const bg = luminance(backgrounds[theme]), fg = foregrounds[theme] === "#fff" ? 1 : 0;
+        assert.ok((Math.max(bg, fg) + 0.05) / (Math.min(bg, fg) + 0.05) >= 4.5, `low contrast: ${sign}, ${intensityPct}, ${theme}`);
+      }
+    }
+    const strong = (currentGex: number) => getSpxPressureCellStyle({ state: "UNCHANGED", currentGex, intensityPct: 100 }, false).background;
+    assert.match(strong(1), /rgb\(38 166 154\)/);
+    assert.match(strong(-1), /rgb\(239 83 80\)/);
+  });
+
+  it("keeps pending and missing data neutral, zero separate, and flips amber", () => {
+    const cell = { state: "POSITIVE_WEAKER" as const, currentGex: 1, intensityPct: 25 };
+    for (const state of ["NO_DATA", "NO_BASELINE", "OUTSIDE_COVERAGE"] as const) {
+      assert.match(getSpxPressureCellStyle({ ...cell, state }, false).background, /--ww-raised/);
+    }
+    assert.match(getSpxPressureCellStyle(cell, true).background, /--ww-raised/);
+    assert.match(getSpxPressureCellStyle({ ...cell, currentGex: null }, false).background, /--ww-raised/);
+    assert.equal(getSpxPressureCellStyle({ ...cell, currentGex: 0 }, false).background, "light-dark(#edf1f6, #172234)");
+    for (const state of ["FLIP_TO_POSITIVE", "FLIP_TO_NEGATIVE"] as const) {
+      assert.equal(getSpxPressureCellStyle({ ...cell, state }, false).background, "light-dark(#f5da93, #805b19)");
+    }
+    assert.throws(() => getSpxPressureCellStyle({ ...cell, intensityPct: NaN }, false), /Invalid pressure color intensity/);
   });
 });

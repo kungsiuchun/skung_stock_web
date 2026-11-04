@@ -158,17 +158,42 @@ const stateGlyph = (state: SpxGexPressureState) => {
 const stateColor = (state: SpxGexPressureState, currentGex?: number | null) => {
   if (state === "FLIP_TO_POSITIVE" || state === "FLIP_TO_NEGATIVE") return "var(--ww-amber, #e7bb72)";
   if (state === "NO_DATA" || state === "NO_BASELINE" || state === "OUTSIDE_COVERAGE") return "var(--ww-muted, #93a7bd)";
-  if ((currentGex || 0) > 0) return "var(--ww-green, #55c8a0)";
-  if ((currentGex || 0) < 0) return "var(--ww-red, #ee8793)";
+  if ((currentGex || 0) > 0) return "var(--spx-positive-number, #4ed4a6)";
+  if ((currentGex || 0) < 0) return "var(--spx-negative-number, #ff8190)";
   return "var(--ww-muted, #93a7bd)";
 };
 
-const cellBackground = (cell: SpxGexPressureCell, missingSlot: boolean) => {
-  if (missingSlot) {
-    return "var(--ww-raised, #0c1b2b)";
+const pressureColorRamps = {
+  light: { positive: ["#d7efe7", "#a8dcc9", "#61bfa7", "#26a69a"], negative: ["#f9e0e3", "#f7b0ae", "#f07a76", "#ef5350"] },
+  dark: { positive: ["#164e3f", "#16715a", "#198d70", "#26a69a"], negative: ["#6b2836", "#943647", "#bf4655", "#ef5350"] },
+};
+
+const pressureRampColor = (ramp: string[], intensity: number) => {
+  const position = intensity * (ramp.length - 1);
+  const index = Math.min(ramp.length - 2, Math.floor(position));
+  const from = ramp[index].slice(1).match(/../g)!.map(value => parseInt(value, 16));
+  const to = ramp[index + 1].slice(1).match(/../g)!.map(value => parseInt(value, 16));
+  const rgb = from.map((value, channel) => Math.round(value + (to[channel] - value) * (position - index)));
+  const linear = rgb.map(value => value / 255 <= 0.04045 ? value / 255 / 12.92 : ((value / 255 + 0.055) / 1.055) ** 2.4);
+  const luminance = linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+  // The black/white crossover maximizes WCAG contrast across the approved ramp.
+  return { background: `rgb(${rgb.join(" ")})`, color: luminance > Math.sqrt(0.0525) - 0.05 ? "#000" : "#fff" };
+};
+
+export const getSpxPressureCellStyle = (cell: Pick<SpxGexPressureCell, "state" | "currentGex" | "intensityPct">, missingSlot: boolean) => {
+  if (missingSlot || ["NO_DATA", "OUTSIDE_COVERAGE", "NO_BASELINE"].includes(cell.state) || cell.currentGex === null) {
+    return { background: "var(--ww-raised, #0c1b2b)", color: "var(--ww-muted, #93a7bd)" };
   }
-  if (cell.state === "NO_DATA" || cell.state === "OUTSIDE_COVERAGE" || cell.state === "NO_BASELINE") return "var(--ww-raised, #0c1b2b)";
-  return `color-mix(in srgb, ${stateColor(cell.state, cell.currentGex)} ${24 + (cell.intensityPct / 100) * 26}%, var(--ww-surface, #08131f))`;
+  if (cell.state === "FLIP_TO_POSITIVE" || cell.state === "FLIP_TO_NEGATIVE") {
+    return { background: "light-dark(#f5da93, #805b19)", color: "light-dark(#000, #fff)" };
+  }
+  if (cell.currentGex === 0) return { background: "light-dark(#edf1f6, #172234)", color: "var(--ww-text, #f3f8ff)" };
+  if (!Number.isFinite(cell.intensityPct)) throw new Error("Invalid pressure color intensity");
+  const intensity = Math.max(0, Math.min(100, cell.intensityPct)) / 100;
+  const tone = cell.currentGex > 0 ? "positive" : "negative";
+  const light = pressureRampColor(pressureColorRamps.light[tone], intensity);
+  const dark = pressureRampColor(pressureColorRamps.dark[tone], intensity);
+  return { background: `light-dark(${light.background}, ${dark.background})`, color: `light-dark(${light.color}, ${dark.color})` };
 };
 
 const etClock = (now = new Date()) => {
@@ -634,7 +659,6 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
   return (
     <section
       className="border border-[#123142] bg-[#030910]"
-      style={{ colorScheme: "dark" }}
       data-spx-gex-pressure-matrix="true"
       aria-busy={loading || Boolean(enabled && selectedDate && (!data || data.selectedDate !== selectedDate))}
     >
@@ -730,7 +754,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
                       </div>
                     ))}
                   </div>
-                  <div className="sticky right-0 z-40 flex h-11 shrink-0 items-center justify-end bg-[#050c14] px-2 text-right font-black text-cyan-200 shadow-[-8px_0_12px_rgba(3,9,16,.75)]" style={{ width: CURRENT_GEX_WIDTH }} data-current-gex-column="header">CURRENT GEX</div>
+                  <div className="sticky right-0 z-40 flex h-11 shrink-0 items-center justify-end border-l border-[#123142] bg-[#050c14] px-2 text-right font-black text-cyan-200" style={{ width: CURRENT_GEX_WIDTH }} data-current-gex-column="header">CURRENT GEX</div>
                 </div>
 
                 <div className="flex">
@@ -783,8 +807,8 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
                             <button
                               key={key}
                               type="button"
-                              className="relative z-10 flex shrink-0 items-center justify-center border-b border-l border-[#102433] font-black transition-[filter] hover:brightness-150 focus-visible:z-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-200"
-                              style={{ width: effectiveCellWidth, minWidth: effectiveCellWidth, height: ROW_HEIGHT, minHeight: ROW_HEIGHT, background: cellBackground(cell, slot.status !== "READY"), color: "var(--ww-text, #f3f8ff)" }}
+                              className="relative z-10 flex shrink-0 items-center justify-center border-b border-l border-[#102433] font-black hover:outline hover:outline-1 hover:-outline-offset-1 hover:outline-cyan-200 focus-visible:z-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-200"
+                              style={{ width: effectiveCellWidth, minWidth: effectiveCellWidth, height: ROW_HEIGHT, minHeight: ROW_HEIGHT, ...getSpxPressureCellStyle(cell, slot.status !== "READY") }}
                               onMouseEnter={(event) => {
                                 if (!hoverSuppressedAfterScrollRef.current) activateCell(event.currentTarget, row.strike, cell, false);
                               }}
@@ -837,9 +861,9 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
                     <span className="sr-only">{usingOneMinuteSpot ? "SPX 1-minute price overlay" : "SPX 15-minute canonical snapshot fallback overlay"}{chartGeometry?.expectedMoveRange ? ` with 0DTESPX expected move plus or minus ${chartGeometry.expectedMoveRange.value}` : ""}</span>
                   </div>
 
-                  <div className="sticky right-0 z-30 shrink-0 bg-[#050c14] shadow-[-8px_0_12px_rgba(3,9,16,.75)]" style={{ width: CURRENT_GEX_WIDTH }} data-current-gex-column="body">
+                  <div className="sticky right-0 z-30 shrink-0 border-l border-[#123142] bg-[#050c14]" style={{ width: CURRENT_GEX_WIDTH }} data-current-gex-column="body">
                     {displayPressure!.rows.map((row) => (
-                      <div key={row.strike} className={`flex items-center justify-end border-b border-[#102433] px-2 text-right font-black tabular-nums ${(row.currentGex || 0) >= 0 ? "text-green-300" : "text-pink-300"}`} style={{ height: ROW_HEIGHT }}>
+                      <div key={row.strike} className="flex items-center justify-end border-b border-[#102433] px-2 text-right font-black tabular-nums" style={{ height: ROW_HEIGHT, color: stateColor("UNCHANGED", row.currentGex) }}>
                         {compact(row.currentGex, true)}
                       </div>
                     ))}
@@ -868,7 +892,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
 
           <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#123142] bg-[#030910] px-3 py-2 font-mono text-[10px] text-zinc-500">
             <div className="flex flex-wrap gap-3">
-              <span className="text-green-300">■ Positive GEX</span><span className="text-pink-300">■ Negative GEX</span><span className="text-white">+ Stronger</span><span>− Weaker</span><span className="text-amber-300">↔ Flip</span><span className="text-cyan-300">━ SPX</span><span className="text-violet-200">┄ Expected Move</span>
+              <span style={{ color: stateColor("UNCHANGED", 1) }}>■ Positive GEX</span><span style={{ color: stateColor("UNCHANGED", -1) }}>■ Negative GEX</span><span className="text-white">+ Stronger</span><span>− Weaker</span><span className="text-amber-300">↔ Flip</span><span className="text-cyan-300">━ SPX</span><span className="text-violet-200">┄ Expected Move</span>
             </div>
             <span className="tabular-nums">{pressure.source.provider} / baseline {pressure.baseline.snapshotTimeEt} ET / collected {pressure.baseline.collectedTimeEt} ET</span>
           </div>

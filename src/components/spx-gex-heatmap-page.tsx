@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowLeft, CalendarDays, Gauge, Pause, Play, Waves } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Gauge, Pause, Play, Waves } from "lucide-react";
 import { buildSpxGexHeatmapReadingContext, formatSpxGexCompactExposure, type SpxGexHeatmapCell, type SpxGexHeatmapModel, type SpxGexHeatmapReadingRule, type SpxGexStrikeProfile } from "@/lib/spx-gex-heatmap";
 import { buildSpxFailureDetails, formatSpxFailureDetails, parseSpxBoardResponse, spxFailureMessage, type SpxFailureDetails } from "@/lib/spx-board-response";
 import { useSpxGexBoard, currentEtClock, type SpxGexBoardNavigationMode } from "@/hooks/use-spx-gex-board";
@@ -382,9 +382,6 @@ export function SPXGexHeatmapPage() {
   }, []);
   const snapshotControls = (
     <div data-spx-gex-snapshot-controls="true" className="flex flex-wrap items-center gap-2">
-      <label className="inline-flex h-10 items-center gap-2 border border-white/10 bg-white/[0.04] px-3 text-sm text-zinc-300">
-        <CalendarDays aria-hidden="true" className="h-4 w-4 text-cyan-200" />
-        <span className="sr-only">SPX GEX snapshot date</span>
         <select
           name="spx-gex-snapshot-date"
           aria-label="SPX GEX snapshot date"
@@ -399,7 +396,7 @@ export function SPXGexHeatmapPage() {
               { navigationMode: nextNavigationMode },
             );
           }}
-          className="bg-[#06111a] text-sm font-bold text-white outline-none focus-visible:ring-2 focus-visible:ring-cyan-200"
+          className="h-11 bg-[#06111a] text-sm font-bold text-white outline-none focus-visible:ring-2 focus-visible:ring-cyan-200"
         >
           {data.availableDates.length === 0 ? (
             <option value="">No snapshots</option>
@@ -411,7 +408,6 @@ export function SPXGexHeatmapPage() {
             ))
           )}
         </select>
-      </label>
     </div>
   );
 
