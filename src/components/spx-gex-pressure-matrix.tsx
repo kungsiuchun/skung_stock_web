@@ -892,7 +892,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
 
           <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#123142] bg-[#030910] px-3 py-2 font-mono text-[10px] text-zinc-500">
             <div className="flex flex-wrap gap-3">
-              <span className="text-green-300">■ Positive GEX</span><span className="text-pink-300">■ Negative GEX</span><span className="text-white">+ Stronger</span><span>− Weaker</span><span className="text-amber-300">↔ Flip</span><span className="text-cyan-300">━ SPX</span><span className="text-violet-200">┄ Expected Move</span>
+              <span style={{ color: stateColor("UNCHANGED", 1) }}>■ Positive GEX</span><span style={{ color: stateColor("UNCHANGED", -1) }}>■ Negative GEX</span><span className="text-white">+ Stronger</span><span>− Weaker</span><span className="text-amber-300">↔ Flip</span><span className="text-cyan-300">━ SPX</span><span className="text-violet-200">┄ Expected Move</span>
             </div>
             <span className="tabular-nums">{pressure.source.provider} / baseline {pressure.baseline.snapshotTimeEt} ET / collected {pressure.baseline.collectedTimeEt} ET</span>
           </div>
