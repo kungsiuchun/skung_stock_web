@@ -37,3 +37,6 @@
 .ww-spx-embedded svg text[class*="fill-indigo-"]{fill:var(--ww-blue)}
 .ww-app [data-pa-side-pattern]{display:block}
 .ww-app[data-theme=light] .spx-board{--spx-em:#6d28d9}
+.ww-spx-embedded{--spx-positive-number:#4ed4a6;--spx-negative-number:#ff8190}
+.ww-app[data-theme=light] .ww-spx-embedded{--spx-positive-number:#087c58;--spx-negative-number:#b62f4c}
+.ww-app [data-current-gex-column]{background:var(--ww-surface);border-left:1px solid var(--ww-line);box-shadow:none}
