@@ -32,7 +32,7 @@ export function WatcherWorkspacePlans({ symbol, sourceAsOf, saved, updateSaved }
     const a = document.createElement("a"); a.href = href; a.download = "watcher-workspace.json"; a.click(); URL.revokeObjectURL(href);
   };
   return <div className="ww-plans">
-    <div className="ww-section-heading"><div><span className="ww-kicker">DEFINE THE RISK FIRST</span><h1>Trade plans</h1><p>Your levels. Your thesis. Saved on this browser.</p></div><div className="ww-actions"><button onClick={exportSaved}><Download size={15} /> Export</button><button onClick={() => file.current?.click()}><Upload size={15} /> Import</button><input type="file" accept="application/json,.json" hidden ref={file} onChange={async event => {
+    <div className="ww-section-heading"><div><span className="ww-kicker">DEFINE THE RISK FIRST</span><h1>Trade plans</h1><p>Save your price levels and trade thesis in this browser.</p></div><div className="ww-actions"><button onClick={exportSaved}><Download size={15} /> Export</button><button onClick={() => file.current?.click()}><Upload size={15} /> Import</button><input type="file" accept="application/json,.json" hidden ref={file} onChange={async event => {
       const selected = event.target.files?.[0]; event.target.value = "";
       if (!selected) return;
       try { if (selected.size > 1_000_000) throw new Error("Import must be under 1 MB."); setPendingImport(parseWorkspaceSaved(JSON.parse(await selected.text()))); }

@@ -16,7 +16,7 @@ type WorkItem = {
   title: string;
   category: string;
   description: string;
-  buildNote: string;
+  buildNote?: string;
   action: string;
   icon: React.ReactNode;
   featured?: boolean;
@@ -56,8 +56,6 @@ export function WorkGallery({ onOpenCaptionTool }: WorkGalleryProps) {
       category: "Vision Tool",
       description:
         "A compact image-to-caption utility using AI to describe uploaded visuals.",
-      buildNote:
-        "A small tool experiment in making AI perception visible inside the portfolio.",
       action: "Open tool",
       icon: <ImageIcon className="h-5 w-5" />,
       onClick: onOpenCaptionTool,
@@ -84,11 +82,7 @@ export function WorkGallery({ onOpenCaptionTool }: WorkGalleryProps) {
       <div className="portfolio-wrap">
         <header className="page-heading">
           <p className="eyebrow">01 / THE MARKET LAB & OTHER EXPERIMENTS</p>
-          <h1>
-            Working ideas.
-            <br />
-            <em>Real interfaces.</em>
-          </h1>
+          <h1>Tools I built</h1>
           <div className="heading-bottom">
             <p>
               Tools I build and iterate on with AI agents. Mostly for exploring
@@ -133,10 +127,10 @@ export function WorkGallery({ onOpenCaptionTool }: WorkGalleryProps) {
               </div>
               <h2>{item.title}</h2>
               <p>{item.description}</p>
-              <p className="work-contribution">
+              {item.buildNote && <p className="work-contribution">
                 <b>THE BUILD</b>
                 {item.buildNote}
-              </p>
+              </p>}
               {item.view ? (
                 <a className="text-link" href={getHashForView(item.view)} aria-label={item.action + ": " + item.title}>
                   {item.action}

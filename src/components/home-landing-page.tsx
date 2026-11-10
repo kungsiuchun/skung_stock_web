@@ -18,13 +18,13 @@ export function HomeLandingPage() {
             <span className="accent-dot" /> DATA ANALYST · CREATIVE DEVELOPER
           </p>
           <h1 id="home-title">
-            Finding signal.
+            I build stock research tools
             <br />
-            <em>Framing stories.</em>
+            <em>and take photographs.</em>
           </h1>
           <p className="hero-intro">
-            I’m Siu. I build stock research tools with AI agents, make sense of
-            data, and take the scenic route with my camera.
+            I’m Siu, a data analyst at Canvas Worldwide. I build my tools with
+            AI agents.
           </p>
           <div className="hero-actions">
             <a className="portfolio-button" href="#/market-lab">
@@ -129,7 +129,7 @@ export function HomeLandingPage() {
                 <span>Options</span>
               </div>
               <span className="cover-note">
-                A research workspace. Built with AI.
+                Stock research in Watcher
               </span>
             </div>
             <div className="selected-work-caption">

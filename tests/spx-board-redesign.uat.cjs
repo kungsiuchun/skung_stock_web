@@ -76,9 +76,27 @@ const button = async (page,text) => {
       await waitReady(page);
       await page.waitForFunction(()=>document.querySelector('[data-spx-board-pressure-summary] ol li'));
       await page.waitForSelector('[data-pa-chart-surface]');
-      const overview=await page.$eval('[data-spx-board-overview]',e=>({text:e.innerText,bottom:e.getBoundingClientRect().bottom}));
+      const overview=await page.$eval('[data-spx-board-overview]',e=>({text:e.innerText,top:e.getBoundingClientRect().top,bottom:e.getBoundingClientRect().bottom}));
       assert.match(overview.text,/Gamma flip/); assert.match(overview.text,/Call \/ put wall/); assert.match(overview.text,/vs 09:30 ET/);
-      assert.ok(overview.bottom<h,'four-question overview must fit within the first viewport');
+      const preview=await page.$eval('[aria-labelledby="spx-snapshot-gex-title"]',e=>({
+        text:e.innerText,
+        visible:e.getClientRects().length>0,
+        bottom:e.getBoundingClientRect().bottom,
+        strikes:[...e.querySelectorAll('tbody th')].map(cell=>Number(cell.textContent.replaceAll(',',''))),
+      }));
+      if(name==='mobile'){
+        assert.ok(preview.visible && preview.bottom<overview.top && preview.bottom<h,'snapshot GEX must fit above the overview in the first viewport');
+        assert.ok(preview.text.includes(fixture.sessions.at(-1).snapshotTimeEt+' ET'));
+        const spot=fixture.sessions.at(-1).spot;
+        const pricedStrikes=new Set(fixture.heatmap.cells.filter(cell=>fixture.heatmap.selectedExpiries.includes(cell.expdate) && Number.isFinite(cell.netGex)).map(cell=>cell.strike));
+        const expected=fixture.heatmap.strikeProfiles.map(row=>row.strike).filter(strike=>pricedStrikes.has(strike))
+          .sort((a,b)=>Math.abs(a-spot)-Math.abs(b-spot)||b-a).slice(0,5).sort((a,b)=>b-a);
+        assert.ok(expected.length>0);
+        assert.deepEqual(preview.strikes,expected);
+      }else{
+        assert.equal(preview.visible,false);
+        assert.ok(overview.bottom<h,'desktop overview must fit within the first viewport');
+      }
       assert.equal(await page.$eval('#spx-board-evidence',e=>e.open),false);
       assert.equal(await page.$eval('[data-spx-gex-navigation-mode]',e=>e.scrollWidth>e.clientWidth),false,'page must not overflow horizontally');
       assert.equal(await page.$eval('[data-spx-gex-heatmap-spot-badge]',e=>e.classList.contains('spx-spot-live-pulse')),false);
@@ -104,6 +122,7 @@ const button = async (page,text) => {
       await button(page,'Latest retained');
       await page.waitForFunction(()=>document.querySelector('[data-spx-gex-request-state]')?.getAttribute('data-spx-gex-request-state')==='ERROR');
       assert.match(await page.$eval('[data-spx-board-overview]',e=>e.innerText),/Last verified/);
+      if(name==='mobile')assert.match(await page.$eval('[aria-labelledby="spx-snapshot-gex-title"]',e=>e.innerText),/Last verified/);
       assert.match(await page.$eval('[role="alert"]',e=>e.innerText),/Last verified:/);
       state.fault=null; await button(page,'Retry snapshot'); await waitReady(page);
       assert.deepEqual(state.errors,[],'healthy and recoverable flows must not crash React');

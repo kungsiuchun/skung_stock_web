@@ -850,7 +850,7 @@ const visibleText = (page) => page.$eval("[data-watcher-replica]", (node) => nod
 
     marketBreadthApiMode = "EMPTY";
     await page.click("[data-spx-market-breadth] .siw-spx-market-breadth-refresh");
-    await page.waitForFunction(() => document.querySelector("[data-spx-market-breadth]")?.textContent?.includes("Initial backfill required"), { timeout: 5000 });
+    await page.waitForFunction(() => document.querySelector("[data-spx-market-breadth]")?.textContent?.includes("No daily snapshot has been published yet."), { timeout: 5000 });
 
     marketBreadthApiMode = "INVALID";
     await page.click("[data-spx-market-breadth] .siw-spx-market-breadth-refresh");

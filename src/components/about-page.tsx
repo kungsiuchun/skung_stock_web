@@ -104,10 +104,7 @@ export function AboutPage() {
             </div>
             <div className="resume-details">
               <h3>For the complete picture</h3>
-              <p>
-                This is a concise overview of my supplied résumé. Read the PDF
-                for the full professional profile.
-              </p>
+              <p><a href={profile.resume} target="_blank" rel="noreferrer">Read my full résumé (PDF).</a></p>
               <a
                 className="text-link"
                 href={profile.linkedin}

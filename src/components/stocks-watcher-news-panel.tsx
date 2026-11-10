@@ -102,7 +102,7 @@ export function StocksWatcherNewsPanel({ symbol, loadTool }: { symbol: string; l
   const clearFilters = () => { setQuery(""); setSource(""); };
   return <section className={`siw-panel siw-primary-panel siw-newsroom is-${view}`} data-primary-tab-panel="News" data-newsroom aria-labelledby="siw-newsroom-title">
     <header className="siw-newsroom-header">
-      <div><p className="siw-newsroom-eyebrow">The ticker desk</p><h2 id="siw-newsroom-title">{symbol} Newsroom</h2><p>Headlines first. Context when you need it.</p></div>
+      <div><p className="siw-newsroom-eyebrow">The ticker desk</p><h2 id="siw-newsroom-title">{symbol} Newsroom</h2><p>Browse headlines by source and open the original article for details.</p></div>
       <button type="button" onClick={news.retry} disabled={news.loading}><RefreshCw aria-hidden="true" size={15} />{news.loading ? "Loading news…" : "Refresh news"}</button>
     </header>
     <div className="siw-newsroom-toolbar">

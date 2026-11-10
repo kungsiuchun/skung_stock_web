@@ -37,7 +37,7 @@ export class RouteErrorBoundary extends Component<RouteErrorBoundaryProps, Route
         <div className="max-w-lg border border-rose-500/50 bg-rose-500/10 p-6">
           <p className="text-xs font-black uppercase tracking-[0.16em] text-rose-300">Tool unavailable</p>
           <h1 className="mt-3 text-2xl font-black">This page could not open.</h1>
-          <p className="mt-3 text-sm leading-6 text-zinc-300">The route failed while loading or rendering. Retry once; if it still fails, return to Market Lab and choose another tool.</p>
+          <p className="mt-3 text-sm leading-6 text-zinc-300">Try again or return to Market Lab.</p>
           <div className="mt-5 flex flex-wrap gap-3">
             <button type="button" onClick={() => window.location.reload()} className="min-h-11 border border-rose-300 px-4 text-sm font-bold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-300">Retry page</button>
             <a href={getHashForView("work-gallery")} className="inline-flex min-h-11 items-center border border-zinc-600 px-4 text-sm font-bold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-300">Return to Market Lab</a>

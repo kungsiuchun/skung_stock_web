@@ -184,7 +184,7 @@ export function MarketBreadthPanel({ variant = "standalone" }: MarketBreadthPane
         </header>
 
         {loading && <LoadingState />}
-        {!loading && empty && <StatusPanel tone="empty" title="Initial backfill required" message="No READY market breadth snapshot exists yet. Run the authorized initial backfill before publishing this page." onRetry={load} />}
+        {!loading && empty && <StatusPanel tone="empty" title="Market breadth data unavailable" message="No daily snapshot has been published yet." onRetry={load} />}
         {!loading && error && <StatusPanel tone="error" title="Market breadth unavailable" message={error} onRetry={load} />}
 
         {!loading && data && (

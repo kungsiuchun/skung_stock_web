@@ -422,7 +422,7 @@ export function SPXGexHeatmapPage() {
           <div className="flex flex-wrap items-end justify-between gap-3">
             <div>
               <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">SPX Market Structure</h1>
-              <p className="mt-1 text-sm text-slate-400">Key levels. Pressure changes. Verifiable context.</p>
+              <p className="mt-1 text-sm text-slate-400">Compare GEX by strike and track pressure changes through the session.</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {snapshotControls}
@@ -458,6 +458,7 @@ export function SPXGexHeatmapPage() {
         {requestState.phase === "EMPTY" && <div><Notice tone="amber" text={heatmap ? `Requested snapshot is unavailable. Showing last verified ${selectedDate} ${selectedSession?.snapshotTimeEt} ET.` : "No retained snapshot is available for this selection."} /><button className="min-h-10 px-4 text-xs text-cyan-200 underline" onClick={() => void loadHeatmap(navigationMode === "latest" ? undefined : selectedDate, navigationMode === "latest" ? null : selectedMinute)}>Retry snapshot</button></div>}
         {requestState.phase === "ERROR" && <div role="alert"><Notice tone="red" text={`${spxFailureMessage(requestState.httpStatus)}${heatmap ? ` Last verified: ${selectedDate} ${selectedSession?.snapshotTimeEt} ET; refresh failed.` : ""}`} /><button className="min-h-10 px-4 text-xs text-cyan-200 underline" onClick={() => void loadHeatmap(navigationMode === "latest" ? undefined : selectedDate, navigationMode === "latest" ? null : selectedMinute)}>Retry snapshot</button></div>}
         {data.warnings.length > 0 && <Notice tone="amber" text={data.warnings.join(" ")} />}
+        {heatmap && <SpxSnapshotGexPreview heatmap={heatmap} stale={requestState.phase !== "READY"} />}
         {heatmap && <SpxBoardOverview heatmap={heatmap} pressure={pressureOverview} stale={requestState.phase !== "READY"} onEvidence={() => {
           const panel = document.getElementById("spx-board-evidence") as HTMLDetailsElement | null;
           if (panel) { panel.open = true; panel.scrollIntoView({block: "start"}); panel.querySelector("summary")?.focus(); }
@@ -470,7 +471,7 @@ export function SPXGexHeatmapPage() {
           <div className="space-y-3 p-3">
             <p>{sourceText || "No verified snapshot loaded."}</p>
             <p className="break-all font-mono">Snapshot {heatmap?.canonical?.snapshotId || "unavailable"} · {heatmap?.canonical?.payloadHash || "hash unavailable"}</p>
-            <p>Per-cell inputs: select an expiry cell in Snapshot & replay.</p>
+            <p>Select an expiry cell in Snapshot & replay to see its inputs.</p>
                     <div className="flex flex-wrap gap-x-4 gap-y-1 border border-white/10 bg-black/20 px-3 py-2 font-mono text-[10px] text-zinc-500" data-spx-gex-request-state={requestState.phase}>
           <span>STATE <strong className="text-zinc-200">{requestState.phase}</strong></span>
           <span>SOURCE <strong className="text-zinc-200">{sourceModeLabel()}</strong></span>
@@ -516,7 +517,7 @@ export function SPXGexHeatmapPage() {
                 <div className="max-w-2xl">
                   <h2 className="mt-1 text-xl font-black tracking-normal text-white">Snapshot & replay</h2>
                   <p className="mt-2 text-sm leading-6 text-zinc-500">
-                    Select a cell to inspect its inputs. GEX, DEX, VEX and CEX share one model.
+                    Select an expiry cell to see its pricing inputs. GEX, DEX, VEX and CEX use the same model.
                   </p>
                 </div>
               </div>
@@ -569,7 +570,7 @@ export function SPXGexHeatmapPage() {
                             </span>
                             <span className="text-zinc-600">{agent.attempts.length} attempt{agent.attempts.length === 1 ? "" : "s"}</span>
                           </div>
-                          <p className="mt-1 text-xs leading-5 text-zinc-400">{agent.reasoning || "No auditable reasoning persisted."}</p>
+                          <p className="mt-1 text-xs leading-5 text-zinc-400">{agent.reasoning || "No reasoning was saved for this run."}</p>
                         </div>
                       ))}
                     </div>
@@ -971,6 +972,50 @@ const StrikeCell = ({ strike, isSpotStrike }: { strike: number; isSpotStrike: bo
     {strike.toLocaleString("en-US", { maximumFractionDigits: 0 })}
   </th>
 );
+
+const SpxSnapshotGexPreview = ({ heatmap, stale }: { heatmap: SpxGexHeatmapModel; stale: boolean }) => {
+  const pricedStrikes = new Set(heatmap.cells
+    .filter(cell => heatmap.selectedExpiries.includes(cell.expdate) && cell.netGex !== null && Number.isFinite(cell.netGex))
+    .map(cell => cell.strike));
+  const spot = heatmap.quote.last;
+  const rows = auditedProfiles(heatmap)
+    .filter(row => pricedStrikes.has(row.strike) && Number.isFinite(row.netGex))
+    .sort((a, b) => Math.abs(a.strike - spot) - Math.abs(b.strike - spot) || b.strike - a.strike)
+    .slice(0, 5)
+    .sort((a, b) => b.strike - a.strike);
+  const max = Math.max(1, ...rows.map(row => Math.abs(row.netGex)));
+  const time = heatmap.session?.snapshotTimeEt;
+
+  return (
+    <section className="rounded-xl border border-slate-700/70 bg-[#0b1724] p-3 sm:hidden" aria-labelledby="spx-snapshot-gex-title">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
+        <h2 id="spx-snapshot-gex-title" className="text-sm font-semibold">Snapshot GEX</h2>
+        <span className={stale ? "text-xs text-amber-200" : "text-xs text-slate-300"}>
+          {stale ? "Last verified" : "Delayed"} · {time ? `${time} ET` : "Time unavailable"}
+        </span>
+      </div>
+      {rows.length > 0 ? (
+        <table className="mt-1 w-full table-fixed text-xs tabular-nums">
+          <caption className="text-left text-slate-300">Nearest priced strikes to {spot.toLocaleString("en-US")} · zero at center</caption>
+          <tbody>
+            {rows.map(({ strike, netGex }) => (
+              <tr key={strike}>
+                <th scope="row" className="w-16 py-0.5 text-left font-medium">{strike.toLocaleString("en-US")}</th>
+                <td className="px-2" aria-hidden="true">
+                  <div className="relative h-2.5 rounded-sm bg-[#07111b]">
+                    <div className="absolute inset-y-0 left-1/2 border-l border-slate-500" />
+                    <div className={`absolute inset-y-0 ${netGex < 0 ? "right-1/2" : "left-1/2"}`} style={{ width: `${Math.abs(netGex) / max * 50}%`, backgroundColor: exposureColor(netGex) }} />
+                  </div>
+                </td>
+                <td className="w-16 text-right font-semibold" style={{ color: netGex === 0 ? undefined : exposureColor(netGex) }}>{formatSignedCompact(netGex)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : <p className="mt-1 text-xs text-slate-300">No priced strikes in this snapshot.</p>}
+    </section>
+  );
+};
 
 const ExposureBar = ({ value, max }: { value: number; max: number }) => {
   const width = `${Math.max(2, Math.min(100, (Math.abs(value) / Math.max(1, max)) * 100))}%`;
