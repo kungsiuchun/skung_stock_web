@@ -2,10 +2,25 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  D1SpxGexCollectionStore,
   getExpectedSpxGexCollectionSlots,
   summarizeSpxGexCollectionCoverage,
   validateSpxGexCollectionTransition,
 } from "../src/lib/spx-gex-collection-lifecycle";
+import type { D1DatabaseLike } from "../src/lib/spx-recap-d1";
+
+test("collection attempts retain provider diagnostics when normalized cell counts arrive later", async () => {
+  const rows = [
+    { slot_id: "2026-11-16:570", snapshot_minute_et: 570, stage: "FETCHED", attempt: 1, occurred_at: "2026-11-16T14:45:00Z", payload_json: JSON.stringify({ collectionQuality: { rawLegCount: 960, sourceTimestamp: "2026-11-16T14:44:00Z", cacheStatus: "miss" } }) },
+    { slot_id: "2026-11-16:570", snapshot_minute_et: 570, stage: "PERSISTED", attempt: 1, occurred_at: "2026-11-16T14:45:11Z", payload_json: JSON.stringify({ collectionQuality: { pricedCellCount: 18, repairedCellCount: 0, partialCellCount: 1, unpricedCellCount: 461 } }) },
+  ];
+  const statement = { bind: () => statement, all: async () => ({ results: rows }) };
+  const store = new D1SpxGexCollectionStore({ prepare: () => statement } as unknown as D1DatabaseLike);
+  const [attempt] = await store.listAttemptsForDate("2026-11-16");
+  assert.equal(attempt.quality?.rawLegCount, 960);
+  assert.equal(attempt.quality?.pricedCellCount, 18);
+  assert.equal(attempt.quality?.sourceTimestamp, "2026-11-16T14:44:00Z");
+});
 
 test("2026-07-13 lifecycle query exposes the eight missing Board slots", () => {
   const expected = getExpectedSpxGexCollectionSlots("2026-07-13");
