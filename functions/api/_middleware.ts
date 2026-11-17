@@ -9,8 +9,8 @@ interface Context {
 }
 const guardedStores = new WeakMap<object, object>();
 const guardedValues = new WeakSet<object>();
-const postOnly = new Set(["/api/caption", "/api/agent/chat", "/api/finrobot", "/api/trading-agent/query", "/api/research/report", "/api/finance-dashboard/snapshot", "/api/portfolio-backtest", "/api/stocks-intelligence-watcher/auth/logout"]);
-const readWrite = new Set(["/api/stocks-intelligence-watcher", "/api/stocks-intelligence-watcher/admin"]);
+const postOnly = new Set(["/api/agent/chat", "/api/finrobot", "/api/trading-agent/query", "/api/research/report", "/api/finance-dashboard/snapshot", "/api/portfolio-backtest", "/api/stocks-intelligence-watcher/auth/logout"]);
+const readWrite = new Set(["/api/caption", "/api/stocks-intelligence-watcher", "/api/stocks-intelligence-watcher/admin"]);
 
 /** All public Pages R2 reads share one allowance, including legacy/admin read paths. */
 export async function onRequest(context: Context) {

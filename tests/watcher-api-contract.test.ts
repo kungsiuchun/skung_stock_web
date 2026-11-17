@@ -118,6 +118,7 @@ test("public routes reject unsupported methods before cache, R2 or handlers", as
     ["/api/market-context", "POST", "GET"], ["/api/news", "DELETE", "GET"],
     ["/api/stocks-intelligence-watcher", "PUT", "GET, POST"],
     ["/api/stocks-intelligence-watcher/admin", "DELETE", "GET, POST"],
+    ["/api/caption", "PUT", "GET, POST"],
     ["/api/stocks-intelligence-watcher/auth/logout", "GET", "POST"],
   ];
   let calls = 0;

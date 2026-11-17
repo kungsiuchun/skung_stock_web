@@ -2,9 +2,27 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { onRequestGet, onRequestPost } from "../functions/api/caption";
 import { createWatcherSession } from "../src/lib/stocks-watcher-auth";
+import { onRequest as middleware } from "../functions/api/_middleware";
 
 const authEnv = { STOCKS_WATCHER_SESSION_SECRET: "test-caption-session-secret", STOCKS_WATCHER_ALLOWED_EMAIL: "owner@example.test" };
 const ownerCookie = async (email = "owner@example.test") => `stocks_watcher_session=${await createWatcherSession(email, authEnv.STOCKS_WATCHER_SESSION_SECRET)}`;
+
+test("Caption availability traverses the deployed method middleware and retains owner authentication", async () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "caches");
+  Object.defineProperty(globalThis, "caches", { configurable: true, value: { default: {} } });
+  let calls = 0;
+  const env = { ...authEnv, image_caption_ai: { run: async () => { calls++; return { answer: "caption" }; } } };
+  try {
+    for (const [cookie, expected] of [[null, 401], [await ownerCookie(), 200]] as const) {
+      const request = new Request("https://example.test/api/caption", { headers: cookie ? { Cookie: cookie } : {} });
+      const response = await middleware({ request, env, next: () => onRequestGet({ request, env }), waitUntil() {} });
+      assert.equal(response.status, expected);
+    }
+    assert.equal(calls, 0);
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "caches", previous); else Reflect.deleteProperty(globalThis, "caches");
+  }
+});
 
 test("caption requires an allowlisted owner before reading an image or calling AI", async () => {
   let reads = 0, calls = 0;
