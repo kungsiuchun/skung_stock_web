@@ -85,3 +85,14 @@
 - 真實 Moondream binding 的回傳是 `result`/`usage` envelope；保留直接 `answer` 的文件格式，明確正規化該 envelope。三次聚焦診斷及一次修正後推論均只使用專案既有公開相機 PNG；最後 HTTP 200、非空 caption。沒有使用私人圖片或記錄圖像／prompt／生成內容，沒有舊模型或假 caption fallback。
 - 正式真瀏覽器：SPX snapshot 正常，375/1440px 的缺基準提示為 21/21、橫向溢出 0、page errors 0；Portfolio v1 顯示明確遷移提示，開啟時自動回測次數 0。今日開盤基準沒有被補造。
 - 最終程式與部署識別、CI 及清理結果記於下方最終 closeout；前文未發布／待配置段落屬已完成之前的階段紀錄。
+
+## 最終 closeout — 2026-11-16 20:42 PST
+
+- 正式程式版本：`be95199199ca76cc2cd8e0d3b3f8fb85dd1a49bf`，已 commit、merge 到 main 並推送 origin；[最終程式 Quality Gate](https://github.com/kungsiuchun/skung_stock_web/actions/runs/44018686861) 成功。另行提交的本段文件不改變已部署程式。
+- 最終本地驗證：800/800 離線測試、API/Worker/publisher strict typecheck、lint、production build、Pages Functions bundle 與 Worker dry-run bundle 通過。沒有把 live-provider smoke 算成已驗證。
+- `npm run deploy` 配對發布完成。Pages deployment `5317c6c1-4160-4e94-bf2d-bb2fb95212ce`，status=success、branch=main、commit=be95199；[部署網址](https://5317c6c1.sius-ai-workshop.pages.dev)。SPX Worker version `3ae27cbd-26bc-45c2-a990-cb32dca8ecf6`，正式 health metadata 已核對。
+- 正式無 bearer=401、正確 bearer health=200；Caption 訪客 GET=401；AI binding 已存在。公開 owner login 入口已核對。正式 owner 的完整 OAuth 登入與生成沒有代操作；真實 AI 生成的證據是本地已認證 fixture 透過同帳戶官方遠端 binding 的 HTTP 200。
+- 正式 SPX/Portfolio 瀏覽器再驗證通過：375/1440px、page errors=0、水平溢出=0；開盤基準缺失仍明示 21/21，沒有製造顏色或覆寫歷史；v1 分享不會自動送出回測。Portfolio API 對 v1 methodology 回 400。
+- Migration、secret、AI binding 已完成，這三項不再是未閉環事項。保留的驗證限制：收市後無法實跑下一次開盤的 09:45/09:47/09:50 alarm，該排程與品質條件以回歸測試驗證；沒有聲稱供應商下一次一定成功。
+- 臨時 release worktree 只在確認乾淨且來源 branch 已合併後清理；既有其他 worktree、秘密檔與使用者工作不動。DPAPI 備份留在 primary checkout 的 ignored `.local-secrets/`。
+- 記憶建議：保存開盤品質門檻、有界重試與 Workers AI envelope 契約；本輪沒有寫入長期記憶。
