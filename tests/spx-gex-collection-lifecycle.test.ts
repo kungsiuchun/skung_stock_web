@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import {
@@ -8,6 +10,29 @@ import {
   validateSpxGexCollectionTransition,
 } from "../src/lib/spx-gex-collection-lifecycle";
 import type { D1DatabaseLike } from "../src/lib/spx-recap-d1";
+
+test("a recovered collection keeps its allocated attempt through normalization and persistence", async () => {
+  const sql = new DatabaseSync(":memory:");
+  sql.exec(readFileSync(new URL("../migrations/0008_spx_gex_collection_lifecycle.sql", import.meta.url), "utf8"));
+  const db: D1DatabaseLike = { prepare(query) {
+    const statement = sql.prepare(query); let values: any[] = [];
+    const prepared = {
+      bind(...params: unknown[]) { values = params; return prepared; },
+      async first<T>() { return (statement.get(...values) || null) as T | null; },
+      async all<T>() { return { results: statement.all(...values) as T[] }; },
+      async run() { return { meta: { changes: Number(statement.run(...values).changes) } }; },
+    }; return prepared;
+  } };
+  const store = new D1SpxGexCollectionStore(db);
+  const at = "2026-11-16T14:45:00Z";
+  try {
+    await store.scheduleDate("2026-11-16", at);
+    await store.appendStage("2026-11-16:570", "FAILED", { error: "GEX_COLLECTION_FAILED" }, at, 1);
+    for (const stage of ["FETCHED", "NORMALIZED", "PERSISTED"] as const) await store.appendStage("2026-11-16:570", stage, {}, at, 1);
+    const attempts = await store.listAttemptsForDate("2026-11-16");
+    assert.deepEqual(attempts.map(({ attempt, status }) => ({ attempt, status })), [{ attempt: 1, status: "FAILED" }, { attempt: 2, status: "ACCEPTED" }]);
+  } finally { sql.close(); }
+});
 
 test("collection attempts retain provider diagnostics when normalized cell counts arrive later", async () => {
   const rows = [

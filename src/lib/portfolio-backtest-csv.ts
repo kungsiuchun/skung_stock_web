@@ -11,9 +11,9 @@ const csvCell = (value: string | number): string => {
 };
 
 export const serializePortfolioBacktestCsv = (result: Pick<PortfolioBacktestResult, "curve" | "rebalancePolicy" | "dividendPolicy" | "sourceAsOf" | "methodologyVersion" | "warnings">, cacheStatus: string): string => {
-  const header = "date,portfolio_value_usd,spy_value_usd,portfolio_index_base_100,spy_index_base_100,rebalance_policy,dividend_policy,source_as_of,cache_status,methodology_version,warnings";
+  const header = "date,portfolio_value_usd,spy_value_usd,portfolio_cash_usd,spy_cash_usd,portfolio_index_base_100,spy_index_base_100,rebalance_policy,dividend_policy,source_as_of,cache_status,methodology_version,warnings";
   const rows = result.curve.map((point) => [
-    point.date, point.portfolioValue, point.benchmarkValue, point.portfolioIndexed, point.benchmarkIndexed,
+    point.date, point.portfolioValue, point.benchmarkValue, point.portfolioCash, point.benchmarkCash, point.portfolioIndexed, point.benchmarkIndexed,
     result.rebalancePolicy, result.dividendPolicy, result.sourceAsOf, cacheStatus, result.methodologyVersion,
     result.warnings.join(" | "),
   ].map(csvCell).join(","));

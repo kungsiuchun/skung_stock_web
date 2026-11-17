@@ -42,9 +42,9 @@ const rowToRecord = (row: HealthRow): SpxOperationalHealthRecord => ({
 
 export const classifySpxOperationalFailure = (error: unknown, fallback = "UNEXPECTED_RUNTIME") => {
   const message = error instanceof Error ? error.message : String(error || "");
-  if (/canonical.*gex|heatmap|gex/i.test(message)) return "CANONICAL_GEX_UNAVAILABLE";
   if (/d1|sqlite|database/i.test(message)) return "D1_OPERATION_FAILED";
   if (/timeout|abort/i.test(message)) return "UPSTREAM_TIMEOUT";
+  if (/canonical.*gex|heatmap|gex/i.test(message)) return "CANONICAL_GEX_UNAVAILABLE";
   return fallback;
 };
 

@@ -8,7 +8,8 @@
   invented price targets. Source dates, gaps and manual invalidation stay visible.
 - Preserve legacy Finance, Trading Agent, Breadth, Rotation, Rates, Portfolio and
   SPX routes. Workspace hash parameters preserve symbol, tab, range and expiry.
-  Portfolio's v1 share parser and SPX's replay parameters retain their own contracts.
+  Portfolio v1 shares retain their inputs but require explicit migration to v2
+  before running or sharing; SPX replay parameters retain their own contract.
 
 ## Data and costs
 
@@ -73,6 +74,14 @@
   or reserve another AI cost. The guard covers this service, not the entire account.
 - Owner OAuth accepts only verified allowlisted GitHub emails. Provider exchanges
   have bounded deadlines; malformed/provider failures return explicit JSON errors.
+- The owner session cookie uses Path=/api so Caption can share OAuth; callback
+  clears the legacy Watcher-only cookie and logout clears both paths. Caption is
+  owner-only and same-origin POST, accepts nonempty PNG/JPEG up to 5 MB, and fails
+  closed without the owner allowlist/session secret or `image_caption_ai` binding.
+  A public visit and the availability check never invoke caption AI.
+- Caption uses the Workers AI Moondream 3.1 query contract with a base64 image,
+  reasoning/streaming disabled and a 50-token cap. Empty/malformed answers fail;
+  there is no deprecated LLaVA fallback. `wrangler.toml` owns the AI binding.
 - Reports validate a structured summary/support/counterchecks/risks contract and
   source IDs before rendering. Cache identity includes evidence hash, symbol, lens,
   bilingual bundle and prompt version. Never relabel a cached report's source timestamp;

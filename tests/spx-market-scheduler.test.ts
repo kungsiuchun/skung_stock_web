@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { SpxMarketScheduler } from "../scripts/worker-spx-bot";
 
 import {
   SPX_SCHEDULER_LATE_GRACE_MS,
   advanceSpxGexOpeningRetryState,
   canonicalQuarterHourUtc,
   createSpxGexOpeningRetryState,
+  isRetryableSpxGexOpeningFailure,
   dueMissingRunIds,
   nextQuarterHourUtc,
   nextSchedulerAlarmAt,
@@ -14,6 +16,26 @@ import {
 } from "../src/lib/spx-market-scheduler";
 
 const workerSource = readFileSync(new URL("../scripts/worker-spx-bot.ts", import.meta.url), "utf8");
+
+test("opening retries cover sparse data and source failures, but never D1 or contract failures", () => {
+  for (const code of ["INSUFFICIENT_OPENING_COVERAGE", "NO_AUDITED_BLENDED_IV_CELLS", "GEX_COLLECTION_FAILED", "UPSTREAM_TIMEOUT", "CANONICAL_GEX_UNAVAILABLE"]) assert.equal(isRetryableSpxGexOpeningFailure(code), true, code);
+  for (const code of ["D1_OPERATION_FAILED", "SESSION_CONTRACT_INCOMPLETE", "SNAPSHOT_JSON_MALFORMED", "D1_SAFETY_CUTOFF"]) assert.equal(isRetryableSpxGexOpeningFailure(code), false, code);
+});
+
+test("a late restored opening alarm never fetches current data for an old opening bucket", async () => {
+  const retry = createSpxGexOpeningRetryState("expired:570", canonicalQuarterHourUtc(Date.now() - 86_400_000));
+  let saved: any = { openingRetry: retry, nextAlarmAt: retry.nextAttemptAtMs };
+  let alarm = 0;
+  const scheduler = new SpxMarketScheduler({ storage: {
+    async get() { return saved; }, async put(_key: string, value: unknown) { saved = value; },
+    async setAlarm(at: number) { alarm = at; },
+  } } as any, {} as any);
+  const result = await scheduler.fetch(new Request(`https://scheduler/wake?scheduledAt=${retry.nextAttemptAtMs}`));
+  assert.equal((await result.json() as any).status, "OPENING_RETRY_LATE_SKIPPED");
+  assert.equal(saved.openingRetry, null);
+  assert.equal(saved.lastFailureCode, "OPENING_RETRY_LATE");
+  assert.ok(alarm > Date.now());
+});
 
 test("scheduler computes the next quarter-hour without drift", () => {
   const at1430 = Date.parse("2026-07-17T18:30:00.000Z");

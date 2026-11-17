@@ -30,6 +30,17 @@ the scheduler Durable Object, D1 ledger, or Telegram delivery.
 - GEX comes only from the canonical Board `SpxGexTelegramSummary` persisted in
   `MarketSnapshot`. Never re-fetch or recalculate it in the formatter. If absent,
   say the canonical snapshot is missing.
+- Execution plans use structured SPX entry bounds, stop price/trigger/timeframe
+  and numeric targets. CALL stops must be below the entry zone and targets above;
+  PUT uses the inverse. A 5m/15m close stop requires a fresh completed bar after
+  entry. Legacy/unverifiable exit rules require review, never invented prices.
+- Delivery has a 20-second send deadline and 60-second lease. Unacknowledged sends
+  become UNKNOWN and are never automatically resent. Manual retry requires POST
+  plus explicit duplicate acknowledgement; decisions expire after 15 minutes or
+  a newer decision. Migration `0017_spx_delivery_recovery.sql` preserves evidence.
+- Manual Worker endpoints require an independent `WEBHOOK_SECRET` bearer header;
+  query tokens and Telegram chat-ID authentication are rejected. Scheduled alarms
+  do not use this manual endpoint. Missing secret fails closed before side effects.
 
 ## Council and CIO model contract
 
@@ -70,6 +81,14 @@ the scheduler Durable Object, D1 ledger, or Telegram delivery.
   backfill a decision with later data.
 - GEX API status is READY, EMPTY, or ERROR. Missing D1/table is 503, read failure
   is 500, and only READY may be cached. Missing URL `snapshot` remains null.
+- Opening baseline collection runs at 09:45 ET for the delayed 09:30 bucket, with
+  fresh CBOE-only retries at 09:47 and 09:50. Before any generated opening snapshot
+  is persisted, at least 49 of 61 same-day audited strikes at 5-point increments
+  within +/-150 points of rounded spot must be priced. Sparse coverage and source
+  failures retry; D1/budget and malformed-contract failures stop. Retry alarms more
+  than two minutes late are skipped. No decision replay or later historical repair.
+- Missing baseline cells stay uncolored and are explicitly identified in the
+  visible strike view. Current GEX and price overlays cannot supply a missing delta.
 - Pressure API reads compact guarded D1 projections, never whole-day snapshot
   JSON. Browser reads share one serial lane with 8-second attempts and one 300ms
   retry only for timeout/transport or 502/503/504; every terminal path releases

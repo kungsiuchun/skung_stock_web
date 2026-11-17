@@ -2,6 +2,10 @@ name = "sius-ai-workshop"
 pages_build_output_dir = "./dist"
 compatibility_date = "2024-04-01"
 
+# Owner-only Caption API; public visits never invoke the model.
+[ai]
+binding = "image_caption_ai"
+
 [vars]
 # Approved low-cost public model, with a global USD0.10/day reservation ceiling.
 # Never reuse the independently configured SPX/legacy model setting.

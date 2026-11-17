@@ -11,6 +11,7 @@ import {
   getCanonicalGexRiskDirective,
   resolveSpxDeliveryMode,
   retrySpxDelivery,
+  SpxTelegramRejectedError,
   runSpxDecisionPipeline,
   type CouncilResult,
   type MarketSnapshot,
@@ -474,6 +475,15 @@ test("directional Telegram is a compact decision card with Council votes and exe
   };
   const { dependencies, sent } = buildDependencies({
     council: { analyze: async () => directionalCouncil },
+    marketData: { load: async (runId, runScheduledAt) => ({
+      ...snapshot, runId, scheduledAt: runScheduledAt.toISOString(), replayGrade: "NORMALIZED_CANONICAL",
+      sourceFreshness: { ...snapshot.sourceFreshness, canonicalGex: { source: "fixture", observedAt: snapshot.snapshotAt, ageMs: 0, status: "OK" } },
+      replayEvidence: {
+        replayGrade: "NORMALIZED_CANONICAL", vendorRawPayloadsPersisted: false,
+        gex: { ...replayFixture.boardSnapshotEvidence, facts: {}, dataQuality: null },
+        normalizedSeries: { spx15m: [], spx5m: [], spxD1: [], spxH1: [], vix15m: [], vix9d: [] },
+      },
+    }) },
     cio: {
       decide: async () => ({
         action: "OPEN_CALL",
@@ -871,6 +881,15 @@ test("canonical GEX gate exposes missing/schema mismatch and permits a fresh fal
     /schema_mismatch/,
   );
   assert.equal(getCanonicalGexRiskDirective(freshFallback, directional), null);
+  const nonGexDecision = { ...directional, evidenceRefs: ["spx.last"] };
+  for (const decision of [directional, nonGexDecision]) {
+    assert.equal(getCanonicalGexRiskDirective({ ...freshFallback, replayEvidence: null }, decision)?.reason, "canonical_gex_missing");
+    assert.equal(getCanonicalGexRiskDirective({ ...freshFallback, sourceFreshness: {
+      ...freshFallback.sourceFreshness,
+      canonicalGex: { ...freshFallback.sourceFreshness.canonicalGex!, ageMs: 35 * 60_000 + 1, status: "STALE" },
+    } }, decision)?.reason, "canonical_gex_stale");
+    assert.equal(getCanonicalGexRiskDirective(freshFallback, decision), null);
+  }
 });
 
 test("CIO timeout fails closed to DEGRADED HOLD", async () => {
@@ -1011,7 +1030,7 @@ test("Telegram failure is queryable and retry is idempotent", async () => {
     telegram: {
       send: async () => {
         attempts += 1;
-        if (attempts === 1) throw new Error("telegram 502");
+        if (attempts === 1) throw new SpxTelegramRejectedError("telegram rejected: rate limit");
         return { messageId: "tg-retry-1" };
       },
     },
@@ -1024,9 +1043,10 @@ test("Telegram failure is queryable and retry is idempotent", async () => {
   }, dependencies);
 
   assert.equal(result.delivery.status, "FAILED");
-  assert.equal(store.getOutbox("delivery-retry")?.lastError, "telegram 502");
+  assert.equal(store.getOutbox("delivery-retry")?.lastError, "telegram rejected: rate limit");
   assert.equal(store.getLifecycle("delivery-retry").at(-1)?.stage, "DELIVERY_FAILED");
 
+  dependencies.clock.now = () => new Date("2026-07-13T18:46:41.000Z");
   const retried = await retrySpxDelivery("delivery-retry", dependencies);
   assert.equal(retried.status, "DELIVERED");
   assert.equal(store.getOutbox("delivery-retry")?.telegramMessageId, "tg-retry-1");

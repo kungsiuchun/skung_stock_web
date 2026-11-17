@@ -14,10 +14,29 @@ const AICaptionTool = ({ isOpen, onClose }: AICaptionToolProps) => {
   const [caption, setCaption] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [access, setAccess] = useState<"checking" | "owner" | "signin" | "unavailable">("checking");
+  const [accessMessage, setAccessMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const requestRef = useRef<AbortController | null>(null);
   const reducedMotion = useReducedMotion();
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const controller = new AbortController();
+    setAccess("checking");
+    setAccessMessage(null);
+    void fetch("/api/caption", { signal: controller.signal }).then(async response => {
+      const body = await parseJsonResponse<{ available?: boolean; error?: string }>(response, "/api/caption", { allowHttpError: true });
+      if (controller.signal.aborted) return;
+      if (response.ok && body.available === true) { setAccess("owner"); return; }
+      setAccess(response.status === 401 ? "signin" : "unavailable");
+      setAccessMessage(body.error || "Caption generation is unavailable. Try reopening the tool.");
+    }).catch(() => {
+      if (!controller.signal.aborted) { setAccess("unavailable"); setAccessMessage("Owner access could not be checked. Close and reopen the tool to retry."); }
+    });
+    return () => controller.abort();
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -64,7 +83,7 @@ const AICaptionTool = ({ isOpen, onClose }: AICaptionToolProps) => {
   };
 
   const generateCaption = async () => {
-    if (!file || requestRef.current) return;
+    if (!file || requestRef.current || access !== "owner") return;
     const request = new AbortController();
     requestRef.current = request;
 
@@ -82,10 +101,17 @@ const AICaptionTool = ({ isOpen, onClose }: AICaptionToolProps) => {
         signal: request.signal,
       });
 
-      const data = await parseJsonResponse<{ result?: { description?: string; response?: string }; response?: string; description?: string }>(response, "/api/caption");
+      const data = await parseJsonResponse<{ result?: string | { description?: string; response?: string }; response?: string; description?: string; error?: string }>(response, "/api/caption", { allowHttpError: true });
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          setAccess(response.status === 401 ? "signin" : "unavailable");
+          setAccessMessage(data.error || "Owner access is required to generate captions.");
+        }
+        throw new Error(data.error || `Caption generation failed (HTTP ${response.status}).`);
+      }
 
       const aiResponse = data && typeof data === "object"
-        ? data.result?.description || data.result?.response || data.response || data.description
+        ? typeof data.result === "string" ? data.result : data.result?.description || data.result?.response || data.response || data.description
         : undefined;
 
       if (request.signal.aborted) return;
@@ -140,8 +166,11 @@ const AICaptionTool = ({ isOpen, onClose }: AICaptionToolProps) => {
 
             {/* Content */}
             <div className="p-8 space-y-8">
+              <p className="text-sm text-white/60">Caption generation is reserved for the site owner. Uploaded images are sent to the AI service only when the owner selects Generate caption.</p>
+              {access === "checking" && <p role="status" className="text-sm text-white/60">Checking owner access…</p>}
+              {access !== "owner" && access !== "checking" && <div role="status" className="rounded-xl border border-white/10 bg-white/5 p-3 text-sm text-white/70"><p>{accessMessage}</p>{access === "signin" && <><a className="mt-3 inline-flex min-h-11 items-center underline focus-visible:ring-2 focus-visible:ring-purple-400" href="/api/stocks-intelligence-watcher/auth/login">Sign in as owner</a><p className="text-xs text-white/50">After signing in, reopen Image Caption.</p></>}</div>}
               {error && <p role="alert" className="rounded-xl border border-red-400/40 bg-red-400/10 p-3 text-sm text-red-200">{error}</p>}
-              {!selectedImage ? (
+              {access === "owner" && (!selectedImage ? (
                 <button
                   type="button"
                   aria-label="Upload image for caption"
@@ -211,7 +240,7 @@ const AICaptionTool = ({ isOpen, onClose }: AICaptionToolProps) => {
                   </AnimatePresence>
                   </div>
                 </div>
-              )}
+              ))}
             </div>
 
             <input

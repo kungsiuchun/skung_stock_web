@@ -486,7 +486,7 @@ const decision = (value: unknown) => {
     || !nullableString(value.degradedReason)
     || !oneOf(value.replayGrade, ["NORMALIZED_CANONICAL", "PARTIAL_NORMALIZED", "UNAVAILABLE"])
     || !record(delivery)
-    || !oneOf(delivery.status, ["PENDING", "SENDING", "FAILED", "DELIVERED", "NOT_QUEUED"])
+    || !oneOf(delivery.status, ["PENDING", "SENDING", "FAILED", "DELIVERED", "UNKNOWN", "EXPIRED", "NOT_QUEUED"])
     || !nonNegativeInteger(delivery.attemptCount)
     || !nullableString(delivery.telegramMessageId)
     || !nullableString(delivery.error)

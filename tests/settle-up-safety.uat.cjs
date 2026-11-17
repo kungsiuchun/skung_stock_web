@@ -31,11 +31,38 @@ const confirm = async (page) => { await page.click("dialog button[data-confirm]"
     browser = await puppeteer.launch({ headless: true });
     const screenshots = path.join(rootDir, "uat_screenshots", "settle-up-safety");
     fs.mkdirSync(screenshots, { recursive: true });
-    for (const width of [390, 768, 1440]) {
+    for (const width of [375, 390, 768, 1440]) {
     const page = await browser.newPage();
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.setViewport({ width, height: 844 });
+    const malformedBill = structuredClone(fixture);
+    malformedBill.events[0].expenses[0].participantIds = ["b"];
+    const malformed = JSON.stringify(malformedBill).replace('"amountCents":1001', '"amountCents":1e400');
+    await page.goto(`${baseUrl}/#/work/settle-up?data=${Buffer.from(malformed).toString("base64url")}`, { waitUntil: "networkidle0" });
+    assert.match(await page.$eval("[role='alert']", node => node.textContent), /shared bill is invalid/i, "nonfinite shared amounts must fail visibly without hanging");
+    await page.screenshot({ path: path.join(screenshots, `invalid-share-${width}.png`) });
+    await shareBill(page);
+    assert.equal(await page.$("[role='alert']"), null, "replacing an invalid share URL must clear the load error");
+    const overflowBill = structuredClone(fixture);
+    overflowBill.events[0].expenses[0].amountCents = Number.MAX_SAFE_INTEGER;
+    overflowBill.events[0].expenses.push({ ...overflowBill.events[0].expenses[0], id: "extra", amountCents: 1 });
+    await page.goto(fixtureUrl(overflowBill), { waitUntil: "networkidle0" });
+    assert.match(await page.$eval("[role='alert']", node => node.textContent), /shared bill is invalid/i, "safe individual amounts cannot overflow the bill total");
+    const duplicateBill = structuredClone(fixture);
+    duplicateBill.events[0].expenses.push({ ...duplicateBill.events[0].expenses[0] });
+    await page.goto(fixtureUrl(duplicateBill), { waitUntil: "networkidle0" });
+    assert.match(await page.$eval("[role='alert']", node => node.textContent), /shared bill is invalid/i, "duplicate IDs must not allow multi-row updates to bypass amount bounds");
+    await page.goto(fixtureUrl(fixture), { waitUntil: "networkidle0" });
+    const amount = await page.$("input[name='amount-food']");
+    await amount.click({ clickCount: 3 });
+    await amount.evaluate(node => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(node, "1e100");
+      node.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    assert.equal(await amount.evaluate(node => node.getAttribute("aria-invalid")), "true");
+    assert.match(await page.$eval("[role='alert']", node => node.textContent), /has not been saved/);
+    assert.equal((await shareBill(page)).events[0].expenses[0].amountCents, 1001, "invalid draft must preserve saved cents");
     await page.goto(fixtureUrl(fixture), { waitUntil: "networkidle0" });
     assert.deepEqual(await shareBill(page), fixture, "Existing v2 sharing must round trip unchanged");
     assert.match(await page.$eval("aside ol", (node) => node.textContent), /Bob pays Alice\s*\$5\.00/, "The original cent allocation must remain unchanged");
@@ -149,7 +176,7 @@ const confirm = async (page) => { await page.click("dialog button[data-confirm]"
     assert.equal(await page.$("dialog button[data-confirm]"), null, "The last referenced person must not clear all expenses");
     await page.keyboard.press("Escape");
     assert.deepEqual(await shareBill(page), lastReferenced);
-    console.log("Settle Up safety UAT passed: protected references, all confirmation/cancellation paths, exact cents and v1/v2 sharing at 390/768/1440px.");
+    console.log("Settle Up safety UAT passed: invalid shares and amounts, protected references, confirmations, exact cents and v1/v2 sharing at 375/390/768/1440px.");
   } finally {
     if (browser) await browser.close();
     await stopProcessTree(server);

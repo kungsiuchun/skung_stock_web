@@ -96,7 +96,7 @@ An SPX Data Agent should contribute direction, confidence, evidence, and blockin
 
 SPX Market Data Quality is the per-run freshness and completeness summary for the SPX Telegram Trading Council.
 
-Required SPX price feeds can block a new advisory when missing. Optional context such as CBOE GEX, PCR, VIX, D1, or H1 can warn and reduce confidence without automatically forcing HOLD.
+Required SPX price feeds can block a new advisory when missing. Directional CIO output also requires canonical GEX with the current schema and an age of at most 35 minutes; missing, schema-mismatched, or stale canonical GEX is vetoed to DEGRADED HOLD, regardless of the CIO evidence references. A verified fallback provider may supply the canonical snapshot. Optional context such as PCR, VIX, D1, or H1 can warn and reduce confidence without automatically forcing HOLD. See `docs/agents/spx-decision-pipeline.md` for the owning contract.
 
 ## Agent Calibration
 
@@ -168,7 +168,7 @@ required.
 
 US ETF Portfolio Backtester is a standalone Market Lab Work Item at `#/work/portfolio-backtest`.
 
-Its public share contract is a versioned hash link such as `#/work/portfolio-backtest?v=1&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:6000&asset=BND:4000`. Each `asset` value is a unique ETF ticker plus whole basis points. The complete setup must satisfy the same capital, date, policy, 1–10 position, uniqueness, and 10,000-basis-point validation as a submitted backtest; one invalid field rejects the entire shared setup. Links contain inputs only and never results, verification state, or provider payloads. Opening a link never starts an API request.
+Its public share contract is a versioned hash link such as `#/work/portfolio-backtest?v=2&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:6000&asset=BND:4000`. Each `asset` value is a unique ETF ticker plus whole basis points. The complete setup must satisfy the same capital, date, policy, 1–10 position, uniqueness, and 10,000-basis-point validation as a submitted backtest; one invalid field rejects the entire shared setup. Links contain inputs only and never results, verification state, or provider payloads. Opening a link never starts an API request. Legacy v1 inputs remain readable but require explicit acceptance of methodology v2 before computing or sharing. The API and results require methodology v2.
 
 Encoding sorts a copy of the assets by ticker for canonical links; decoding preserves the asset order present in the URL. Sharing never reorders the current form.
 
@@ -176,8 +176,8 @@ Completed results offer a browser-only comparison CSV download containing the ex
 
 It compares a visitor-defined USD allocation of one to ten US-listed ETFs with SPY through a read-only EOD historical simulation. The browser submits the configuration only; the Pages Function validates ETF eligibility, retrieves and normalizes history server-side, and returns a versioned result without raw provider payloads.
 
-Every portfolio must allocate exactly 10,000 whole basis points. SPY is the fixed benchmark. Rebalancing may be none, monthly, quarterly, or annual and always occurs on the last shared completed EOD session of that period.
+Every portfolio must allocate exactly 10,000 whole basis points. SPY is the fixed benchmark. Rebalancing may be none, monthly, quarterly, or annual and occurs only on the actual NYSE calendar period-end session when present in the common history; a partial period's last observed date never substitutes for period-end.
 
-Dividend policy is explicit. `reinvest` uses Yahoo's split- and dividend-adjusted close for total-return compounding. `cash` uses Yahoo's split-adjusted close plus dividend events held as zero-yield cash. Do not apply split factors to Yahoo chart closes a second time: that manufactures a false split gain.
+Dividend policy is explicit. `reinvest` uses Yahoo's split- and dividend-adjusted close for total-return compounding. `cash` uses Yahoo's split-adjusted close plus dividend events held as zero-yield cash throughout the simulation, including rebalancing. Only invested holdings rebalance; UI and CSV expose cash separately. Do not apply split factors to Yahoo chart closes a second time: that manufactures a false split gain.
 
 The feature is EOD-only. It exposes requested and effective common date ranges, source-as-of, cache state, warnings, and unavailable states. Missing, malformed, ineligible, or insufficient common history fails closed; it never returns demo, zero-filled, partial-portfolio, or forecast output.

@@ -1,7 +1,7 @@
 import { RSI, BollingerBands, SMA, MACD, EMA } from 'technicalindicators';
 import { PERSONAS, ORCHESTRATOR_PROMPT, AUDIT_AGENT_PROMPT } from './prompts';
 import { readFinalSignalPerformance, readPendingFinalSignalOutcomes, updateFinalSignalOutcome, upsertFinalSignalOutcome, upsertRecapDay, type D1DatabaseLike } from '../src/lib/spx-recap-d1';
-import { generateAndStoreSpxGexHeatmap, getSpxGexGenerationStatus, readSpxGexHeatmap, SpxGexSnapshotValidationError, toTelegramGexSummary, type SpxGexDataClient, type SpxGexHeatmapModel, type SpxGexTelegramSummary } from '../src/lib/spx-gex-heatmap';
+import { generateAndStoreSpxGexHeatmap, getSpxGexGenerationStatus, readSpxGexHeatmap, SpxGexSnapshotValidationError, SpxGexOpeningCoverageError, toTelegramGexSummary, type SpxGexDataClient, type SpxGexHeatmapModel, type SpxGexTelegramSummary } from '../src/lib/spx-gex-heatmap';
 import { createCboeOnlySpxGexDataClient, createSpxGexIntradayDataClient } from '../src/lib/spx-gex-cboe';
 import {
   applyRiskGate,
@@ -15,6 +15,7 @@ import {
   retrySpxDelivery,
   runSpxDecisionPipeline,
   InMemorySpxDecisionStore,
+  SpxTelegramRejectedError,
   type CioDecision,
   type CouncilResult,
   type DecisionRunRecord,
@@ -38,6 +39,7 @@ import {
   advanceSpxGexOpeningRetryState,
   canonicalQuarterHourUtc,
   createSpxGexOpeningRetryState,
+  isRetryableSpxGexOpeningFailure,
   dueMissingRunIds,
   nextSchedulerAlarmAt,
   shouldRunScheduledTick,
@@ -47,6 +49,8 @@ import { runSpxDecisionRun } from '../src/lib/spx-decision-run';
 import { buildSpxMarketSnapshot, normalizeSpxReplaySeries } from '../src/lib/spx-market-snapshot';
 import { runSpxRetention, SPX_KV_RETENTION_SECONDS } from '../src/lib/spx-retention';
 import { getEarlyCloseMarketHolidayKeys, getFullMarketHolidayKeys } from '../src/lib/nyse-calendar';
+import { hasSpxExecutionGeometry, readSpxExecutionFields, readSpxExecutionPlan, spxExecutionDisplay, type SpxExecutionPlan, type SpxExecutionStop } from '../src/lib/spx-execution-plan';
+import { authorizeSpxWorkerRequest } from '../src/lib/spx-worker-auth';
 
 // Cloudflare Worker Environment Types
 interface Env {
@@ -92,6 +96,8 @@ interface ActionLogItem {
   dataQuality?: MarketDataQualitySummary;
   agentVotes?: Record<string, unknown>;
   cioConfidence?: number;
+  executionPlan?: SpxExecutionPlan;
+  executionOpenedAt?: string;
 }
 interface DailyMemory {
   currentPosition: "NONE" | "CALL" | "PUT";
@@ -239,9 +245,9 @@ const CIO_RESPONSE_SCHEMA = {
     trade_action: { type: "string", enum: ["OPEN_CALL", "OPEN_PUT", "HOLD", "CLOSE"] },
     confidence_score: { type: "number", minimum: 1, maximum: 100 },
     logic: { type: "string" },
-    buy_zone: { type: ["string", "null"] },
-    stop_loss: { type: ["string", "null"] },
-    targets: { type: "array", items: { type: "string" } },
+    buy_zone: { type: ["object", "null"], additionalProperties: false, properties: { low: { type: "number", exclusiveMinimum: 0 }, high: { type: "number", exclusiveMinimum: 0 } }, required: ["low", "high"] },
+    stop_loss: { type: ["object", "null"], additionalProperties: false, properties: { price: { type: "number", exclusiveMinimum: 0 }, trigger: { type: "string", enum: ["touch", "bar_close"] }, timeframe: { type: ["string", "null"], enum: [null, "5m", "15m"] } }, required: ["price", "trigger", "timeframe"] },
+    targets: { type: "array", items: { type: "number", exclusiveMinimum: 0 } },
     no_trade_conditions: { type: "array", items: { type: "string" } },
     evidence_refs: { type: "array", items: { type: "string" } },
     claims: {
@@ -278,9 +284,9 @@ export interface CioModelPlan {
   trade_action: "OPEN_CALL" | "OPEN_PUT" | "HOLD" | "CLOSE";
   confidence_score: number;
   logic: string;
-  buy_zone: string | null;
-  stop_loss: string | null;
-  targets: string[];
+  buy_zone: { low: number; high: number } | null;
+  stop_loss: SpxExecutionStop | null;
+  targets: number[];
   no_trade_conditions: string[];
   evidence_refs: string[];
   claims: Array<{ text: string; evidence_refs: string[] }>;
@@ -293,30 +299,22 @@ export interface NumericExecutionLevels {
   targets: number[];
 }
 
-const numericLevels = (value: string) => (value.match(/\d+(?:\.\d+)?/g) || [])
-  .map(Number)
-  .filter((item) => Number.isFinite(item));
-
-export const parseNumericExecutionLevels = (plan: Pick<CioModelPlan, "buy_zone" | "stop_loss" | "targets">): NumericExecutionLevels | null => {
-  if (!plan.buy_zone || !plan.stop_loss || plan.targets.length === 0) return null;
-  const zone = numericLevels(plan.buy_zone);
-  const invalidation = numericLevels(plan.stop_loss)[0];
-  const targets = plan.targets.flatMap(numericLevels);
-  if (zone.length !== 2 || !Number.isFinite(invalidation) || targets.length === 0) return null;
-  const [entryZoneLow, entryZoneHigh] = [...zone].sort((left, right) => left - right);
-  if (entryZoneLow === entryZoneHigh) return null;
-  return { entryZoneLow, entryZoneHigh, invalidation, targets };
+export const parseNumericExecutionLevels = (value: { buy_zone?: unknown; stop_loss?: unknown; targets?: unknown }): NumericExecutionLevels | null => {
+  const plan = readSpxExecutionFields(value);
+  return plan ? { entryZoneLow: plan.entryZone.low, entryZoneHigh: plan.entryZone.high, invalidation: plan.stop.price, targets: plan.targets } : null;
 };
 
 export const passesDirectionalEntryGate = (input: {
   action: "OPEN_CALL" | "OPEN_PUT";
   currentPrice: number;
   completedM5Bars: Array<{ open?: number; close?: number }>;
-  plan: Pick<CioModelPlan, "buy_zone" | "stop_loss" | "targets">;
+  plan: { buy_zone?: unknown; stop_loss?: unknown; targets?: unknown };
   actionLog: Array<{ action?: string }>;
 }) => {
   const levels = parseNumericExecutionLevels(input.plan);
   if (!levels) return { ok: false as const, reason: "numeric_execution_levels_required", levels: null };
+  if (!hasSpxExecutionGeometry(readSpxExecutionFields(input.plan)!, input.action)) return { ok: false as const, reason: "execution_geometry_invalid", levels };
+  if (!Number.isFinite(input.currentPrice)) return { ok: false as const, reason: "entry_price_unavailable", levels };
   if (input.currentPrice < levels.entryZoneLow || input.currentPrice > levels.entryZoneHigh) {
     return { ok: false as const, reason: "entry_zone_not_reached", levels };
   }
@@ -344,24 +342,33 @@ export const deriveOpenPositionContext = (dailyMemory: DailyMemory): SpxOpenPosi
     invalidation: openingSnapshot?.stopLoss || null,
     targets: openingSnapshot?.takeProfit ? [openingSnapshot.takeProfit] : [],
     openingRunId: openingSnapshot?.runId || null,
+    ...(readSpxExecutionPlan(openingSnapshot?.executionPlan) ? { executionPlan: readSpxExecutionPlan(openingSnapshot?.executionPlan)! } : {}),
   };
 };
 
-export const evaluateNumericPositionExit = (dailyMemory: DailyMemory, currentPrice: number) => {
+export const evaluateNumericPositionExit = (dailyMemory: DailyMemory, currentPrice: number, options: { now?: Date; quotes5m?: Array<{ date?: Date; close?: number }>; quotes15m?: Array<{ date?: Date; close?: number }> } = {}) => {
   const context = deriveOpenPositionContext(dailyMemory);
-  if (!context || !Number.isFinite(currentPrice)) return null;
-  const invalidation = context.invalidation ? numericLevels(context.invalidation)[0] : null;
-  const targets = context.targets.flatMap(numericLevels);
-  if (!Number.isFinite(invalidation) || targets.length === 0) {
-    return { shouldClose: true, reason: "position_missing_numeric_exit_levels" };
+  if (!context) return null;
+  if (!Number.isFinite(currentPrice) || currentPrice <= 0) return { shouldClose: false, reason: "EXIT_RULE_DATA_UNAVAILABLE", requiresReview: true };
+  const openingAction = context.side === "CALL" ? "買入 Call" : "買入 Put";
+  const opening = [...dailyMemory.actionLog].reverse().find(item => item.action === openingAction);
+  const plan = readSpxExecutionPlan(opening?.executionPlan);
+  if (!plan || !hasSpxExecutionGeometry(plan, context.side === "CALL" ? "OPEN_CALL" : "OPEN_PUT")) return { shouldClose: false, reason: "EXIT_RULE_UNKNOWN", requiresReview: true };
+  const targetReached = plan.targets.some(target => context.side === "CALL" ? currentPrice >= target : currentPrice <= target);
+  if (targetReached) return { shouldClose: true, reason: "numeric_target_reached" };
+  let stopPrice = currentPrice;
+  if (plan.stop.trigger === "bar_close") {
+    const intervalMs = plan.stop.timeframe === "5m" ? 5 * 60_000 : 15 * 60_000;
+    const nowMs = options.now?.getTime();
+    const openedAt = Date.parse(opening?.executionOpenedAt || "");
+    const bars = plan.stop.timeframe === "5m" ? options.quotes5m : options.quotes15m;
+    const completed = bars?.filter(bar => bar.date instanceof Date && Number.isFinite(bar.date.getTime()) && typeof bar.close === "number" && Number.isFinite(bar.close) && bar.close > 0
+      && Number.isFinite(nowMs) && bar.date.getTime() + intervalMs <= nowMs! && bar.date.getTime() + intervalMs > openedAt)
+      .sort((a, b) => a.date!.getTime() - b.date!.getTime()).at(-1);
+    if (!Number.isFinite(openedAt) || !completed || nowMs! - (completed.date!.getTime() + intervalMs) > intervalMs) return { shouldClose: false, reason: "EXIT_RULE_DATA_UNAVAILABLE", requiresReview: true };
+    stopPrice = completed.close!;
   }
-  if (context.side === "CALL") {
-    if (currentPrice <= invalidation!) return { shouldClose: true, reason: `numeric_invalidation_${invalidation}` };
-    if (targets.some((target) => currentPrice >= target)) return { shouldClose: true, reason: "numeric_target_reached" };
-  } else {
-    if (currentPrice >= invalidation!) return { shouldClose: true, reason: `numeric_invalidation_${invalidation}` };
-    if (targets.some((target) => currentPrice <= target)) return { shouldClose: true, reason: "numeric_target_reached" };
-  }
+  if (context.side === "CALL" ? stopPrice <= plan.stop.price : stopPrice >= plan.stop.price) return { shouldClose: true, reason: `numeric_invalidation_${plan.stop.price}` };
   return { shouldClose: false, reason: null };
 };
 
@@ -386,9 +393,7 @@ export const validateCioModelPlan = (
   if (!Number.isInteger(candidate.confidence_score)) return { ok: false, invalidField: "confidence_score_not_integer" };
   if (candidate.confidence_score < 1 || candidate.confidence_score > 100) return { ok: false, invalidField: "confidence_score_out_of_range" };
   if (typeof candidate.logic !== "string" || !candidate.logic.trim()) return { ok: false, invalidField: "logic" };
-  if (candidate.buy_zone !== null && typeof candidate.buy_zone !== "string") return { ok: false, invalidField: "buy_zone" };
-  if (candidate.stop_loss !== null && typeof candidate.stop_loss !== "string") return { ok: false, invalidField: "stop_loss" };
-  if (!stringArray(candidate.targets)) return { ok: false, invalidField: "targets" };
+  if (!Array.isArray(candidate.targets) || !candidate.targets.every(value => typeof value === "number" && Number.isFinite(value) && value > 0)) return { ok: false, invalidField: "targets" };
   if (!stringArray(candidate.no_trade_conditions)) return { ok: false, invalidField: "no_trade_conditions" };
   if (!stringArray(candidate.evidence_refs) || candidate.evidence_refs.length === 0) return { ok: false, invalidField: "evidence_refs" };
   if (allowedEvidenceRefs && candidate.evidence_refs.some((reference) => !allowedEvidenceRefs.has(reference))) {
@@ -402,13 +407,14 @@ export const validateCioModelPlan = (
   }
   if (["OPEN_CALL", "OPEN_PUT"].includes(action)
     && !parseNumericExecutionLevels({
-      buy_zone: candidate.buy_zone as string | null,
-      stop_loss: candidate.stop_loss as string | null,
-      targets: candidate.targets as string[],
+      buy_zone: candidate.buy_zone,
+      stop_loss: candidate.stop_loss,
+      targets: candidate.targets,
     })) {
     return { ok: false, invalidField: "numeric_execution_levels_required" };
   }
-  if (action === "HOLD" && (candidate.buy_zone !== null || candidate.stop_loss !== null || candidate.targets.length > 0)) {
+  if ((action === "OPEN_CALL" || action === "OPEN_PUT") && !hasSpxExecutionGeometry(readSpxExecutionFields(candidate)!, action)) return { ok: false, invalidField: "execution_geometry_invalid" };
+  if ((action === "HOLD" || action === "CLOSE") && (candidate.buy_zone !== null || candidate.stop_loss !== null || candidate.targets.length > 0)) {
     return { ok: false, invalidField: "hold_trade_levels" };
   }
   return {
@@ -417,12 +423,12 @@ export const validateCioModelPlan = (
       trade_action: action,
       confidence_score: candidate.confidence_score,
       logic: candidate.logic,
-      buy_zone: candidate.buy_zone as string | null,
-      stop_loss: candidate.stop_loss as string | null,
-      targets: [...candidate.targets],
+      buy_zone: candidate.buy_zone as CioModelPlan["buy_zone"],
+      stop_loss: candidate.stop_loss as CioModelPlan["stop_loss"],
+      targets: [...candidate.targets] as number[],
       no_trade_conditions: [...candidate.no_trade_conditions],
       evidence_refs: [...candidate.evidence_refs],
-      claims: candidate.claims.map((claim: any) => ({ text: claim.text, evidence_refs: [...claim.evidence_refs] })),
+      claims: (candidate.claims as CioModelPlan["claims"]).map(claim => ({ text: claim.text, evidence_refs: [...claim.evidence_refs] })),
     },
   };
 };
@@ -592,7 +598,7 @@ const isTransientCioFailure = (httpStatus: number | null) => httpStatus === 408
 
 export const resolveCioDegradedReason = (
   cioFailureReason: string | undefined,
-  existingDegradedReason: string | undefined,
+  existingDegradedReason: string | null | undefined,
   cioModelStatus: string,
   cioValidationFailure: string,
 ) => cioFailureReason || existingDegradedReason || (cioModelStatus === 'TIMEOUT' ? 'cio_timeout' : cioValidationFailure);
@@ -795,7 +801,7 @@ export async function runStructuredOpenRouterRequest(input: {
         retryIgnoredProviders = isGpt5Model(input.model) ? [] : Array.from(new Set(
           [selectedProvider, ...providerNamesFrom(routerMetadata?.attempts)]
             .map(councilProviderSlug)
-            .filter((provider): provider is string => Boolean(provider)),
+            .filter((provider): provider is NonNullable<typeof provider> => Boolean(provider)),
         ));
         continue;
       }
@@ -875,7 +881,7 @@ export async function runStructuredOpenRouterRequest(input: {
         retryIgnoredProviders = isGpt5Model(input.model) ? [] : Array.from(new Set(
           [selectedProvider, ...attemptedProviders]
             .map(councilProviderSlug)
-            .filter((provider): provider is string => Boolean(provider)),
+            .filter((provider): provider is NonNullable<typeof provider> => Boolean(provider)),
         ));
         continue;
       }
@@ -2385,13 +2391,17 @@ function appendPlanSnapshot(
     dataQuality?: MarketDataQualitySummary;
     agentVotes?: Record<string, unknown>;
     cioConfidence?: number;
+    openedAt?: string;
   } = {},
 ): ActionLogItem {
+  const executionPlan = readSpxExecutionFields(plan || {});
+  const display = spxExecutionDisplay(executionPlan);
   return {
     ...logItem,
-    buyZone: plan?.buy_zone,
-    stopLoss: plan?.stop_loss,
-    takeProfit: Array.isArray(plan?.targets) ? plan.targets.join(" | ") : plan?.take_profit,
+    buyZone: display.entry || undefined,
+    stopLoss: display.invalidation || undefined,
+    takeProfit: display.targets.length ? display.targets.join(" | ") : undefined,
+    ...(executionPlan ? { executionPlan, executionOpenedAt: meta.openedAt } : {}),
     riskWarning: plan?.risk_warning,
     ruleEngineVerdict: ruleEngine.verdict,
     signalScore: ruleEngine.signalScore,
@@ -2406,7 +2416,7 @@ export function analyzeZeroDteRules(args: {
   now: Date;
   etNow: Date;
   spxInd: any;
-  m5Analysis: { volumeSurge: number; currentM5Vol?: number; avgM5Vol?: number };
+  m5Analysis: { volumeSurge: number | null; currentM5Vol?: number | null; avgM5Vol?: number | null };
   currentVix: number | null | undefined;
   currentVix9d: number | null | undefined;
   pcrValue: number | null;
@@ -2719,26 +2729,35 @@ export function buildAuditTelegramMessages(date: string, report: string, storage
   });
 }
 
-async function sendTelegramMessage(token: string, chatId: string, text: string, parseMode: "HTML" | null = "HTML") {
+export async function sendTelegramMessage(token: string, chatId: string, text: string, parseMode: "HTML" | null = "HTML", signal?: AbortSignal) {
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  const res = await fetchWithTimeout(url, {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal?.aborted) abort();
+  signal?.addEventListener('abort', abort, { once: true });
+  const deadline = setTimeout(abort, TELEGRAM_TIMEOUT_MS);
+  try {
+  const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(buildTelegramSendPayload(chatId, text, parseMode))
-  }, TELEGRAM_TIMEOUT_MS);
+    body: JSON.stringify(buildTelegramSendPayload(chatId, text, parseMode)),
+    signal: controller.signal,
+  });
   const resData = await res.json() as any;
-  if (!res.ok) {
-    throw new Error(`telegram_http_${res.status}:${compactModelText(resData?.description || JSON.stringify(resData), 180)}`);
+  if (resData?.ok === false && (res.ok || res.status >= 400 && res.status < 500)) {
+    throw new SpxTelegramRejectedError(`telegram_rejected_${res.status}`);
   }
+  if (!res.ok || resData?.ok !== true) throw new Error(`telegram_unconfirmed_${res.status}`);
   const messageId = resData?.result?.message_id;
-  if (messageId === null || messageId === undefined) throw new Error('telegram_response_missing_message_id');
+  if (typeof messageId !== 'number' || !Number.isSafeInteger(messageId) || messageId <= 0) throw new Error('telegram_response_missing_message_id');
   console.log(`[TELEGRAM] Delivered message_id=${messageId}`);
   return { messageId: String(messageId) };
+  } finally { clearTimeout(deadline); signal?.removeEventListener('abort', abort); }
 }
 
-const sendSpxDecisionTelegramMessage = async (token: string, chatId: string, text: string) => {
+const sendSpxDecisionTelegramMessage = async (token: string, chatId: string, text: string, signal?: AbortSignal) => {
   const payload = buildSpxDecisionTelegramPayload(chatId, text);
-  return sendTelegramMessage(token, chatId, payload.text, "HTML");
+  return sendTelegramMessage(token, chatId, payload.text, "HTML", signal);
 };
 
 export function hasActiveTradingRunLock(rawLock: string | null, nowMs = Date.now()) {
@@ -2879,12 +2898,13 @@ const expectedTradingRunIdsForDate = (dateKey: string) => {
 async function retryDueDecisionOutbox(env: Env, now: Date) {
   if (!env.SPX_RECAP_DB) return;
   const store = new D1SpxDecisionStore(env.SPX_RECAP_DB);
+  await store.recoverExpiredSending(now.toISOString());
   const pending = await store.listRetryableOutbox(now.toISOString(), 3);
   for (const record of pending) {
     await retrySpxDelivery(record.runId, {
       clock: { now: () => new Date() },
       store,
-      telegram: { send: (message) => sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, message) },
+      telegram: { send: (message, signal) => sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, message, signal) },
     });
   }
 }
@@ -3000,7 +3020,7 @@ async function completeDegradedDecisionRun(
   }, {
     clock: { now: () => new Date() },
     store,
-    telegram: { send: (payload) => sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, payload) },
+    telegram: { send: (payload, signal) => sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, payload, signal) },
   });
 }
 
@@ -3142,7 +3162,6 @@ const buildSpxUatReplaySnapshot = (runId: string): MarketSnapshot => ({
       collectedMinuteEt: 885,
       collectedTimeEt: '14:45',
       generatedAt: SPX_UAT_REPLAY_SCHEDULED_AT.toISOString(),
-      displayTimeLabel: '14:30 ET snapshot / collected 14:45 ET',
       sourceTimestamp: '2026-07-13T18:45:36.000Z',
       provider: 'cboe',
       fallbackFrom: null,
@@ -3224,13 +3243,14 @@ export async function runSpxUatReplay(
     }) },
     riskGate: { evaluate: async () => ({ disposition: 'PASS', reason: 'No safety veto.' }) },
     store,
-    telegram: { send: async (text) => {
+    telegram: { send: async (text, signal) => {
       message = text;
       return deliveryMode === 'SEND'
-        ? sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, text)
+        ? sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, text, signal)
         : { messageId: 'uat-preview' };
     } },
   });
+  message = formatTelegramDecisionMessage({ run: result.run, snapshot: result.run.snapshot!, council: result.run.council!, cioDecision: result.run.cioDecision!, riskGate: result.run.riskGate! });
   return { runId, message, result };
 }
 
@@ -3307,31 +3327,35 @@ export async function runSpxUatLlm(
       const context = buildSpxUatLlmContext(snapshot);
       const result = await decideWithCio(context, council.agents, env, { fetcher: options.fetcher });
       const plan = result.plan as any;
+      const executionPlan = readSpxExecutionFields(plan || {});
+      const executionDisplay = spxExecutionDisplay(executionPlan);
       return {
-        action: normalizeCioAction(plan?.trade_action),
+        action: normalizeCioAction(plan?.trade_action) as CioDecision['action'],
         confidence: clampConfidence(plan?.confidence_score, 0),
         thesis: compactModelText(plan?.logic, 320),
-        entry: compactModelText(plan?.buy_zone, 180) || null,
-        invalidation: compactModelText(plan?.stop_loss, 180) || null,
-        targets: Array.isArray(plan?.targets) ? plan.targets.map((item: unknown) => compactModelText(item, 180)).filter(Boolean) : [],
+        entry: executionDisplay.entry,
+        invalidation: executionDisplay.invalidation,
+        targets: executionDisplay.targets,
+        ...(executionPlan ? { executionPlan } : {}),
         noTradeConditions: Array.isArray(plan?.no_trade_conditions) ? plan.no_trade_conditions.map((item: unknown) => compactModelText(item, 180)).filter(Boolean) : [],
         evidenceRefs: normalizeEvidenceRefs(plan?.evidence_refs),
         claims: normalizeEvidenceClaims(plan?.claims).map((claim) => ({ text: claim.text, evidenceRefs: claim.evidenceRefs })),
         modelStatus: result.modelStatus,
-        failureReason: result.failureReason,
+        failureReason: result.failureReason ?? undefined,
         latencyMs: result.attempts.reduce((total, attempt) => total + attempt.latencyMs, 0),
         attempts: result.attempts,
       };
     } },
     riskGate: { evaluate: async () => ({ disposition: 'PASS', reason: 'No safety veto.' }) },
     store,
-    telegram: { send: async (text) => {
+    telegram: { send: async (text, signal) => {
       message = text;
       return deliveryMode === 'SEND'
-        ? sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, text)
+        ? sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, text, signal)
         : { messageId: 'uat-llm-preview' };
     } },
   });
+  message = formatTelegramDecisionMessage({ run: result.run, snapshot: result.run.snapshot!, council: result.run.council!, cioDecision: result.run.cioDecision!, riskGate: result.run.riskGate! });
   return { runId, message, result, probe };
 }
 
@@ -3373,7 +3397,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
         await retrySpxDelivery(runId, {
           clock: { now: () => new Date() },
           store: decisionStore,
-          telegram: { send: (message) => sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, message) },
+          telegram: { send: (message, signal) => sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, message, signal) },
         });
       }
       if (deliveryMode === 'PREVIEW') {
@@ -3413,7 +3437,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
 
     console.log('[DEBUG] Step 1: Fetching Yahoo SPX intraday, optional market context, canonical SPX GEX...');
     const spxQuotes = await timedStep('Yahoo SPX 15m core chart', () => fetchYahooChart('^GSPC', '15m', '7d'));
-    const spxQuotesM5 = await fetchOptionalMarketData('Yahoo SPX 5m trigger chart', fetchYahooChart('^GSPC', '5m', '2d'), spxQuotes);
+    const spxQuotesM5 = await fetchOptionalMarketData('Yahoo SPX 5m trigger chart', fetchYahooChart('^GSPC', '5m', '2d'), []);
     const [spxQuotesD1, spxQuotesH1, vixQuotes, vixQuotes9d, canonicalGexSnapshot, sentimentData] = await Promise.all([
       fetchOptionalMarketData('SPX D1 price-action chart', fetchYahooChart('^GSPC', '1d', '3mo'), []),
       fetchOptionalMarketData('SPX H1 price-action chart', fetchYahooChart('^GSPC', '1h', '10d'), []),
@@ -3443,6 +3467,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
     await refreshPendingFinalSignalOutcomes(env, etDateStr, spxQuotes, now);
 
     const snapshotAt = new Date();
+    const numericExit = evaluateNumericPositionExit(dailyMemory, spxInd.currentClose, { now: snapshotAt, quotes5m: spxQuotesM5, quotes15m: spxQuotes });
     const completedM5 = analyzeCompletedM5Bars(spxQuotesM5, snapshotAt);
     const m5QuotesValid = completedM5.completedBars;
     const m5Analysis = {
@@ -3451,6 +3476,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
       volumeSurge: completedM5.volumeSurge,
       currentM5Vol: completedM5.currentM5Vol,
       avgM5Vol: completedM5.avgM5Vol,
+      latestCompletedAt: completedM5.latestCompletedAt,
     };
 
     const pcrStatus = !pcrValue ? '數據缺失' : (pcrValue > 1.25 ? '⚠️ 極度恐慌避險 (反轉契機)' : pcrValue < 0.8 ? '極度貪婪 (回調風險)' : '情緒中性');
@@ -3605,7 +3631,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
         fallbackFrom: canonicalGex.fallbackFrom,
         sourceTimestamp: canonicalGex.sourceTimestamp,
         facts: Object.fromEntries(Object.entries(snapshotFacts).filter(([key]) => key.startsWith('gex.'))),
-        dataQuality: canonicalGex.dataQuality,
+        dataQuality: canonicalGex.dataQuality ? { ...canonicalGex.dataQuality } : null,
       } : null,
       normalizedSeries: {
         spx15m: normalizeSpxReplaySeries(spxQuotes),
@@ -3639,6 +3665,13 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
       hardBlocks: [...marketDataQuality.hardBlocks],
       warnings: [...marketDataQuality.warnings],
     };
+    if (numericExit?.requiresReview) {
+      const warning = '原持倉退出規則無法驗證；自動止蝕判斷暫停，請人工處理。';
+      if (marketDataQuality.overallStatus === 'OK') marketDataQuality.overallStatus = 'WARN';
+      marketDataQuality.warnings.push(warning);
+      if (marketSnapshot.dataQuality.status === 'OK') marketSnapshot.dataQuality.status = 'WARN';
+      marketSnapshot.dataQuality.warnings.push(warning);
+    }
     if (marketDataQuality.overallStatus === 'BLOCK') {
       zeroDteRuleEngine.hardBlocks = [...new Set([...zeroDteRuleEngine.hardBlocks, ...marketDataQuality.hardBlocks])];
       zeroDteRuleEngine.hardRuleTriggered = true;
@@ -3681,6 +3714,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
         currentPosition: dailyMemory.currentPosition,
         entryPrice: dailyMemory.entryPrice,
         openPosition: openPositionContext,
+        exitRuleStatus: numericExit?.requiresReview ? numericExit.reason : 'VERIFIED',
         recentActions: dailyMemory.actionLog.slice(-3),
       }
     };
@@ -3744,7 +3778,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
       orchestratorPlan = cioResult.plan;
       cioModelStatus = cioResult.modelStatus;
       cioAttempts = cioResult.attempts;
-      cioFailureReason = cioResult.failureReason;
+      cioFailureReason = cioResult.failureReason ?? undefined;
     } else if (marketDataQuality.overallStatus === 'BLOCK') {
       cioModelStatus = 'DATA_BLOCK';
     } else if (councilResult.status === 'DEGRADED') {
@@ -3757,17 +3791,16 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
     const toStringArray = (value: unknown) => (Array.isArray(value) ? value : [])
       .map((item) => compactModelText(item, 180))
       .filter(Boolean);
+    const cioExecutionPlan = readSpxExecutionFields(orchestratorPlan || {});
+    const cioExecutionDisplay = spxExecutionDisplay(cioExecutionPlan);
     let cioDecision: CioDecision = {
       action: normalizeCioAction((orchestratorPlan as any).trade_action) as CioDecision['action'],
       confidence: clampConfidence((orchestratorPlan as any).confidence_score, 0),
       thesis: compactModelText((orchestratorPlan as any).logic || (orchestratorPlan as any).action_reasoning, 320),
-      entry: compactModelText((orchestratorPlan as any).buy_zone, 180) || null,
-      invalidation: compactModelText((orchestratorPlan as any).stop_loss, 180) || null,
-      targets: toStringArray((orchestratorPlan as any).targets).length
-        ? toStringArray((orchestratorPlan as any).targets)
-        : compactModelText((orchestratorPlan as any).take_profit, 180) && (orchestratorPlan as any).take_profit !== 'N/A'
-          ? [compactModelText((orchestratorPlan as any).take_profit, 180)]
-          : [],
+      entry: cioExecutionDisplay.entry,
+      invalidation: cioExecutionDisplay.invalidation,
+      targets: cioExecutionDisplay.targets,
+      ...(cioExecutionPlan ? { executionPlan: cioExecutionPlan } : {}),
       noTradeConditions: toStringArray((orchestratorPlan as any).no_trade_conditions),
       evidenceRefs: normalizeEvidenceRefs((orchestratorPlan as any).evidence_refs),
       claims: normalizeEvidenceClaims((orchestratorPlan as any).claims)
@@ -3840,12 +3873,13 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
       zeroDteRuleEngine.directionalBias === 'NONE';
     const endOfDayDirective = getEndOfDayRiskDirective(marketStatus, dailyMemory.currentPosition);
     const canonicalGexDirective = getCanonicalGexRiskDirective(marketSnapshot, cioDecision);
-    const numericExit = evaluateNumericPositionExit(dailyMemory, spxInd.currentClose);
     let riskDirective: RiskGateDirective = { disposition: 'PASS', reason: 'No safety veto.' };
     if (endOfDayDirective) {
       riskDirective = endOfDayDirective;
     } else if (numericExit?.shouldClose) {
       riskDirective = { disposition: 'REQUIRE_CLOSE', reason: `Numeric exit: ${numericExit.reason}` };
+    } else if (numericExit?.requiresReview) {
+      riskDirective = { disposition: 'VETO_TO_HOLD', reason: `${numericExit.reason}: 原持倉退出規則無法驗證；自動止蝕判斷暫停，請人工處理。` };
     } else if (zeroDteRuleEngine.verdict === 'CLOSE_OR_REDUCE_SUGGESTED' && dailyMemory.currentPosition !== 'NONE') {
       riskDirective = {
         disposition: 'REQUIRE_CLOSE',
@@ -3882,11 +3916,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
         action: riskGateResult.action,
         currentPrice: spxInd.currentClose,
         completedM5Bars: m5QuotesValid,
-        plan: {
-          buy_zone: cioDecision.entry,
-          stop_loss: cioDecision.invalidation,
-          targets: cioDecision.targets,
-        },
+        plan: { buy_zone: cioDecision.executionPlan?.entryZone, stop_loss: cioDecision.executionPlan?.stop, targets: cioDecision.executionPlan?.targets },
         actionLog: dailyMemory.actionLog,
       });
       executionLevels = entryGate.levels;
@@ -3926,6 +3956,8 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
       finalAction: riskGateResult.action,
       disposition: riskGateResult.disposition,
       reason: riskGateResult.reason,
+      exitRuleStatus: numericExit?.reason || 'VERIFIED',
+      automaticExitAvailable: !numericExit?.requiresReview,
     });
 
     const finalPlannedAction = ((orchestratorPlan as any).trade_action || 'HOLD').toString().toUpperCase();
@@ -3948,6 +3980,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
     const currentPriceStr = spxInd.currentClose;
     const planSnapshotMeta = {
       runId,
+      openedAt: now.toISOString(),
       dataQuality: marketDataQuality,
       agentVotes: {
         QM: { decision: d1, confidence: agent1.confidence, modelStatus: agent1.modelStatus || "AI", neutralReason: agent1.neutralReason },
@@ -4027,7 +4060,7 @@ async function executeTradingDecisionRun(env: Env, now: Date = new Date(), optio
     }, {
       clock: { now: () => new Date() },
       store: decisionStore!,
-      telegram: { send: (payload) => sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, payload) },
+      telegram: { send: (payload, signal) => sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, payload, signal) },
     });
     if (delivery) {
       console.log(`[DELIVERY] run_id=${runId} status=${delivery.status} message_id=${delivery.telegramMessageId || 'none'} attempts=${delivery.attemptCount}`);
@@ -4228,7 +4261,7 @@ async function runSpxGexHeatmapGeneration(env: Env, now: Date = new Date(), opti
       dataClient,
       now,
       force: options.force,
-      onStage: (stage, payload) => collectionStore.appendStage(slotId, stage, payload, occurredAt(), attempt),
+      onStage: async (stage, payload) => { await collectionStore.appendStage(slotId, stage, payload, occurredAt(), attempt); },
     });
     if (result.status === 'skipped_existing') {
       const existing = await readSpxGexHeatmap(env.SPX_RECAP_DB, result.date, result.snapshotMinuteEt);
@@ -4253,14 +4286,15 @@ async function runSpxGexHeatmapGeneration(env: Env, now: Date = new Date(), opti
     return { status: 'SUCCEEDED' as const, failureCode: null, retryableOpeningFailure: false };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const failureCode = error instanceof SpxGexSnapshotValidationError
+    const failureCode = error instanceof SpxGexSnapshotValidationError || error instanceof SpxGexOpeningCoverageError
       ? error.reasonCode
       : classifySpxOperationalFailure(error, 'GEX_COLLECTION_FAILED');
-    const retryableOpeningFailure = isOpeningSlot && failureCode === 'NO_AUDITED_BLENDED_IV_CELLS';
+    const retryableOpeningFailure = isOpeningSlot && isRetryableSpxGexOpeningFailure(failureCode);
     await collectionStore.appendStage(slotId, 'FAILED', {
       error: failureCode,
       retryStatus: retryableOpeningFailure && attempt < 3 ? 'OPENING_RETRY_PENDING' : 'TERMINAL',
-      collectionQuality: dataClient.getCollectionQualitySummary?.() || null,
+      collectionQuality: error instanceof SpxGexOpeningCoverageError ? null : dataClient.getCollectionQualitySummary?.() || null,
+      ...(error instanceof SpxGexOpeningCoverageError ? { openingCoverage: error.coverage } : {}),
     }, occurredAt(), attempt)
       .catch((persistError) => console.error('[SPX_GEX_HEATMAP] failed to persist terminal collection state', persistError instanceof Error ? persistError.message : String(persistError)));
     console.error('[SPX_GEX_HEATMAP] Generation failed', message);
@@ -4483,6 +4517,11 @@ export class SpxMarketScheduler {
     if (scheduler.nextAlarmAt !== retry.nextAttemptAtMs) {
       return { status: 'STALE_OPENING_RETRY' as const, scheduler };
     }
+    if (!shouldRunScheduledTick(retry.nextAttemptAtMs, nowMs)) {
+      const next = await this.scheduleNext({ ...scheduler, openingRetry: null,
+        lastFailureCode: 'OPENING_RETRY_LATE', lastFailureAt: nowMs }, retry.canonicalScheduledAtMs, nowMs);
+      return { status: 'OPENING_RETRY_LATE_SKIPPED' as const, scheduler: next };
+    }
     const result = await runSpxGexHeatmapGeneration(
       this.env,
       new Date(retry.canonicalScheduledAtMs),
@@ -4515,7 +4554,7 @@ export class SpxMarketScheduler {
           health,
           operationalTickId(new Date(retry.canonicalScheduledAtMs)),
           'GEX_COLLECTION',
-          '09:30 opening bucket 三次 CBOE 收集均未通過 IV 壓力資料合約；slot 維持 MISSING，沒有重播交易決策。',
+          '09:30 opening bucket 三次收集均未取得足夠合格資料；基準維持不可用，沒有重播交易決策。',
         );
       }
       const next = await this.scheduleNext({
@@ -4642,15 +4681,8 @@ export default {
   async fetch(request: Request, env: Env, ctx: any) {
     const url = new URL(request.url);
 
-    // 🔒 安全防護：驗證請求，防止互聯網掃描器/爬蟲隨機觸發 AI API (浪費您的錢)
-    const reqToken = url.searchParams.get('token');
-
-    // 如果沒有在 Cloudflare 設置 WEBHOOK_SECRET，則預設使用 TELEGRAM_CHAT_ID 作為簡單驗證密碼
-    const expectedToken = env.WEBHOOK_SECRET || env.TELEGRAM_CHAT_ID;
-
-    if (reqToken !== expectedToken) {
-      return new Response('Unauthorized: Please provide a valid ?token parameter to protect your AI credits!', { status: 401 });
-    }
+    const authFailure = await authorizeSpxWorkerRequest(request, env.WEBHOOK_SECRET);
+    if (authFailure) return authFailure;
 
     const forceManualRun = url.searchParams.has('force');
 
@@ -4667,14 +4699,18 @@ export default {
     }
 
     if (url.searchParams.has('retry_run_id')) {
+      if (request.method !== 'POST') return Response.json({ error: 'Manual delivery retries require POST.' }, { status: 405, headers: { Allow: 'POST' } });
+      let retryBody: { acknowledgeDuplicate?: unknown };
+      try { retryBody = await request.json(); } catch { return Response.json({ error: 'A JSON body with acknowledgeDuplicate:true is required.' }, { status: 400 }); }
+      if (!retryBody || retryBody.acknowledgeDuplicate !== true) return Response.json({ error: 'Acknowledge possible duplicate delivery before retrying.' }, { status: 400 });
       if (!env.SPX_RECAP_DB) return new Response('SPX_RECAP_DB unavailable', { status: 503 });
       const runId = url.searchParams.get('retry_run_id') || '';
       const store = new D1SpxDecisionStore(env.SPX_RECAP_DB);
       const delivery = await retrySpxDelivery(runId, {
         clock: { now: () => new Date() },
         store,
-        telegram: { send: (message) => sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, message) },
-      });
+        telegram: { send: (message, signal) => sendSpxDecisionTelegramMessage(env.TELEGRAM_TOKEN, env.TELEGRAM_CHAT_ID, message, signal) },
+      }, { manual: true, acknowledgeDuplicate: true });
       return Response.json({ runId, delivery });
     }
 

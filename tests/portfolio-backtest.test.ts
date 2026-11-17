@@ -89,7 +89,37 @@ test("rebalances only on the final completed common session of the selected mont
   assert.equal(simulatePortfolioBacktest({ ...input, rebalancePolicy: "none" }).endingValue, 100);
   const monthly = simulatePortfolioBacktest({ ...input, rebalancePolicy: "monthly" });
   assert.equal(monthly.endingValue, 156.25);
-  assert.deepEqual(monthly.rebalancedOn, ["2025-01-31", "2025-02-03"]);
+  assert.deepEqual(monthly.rebalancedOn, ["2025-01-31"]);
+});
+
+test("v2 keeps dividend cash separate through rebalancing for both portfolio and SPY", () => {
+  const histories = [
+    series("AAA", [{ date: "2025-01-30", close: 100 }, { date: "2025-01-31", close: 100, dividend: 10 }, { date: "2025-02-03", close: 200 }]),
+    series("BBB", [{ date: "2025-01-30", close: 100 }, { date: "2025-01-31", close: 100 }, { date: "2025-02-03", close: 100 }]),
+    series("SPY", [{ date: "2025-01-30", close: 100 }, { date: "2025-01-31", close: 100, dividend: 4 }, { date: "2025-02-03", close: 200 }]),
+  ];
+  const input = { startingCapital: 100, positions: [{ ticker: "AAA", basisPoints: 5_000 }, { ticker: "BBB", basisPoints: 5_000 }], histories, dividendPolicy: "cash" as const };
+  const result = simulatePortfolioBacktest({ ...input, rebalancePolicy: "monthly" });
+  assert.equal(result.schemaVersion, "v2"); assert.equal(result.methodologyVersion, "v2");
+  assert.equal(result.endingValue, 155); assert.equal(result.cashBalance, 5);
+  assert.equal(result.benchmarkEndingValue, 204); assert.equal(result.benchmarkCashBalance, 4);
+  assert.deepEqual(result.curve.map(point => point.portfolioCash), [0, 5, 5]);
+  assert.deepEqual(result.curve.map(point => point.benchmarkCash), [0, 4, 4]);
+  assert.equal(result.positions.reduce((sum, position) => sum + position.endingValue, 0), 150);
+  assert.equal(result.positions[0].cashDividendValue, 5);
+  assert.deepEqual(result.rebalancedOn, ["2025-01-31"]);
+  assert.equal(simulatePortfolioBacktest({ ...input, rebalancePolicy: "none" }).benchmarkEndingValue, result.benchmarkEndingValue);
+});
+
+test("calendar period ends rebalance even when the requested range ends there, never on a truncated midperiod end", () => {
+  for (const [dates, expected] of [
+    [["2025-08-28", "2025-08-29"], ["2025-08-29"]],
+    [["2025-01-29", "2025-01-30"], []],
+    [["2021-12-30", "2021-12-31"], ["2021-12-31"]],
+  ] as Array<[string[], string[]]>) {
+    const result = simulatePortfolioBacktest({ startingCapital: 100, positions: [{ ticker: "VTI", basisPoints: 10_000 }], histories: [series("VTI", dates.map(date => ({ date, close: 100 }))), series("SPY", dates.map(date => ({ date, close: 100 })))], rebalancePolicy: "monthly", dividendPolicy: "cash" });
+    assert.deepEqual(result.rebalancedOn, expected);
+  }
 });
 
 test("does not double-count split events when cash-policy closes are already split-adjusted", () => {

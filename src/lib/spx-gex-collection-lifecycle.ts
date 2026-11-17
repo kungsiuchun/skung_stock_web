@@ -223,7 +223,7 @@ export class D1SpxGexCollectionStore {
     if (!validateSpxGexCollectionTransition(current.currentStage, stage)) {
       throw new Error(`Invalid SPX GEX lifecycle transition ${current.currentStage} -> ${stage} for ${slotId}`);
     }
-    let effectiveAttempt = attempt || this.activeAttempts.get(slotId) || 0;
+    let effectiveAttempt = Math.max(attempt, this.activeAttempts.get(slotId) || 0);
     if (current.currentStage === "FAILED" && stage === "FETCHED") {
       const next = await this.db.prepare(`
         SELECT COALESCE(MAX(attempt), 0) + 1 AS next_attempt

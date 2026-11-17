@@ -5,11 +5,11 @@ const puppeteer = require("puppeteer");
 const { startVite, stopProcessTree, wait, waitForServer } = require("./helpers/browser-uat.cjs");
 
 const rootDir = path.resolve(__dirname, "..");
-const port = 5188;
+const port = Number(process.env.PORTFOLIO_BACKTEST_UAT_PORT || 5188);
 const baseUrl = `http://127.0.0.1:${port}`;
 const screenshotsDir = path.join(rootDir, "uat_screenshots", "portfolio-backtest");
 const backtestResult = (input) => ({
-  schemaVersion: "v1",
+  schemaVersion: "v2",
   benchmark: "SPY",
   dataSource: { provider: "Yahoo Finance chart API", role: "US ETF and SPY completed EOD history" },
   requestedRange: { start: input.startDate, end: input.endDate },
@@ -19,20 +19,22 @@ const backtestResult = (input) => ({
   dividendPolicy: input.dividendPolicy,
   sourceAsOf: "2026-08-21",
   curve: [
-    { date: "2021-08-23", portfolioValue: input.startingCapital, portfolioIndexed: 100, benchmarkValue: input.startingCapital, benchmarkIndexed: 100 },
-    { date: "2023-08-21", portfolioValue: 12150, portfolioIndexed: 121.5, benchmarkValue: 11800, benchmarkIndexed: 118 },
-    { date: "2026-08-21", portfolioValue: 16900, portfolioIndexed: 169, benchmarkValue: 15700, benchmarkIndexed: 157 },
+    { date: "2021-08-23", portfolioValue: input.startingCapital, portfolioIndexed: 100, benchmarkValue: input.startingCapital, benchmarkIndexed: 100, portfolioCash: 0, benchmarkCash: 0 },
+    { date: "2023-08-21", portfolioValue: 12150, portfolioIndexed: 121.5, benchmarkValue: 11800, benchmarkIndexed: 118, portfolioCash: input.dividendPolicy === "cash" ? 60 : 0, benchmarkCash: input.dividendPolicy === "cash" ? 50 : 0 },
+    { date: "2026-08-21", portfolioValue: 16900, portfolioIndexed: 169, benchmarkValue: 15700, benchmarkIndexed: 157, portfolioCash: input.dividendPolicy === "cash" ? 120 : 0, benchmarkCash: input.dividendPolicy === "cash" ? 100 : 0 },
   ],
   metrics: { endingValue: 16900, cumulativeReturn: 0.69, cagr: 0.11, annualizedVolatility: 0.16, sharpeRatio: 0.69, maxDrawdown: -0.18 },
   benchmarkMetrics: { endingValue: 15700, cumulativeReturn: 0.57, cagr: 0.094, annualizedVolatility: 0.17, sharpeRatio: 0.55, maxDrawdown: -0.2 },
   endingValue: 16900,
   benchmarkEndingValue: 15700,
+  cashBalance: input.dividendPolicy === "cash" ? 120 : 0,
+  benchmarkCashBalance: input.dividendPolicy === "cash" ? 100 : 0,
   excessCumulativeReturn: 0.12,
-  positions: input.positions.map((position) => ({ ticker: position.ticker, displayName: `${position.ticker} ETF`, targetWeightPct: position.basisPoints / 100, endingWeightPct: position.basisPoints / 100, endingValue: 16900 * position.basisPoints / 10_000, cashDividendValue: input.dividendPolicy === "cash" ? 120 : 0 })),
+  positions: input.positions.map((position) => ({ ticker: position.ticker, displayName: `${position.ticker} ETF`, targetWeightPct: position.basisPoints / 100, endingWeightPct: position.basisPoints / 100, endingValue: (16900 - (input.dividendPolicy === "cash" ? 120 : 0)) * position.basisPoints / 10_000, cashDividendValue: input.dividendPolicy === "cash" ? 120 : 0 })),
   rebalancedOn: input.rebalancePolicy === "none" ? [] : ["2026-08-21"],
   excludedSessions: [],
   warnings: [],
-  methodologyVersion: "v1",
+  methodologyVersion: "v2",
 });
 const isBacktestRequest = (request) => {
   const url = new URL(request.url());
@@ -94,39 +96,49 @@ const successResponse = (input, requestId) => ({
     assert.equal(requestCount, 0, "opening a shared setup must not call the API");
     assert.deepEqual(await page.$$eval("input[name$='-ticker']", (inputs) => inputs.map((input) => input.value)), ["VTI", "BND"]);
     assert.deepEqual(await page.$$eval("input[name$='-weight']", (inputs) => inputs.map((input) => input.value)), ["60.00", "40.00"]);
-    assert.equal(await page.title(), "Portfolio vs SPY — Siu");
+    assert.equal(await page.title(), "Watcher · Portfolio — Siu");
+    await page.waitForSelector("[data-testid='portfolio-legacy-migration']");
+    assert.equal(await page.$eval("button[type='submit']", node => node.disabled), true, "v1 setup cannot silently execute v2");
+    assert.equal(await page.$$eval("form[name='portfolio-backtest'] button", nodes => nodes.find(node => node.textContent.includes("Copy setup link")).disabled), true, "v1 setup must be reviewed before producing a v2 link");
+    for (const width of [375, 1440]) {
+      await page.setViewport({ width, height: 1000 });
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+      await page.screenshot({ path: path.join(screenshotsDir, `legacy-migration-${width}.png`), fullPage: true });
+    }
+    await page.focus("[data-testid='portfolio-legacy-migration'] button");
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => document.querySelector("[data-testid='portfolio-legacy-migration']") === null);
+    assert.equal(await page.$eval("button[type='submit']", node => node === document.activeElement), true, "acceptance must return focus to Run");
+    await page.evaluate(() => Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async value => { window.__v2SetupUrl = value; } } }));
+    await page.$$eval("form[name='portfolio-backtest'] button", nodes => nodes.find(node => node.textContent.includes("Copy setup link")).click());
+    await page.waitForFunction(() => window.__v2SetupUrl);
+    assert.match(await page.evaluate(() => window.__v2SetupUrl), /[?&]v=2&/);
+    assert.equal(requestCount, 0, "explicit migration and sharing must not run a backtest");
 
     await page.evaluate(() => {
-      window.location.hash = "#/work/portfolio-backtest?v=1&capital=20000&start=2022-01-01&end=2026-08-21&rebalance=monthly&dividend=cash&asset=VOO:7000&asset=VXUS:3000";
+      window.location.hash = "#/work/portfolio-backtest?v=2&capital=20000&start=2022-01-01&end=2026-08-21&rebalance=monthly&dividend=cash&asset=VOO:7000&asset=VXUS:3000";
     });
     await page.waitForFunction(() => document.querySelector("input[name='capital']")?.value === "20000");
     assert.deepEqual(await page.$$eval("input[name$='-ticker']", (inputs) => inputs.map((input) => input.value)), ["VOO", "VXUS"]);
     assert.deepEqual(await page.$$eval("input[name$='-weight']", (inputs) => inputs.map((input) => input.value)), ["70.00", "30.00"]);
     assert.equal(requestCount, 0, "changing a shared setup hash must not call the backtest API");
     await page.evaluate(() => {
-      window.location.hash = "#/work/portfolio-backtest?v=1&capital=10000&start=2021-01-01&end=2026-08-21&rebalance=quarterly&dividend=reinvest&asset=VTI:6000&asset=BND:4000";
+      window.location.hash = "#/work/portfolio-backtest?v=2&capital=10000&start=2021-01-01&end=2026-08-21&rebalance=quarterly&dividend=reinvest&asset=VTI:6000&asset=BND:4000";
     });
     await page.waitForFunction(() => document.querySelector("input[name='capital']")?.value === "10000");
 
-    await page.goto(`${baseUrl}/#/market-lab`, { waitUntil: "domcontentloaded" });
-    await page.waitForFunction(() => document.body.innerText.includes("Portfolio vs SPY"));
-    const clicked = await page.$$eval("article", (cards) => {
-      const card = cards.find((candidate) => candidate.querySelector("h2")?.textContent?.trim() === "Portfolio vs SPY");
-      const action = card?.querySelector("a[aria-label='Run backtest: Portfolio vs SPY']");
-      if (!(action instanceof HTMLAnchorElement)) return false;
-      action.click();
-      return true;
-    });
-    assert.equal(clicked, true, "Portfolio vs SPY card should be clickable from Market Lab");
-    await page.waitForFunction(() => window.location.hash === "#/work/portfolio-backtest");
+    await page.focus("nav[aria-label='Watcher workspace'] a[aria-label='Portfolio']");
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => window.location.hash.includes("view=portfolio"));
     await page.waitForFunction(() => document.body.innerText.includes("PORTFOLIO VS SPY"));
+    await page.waitForFunction(() => document.querySelector("input[name='asset-1-ticker']")?.value === "");
     assert.match(await page.$eval("body", (body) => body.innerText), /PORTFOLIO VS SPY/);
 
      const tickerInputs = await page.$$("input[name$='-ticker']");
      const weightInputs = await page.$$("input[name$='-weight']");
      await tickerInputs[0].type("vti");
      assert.equal(await tickerInputs[0].evaluate((input) => input.value), "VTI", "ticker input should normalize to uppercase");
-    await weightInputs[0].type("60");
+    await weightInputs[0].type("2.30");
     const addClicked = await page.$$eval("button", (buttons) => {
       const add = buttons.find((button) => (button.textContent || "").includes("Add ETF"));
       if (!add) return false;
@@ -137,8 +149,18 @@ const successResponse = (input, requestId) => ({
     const secondTicker = (await page.$$("input[name$='-ticker']"))[1];
     const secondWeight = (await page.$$("input[name$='-weight']"))[1];
      await secondTicker.type("BND");
-     await secondWeight.type("40");
+     await secondWeight.type("97.70");
+     assert.equal(await page.$eval("button[type='submit']", (button) => button.disabled), false, "valid fractional percentages must enable the backtest");
+     const fractionalRequest = page.waitForRequest(isBacktestRequest);
+     await page.focus("button[type='submit']");
+     await page.keyboard.press("Enter");
+     assert.deepEqual(JSON.parse((await fractionalRequest).postData()).positions.map((position) => position.basisPoints), [230, 9770]);
+     await page.waitForSelector("[data-testid='portfolio-performance-chart']");
      const copySetupButtonText = () => page.$$eval("form[name='portfolio-backtest'] button", (buttons) => buttons.find((candidate) => (candidate.textContent || "").toLowerCase().includes("setup link"))?.textContent?.trim() || "");
+     await weightInputs[0].click({ clickCount: 3 });
+     await weightInputs[0].type("60");
+     await secondWeight.click({ clickCount: 3 });
+     await secondWeight.type("40");
      await page.evaluate(() => {
        Object.defineProperty(navigator, "clipboard", {
          configurable: true,
@@ -333,10 +355,10 @@ const successResponse = (input, requestId) => ({
     assert.equal(policyRequests.size, 8, "each rebalancing/dividend policy pair must reach the API seam");
     const downloadLink = await page.waitForSelector("a[download$='.csv']");
     const downloadState = await downloadLink.evaluate((node) => ({ filename: node.download, href: node.href }));
-    assert.equal(downloadState.filename, "portfolio-vs-spy-2021-08-23-to-2026-08-21.csv");
+    assert.equal(downloadState.filename, "portfolio-vs-spy-v2-2021-08-23-to-2026-08-21.csv");
     const comparisonCsv = decodeURIComponent(downloadState.href.split(",").slice(1).join(","));
-    assert.match(comparisonCsv, /^date,portfolio_value_usd,spy_value_usd,portfolio_index_base_100,spy_index_base_100,/);
-    assert.match(comparisonCsv, /"2026-08-21",16900,15700,169,157,"annual","cash","2026-08-21","refreshed","v1",""/);
+    assert.match(comparisonCsv, /^date,portfolio_value_usd,spy_value_usd,portfolio_cash_usd,spy_cash_usd,portfolio_index_base_100,spy_index_base_100,/);
+    assert.match(comparisonCsv, /"2026-08-21",16900,15700,120,100,169,157,"annual","cash","2026-08-21","refreshed","v2",""/);
     const downloadsDir = path.join(screenshotsDir, "downloads");
     fs.mkdirSync(downloadsDir, { recursive: true });
     const downloadSession = await page.createCDPSession();
@@ -354,7 +376,7 @@ const successResponse = (input, requestId) => ({
     await completedDownload;
     assert.equal(fs.readFileSync(path.join(downloadsDir, downloadState.filename), "utf8"), comparisonCsv, "the actual downloaded CSV must match the displayed result without recomputation");
     assert.equal(requestCount, beforeExport, "export must not call the backtest API");
-    for (const width of [390, 768]) {
+    for (const width of [375, 390, 768]) {
       await page.setViewport({ width, height: 844 });
       await downloadLink.evaluate((node) => node.scrollIntoView({ block: "center" }));
       const exportBounds = await downloadLink.evaluate((node) => {
@@ -375,7 +397,7 @@ const successResponse = (input, requestId) => ({
      const staleText = await page.$eval("body", (body) => body.innerText);
      assert.match(staleText, /Cache: stale[\s\S]*Data warning[\s\S]*Historical data is stale because a refresh failed/i);
      const staleCsv = await page.$eval("a[download$='.csv']", (node) => decodeURIComponent(node.href.split(",").slice(1).join(",")));
-     assert.match(staleCsv, /"stale","v1","Historical data is stale because a refresh failed/);
+     assert.match(staleCsv, /"stale","v2","Historical data is stale because a refresh failed/);
      apiMode = "success";
 
      const beforeInvalidRun = requestCount;
@@ -425,7 +447,7 @@ const successResponse = (input, requestId) => ({
     const delayedBacktestAInput = JSON.parse(delayedBacktestARequest.postData() || "{}");
     await page.waitForFunction(() => document.querySelector("button[type='submit']")?.textContent?.includes("Fetching and simulating EOD history"));
     await page.evaluate(() => {
-      window.location.hash = "#/work/portfolio-backtest?v=1&capital=20000&start=2022-01-01&end=2026-08-21&rebalance=monthly&dividend=cash&asset=VOO:7000&asset=VXUS:3000";
+      window.location.hash = "#/work/portfolio-backtest?v=2&capital=20000&start=2022-01-01&end=2026-08-21&rebalance=monthly&dividend=cash&asset=VOO:7000&asset=VXUS:3000";
     });
     await page.waitForFunction(() => document.querySelector("input[name='capital']")?.value === "20000");
     assert.equal(await page.$("[data-testid='portfolio-performance-chart']"), null, "loading a new shared setup must clear the old result");
@@ -452,7 +474,7 @@ const successResponse = (input, requestId) => ({
     const delayedBacktestErrorRequest = await delayedBacktestErrorRequestPromise;
     await page.waitForFunction(() => document.querySelector("button[type='submit']")?.textContent?.includes("Fetching and simulating EOD history"));
     await page.evaluate(() => {
-      window.location.hash = "#/work/portfolio-backtest?v=1&capital=30000&start=2023-01-01&end=2026-08-21&rebalance=none&dividend=reinvest&asset=VTI:10000";
+      window.location.hash = "#/work/portfolio-backtest?v=2&capital=30000&start=2023-01-01&end=2026-08-21&rebalance=none&dividend=reinvest&asset=VTI:10000";
     });
     await page.waitForFunction(() => document.querySelector("input[name='capital']")?.value === "30000");
     delayedApiMode = null;

@@ -1,6 +1,7 @@
 import type { D1DatabaseLike } from "./spx-recap-d1";
 import {
   SPX_LIFECYCLE_STAGES,
+  SPX_DELIVERY_LEASE_MS,
   type CioDecision,
   type CouncilAgentAnalysis,
   type CouncilResult,
@@ -360,12 +361,13 @@ export class D1SpxDecisionStore implements SpxDecisionStore {
     return row ? rowToOutbox(row) : null;
   }
 
-  async markDeliveryAttempt(runId: string, at: string) {
+  async markDeliveryAttempt(runId: string, at: string, expectedAttempt: number, allowUnknown = false) {
     const result = await this.db.prepare(`
       UPDATE spx_delivery_outbox
       SET status = 'SENDING', attempt_count = attempt_count + 1, updated_at = ?
-      WHERE run_id = ? AND status IN ('PENDING', 'FAILED')
-    `).bind(at, runId).run();
+      WHERE run_id = ? AND attempt_count = ?
+        AND (status IN ('PENDING', 'FAILED') OR (status = 'UNKNOWN' AND ? = 1))
+    `).bind(at, runId, expectedAttempt, allowUnknown ? 1 : 0).run();
     if (changesFromResult(result) === 0) {
       const existing = await this.requireOutbox(runId);
       if (existing.status === 'DELIVERED') return existing;
@@ -374,22 +376,52 @@ export class D1SpxDecisionStore implements SpxDecisionStore {
     return this.requireOutbox(runId);
   }
 
-  async markDeliveryFailed(runId: string, error: string, nextAttemptAt: string, at: string) {
+  async markDeliveryFailed(runId: string, error: string, nextAttemptAt: string, at: string, expectedAttempt: number) {
     await this.db.prepare(`
       UPDATE spx_delivery_outbox
       SET status = 'FAILED', last_error = ?, next_attempt_at = ?, updated_at = ?
-      WHERE run_id = ? AND status != 'DELIVERED'
-    `).bind(error, nextAttemptAt, at, runId).run();
+      WHERE run_id = ? AND status = 'SENDING' AND attempt_count = ?
+    `).bind(error, nextAttemptAt, at, runId, expectedAttempt).run();
     return this.requireOutbox(runId);
   }
 
-  async markDelivered(runId: string, telegramMessageId: string, at: string) {
+  async markDeliveryUnknown(runId: string, error: string, at: string, expectedAttempt: number) {
+    await this.db.prepare(`
+      UPDATE spx_delivery_outbox
+      SET status = 'UNKNOWN', last_error = ?, next_attempt_at = NULL, updated_at = ?
+      WHERE run_id = ? AND status = 'SENDING' AND attempt_count = ?
+    `).bind(error, at, runId, expectedAttempt).run();
+    return this.requireOutbox(runId);
+  }
+
+  async markDeliveryExpired(runId: string, at: string, expectedAttempt: number) {
+    await this.db.prepare(`
+      UPDATE spx_delivery_outbox
+      SET status = 'EXPIRED', last_error = ?, next_attempt_at = NULL, updated_at = ?
+      WHERE run_id = ? AND status IN ('PENDING', 'FAILED', 'UNKNOWN') AND attempt_count = ?
+    `).bind('Original decision expired or was superseded; do not resend it as a live signal.', at, runId, expectedAttempt).run();
+    return this.requireOutbox(runId);
+  }
+
+  async recoverExpiredSending(at: string) {
+    const cutoff = new Date(Date.parse(at) - SPX_DELIVERY_LEASE_MS).toISOString();
+    await this.db.prepare(`
+      UPDATE spx_delivery_outbox
+      SET status = 'UNKNOWN', last_error = ?, next_attempt_at = NULL, updated_at = ?
+      WHERE run_id IN (
+        SELECT run_id FROM spx_delivery_outbox
+        WHERE status = 'SENDING' AND updated_at <= ? ORDER BY updated_at LIMIT 25
+      ) AND status = 'SENDING' AND updated_at <= ?
+    `).bind('Delivery acknowledgement was not persisted; verify Telegram before retrying.', at, cutoff, cutoff).run();
+  }
+
+  async markDelivered(runId: string, telegramMessageId: string, at: string, expectedAttempt: number) {
     await this.db.prepare(`
       UPDATE spx_delivery_outbox
       SET status = 'DELIVERED', telegram_message_id = ?, last_error = NULL,
           next_attempt_at = NULL, updated_at = ?
-      WHERE run_id = ?
-    `).bind(telegramMessageId, at, runId).run();
+      WHERE run_id = ? AND status IN ('SENDING', 'UNKNOWN') AND attempt_count = ?
+    `).bind(telegramMessageId, at, runId, expectedAttempt).run();
     return this.requireOutbox(runId);
   }
 
@@ -397,6 +429,13 @@ export class D1SpxDecisionStore implements SpxDecisionStore {
     return Boolean(await this.db.prepare(`
       SELECT run_id FROM spx_decision_runs WHERE run_id = ?
     `).bind(runId).first<{ run_id: string }>());
+  }
+
+  async hasNewerDecision(runId: string, scheduledAt: string) {
+    return Boolean(await this.db.prepare(`
+      SELECT 1 AS found FROM spx_decision_runs
+      WHERE scheduled_at > ? AND run_id != ? AND final_action IS NOT NULL LIMIT 1
+    `).bind(scheduledAt, runId).first<{ found: number }>());
   }
 
   async listRetryableOutbox(at: string, limit = 5) {
@@ -508,6 +547,6 @@ export async function queryLifecycleCoverage(
       const row = byRunId.get(runId);
       return Boolean(row && row.current_stage !== "DELIVERED" && row.current_stage !== "DELIVERY_FAILED");
     }),
-    deliveryFailedRunIds: expectedRunIds.filter((runId) => byRunId.get(runId)?.delivery_status === "FAILED"),
+    deliveryFailedRunIds: expectedRunIds.filter((runId) => ["FAILED", "UNKNOWN", "EXPIRED"].includes(byRunId.get(runId)?.delivery_status || "")),
   };
 }

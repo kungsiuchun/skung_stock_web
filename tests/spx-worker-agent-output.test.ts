@@ -43,6 +43,7 @@ import {
   SPX_COUNCIL_TIMING_POLICY,
   shouldRunLlmCio,
   shouldRunLlmCouncil,
+  sendTelegramMessage,
   validateCioModelPlan,
 } from "../scripts/worker-spx-bot";
 import { ORCHESTRATOR_PROMPT, SYSTEM_PROMPT_PREFIX } from "../scripts/prompts";
@@ -133,7 +134,7 @@ test("audit delivery saves the complete report before sending and reports partia
           || scenario === 'failure notification rejected' && telegramBodies.length === 3)) {
           return Response.json({ description: 'Bad Request: test delivery rejected' }, { status: 400 });
         }
-        return Response.json({ result: { message_id: telegramBodies.length } });
+        return Response.json({ ok: true, result: { message_id: telegramBodies.length } });
       });
       const kvWrites = new Map<string, string>();
       const result = await runEndOfDayAudit({
@@ -479,9 +480,9 @@ test("M5 context marks missing 0DTESPX volume as unavailable instead of throwing
 
 test("directional execution requires numeric levels, an in-zone price, a confirming completed 5m bar, and no prior entry", () => {
   const plan = {
-    buy_zone: "7520.25 - 7522.75",
-    stop_loss: "7517.50",
-    targets: ["7526.00", "7530.00"],
+    buy_zone: { low: 7520.25, high: 7522.75 },
+    stop_loss: { price: 7517.5, trigger: "touch", timeframe: null },
+    targets: [7526, 7530],
   };
   assert.deepEqual(parseNumericExecutionLevels(plan), {
     entryZoneLow: 7520.25,
@@ -489,6 +490,10 @@ test("directional execution requires numeric levels, an in-zone price, a confirm
     invalidation: 7517.5,
     targets: [7526, 7530],
   });
+  for (const patch of [{ stop_loss: "5m close below 7515" }, { targets: ["7530 after 5m"] }, { targets: ["unavailable", "7530"] }]) {
+    assert.equal(parseNumericExecutionLevels({ ...plan, ...patch }), null, "ambiguous execution text must not become a price");
+    assert.equal(passesDirectionalEntryGate({ action: "OPEN_CALL", currentPrice: 7521, completedM5Bars: [{ open: 7520, close: 7522 }], plan: { ...plan, ...patch }, actionLog: [] }).reason, "numeric_execution_levels_required");
+  }
   assert.equal(passesDirectionalEntryGate({
     action: "OPEN_CALL",
     currentPrice: 7524,
@@ -517,11 +522,55 @@ test("an open directional position closes only at a numeric invalidation or targ
     currentPosition: "CALL",
     entryPrice: 7521,
     entryTime: "2026/08/23 10:00 ET",
-    actionLog: [{ action: "買入 Call", stopLoss: "7517.50", takeProfit: "7526.00 | 7530.00" }],
+    actionLog: [{ action: "買入 Call", stopLoss: "7517.50", takeProfit: "7526.00 | 7530.00", executionPlan: { schemaVersion: 1, underlying: "SPX", entryZone: { low: 7520, high: 7522 }, stop: { price: 7517.5, trigger: "touch", timeframe: null }, targets: [7526, 7530] } }],
   } as any;
   assert.deepEqual(evaluateNumericPositionExit(memory, 7523), { shouldClose: false, reason: null });
   assert.deepEqual(evaluateNumericPositionExit(memory, 7517.5), { shouldClose: true, reason: "numeric_invalidation_7517.5" });
+  assert.deepEqual(evaluateNumericPositionExit({ ...memory, actionLog: [{ action: "買入 Call", stopLoss: "5m close below 7515", takeProfit: "7526" }] } as any, 7520), { shouldClose: false, reason: "EXIT_RULE_UNKNOWN", requiresReview: true });
   assert.deepEqual(evaluateNumericPositionExit(memory, 7526), { shouldClose: true, reason: "numeric_target_reached" });
+});
+
+test("SPX entry geometry rejects reversed stops/targets for both directions", () => {
+  const call = { buy_zone: { low: 7520, high: 7522 }, stop_loss: { price: 7515, trigger: "touch", timeframe: null }, targets: [7530] };
+  const gate = (action: "OPEN_CALL" | "OPEN_PUT", plan: typeof call) => passesDirectionalEntryGate({ action, currentPrice: 7521, completedM5Bars: [{ open: 7521, close: 7521 }], actionLog: [], plan });
+  assert.equal(gate("OPEN_CALL", call).ok, true);
+  assert.equal(gate("OPEN_PUT", { ...call, stop_loss: { ...call.stop_loss, price: 7530 }, targets: [7515] }).ok, true);
+  for (const patch of [{ stop_loss: { ...call.stop_loss, price: 7520 } }, { stop_loss: { ...call.stop_loss, price: 7535 } }, { targets: [7510] }, { targets: [7530, 7521] }]) {
+    assert.equal(gate("OPEN_CALL", { ...call, ...patch }).reason, "execution_geometry_invalid");
+  }
+  const validModel = { ...call, trade_action: "OPEN_CALL", confidence_score: 65, logic: "Entry geometry verified.", no_trade_conditions: [], evidence_refs: ["spx.last"], claims: [{ text: "Price supports the setup.", evidence_refs: ["spx.last"] }] };
+  assert.equal(validateCioModelPlan(validModel).ok, true);
+  assert.deepEqual(validateCioModelPlan({ ...validModel, stop_loss: { ...call.stop_loss, price: 7535 } }), { ok: false, invalidField: "execution_geometry_invalid" });
+  for (const stop of ["5m close below 7515", { price: 7515, trigger: "touch", timeframe: "5m" }, { price: 7515, trigger: "bar_close", timeframe: null }]) assert.equal(validateCioModelPlan({ ...validModel, stop_loss: stop }).ok, false);
+});
+
+test("conditional SPX stops use only completed matching candles after entry", () => {
+  const plan = { schemaVersion: 1, underlying: "SPX", entryZone: { low: 7520, high: 7522 }, stop: { price: 7515, trigger: "bar_close", timeframe: "5m" }, targets: [7530] };
+  const memory = { currentPosition: "CALL", entryPrice: 7521, entryTime: "display only", actionLog: [{ action: "買入 Call", executionPlan: plan, executionOpenedAt: "2026-11-12T15:00:00Z" }] } as any;
+  const now = new Date("2026-11-12T15:06:00Z");
+  const beforeEntry = { date: new Date("2026-11-12T14:55:00Z"), close: 7500 };
+  const complete = { date: new Date("2026-11-12T15:00:00Z"), close: 7516 };
+  const incomplete = { date: new Date("2026-11-12T15:05:00Z"), close: 7500 };
+  assert.deepEqual(evaluateNumericPositionExit(memory, 7510, { now, quotes5m: [beforeEntry, complete, incomplete] }), { shouldClose: false, reason: null }, "an intrabar touch must not trigger a close stop");
+  assert.deepEqual(evaluateNumericPositionExit(memory, 7520, { now, quotes5m: [{ ...complete, close: 7514 }] }), { shouldClose: true, reason: "numeric_invalidation_7515" });
+  assert.deepEqual(evaluateNumericPositionExit(memory, 7510, { now, quotes15m: [{ ...complete, close: 7500 }] }), { shouldClose: false, reason: "EXIT_RULE_DATA_UNAVAILABLE", requiresReview: true }, "15m data must not substitute for a 5m stop");
+  assert.deepEqual(evaluateNumericPositionExit(memory, 7510, { now, quotes5m: [beforeEntry, incomplete] }), { shouldClose: false, reason: "EXIT_RULE_DATA_UNAVAILABLE", requiresReview: true });
+});
+
+test("Telegram adapter distinguishes explicit rejections from uncertain delivery and propagates abort", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const [status, body, expected] of [[400, { ok: false }, "SpxTelegramRejectedError"], [200, { ok: false }, "SpxTelegramRejectedError"], [503, { ok: false }, "Error"], [200, { ok: true, result: {} }, "Error"]] as const) {
+      globalThis.fetch = async () => Response.json(body, { status });
+      await assert.rejects(sendTelegramMessage("test-token", "chat", "message"), error => error instanceof Error && error.name === expected);
+    }
+    const controller = new AbortController();
+    let observed: AbortSignal | null | undefined;
+    globalThis.fetch = ((_input, init) => { observed = init?.signal; return new Promise<Response>((_resolve, reject) => observed!.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true })); }) as typeof fetch;
+    const pending = assert.rejects(sendTelegramMessage("test-token", "chat", "message", "HTML", controller.signal), { name: "AbortError" });
+    controller.abort(); await pending;
+    assert.equal(observed?.aborted, true);
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test("valid AI Council output rejects zero confidence and invalid HOLD evidence references", async () => {

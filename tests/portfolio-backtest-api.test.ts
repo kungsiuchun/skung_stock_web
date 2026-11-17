@@ -34,7 +34,7 @@ const chartPayload = (ticker: string, instrumentType = "ETF") => ({
 const requestFor = (body: unknown) => new Request("http://localhost:8788/api/portfolio-backtest", {
   method: "POST",
   headers: { "content-type": "application/json" },
-  body: JSON.stringify(body),
+  body: JSON.stringify(body && typeof body === "object" && !Array.isArray(body) ? { methodologyVersion: "v2", ...body } : body),
 });
 
 type CacheRow = { cache_key: string; payload_json: string; source_as_of: string | null; cached_at: string; expires_at: string; last_refresh_error: string | null };
@@ -124,6 +124,48 @@ test("rejects an invalid allocation before requesting Yahoo history", async () =
   assert.equal(response.status, 400);
   assert.equal(body.error.code, "INVALID_ALLOCATION");
   assert.equal(fetches, 0);
+});
+
+test("requires an explicit current methodology before reading provider data", async () => {
+  let fetches = 0;
+  for (const methodologyVersion of [undefined, "v1", "v3", 2]) {
+    const response = await onRequestPost({
+      request: requestFor({ methodologyVersion, startingCapital: 10_000, positions: [{ ticker: "VTI", basisPoints: 10_000 }], rebalancePolicy: "none", dividendPolicy: "cash" }),
+      env: {}, fetcher: async () => { fetches++; return new Response(); },
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json() as { error: { message: string } }).error.message, /require methodologyVersion v2/);
+  }
+  assert.equal(fetches, 0);
+});
+
+test("rejects malformed positions as client errors before requesting history", async () => {
+  let fetches = 0;
+  for (const position of [null, 1, "VTI", {}, { ticker: 12, basisPoints: 10_000 }, { ticker: null, basisPoints: 10_000 }]) {
+    const response = await onRequestPost({
+      request: requestFor({ startingCapital: 10_000, positions: [position], rebalancePolicy: "none", dividendPolicy: "reinvest" }),
+      env: {},
+      fetcher: async () => { fetches++; return new Response(); },
+    });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json() as { error: { code: string } }).error.code, "INVALID_ALLOCATION");
+  }
+  assert.equal(fetches, 0);
+});
+
+test("rejects missing and mismatched Yahoo history identities", async () => {
+  for (const symbol of ["SPY", "", undefined]) {
+    const payload = chartPayload("VTI");
+    Object.assign(payload.chart.result[0].meta, { symbol });
+    assert.throws(() => normalizeYahooPortfolioHistory({ ticker: "VTI", payload }), /missing or mismatched symbol/);
+  }
+  const response = await onRequestPost({
+    request: requestFor({ startingCapital: 10_000, positions: [{ ticker: "VTI", basisPoints: 10_000 }], rebalancePolicy: "none", dividendPolicy: "reinvest" }),
+    env: {},
+    fetcher: async () => Response.json(chartPayload("SPY")),
+  });
+  assert.equal(response.status, 502);
+  assert.equal((await response.json() as { error: { code: string } }).error.code, "MALFORMED_PAYLOAD");
 });
 
 test("rejects an impossible calendar date before requesting Yahoo history", async () => {

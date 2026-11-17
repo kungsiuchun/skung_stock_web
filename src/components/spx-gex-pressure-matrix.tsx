@@ -572,6 +572,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
     ? focusSpxGexPressureOnPrice(sessionPressure, oneMinuteSpotSegments, strikePanSteps)
     : null, [sessionPressure, oneMinuteSpotSegments, strikePanSteps]);
   const outsideGexCoverage = displayPressure?.rows.some((row) => row.cells[0]?.state === "OUTSIDE_COVERAGE") || false;
+  const missingBaselineRows = displayPressure?.rows.filter(row => row.cells.some(cell => cell.state === "NO_BASELINE")).length || 0;
   const axisTicks = useMemo(() => displayPressure ? buildSpxGexPressureAxisTicks(displayPressure.timeline) : [], [displayPressure]);
   const timelineLength = displayPressure?.timeline.length || 0;
   const availableTimelineWidth = Math.max(0, matrixRailWidth - STRIKE_WIDTH - CURRENT_GEX_WIDTH);
@@ -708,6 +709,7 @@ export function SpxGexPressureMatrix({ selectedDate, selectedMinute, pressureRef
             {(priceOverlay?.error || expectedMoveCode) && <details data-spx-price-overlay-diagnostics="true" className="p-2 text-xs text-zinc-400"><summary className="cursor-pointer">Price overlay diagnostics</summary><p className="break-all">{formatSpxFailureDetails(priceOverlayDiagnostic)}</p></details>}
            {priceOverlayWarning && <div className="border-b border-cyan-300/20 bg-cyan-300/5 px-3 py-2 text-xs text-cyan-100" role="status" data-spx-gex-pressure-spot-warning="true">{priceOverlayWarning}</div>}
             {outsideGexCoverage && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-coverage-warning="true">Displayed strikes extend beyond available 0DTE GEX coverage. Empty rows show price context only, not GEX data.</div>}
+            {missingBaselineRows > 0 && <div className="border-b border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100" role="status" data-spx-gex-pressure-baseline-warning="true">Opening baseline unavailable for {missingBaselineRows} of {displayPressure!.rows.length} displayed strikes. Change colors are unavailable for those strikes; blank cells do not mean zero change. Current GEX and the price line remain independent.</div>}
             {expectedMoveWarning && <div className={`${expectedMoveIsStale ? "border-amber-300/20 bg-amber-300/10 text-amber-100" : "border-violet-300/20 bg-violet-300/5 text-violet-100"} border-b px-3 py-2 text-xs`} role="status" data-spx-gex-pressure-expected-move-warning="true">{expectedMoveWarning}</div>}
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#123142] bg-[#07141e] px-3 py-2 font-mono text-[10px] text-cyan-100">
               <span data-spx-gex-pressure-view-range="true">STRIKES {strikeFormatter.format(displayPressure!.strikeRange.lower)}–{strikeFormatter.format(displayPressure!.strikeRange.upper)} · 21 ROWS{strikePanSteps === 0 ? " · FOLLOWING SPOT" : " · MANUAL VIEW"}{spotOutsideView ? " · SPOT OUTSIDE VIEW" : pricePathOutsideView ? " · PRICE PATH CLIPPED TO VIEW" : ""}</span>

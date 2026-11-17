@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decodePortfolioBacktestShareConfig, encodePortfolioBacktestShareConfig, type PortfolioBacktestShareConfigV1 } from "../src/lib/portfolio-backtest-share";
+import { decodePortfolioBacktestShareConfig, encodePortfolioBacktestShareConfig, type PortfolioBacktestShareConfigV2 } from "../src/lib/portfolio-backtest-share";
 
-const valid: PortfolioBacktestShareConfigV1 = {
-  version: 1,
+const valid: PortfolioBacktestShareConfigV2 = {
+  version: 2,
   startingCapital: 10_000,
   startDate: "2021-01-01",
   endDate: "2026-10-15",
@@ -15,11 +15,11 @@ const valid: PortfolioBacktestShareConfigV1 = {
   ],
 };
 
-test("round trips a canonical v1 setup without results or provider state", () => {
-  const incoming = "#/work/portfolio-backtest?v=1&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:6000&asset=BND:4000";
+test("round trips a canonical v2 setup without results or provider state", () => {
+  const incoming = "#/work/portfolio-backtest?v=2&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:6000&asset=BND:4000";
   assert.deepEqual(decodePortfolioBacktestShareConfig(incoming), valid, "opening a link should preserve its asset order");
   const encoded = encodePortfolioBacktestShareConfig(valid);
-  assert.equal(encoded, "#/work/portfolio-backtest?v=1&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=BND:4000&asset=VTI:6000");
+  assert.equal(encoded, "#/work/portfolio-backtest?v=2&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=BND:4000&asset=VTI:6000");
   assert.deepEqual(decodePortfolioBacktestShareConfig(encoded), { ...valid, positions: [valid.positions[1], valid.positions[0]] });
   assert.equal(decodePortfolioBacktestShareConfig("#/work/portfolio-backtest"), null);
 });
@@ -34,26 +34,32 @@ test("round trips capital values whose canonical form uses an exponent", () => {
   }
 });
 
+test("loads legacy v1 inputs without silently relabeling their methodology", () => {
+  const legacy = "#/work/portfolio-backtest?v=1&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=cash&asset=VTI:6000&asset=BND:4000";
+  assert.deepEqual(decodePortfolioBacktestShareConfig(legacy), { ...valid, version: 1, dividendPolicy: "cash" });
+  assert.throws(() => encodePortfolioBacktestShareConfig({ ...valid, version: 1 } as unknown as PortfolioBacktestShareConfigV2), /require methodology v2/);
+});
+
 test("rejects invalid shared setups as one unit", () => {
   const route = "#/work/portfolio-backtest";
   const cases = [
-    `${route}?v=2&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:10000`,
-    `${route}?v=1&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:5000&asset=VTI:5000`,
-    `${route}?v=1&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:1000&asset=BND:1000&asset=VEA:1000&asset=VWO:1000&asset=VNQ:1000&asset=TIP:1000&asset=GLD:1000&asset=DBC:1000&asset=IJS:1000&asset=IJH:500&asset=SHY:500`,
-    `${route}?v=1&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:9999`,
-    `${route}?v=1&capital=10000&start=2026-10-16&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:10000`,
-    `${route}?v=1&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=weekly&dividend=reinvest&asset=VTI:10000`,
-    `${route}?v=1&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=spend&asset=VTI:10000`,
-    `${route}?v=1&capital=10000&capital=20000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:10000`,
+    `${route}?v=3&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:10000`,
+    `${route}?v=2&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:5000&asset=VTI:5000`,
+    `${route}?v=2&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:1000&asset=BND:1000&asset=VEA:1000&asset=VWO:1000&asset=VNQ:1000&asset=TIP:1000&asset=GLD:1000&asset=DBC:1000&asset=IJS:1000&asset=IJH:500&asset=SHY:500`,
+    `${route}?v=2&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:9999`,
+    `${route}?v=2&capital=10000&start=2026-10-16&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:10000`,
+    `${route}?v=2&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=weekly&dividend=reinvest&asset=VTI:10000`,
+    `${route}?v=2&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=spend&asset=VTI:10000`,
+    `${route}?v=2&capital=10000&capital=20000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:10000`,
   ];
   for (const value of cases) assert.throws(() => decodePortfolioBacktestShareConfig(value));
-  assert.equal(decodePortfolioBacktestShareConfig(`${route}-other?v=1&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:10000`), null);
+  assert.equal(decodePortfolioBacktestShareConfig(`${route}-other?v=2&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:10000`), null);
 });
 
 test("requires both dates and canonicalizes ticker input before encoding", () => {
   assert.throws(() => encodePortfolioBacktestShareConfig({ ...valid, startDate: "" }));
   assert.throws(() => encodePortfolioBacktestShareConfig({ ...valid, endDate: "" }));
-  assert.throws(() => decodePortfolioBacktestShareConfig("#/work/portfolio-backtest?v=1&capital=10000&start=&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:10000"));
+  assert.throws(() => decodePortfolioBacktestShareConfig("#/work/portfolio-backtest?v=2&capital=10000&start=&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=VTI:10000"));
   assert.equal(
     encodePortfolioBacktestShareConfig({
       ...valid,
@@ -62,6 +68,6 @@ test("requires both dates and canonicalizes ticker input before encoding", () =>
         { ticker: "bnd", basisPoints: 4_000 },
       ],
     }),
-    "#/work/portfolio-backtest?v=1&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=BND:4000&asset=VTI:6000",
+    "#/work/portfolio-backtest?v=2&capital=10000&start=2021-01-01&end=2026-10-15&rebalance=quarterly&dividend=reinvest&asset=BND:4000&asset=VTI:6000",
   );
 });
