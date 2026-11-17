@@ -82,6 +82,9 @@
 - Caption uses the Workers AI Moondream 3.1 query contract with a base64 image,
   reasoning/streaming disabled and a 50-token cap. Empty/malformed answers fail;
   there is no deprecated LLaVA fallback. `wrangler.toml` owns the AI binding.
+  Normalize `answer` either directly or inside the observed `result`/`usage`
+  envelope; invalid-response diagnostics record field types only, never images,
+  prompts or generated captions.
 - Reports validate a structured summary/support/counterchecks/risks contract and
   source IDs before rendering. Cache identity includes evidence hash, symbol, lens,
   bilingual bundle and prompt version. Never relabel a cached report's source timestamp;

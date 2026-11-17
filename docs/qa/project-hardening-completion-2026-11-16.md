@@ -74,3 +74,14 @@
 - `wrangler.toml` 宣告 `image_caption_ai` binding，避免正式配置與本地來源脫節。
 - Worker 新 secret 只經 stdin/API 傳送；本地備份使用 Windows DPAPI，置於 git-ignored `.local-secrets/`，不改既有 `.dev.vars`，不輸出 secret。
 - 正式 migration 前後比對 outbox 整體內容雜湊與列數；不觸發 Telegram 重送或歷史市場資料重收。
+
+## 發布驗證收尾
+
+- Hardening commit `12ca670` 已合併成 `fd7d96f` 並推送 main；合併後 799/799 離線測試、strict typecheck、lint、build、Functions/Worker bundle 及 [GitHub CI](https://github.com/kungsiuchun/skung_stock_web/actions/runs/44016721268) 通過。
+- 正式 `0017` 已套用；504 筆 outbox 的完整內容 SHA-256 前後均為 `1dc70fc10a6ad95e861e796fcca8c72c9955d38079bc2183b984b68e946f9dd1`，沒有修改傳送證據或發送 Telegram。
+- Worker 獨立 secret 已配置，Windows DPAPI 備份保存在 `.local-secrets/spx-worker-webhook.dpapi`（git-ignored、沒有輸出／提交明文、既有 `.dev.vars` 未改）。Pages `image_caption_ai` binding 已配置。
+- 首次正式驗證找到 Caption GET 被 middleware 的舊 POST-only 清單攔截；補上真 middleware -> owner availability handler 的回歸，拒絕其他方法保持 405。修正 commit `bd2d771`，800/800 離線測試及 [第二次 CI](https://github.com/kungsiuchun/skung_stock_web/actions/runs/44017473591) 通過。
+- 正式 Worker 無認證為 401、正確 bearer health 為 200；Caption 訪客 GET 為 401，不能呼叫 AI。正式 owner session secret 不可讀，沒有偽造或重設正式 owner 登入；改以本地已驗證 owner fixture，透過 Wrangler 官方 remote AI binding 做真實推論。
+- 真實 Moondream binding 的回傳是 `result`/`usage` envelope；保留直接 `answer` 的文件格式，明確正規化該 envelope。三次聚焦診斷及一次修正後推論均只使用專案既有公開相機 PNG；最後 HTTP 200、非空 caption。沒有使用私人圖片或記錄圖像／prompt／生成內容，沒有舊模型或假 caption fallback。
+- 正式真瀏覽器：SPX snapshot 正常，375/1440px 的缺基準提示為 21/21、橫向溢出 0、page errors 0；Portfolio v1 顯示明確遷移提示，開啟時自動回測次數 0。今日開盤基準沒有被補造。
+- 最終程式與部署識別、CI 及清理結果記於下方最終 closeout；前文未發布／待配置段落屬已完成之前的階段紀錄。

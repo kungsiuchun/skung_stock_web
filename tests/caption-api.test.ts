@@ -89,6 +89,10 @@ test("caption sends the supported Moondream image contract and rejects empty pro
   const valid = await onRequestPost({ request: request(), env });
   assert.equal(valid.status, 200);
   assert.deepEqual(await valid.json(), { success: true, result: "A quiet horizon." });
+  output = { result: { answer: "An image through a lens." }, usage: { total_tokens: 20 } };
+  const wrapped = await onRequestPost({ request: request(), env });
+  assert.equal(wrapped.status, 200);
+  assert.deepEqual(await wrapped.json(), { success: true, result: "An image through a lens." });
   for (output of [null, {}, { answer: " " }, "old-model-output"]) {
     assert.equal((await onRequestPost({ request: request(), env })).status, 502);
   }

@@ -67,8 +67,16 @@ export const onRequestPost = async (context: { request: Request; env: Env }) => 
       }
     );
 
-    const answer = result && typeof result === "object" && "answer" in result ? result.answer : null;
-    if (typeof answer !== "string" || !answer.trim()) return json({ error: "The caption service returned no usable caption. Retry or choose another image." }, 502);
+    // Workers AI may wrap the model result alongside usage metadata.
+    const output = result && typeof result === "object" ? result as Record<string, unknown> : {};
+    const payload = output.result && typeof output.result === "object" ? output.result as Record<string, unknown> : output;
+    const answer = payload.answer;
+    if (typeof answer !== "string" || !answer.trim()) {
+      console.error("caption_invalid_provider_answer", { resultType: typeof result, envelopeResultType: typeof output.result,
+        answerType: typeof payload.answer, fields: Object.keys(payload).slice(0, 12),
+        finishReason: typeof payload.finish_reason === "string" ? payload.finish_reason.slice(0, 40) : null });
+      return json({ error: "The caption service returned no usable caption. Retry or choose another image." }, 502);
+    }
     return json({ success: true, result: answer.trim() });
   } catch {
     return json({ error: "Caption generation failed. Retry or choose another image." }, 500);
