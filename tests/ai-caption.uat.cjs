@@ -28,23 +28,49 @@ fs.writeFileSync(path.join(fixtureDir, "corrupt.png"), "not a PNG");
     page.on("pageerror", (error) => errors.push(error.message));
     await page.evaluateOnNewDocument(() => {
       window.__captionRequests = [];
+      window.__captionAccess = "owner";
       const nativeFetch = window.fetch.bind(window);
-      window.fetch = (url, options) => String(url) === "/api/caption"
+      window.fetch = (url, options) => {
+        if (String(url) !== "/api/caption") return nativeFetch(url, options);
+        if (!options?.method || options.method === "GET") {
+          if (window.__captionAccess === "visitor") return Promise.resolve(Response.json({ error: "Sign in as the site owner to generate captions." }, { status: 401 }));
+          if (window.__captionAccess === "unavailable") return Promise.resolve(Response.json({ error: "Caption generation is unavailable because its AI service is not configured." }, { status: 503 }));
+          return Promise.resolve(Response.json({ available: true }));
+        }
         // Deliberately ignore abort to prove late responses cannot change a new image.
-        ? new Promise((resolve) => window.__captionRequests.push({ resolve, signal: options.signal }))
-        : nativeFetch(url, options);
+        return new Promise((resolve) => window.__captionRequests.push({ resolve, signal: options.signal }));
+      };
       window.__previewUrls = new Set();
       const create = URL.createObjectURL.bind(URL);
       const revoke = URL.revokeObjectURL.bind(URL);
       URL.createObjectURL = (blob) => { const url = create(blob); window.__previewUrls.add(url); return url; };
       URL.revokeObjectURL = (url) => { window.__previewUrls.delete(url); revoke(url); };
     });
-    for (const width of [390, 768, 1440]) {
+    for (const width of [375, 1440]) {
       await page.setViewport({ width, height: 900 });
       await page.goto(`${baseUrl}/#/market-lab`, { waitUntil: "domcontentloaded" });
       await page.waitForSelector(".work-card button.text-link");
+      for (const access of ["visitor", "unavailable"]) {
+        await page.evaluate(value => { window.__captionAccess = value; }, access);
+        await page.focus(".work-card button.text-link");
+        await page.keyboard.press("Enter");
+        await page.waitForFunction(mode => mode === "visitor" ? Boolean(document.querySelector("dialog[open] a")) : document.querySelector("dialog[open]")?.textContent.includes("AI service is not configured"), {}, access);
+        assert.equal(await page.$("button[aria-label='Upload image for caption']"), null, "visitors and missing bindings cannot select images for generation");
+        if (access === "visitor") assert.equal(await page.$eval("dialog a", node => new URL(node.href).pathname), "/api/stocks-intelligence-watcher/auth/login");
+        assert.equal(await page.evaluate(() => window.__captionRequests.length), 0);
+        await page.waitForFunction(() => getComputedStyle(document.querySelector("dialog > div")).opacity === "1");
+        await page.screenshot({ path: path.join(screenshots, `caption-${access}-${width}.png`) });
+        await page.keyboard.press("Escape");
+      }
+    }
+    for (const width of [375, 768, 1440]) {
+      await page.setViewport({ width, height: 900 });
+      await page.goto(`${baseUrl}/#/market-lab`, { waitUntil: "domcontentloaded" });
+      await page.waitForSelector(".work-card button.text-link");
+      await page.evaluate(() => { window.__captionAccess = "owner"; });
       await page.click(".work-card button.text-link");
       await page.waitForSelector("dialog[open][aria-labelledby='caption-tool-title']");
+      await page.waitForSelector("button[aria-label='Upload image for caption']");
       assert.equal(await page.evaluate(() => document.querySelector("dialog").contains(document.activeElement)), true);
       for (let tab = 0; tab < 6; tab++) {
         await page.keyboard.press("Tab");
@@ -66,6 +92,7 @@ fs.writeFileSync(path.join(fixtureDir, "corrupt.png"), "not a PNG");
     }
     await page.click(".work-card button.text-link");
     await page.waitForSelector("dialog[open]");
+    await page.waitForSelector("button[aria-label='Upload image for caption']");
     const input = await page.$("input[name='caption-image']");
     for (const [name, message] of [["not-image.txt", /PNG or JPG/], ["too-large.png", /no larger than 5 MB/], ["empty.jpg", /non-empty/], ["corrupt.png", /could not be opened/]]) {
       await input.uploadFile(path.join(fixtureDir, name));
@@ -103,11 +130,20 @@ fs.writeFileSync(path.join(fixtureDir, "corrupt.png"), "not a PNG");
     const finalIndex = await page.evaluate(() => window.__captionRequests.length);
     await generate();
     await page.waitForFunction((count) => window.__captionRequests.length === count, {}, finalIndex + 1);
-    await page.evaluate((index) => window.__captionRequests[index].resolve(Response.json({ result: { description: "NEW CAPTION" } })), finalIndex);
+    await page.evaluate((index) => window.__captionRequests[index].resolve(Response.json({ result: "NEW CAPTION" })), finalIndex);
     await page.waitForFunction(() => document.querySelector("dialog").textContent.includes("NEW CAPTION"));
     assert.equal(await page.$("dialog [role='alert']"), null);
     await page.waitForFunction(() => getComputedStyle(document.querySelector("dialog [role='status'] > div")).opacity === "1");
     await page.screenshot({ path: path.join(screenshots, "desktop-caption.png") });
+    await page.click("button[aria-label='Remove uploaded image']");
+    await selectImage();
+    const expiredIndex = await page.evaluate(() => window.__captionRequests.length);
+    await generate();
+    await page.waitForFunction(count => window.__captionRequests.length === count, {}, expiredIndex + 1);
+    await page.evaluate(index => window.__captionRequests[index].resolve(Response.json({ error: "Owner session expired. Sign in again." }, { status: 401 })), expiredIndex);
+    await page.waitForSelector("dialog a[href='/api/stocks-intelligence-watcher/auth/login']");
+    assert.equal(await page.$("button::-p-text(GENERATE CAPTION)"), null, "expired owners cannot continue generating");
+    assert.match(await page.$eval("dialog [role='alert']", node => node.textContent), /session expired/);
     await page.click("button[aria-label='Close image caption tool']");
     await page.waitForSelector("dialog[open]", { hidden: true });
     assert.equal(await page.evaluate(() => window.__previewUrls.size), 0, "closing must release image preview URLs");

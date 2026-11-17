@@ -45,8 +45,10 @@ export const getFullMarketHolidayKeys = (year: number) => {
   const holidays = new Set<string>();
   const addDate = (date: Date) => holidays.add(keyFromDate(date));
 
-  holidays.add(observedHolidayKey(year, 0, 1));
-  holidays.add(observedHolidayKey(year + 1, 0, 1));
+  // NYSE does not observe a Saturday New Year's Day on the preceding Friday.
+  if (new Date(Date.UTC(year, 0, 1)).getUTCDay() !== 6) {
+    holidays.add(observedHolidayKey(year, 0, 1));
+  }
   addDate(nthWeekdayOfMonth(year, 0, 1, 3));
   addDate(nthWeekdayOfMonth(year, 1, 1, 3));
 

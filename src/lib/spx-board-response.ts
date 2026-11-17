@@ -377,18 +377,18 @@ const heatmap = (value: unknown) => {
 };
 
 const collectionQuality = (value: unknown) => record(value)
-  && nonNegativeInteger(value.rawLegCount)
-  && nonNegativeInteger(value.parsedLegCount)
-  && nonNegativeInteger(value.zeroIvCount)
-  && nonNegativeInteger(value.missingIvCount)
-  && nonNegativeInteger(value.invalidBidAskCount)
-  && nonNegativeInteger(value.missingOpenInterestCount)
+  && optional(value, "rawLegCount", nonNegativeInteger)
+  && optional(value, "parsedLegCount", nonNegativeInteger)
+  && optional(value, "zeroIvCount", nonNegativeInteger)
+  && optional(value, "missingIvCount", nonNegativeInteger)
+  && optional(value, "invalidBidAskCount", nonNegativeInteger)
+  && optional(value, "missingOpenInterestCount", nonNegativeInteger)
   && (value.pricedCellCount === null || nonNegativeInteger(value.pricedCellCount))
   && (value.repairedCellCount === null || nonNegativeInteger(value.repairedCellCount))
   && (value.partialCellCount === null || nonNegativeInteger(value.partialCellCount))
   && (value.unpricedCellCount === null || nonNegativeInteger(value.unpricedCellCount))
-  && nullableDateTime(value.sourceTimestamp)
-  && oneOf(value.cacheStatus, ["miss", "fresh", "stale", "force_refreshed"]);
+  && optional(value, "sourceTimestamp", nullableDateTime)
+  && optional(value, "cacheStatus", item => oneOf(item, ["miss", "fresh", "stale", "force_refreshed"]));
 
 const collectionAttempt = (value: Record<string, unknown>) => typeof value.slotId === "string"
   && minuteEt(value.snapshotMinuteEt)
@@ -486,7 +486,7 @@ const decision = (value: unknown) => {
     || !nullableString(value.degradedReason)
     || !oneOf(value.replayGrade, ["NORMALIZED_CANONICAL", "PARTIAL_NORMALIZED", "UNAVAILABLE"])
     || !record(delivery)
-    || !oneOf(delivery.status, ["PENDING", "SENDING", "FAILED", "DELIVERED", "NOT_QUEUED"])
+    || !oneOf(delivery.status, ["PENDING", "SENDING", "FAILED", "DELIVERED", "UNKNOWN", "EXPIRED", "NOT_QUEUED"])
     || !nonNegativeInteger(delivery.attemptCount)
     || !nullableString(delivery.telegramMessageId)
     || !nullableString(delivery.error)

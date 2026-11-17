@@ -30,7 +30,8 @@ export async function onRequestGet(context: { request: Request; env?: Env }) {
   const location = new URL("/", requestUrl.origin);
   location.hash = "/work/stocks-intelligence-watcher?auth=success";
   const responseHeaders = new Headers({ Location: location.toString() });
-  responseHeaders.append("Set-Cookie", `stocks_watcher_session=${session}; Max-Age=28800; Path=/api/stocks-intelligence-watcher; HttpOnly; Secure; SameSite=Lax`);
+  responseHeaders.append("Set-Cookie", "stocks_watcher_session=; Max-Age=0; Path=/api/stocks-intelligence-watcher; HttpOnly; Secure; SameSite=Lax");
+  responseHeaders.append("Set-Cookie", `stocks_watcher_session=${session}; Max-Age=28800; Path=/api; HttpOnly; Secure; SameSite=Lax`);
   responseHeaders.append("Set-Cookie", "stocks_watcher_oauth_state=; Max-Age=0; Path=/api/stocks-intelligence-watcher/auth; HttpOnly; Secure; SameSite=Lax");
   return new Response(null, { status: 302, headers: responseHeaders });
   } catch { return json({ ok: false, error: "AUTH_PROVIDER_UNAVAILABLE" }, { status: 502 }); }

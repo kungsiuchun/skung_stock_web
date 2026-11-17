@@ -16,6 +16,7 @@ interface Env {
 
 type BacktestRequest = Omit<PortfolioBacktestInput, "histories" | "requestedStart" | "requestedEnd"> & {
   operation?: "backtest";
+  methodologyVersion?: unknown;
   startDate?: string;
   endDate?: string;
 };
@@ -166,6 +167,9 @@ export const normalizeYahooPortfolioHistory = (input: { ticker: string; payload:
   if (!result) throw new PortfolioBacktestApiError("UPSTREAM_UNAVAILABLE", "Market history provider returned no usable chart result.");
   const meta = result.meta && typeof result.meta === "object" ? result.meta as Record<string, unknown> : {};
   const ticker = input.ticker.trim().toUpperCase();
+  if (typeof meta.symbol !== "string" || meta.symbol.trim().toUpperCase() !== ticker) {
+    throw new PortfolioBacktestApiError("MALFORMED_PAYLOAD", `Market history for ${ticker} has a missing or mismatched symbol.`);
+  }
   const eligibility = assertEligibleUsEtf(ticker, meta);
   const timestamps = result.timestamp;
   const indicators = result.indicators && typeof result.indicators === "object" ? result.indicators as Record<string, unknown> : {};
@@ -423,6 +427,7 @@ export async function onRequestPost(context: ApiContext) {
         requestId,
       }, status === "stale" ? 206 : 200, requestId);
     }
+    if (body.methodologyVersion !== "v2") throw new PortfolioBacktestError("INVALID_INPUT", "Backtest requests require methodologyVersion v2. Review and migrate any legacy setup before running.");
     const range = requestedRange(body, context.now || new Date());
     validatePortfolioBacktestRequest({
       startingCapital: body.startingCapital,

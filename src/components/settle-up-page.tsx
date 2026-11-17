@@ -125,12 +125,8 @@ const amountInputValue = (amountCents: number) => (amountCents / 100).toFixed(2)
 
 const parseAmountCents = (value: string) => {
   const parsed = Number(value);
-
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    return 0;
-  }
-
-  return Math.round(parsed * 100);
+  const cents = Math.round(parsed * 100);
+  return Number.isSafeInteger(cents) && parsed >= 0 ? cents : null;
 };
 
 const createId = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -151,7 +147,21 @@ const sanitizeEvent = (event: Partial<SplitEvent>, fallbackName: string): SplitE
     }));
 
   const participantIds = new Set(participants.map((participant) => participant.id));
+  if (participantIds.size !== participants.length || participants.some(participant => !participant.id)) {
+    throw new Error("Shared bill participant IDs must be unique and nonempty.");
+  }
   const firstParticipantId = participants[0]?.id;
+  let totalCents = 0;
+  const expenseIds = new Set<string>();
+  for (const expense of Array.isArray(event.expenses) ? event.expenses : []) {
+    if (!expense?.id || expenseIds.has(expense.id)) throw new Error("Shared bill expense IDs must be unique and nonempty.");
+    expenseIds.add(expense.id);
+    if (!expense || !Number.isSafeInteger(expense.amountCents) || expense.amountCents < 0) {
+      throw new Error("Shared bill amounts must be nonnegative safe integer cents.");
+    }
+    totalCents += expense.amountCents;
+    if (!Number.isSafeInteger(totalCents)) throw new Error("Shared bill total exceeds the supported amount.");
+  }
   const expenses = Array.isArray(event.expenses)
     ? event.expenses
         .filter(
@@ -168,7 +178,7 @@ const sanitizeEvent = (event: Partial<SplitEvent>, fallbackName: string): SplitE
           return {
             id: expense.id,
             description: expense.description,
-            amountCents: Math.max(0, Math.round(expense.amountCents)),
+            amountCents: expense.amountCents,
             payerId: participantIds.has(expense.payerId ?? "") ? expense.payerId : firstParticipantId ?? "",
             participantIds: selectedIds.length > 0 ? selectedIds : firstParticipantId ? [firstParticipantId] : [],
           };
@@ -196,6 +206,7 @@ const normalizeBill = (bill: Partial<BillState>): BillState | null => {
   if (events.length === 0) {
     return null;
   }
+  if (new Set(events.map(event => event.id)).size !== events.length) throw new Error("Shared bill event IDs must be unique.");
 
   const activeEventId =
     typeof bill.activeEventId === "string" && events.some((event) => event.id === bill.activeEventId)
@@ -345,11 +356,19 @@ const readBillFromHash = () => {
   }
 
   const data = new URLSearchParams(query).get("data");
-  return data ? decodeBillState(data) : null;
+  if (data === null) return null;
+  const bill = decodeBillState(data);
+  if (!bill) throw new Error("This shared bill is invalid or exceeds the supported amount. Ask the sender for a corrected link.");
+  return bill;
 };
 
 export function SettleUpPage() {
-  const [bill, setBill] = useState<BillState>(() => readBillFromHash() ?? createBlankBill());
+  const [initial] = useState(() => {
+    try { return { bill: readBillFromHash() ?? createBlankBill(), error: null as string | null }; }
+    catch (error) { return { bill: createBlankBill(), error: (error as Error).message }; }
+  });
+  const [bill, setBill] = useState<BillState>(initial.bill);
+  const [loadError, setLoadError] = useState(initial.error);
   const [newParticipantName, setNewParticipantName] = useState("");
   const [newEventName, setNewEventName] = useState("");
   const [shareStatus, setShareStatus] = useState<"idle" | "copied" | "failed">("idle");
@@ -386,11 +405,11 @@ export function SettleUpPage() {
   useEffect(() => {
     const syncBillFromHash = () => {
       setConfirmation(null);
-      const hashBill = readBillFromHash();
-
-      if (hashBill) {
-        setBill(hashBill);
-      }
+      try {
+        const hashBill = readBillFromHash();
+        if (hashBill) setBill(hashBill);
+        setLoadError(null);
+      } catch (error) { setLoadError((error as Error).message); }
     };
 
     window.addEventListener("hashchange", syncBillFromHash);
@@ -568,6 +587,7 @@ export function SettleUpPage() {
   };
 
   const resetDemo = () => {
+    setLoadError(null);
     setShareStatus("idle");
     setBill(demoBill);
 
@@ -584,6 +604,7 @@ export function SettleUpPage() {
     const encoded = encodeBillState(bill);
     const shareUrl = `${window.location.origin}${window.location.pathname}${window.location.search}#/work/settle-up?data=${encoded}`;
     window.history.replaceState(null, "", shareUrl);
+    setLoadError(null);
 
     try {
       await navigator.clipboard.writeText(shareUrl);
@@ -637,6 +658,7 @@ export function SettleUpPage() {
           </div>
         </header>
 
+        {loadError && <p role="alert" className="rounded-xl border border-amber-300/25 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">{loadError}</p>}
         {shareStatus === "failed" && (
           <div role="status" className="rounded-xl border border-amber-300/25 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
             Share URL was created in the address bar, but clipboard access was blocked.
@@ -806,6 +828,7 @@ export function SettleUpPage() {
                   <ExpenseEditor
                     key={expense.id}
                     expense={expense}
+                    maxAmountCents={Number.MAX_SAFE_INTEGER - (totalCents - expense.amountCents)}
                     participants={activeEvent.participants}
                     onChange={updateExpense}
                     onToggleParticipant={toggleParticipant}
@@ -897,29 +920,31 @@ export function SettleUpPage() {
 
 interface ExpenseEditorProps {
   expense: Expense;
+  maxAmountCents: number;
   participants: Participant[];
   onChange: (expenseId: string, patch: Partial<Expense>) => void;
   onToggleParticipant: (expense: Expense, participantId: string) => void;
   onRemove: (expenseId: string) => void;
 }
 
-const ExpenseEditor = ({ expense, participants, onChange, onToggleParticipant, onRemove }: ExpenseEditorProps) => {
+const ExpenseEditor = ({ expense, maxAmountCents, participants, onChange, onToggleParticipant, onRemove }: ExpenseEditorProps) => {
   const [amountStr, setAmountStr] = useState(() => amountInputValue(expense.amountCents));
+  const amountCents = parseAmountCents(amountStr);
+  const amountInvalid = amountCents === null || amountCents > maxAmountCents;
 
   useEffect(() => {
-    const newVal = amountInputValue(expense.amountCents);
-    if (parseAmountCents(amountStr) !== expense.amountCents) {
-      setAmountStr(newVal);
-    }
-  }, [expense.amountCents, amountStr]);
+    setAmountStr(current => parseAmountCents(current) === expense.amountCents ? current : amountInputValue(expense.amountCents));
+  }, [expense.amountCents]);
 
   const handleAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setAmountStr(val);
-    onChange(expense.id, { amountCents: parseAmountCents(val) });
+    const cents = parseAmountCents(val);
+    if (cents !== null && cents <= maxAmountCents) onChange(expense.id, { amountCents: cents });
   };
 
   const handleAmountBlur = () => {
+    if (amountInvalid) return;
     setAmountStr(amountInputValue(expense.amountCents));
   };
 
@@ -941,6 +966,8 @@ const ExpenseEditor = ({ expense, participants, onChange, onToggleParticipant, o
           type="number"
           min="0"
           step="0.01"
+          aria-invalid={amountInvalid || undefined}
+          aria-describedby={amountInvalid ? `amount-error-${expense.id}` : undefined}
           value={amountStr}
           onChange={handleAmountChange}
           onBlur={handleAmountBlur}
@@ -969,6 +996,7 @@ const ExpenseEditor = ({ expense, participants, onChange, onToggleParticipant, o
         </button>
       </div>
 
+      {amountInvalid && <p id={`amount-error-${expense.id}`} role="alert" className="mt-3 text-sm text-amber-100">Enter a nonnegative amount within the supported bill total. This amount change has not been saved.</p>}
       <div className="mt-4 flex flex-wrap gap-2">
         {participants.map((participant) => {
           const selected = expense.participantIds.includes(participant.id);

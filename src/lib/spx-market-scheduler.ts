@@ -3,6 +3,11 @@ export const SPX_SCHEDULER_LATE_GRACE_MS = 2 * 60_000;
 export const SPX_GEX_OPENING_SNAPSHOT_MINUTE_ET = 9 * 60 + 30;
 export const SPX_GEX_OPENING_COLLECTION_MINUTE_ET = 9 * 60 + 45;
 
+export const isRetryableSpxGexOpeningFailure = (failureCode: string) => [
+  "NO_AUDITED_BLENDED_IV_CELLS", "INSUFFICIENT_OPENING_COVERAGE",
+  "GEX_COLLECTION_FAILED", "UPSTREAM_TIMEOUT", "CANONICAL_GEX_UNAVAILABLE",
+].includes(failureCode);
+
 export interface SpxGexOpeningRetryState {
   slotId: string;
   canonicalScheduledAtMs: number;

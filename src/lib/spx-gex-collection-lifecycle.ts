@@ -44,6 +44,12 @@ export interface SpxGexCollectionCoverage {
   failedSlotIds: string[];
 }
 
+/** Canonical normalization can expose cell counts without provider-leg diagnostics. */
+export type SpxGexCollectionAttemptQuality = Pick<SpxGexCollectionQualitySummary,
+  "pricedCellCount" | "repairedCellCount" | "partialCellCount" | "unpricedCellCount">
+  & Partial<Omit<SpxGexCollectionQualitySummary,
+    "pricedCellCount" | "repairedCellCount" | "partialCellCount" | "unpricedCellCount">>;
+
 export interface SpxGexCollectionAttempt {
   slotId: string;
   snapshotMinuteEt: number;
@@ -52,7 +58,7 @@ export interface SpxGexCollectionAttempt {
   occurredAt: string;
   acceptedAt: string | null;
   failureReason: string | null;
-  quality: SpxGexCollectionQualitySummary | null;
+  quality: SpxGexCollectionAttemptQuality | null;
 }
 
 interface CollectionRow {
@@ -217,7 +223,7 @@ export class D1SpxGexCollectionStore {
     if (!validateSpxGexCollectionTransition(current.currentStage, stage)) {
       throw new Error(`Invalid SPX GEX lifecycle transition ${current.currentStage} -> ${stage} for ${slotId}`);
     }
-    let effectiveAttempt = attempt || this.activeAttempts.get(slotId) || 0;
+    let effectiveAttempt = Math.max(attempt, this.activeAttempts.get(slotId) || 0);
     if (current.currentStage === "FAILED" && stage === "FETCHED") {
       const next = await this.db.prepare(`
         SELECT COALESCE(MAX(attempt), 0) + 1 AS next_attempt
@@ -309,7 +315,7 @@ export class D1SpxGexCollectionStore {
       };
       current.occurredAt = row.occurred_at;
       if (payload.collectionQuality && typeof payload.collectionQuality === "object") {
-        current.quality = payload.collectionQuality as SpxGexCollectionQualitySummary;
+        current.quality = { ...current.quality, ...payload.collectionQuality } as SpxGexCollectionAttemptQuality;
       }
       if (row.stage === "FAILED") {
         current.status = payload.retryStatus === "OPENING_RETRY_PENDING" ? "PENDING" : "FAILED";

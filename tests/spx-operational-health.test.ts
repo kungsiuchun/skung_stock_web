@@ -7,6 +7,8 @@ import { isUsableCanonicalSpxGexHeatmap, runSupervisedSpxMarketTick } from "../s
 test("operational health classifies failures without persisting raw error text", () => {
   assert.equal(classifySpxOperationalFailure(new Error("canonical GEX heatmap is malformed")), "CANONICAL_GEX_UNAVAILABLE");
   assert.equal(classifySpxOperationalFailure(new Error("D1 SQLITE_ERROR")), "D1_OPERATION_FAILED");
+  assert.equal(classifySpxOperationalFailure(new Error("D1 SQLITE_ERROR in spx_gex_collection_runs")), "D1_OPERATION_FAILED");
+  assert.equal(classifySpxOperationalFailure(new Error("Cboe GEX timeout")), "UPSTREAM_TIMEOUT");
   assert.equal(classifySpxOperationalFailure(new Error("request timeout")), "UPSTREAM_TIMEOUT");
   assert.equal(classifySpxOperationalFailure(new Error("unexpected parser issue"), "TICK_FAILED"), "TICK_FAILED");
 });

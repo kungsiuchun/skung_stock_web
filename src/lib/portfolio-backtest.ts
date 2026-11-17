@@ -1,4 +1,6 @@
-export const PORTFOLIO_BACKTEST_SCHEMA_VERSION = "v1" as const;
+import { isNyseTradingDay } from "./nyse-calendar";
+
+export const PORTFOLIO_BACKTEST_SCHEMA_VERSION = "v2" as const;
 export const PORTFOLIO_BACKTEST_BENCHMARK = "SPY" as const;
 export const MAX_PORTFOLIO_POSITIONS = 10;
 export const TOTAL_ALLOCATION_BASIS_POINTS = 10_000;
@@ -56,6 +58,8 @@ export interface PortfolioCurvePoint {
   portfolioIndexed: number;
   benchmarkValue: number;
   benchmarkIndexed: number;
+  portfolioCash: number;
+  benchmarkCash: number;
 }
 
 export interface PortfolioPositionResult {
@@ -82,6 +86,8 @@ export interface PortfolioBacktestResult {
   benchmarkMetrics: PortfolioBacktestMetricSet;
   endingValue: number;
   benchmarkEndingValue: number;
+  cashBalance: number;
+  benchmarkCashBalance: number;
   excessCumulativeReturn: number;
   positions: PortfolioPositionResult[];
   rebalancedOn: string[];
@@ -110,12 +116,12 @@ type Holding = {
   ticker: string;
   basisPoints: number;
   shares: number;
-  cash: number;
   cashDividendValue: number;
 };
 
 type BasketRun = {
   values: number[];
+  cashValues: number[];
   holdings: Holding[];
   rebalancedOn: string[];
 };
@@ -127,12 +133,6 @@ const dateKey = (value: string) => {
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 };
 const normalizedTicker = (value: string) => value.trim().toUpperCase();
-const periodKey = (date: string, policy: Exclude<PortfolioRebalancePolicy, "none">) => {
-  const [year, month] = date.split("-").map(Number);
-  if (policy === "monthly") return `${year}-${String(month).padStart(2, "0")}`;
-  if (policy === "quarterly") return `${year}-Q${Math.ceil(month / 3)}`;
-  return String(year);
-};
 
 const round = (value: number, decimals = 8) => Number(value.toFixed(decimals));
 
@@ -154,6 +154,9 @@ export const validatePortfolioBacktestRequest = (input: Pick<PortfolioBacktestIn
   const tickers = new Set<string>();
   let totalBasisPoints = 0;
   for (const position of input.positions) {
+    if (!position || typeof position !== "object" || typeof position.ticker !== "string") {
+      throw new PortfolioBacktestError("INVALID_ALLOCATION", "Each portfolio position needs a valid ticker and positive whole basis-point weight.");
+    }
     const ticker = normalizedTicker(position.ticker);
     if (!/^[A-Z0-9.^-]{1,16}$/.test(ticker) || !Number.isInteger(position.basisPoints) || position.basisPoints <= 0) {
       throw new PortfolioBacktestError("INVALID_ALLOCATION", "Each portfolio position needs a valid ticker and positive whole basis-point weight.");
@@ -191,13 +194,17 @@ const priceFor = (point: PortfolioHistoricalPoint, dividendPolicy: PortfolioDivi
   dividendPolicy === "reinvest" ? point.adjustedClose : point.close;
 
 const basketValue = (holdings: Holding[], points: Map<string, PortfolioHistoricalPoint>, dividendPolicy: PortfolioDividendPolicy) =>
-  holdings.reduce((sum, holding) => sum + holding.cash + holding.shares * priceFor(points.get(holding.ticker)!, dividendPolicy), 0);
+  holdings.reduce((sum, holding) => sum + holding.shares * priceFor(points.get(holding.ticker)!, dividendPolicy), 0);
 
 const shouldRebalance = (index: number, dates: string[], policy: PortfolioRebalancePolicy) => {
   if (policy === "none" || index === 0) return false;
   const current = dates[index];
-  const next = dates[index + 1];
-  return !next || periodKey(current, policy) !== periodKey(next, policy);
+  if (!isNyseTradingDay(current)) return false;
+  const month = Number(current.slice(5, 7));
+  const periodEnd = new Date(`${current}T00:00:00.000Z`);
+  periodEnd.setUTCMonth(policy === "monthly" ? month : policy === "quarterly" ? Math.ceil(month / 3) * 3 : 12, 0);
+  while (!isNyseTradingDay(periodEnd.toISOString().slice(0, 10))) periodEnd.setUTCDate(periodEnd.getUTCDate() - 1);
+  return current === periodEnd.toISOString().slice(0, 10);
 };
 
 const runBasket = (input: {
@@ -212,9 +219,11 @@ const runBasket = (input: {
     const ticker = normalizedTicker(allocation.ticker);
     const initialPoint = input.pointsByTicker.get(ticker)!.get(input.dates[0])!;
     const initialValue = input.startingCapital * allocation.basisPoints / TOTAL_ALLOCATION_BASIS_POINTS;
-    return { ticker, basisPoints: allocation.basisPoints, shares: initialValue / priceFor(initialPoint, input.dividendPolicy), cash: 0, cashDividendValue: 0 };
+    return { ticker, basisPoints: allocation.basisPoints, shares: initialValue / priceFor(initialPoint, input.dividendPolicy), cashDividendValue: 0 };
   });
   const values = [input.startingCapital];
+  const cashValues = [0];
+  let cash = 0;
   const rebalancedOn: string[] = [];
 
   for (let index = 1; index < input.dates.length; index += 1) {
@@ -225,7 +234,7 @@ const runBasket = (input: {
         // Yahoo chart close values are already split-adjusted. Applying the
         // split event to shares again would manufacture a second split gain.
         const dividendValue = holding.shares * point.dividend;
-        holding.cash += dividendValue;
+        cash += dividendValue;
         holding.cashDividendValue += dividendValue;
       }
     }
@@ -234,14 +243,14 @@ const runBasket = (input: {
       for (const holding of holdings) {
         const point = input.pointsByTicker.get(holding.ticker)!.get(date)!;
         holding.shares = totalValue * holding.basisPoints / TOTAL_ALLOCATION_BASIS_POINTS / priceFor(point, input.dividendPolicy);
-        holding.cash = 0;
       }
       rebalancedOn.push(date);
     }
     const points = new Map(holdings.map((holding) => [holding.ticker, input.pointsByTicker.get(holding.ticker)!.get(date)!]));
-    values.push(basketValue(holdings, points, input.dividendPolicy));
+    values.push(basketValue(holdings, points, input.dividendPolicy) + cash);
+    cashValues.push(cash);
   }
-  return { values, holdings, rebalancedOn };
+  return { values, cashValues, holdings, rebalancedOn };
 };
 
 const sampleStdDev = (values: number[]) => {
@@ -319,7 +328,7 @@ export const simulatePortfolioBacktest = (input: PortfolioBacktestInput): Portfo
   const finalDate = dates[dates.length - 1];
   const positionResults = portfolio.holdings.map((holding) => {
     const point = pointsByTicker.get(holding.ticker)!.get(finalDate)!;
-    const endingValueForPosition = holding.shares * priceFor(point, input.dividendPolicy) + holding.cash;
+    const endingValueForPosition = holding.shares * priceFor(point, input.dividendPolicy);
     return {
       ticker: holding.ticker,
       displayName: seriesByTicker.get(holding.ticker)!.displayName,
@@ -339,11 +348,13 @@ export const simulatePortfolioBacktest = (input: PortfolioBacktestInput): Portfo
     rebalancePolicy: input.rebalancePolicy,
     dividendPolicy: input.dividendPolicy,
     sourceAsOf: finalDate,
-    curve: dates.map((date, index) => ({ date, portfolioValue: round(portfolio.values[index]), portfolioIndexed: round(portfolio.values[index] / input.startingCapital * 100), benchmarkValue: round(benchmark.values[index]), benchmarkIndexed: round(benchmark.values[index] / input.startingCapital * 100) })),
+    curve: dates.map((date, index) => ({ date, portfolioValue: round(portfolio.values[index]), portfolioIndexed: round(portfolio.values[index] / input.startingCapital * 100), benchmarkValue: round(benchmark.values[index]), benchmarkIndexed: round(benchmark.values[index] / input.startingCapital * 100), portfolioCash: round(portfolio.cashValues[index]), benchmarkCash: round(benchmark.cashValues[index]) })),
     metrics,
     benchmarkMetrics,
     endingValue,
     benchmarkEndingValue,
+    cashBalance: round(portfolio.cashValues[portfolio.cashValues.length - 1]),
+    benchmarkCashBalance: round(benchmark.cashValues[benchmark.cashValues.length - 1]),
     excessCumulativeReturn: round(metrics.cumulativeReturn - benchmarkMetrics.cumulativeReturn),
     positions: positionResults,
     rebalancedOn: portfolio.rebalancedOn,

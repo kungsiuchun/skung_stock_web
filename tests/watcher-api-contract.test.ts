@@ -349,6 +349,9 @@ test("owner auth requires verified allowed email, validates OAuth state, signs s
   globalThis.fetch = (async url => String(url).includes("access_token") ? Response.json({ access_token: "fixture-token" }) : String(url).endsWith("/emails") ? Response.json([{ email: "owner@example.test", verified }]) : Response.json({ email: "owner@example.test" })) as typeof fetch;
   try {
     const accepted = await callback({ request: requestCallback(), env }); assert.equal(accepted.status, 302);
+    const sessionCookies = accepted.headers.getSetCookie();
+    assert.ok(sessionCookies.some(value => /^stocks_watcher_session=;/.test(value) && value.includes("Max-Age=0; Path=/api/stocks-intelligence-watcher;")));
+    assert.ok(sessionCookies.some(value => /^stocks_watcher_session=[^;]/.test(value) && value.includes("Path=/api; HttpOnly; Secure; SameSite=Lax")));
     const cookie = accepted.headers.get("Set-Cookie")!.match(/stocks_watcher_session=([^;]+)/)![0];
     const active = await session({ request: new Request("https://example.test/api/session", { headers: { Cookie: cookie } }), env });
     assert.equal((await active.json() as any).authenticated, true);
@@ -357,7 +360,8 @@ test("owner auth requires verified allowed email, validates OAuth state, signs s
     assert.equal((await adminPost({ request: new Request("https://example.test/api/admin", { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ tool: "wrong" }) }), env })).status, 400);
     verified = false;
     assert.equal((await callback({ request: requestCallback(), env })).status, 403);
-    assert.match((await logout()).headers.get("Set-Cookie")!, /Max-Age=0/);
+    const cleared = (await logout()).headers.getSetCookie();
+    for (const path of ["/api", "/api/stocks-intelligence-watcher"]) assert.ok(cleared.some(value => value.includes(`Max-Age=0; Path=${path};`)));
   } finally { globalThis.fetch = fetchBefore; }
 });
 

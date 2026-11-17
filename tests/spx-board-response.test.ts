@@ -24,6 +24,19 @@ const pressureReady = () => ({
   warnings: [],
 });
 
+it("accepts normalized cell-only collection quality while rejecting invalid supplied diagnostics", async () => {
+  const attempt = { slotId: "2026-07-13:570", snapshotMinuteEt: 570, attempt: 1, status: "ACCEPTED", occurredAt: "2026-07-13T13:45:11.583Z", acceptedAt: "2026-07-13T13:45:11.583Z", failureReason: null,
+    quality: { pricedCellCount: 18, repairedCellCount: 0, partialCellCount: 1, unpricedCellCount: 461 } };
+  for (const response of [ready(), pressureReady()]) {
+    const kind = "heatmap" in response ? "heatmap" : "pressure";
+    const payload = { ...response, collectionAttempts: [attempt] };
+    await parseSpxBoardResponse(Response.json(payload), "/api/spx-gex", kind);
+    for (const quality of [{ ...attempt.quality, rawLegCount: -1 }, { ...attempt.quality, cacheStatus: "unknown" }, { ...attempt.quality, pricedCellCount: "18" }, {}]) {
+      await assert.rejects(parseSpxBoardResponse(Response.json({ ...payload, collectionAttempts: [{ ...attempt, quality }] }), "/api/spx-gex", kind), /contract/);
+    }
+  }
+});
+
 it("classifies an abort-aware fetch timeout before its abort rejection and retries once", async () => {
   let attempts=0;
   await assert.rejects(runSpxRequest(signal => new Promise<Response>((_resolve,reject)=>{

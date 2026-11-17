@@ -7,5 +7,5 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false
   },
-  "include": ["functions", "scripts/refresh-market-breadth.ts"]
+  "include": ["functions", "scripts/refresh-market-breadth.ts", "scripts/worker-spx-bot.ts", "scripts/publish-robinhood-options-snapshot.ts"]
 }

@@ -10,6 +10,7 @@ import {
   classifySpxGexStructureTags,
   formatSpxGexCompactExposure,
   generateAndStoreSpxGexHeatmap,
+  getSpxGexOpeningCoverage,
   getSpxGexGenerationStatus,
   listSpxGexHeatmapDates,
   listSpxGexHeatmapSessions,
@@ -2178,6 +2179,34 @@ const createFakeDataClient = () => {
 };
 
 describe("SPX GEX intraday automation runner", () => {
+  const completeOpeningClient = () => {
+    const { client, calls } = createFakeDataClient();
+    client.getOptionsChain = async (expiry = expiries[0]) => {
+      calls.push(`get_options_chain:${expiry}`);
+      const chain = buildOptionChain(expiry);
+      for (const side of ["calls", "puts"] as const) {
+        const template = chain[side][0];
+        chain[side] = Array.from({ length: 61 }, (_, index) => ({ ...template, strike: 5850 + index * 5, contractSymbol: `${expiry}:${side}:${index}` }));
+      }
+      return chain;
+    };
+    return { client, calls };
+  };
+
+  it("rejects sparse opening data before persistence, then accepts a complete fresh retry", async () => {
+    const db = new MemoryD1();
+    const sparse = createFakeDataClient();
+    const stages: string[] = [];
+    await assert.rejects(generateAndStoreSpxGexHeatmap({ db, dataClient: sparse.client,
+      now: new Date("2026-05-27T13:45:00Z"), onStage: stage => { stages.push(stage); } }), /INSUFFICIENT_OPENING_COVERAGE/);
+    assert.deepEqual(stages, ["FETCHED", "NORMALIZED"]);
+    assert.equal((await listSpxGexHeatmapSessions(db, "2026-05-27")).length, 0);
+    const complete = completeOpeningClient();
+    await generateAndStoreSpxGexHeatmap({ db, dataClient: complete.client, now: new Date("2026-05-27T13:45:00Z"), force: true });
+    const saved = await readSpxGexHeatmap(db, "2026-05-27", 570);
+    assert.ok(saved);
+    assert.equal(getSpxGexOpeningCoverage(saved).pricedCount, 61);
+  });
   it("never emits NORMALIZED or PERSISTED for a snapshot that fails the shared contract", async () => {
     const db = new MemoryD1();
     const { client } = createFakeDataClient();
@@ -2218,7 +2247,7 @@ describe("SPX GEX intraday automation runner", () => {
 
   it("generates once per 15-minute slot and skips only the same slot", async () => {
     const db = new MemoryD1();
-    const { client, calls } = createFakeDataClient();
+    const { client, calls } = completeOpeningClient();
     const lifecycleStages: string[] = [];
 
     const firstRun = await generateAndStoreSpxGexHeatmap({
@@ -2345,6 +2374,19 @@ const buildPressureSnapshot = (generatedAt: string, spot: number, values: Record
 };
 
 describe("SPX 0DTE pressure matrix", () => {
+  it("opening coverage counts unique audited same-day strikes, including real zero GEX, within the fixed spot window", () => {
+    const snapshot = buildPressureSnapshot("2026-05-27T13:45:00.000Z", 6000, { 6000: 0 });
+    const template = snapshot.cells.find(cell => cell.expdate === "2026-05-27")!;
+    const valid = Array.from({ length: 48 }, (_, index) => ({ ...template, strike: 5850 + index * 5 }));
+    snapshot.cells = [...valid, ...valid, { ...template, strike: 6090, expdate: "2026-05-28" },
+      { ...template, strike: 6095, netGex: null }, { ...template, strike: 6100, gammaIv: undefined },
+      { ...template, strike: 6200 }];
+    assert.equal(getSpxGexOpeningCoverage(snapshot).pricedCount, 48);
+    assert.equal(getSpxGexOpeningCoverage(snapshot).requiredCount, 49);
+    snapshot.cells.push({ ...template, strike: 6090 });
+    assert.equal(getSpxGexOpeningCoverage(snapshot).pricedCount, 49);
+  });
+
   it("keeps a verified same-session 0DTESPX close as spot context without claiming it is live", () => {
     const finalPoint = { time: Date.parse("2026-05-27T20:00:00.000Z"), minuteEt: 16 * 60, timeEt: "16:00", price: 5908.55 };
     const source = { provider: "0dtespx", status: "READY" as const, sessionDate: "2026-05-27", sessionState: "CLOSED" as const };

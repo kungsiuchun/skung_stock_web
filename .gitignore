@@ -26,6 +26,7 @@ dist-ssr
 # Cloudflare and environment
 .wrangler/
 .dev.vars
+.local-secrets/
 .env
 .env.*
 !.env.example

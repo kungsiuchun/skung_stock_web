@@ -64,6 +64,11 @@ export function createWorkspaceClient() {
     const timer = window.setTimeout(abort, 45_000);
     let response: Response; let value: StocksWatcherSnapshot & { error?: string };
     try { response = await fetch(`/api/stocks-intelligence-watcher?symbol=${encodeURIComponent(symbol)}&surface=options`, { signal: controller.signal }); value = await response.json(); }
+    catch (error) {
+      if (requestGeneration !== generation) throw new DOMException("Superseded request", "AbortError");
+      if (controller.signal.aborted && !signal?.aborted) throw new Error("Options snapshot request timed out. Use Refresh to retry.");
+      throw error;
+    }
     finally { window.clearTimeout(timer); active.delete(controller); signal?.removeEventListener("abort", abort); }
     if (requestGeneration !== generation) throw new DOMException("Superseded request", "AbortError");
     if (!response.ok || value.symbol !== symbol || !value.quote) throw new Error(value.error || "The options snapshot could not be verified.");

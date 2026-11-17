@@ -2003,6 +2003,31 @@ const isAuditedBlendedCell = (cell: SpxGexHeatmapCell) => (
   && Number.isFinite(cell.gammaIv)
 );
 
+/** Opening pressure needs a usable 0DTE baseline around spot, not one priced cell in any expiry. */
+export const getSpxGexOpeningCoverage = (heatmap: SpxGexHeatmapModel) => {
+  const center = Math.round(heatmap.quote.last / 5) * 5;
+  const expiry = heatmap.session?.tradingDate;
+  const priced = new Set(heatmap.cells.filter(cell => cell.expdate === expiry && isAuditedBlendedCell(cell)).map(cell => cell.strike));
+  const expected = Array.from({ length: 61 }, (_, index) => center - 150 + index * 5);
+  const missingStrikes = expected.filter(strike => !priced.has(strike));
+  return { expiry, lower: expected[0], upper: expected[60], expectedCount: expected.length,
+    pricedCount: expected.length - missingStrikes.length, requiredCount: Math.ceil(expected.length * 0.8), missingStrikes };
+};
+
+export class SpxGexOpeningCoverageError extends Error {
+  readonly reasonCode = "INSUFFICIENT_OPENING_COVERAGE";
+  constructor(readonly coverage: ReturnType<typeof getSpxGexOpeningCoverage>) {
+    super(`INSUFFICIENT_OPENING_COVERAGE: ${coverage.pricedCount}/${coverage.expectedCount} audited 0DTE strikes; ${coverage.requiredCount} required.`);
+    this.name = "SpxGexOpeningCoverageError";
+  }
+}
+
+const requireSpxGexOpeningCoverage = (heatmap: SpxGexHeatmapModel) => {
+  if (heatmap.session?.snapshotMinuteEt !== 570) return;
+  const coverage = getSpxGexOpeningCoverage(heatmap);
+  if (coverage.pricedCount < coverage.requiredCount) throw new SpxGexOpeningCoverageError(coverage);
+};
+
 export class SpxGexSnapshotValidationError extends Error {
   constructor(
     readonly reasonCode: SpxGexInvalidSnapshotReasonCode,
@@ -2770,6 +2795,7 @@ export const generateAndStoreSpxGexHeatmap = async (options: {
 
   const existing = await readSpxGexIntradaySnapshot(options.db, date, generationStatus.snapshotMinuteEt);
   if (existing) {
+    requireSpxGexOpeningCoverage(existing);
     return {
       status: "skipped_existing",
       date,
@@ -2824,8 +2850,10 @@ export const generateAndStoreSpxGexHeatmap = async (options: {
     },
     cellCount: canonicalHeatmap.cells.length,
     expiryCount: canonicalHeatmap.selectedExpiries.length,
+    ...(generationStatus.snapshotMinuteEt === 570 ? { openingCoverage: getSpxGexOpeningCoverage(canonicalHeatmap) } : {}),
   });
 
+  requireSpxGexOpeningCoverage(canonicalHeatmap);
   const persistedHeatmap = await upsertSpxGexHeatmap(options.db, date, canonicalHeatmap, { retentionTradingDays: 7 });
   await options.onStage?.("PERSISTED", {
     snapshotId: persistedHeatmap.canonical?.snapshotId || null,

@@ -1,4 +1,5 @@
 import type { SpxGexTelegramSummary } from "./spx-gex-heatmap";
+import type { SpxExecutionPlan } from "./spx-execution-plan";
 
 export type SpxDecisionAction = "OPEN_CALL" | "OPEN_PUT" | "HOLD" | "CLOSE";
 export type SpxDecisionStatus = "EXECUTED" | "CIO_UNAVAILABLE" | "COUNCIL_UNAVAILABLE" | "MARKET_DATA_BLOCKED" | "INVALID_OUTPUT" | "PIPELINE_FAILED";
@@ -148,6 +149,7 @@ export interface CouncilResult {
 }
 
 export interface CioDecision {
+  executionPlan?: SpxExecutionPlan;
   action: SpxDecisionAction;
   confidence: number;
   thesis: string;
@@ -176,6 +178,7 @@ export const resolveSpxDecisionStatus = (modelStatus: string | null | undefined)
 };
 
 export interface SpxOpenPositionContext {
+  executionPlan?: SpxExecutionPlan;
   side: Exclude<SpxPosition, "NONE">;
   entryPrice: number | null;
   entryTime: string | null;
@@ -228,7 +231,7 @@ export interface DecisionRunRecord {
 export interface OutboxRecord {
   runId: string;
   message: string;
-  status: "PENDING" | "SENDING" | "FAILED" | "DELIVERED";
+  status: "PENDING" | "SENDING" | "FAILED" | "DELIVERED" | "UNKNOWN" | "EXPIRED";
   attemptCount: number;
   telegramMessageId: string | null;
   lastError: string | null;
@@ -245,9 +248,12 @@ export interface SpxDecisionStore {
   getLifecycle(runId: string): Promise<LifecycleEvent[]> | LifecycleEvent[];
   enqueueOutbox(record: OutboxRecord): Promise<void> | void;
   getOutbox(runId: string): Promise<OutboxRecord | null> | OutboxRecord | null;
-  markDeliveryAttempt(runId: string, at: string): Promise<OutboxRecord> | OutboxRecord;
-  markDeliveryFailed(runId: string, error: string, nextAttemptAt: string, at: string): Promise<OutboxRecord> | OutboxRecord;
-  markDelivered(runId: string, telegramMessageId: string, at: string): Promise<OutboxRecord> | OutboxRecord;
+  markDeliveryAttempt(runId: string, at: string, expectedAttempt: number, allowUnknown?: boolean): Promise<OutboxRecord> | OutboxRecord;
+  markDeliveryFailed(runId: string, error: string, nextAttemptAt: string, at: string, expectedAttempt: number): Promise<OutboxRecord> | OutboxRecord;
+  markDeliveryUnknown(runId: string, error: string, at: string, expectedAttempt: number): Promise<OutboxRecord> | OutboxRecord;
+  markDeliveryExpired(runId: string, at: string, expectedAttempt: number): Promise<OutboxRecord> | OutboxRecord;
+  markDelivered(runId: string, telegramMessageId: string, at: string, expectedAttempt: number): Promise<OutboxRecord> | OutboxRecord;
+  hasNewerDecision(runId: string, scheduledAt: string): Promise<boolean> | boolean;
   hasRun(runId: string): Promise<boolean> | boolean;
 }
 
@@ -272,15 +278,16 @@ export interface SpxDecisionPipelineDependencies {
   };
   store: SpxDecisionStore;
   telegram: {
-    send: (message: string) => Promise<{ messageId: string }>;
+    send: (message: string, signal?: AbortSignal) => Promise<{ messageId: string }>;
   };
   renderMessage?: (input: TelegramDecisionMessageInput) => string;
   deliveryRetryDelayMs?: number;
+  deliverySendTimeoutMs?: number;
 }
 
 export type SpxDeliveryDependencies = Pick<
   SpxDecisionPipelineDependencies,
-  "clock" | "store" | "telegram" | "deliveryRetryDelayMs"
+  "clock" | "store" | "telegram" | "deliveryRetryDelayMs" | "deliverySendTimeoutMs"
 >;
 
 export interface SpxDecisionPipelineInput {
@@ -446,7 +453,6 @@ export function getCanonicalGexRiskDirective(
   cioDecision: CioDecision,
 ): RiskGateDirective | null {
   if (!directionalActions.has(cioDecision.action)) return null;
-  if (!cioDecision.evidenceRefs.some((reference) => reference.startsWith("gex."))) return null;
 
   const evidence = snapshot.replayEvidence?.gex;
   if (!evidence?.snapshotId || !evidence.payloadHash) {
@@ -1084,22 +1090,58 @@ export async function dispatchSpxDecisionDelivery(
 export async function retrySpxDelivery(
   runId: string,
   dependencies: SpxDeliveryDependencies,
+  options: { manual?: boolean; acknowledgeDuplicate?: boolean } = {},
 ): Promise<OutboxRecord> {
-  const existing = await dependencies.store.getOutbox(runId);
+  let existing = await dependencies.store.getOutbox(runId);
   if (!existing) throw new Error(`outbox not found for run ${runId}`);
-  if (existing.status === "DELIVERED") return existing;
+  if (existing.status === "DELIVERED" || existing.status === "EXPIRED") return existing;
+  const now = dependencies.clock.now();
+  if (existing.status === "SENDING") {
+    if (now.getTime() - Date.parse(existing.updatedAt) < SPX_DELIVERY_LEASE_MS) return existing;
+    existing = await dependencies.store.markDeliveryUnknown(runId, "Delivery acknowledgement was not persisted; verify Telegram before retrying.", now.toISOString(), existing.attemptCount);
+  }
+
+  const run = await dependencies.store.getRun(runId);
+  if (!run) throw new Error(`decision run not found for outbox ${runId}`);
+  const mode = run.runMode || run.snapshot?.runMode;
+  const replay = mode === "UAT_REPLAY" || mode === "UAT_LLM";
+  const scheduledMs = Date.parse(replay ? run.createdAt : run.scheduledAt);
+  if (!Number.isFinite(scheduledMs)) throw new Error(`invalid delivery scheduledAt for run ${runId}`);
+  if (now.getTime() >= scheduledMs + SPX_DELIVERY_TTL_MS || (!replay && await dependencies.store.hasNewerDecision(runId, run.scheduledAt))) {
+    return dependencies.store.markDeliveryExpired(runId, now.toISOString(), existing.attemptCount);
+  }
+  if (options.manual && !options.acknowledgeDuplicate) throw new Error("Manual delivery retry requires acknowledgement of a possible duplicate.");
+  if (existing.status === "UNKNOWN" && !(options.manual && options.acknowledgeDuplicate)) return existing;
+  if (existing.status === "UNKNOWN" && now.getTime() - Date.parse(existing.updatedAt) < SPX_DELIVERY_LEASE_MS) return existing;
+  if (!options.manual && existing.status === "FAILED" && existing.nextAttemptAt && Date.parse(existing.nextAttemptAt) > now.getTime()) return existing;
 
   const attemptedAt = nowIso(dependencies);
-  const attempting = await dependencies.store.markDeliveryAttempt(runId, attemptedAt);
+  const attempting = await dependencies.store.markDeliveryAttempt(runId, attemptedAt, existing.attemptCount, Boolean(options.manual && options.acknowledgeDuplicate));
   if (attempting.status === "DELIVERED") return attempting;
   await appendLifecycle(dependencies, runId, "DELIVERY_ATTEMPTED", {
     retry: attempting.attemptCount > 1,
   }, null, attempting.attemptCount);
 
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    const result = await dependencies.telegram.send(attempting.message);
+    const originalMessage = replay ? `🧪 UAT｜歷史重播／非即時交易訊號\n${attempting.message}` : attempting.message;
+    const message = attempting.attemptCount > 1
+      ? `⚠️ 重送／可能重複｜原決策時間 ${run.scheduledAt}\n${originalMessage}`
+      : originalMessage;
+    const result = await Promise.race([
+      dependencies.telegram.send(message, controller.signal),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          controller.abort();
+          reject(new Error("Telegram delivery timed out; receipt is unknown."));
+        }, Math.min(dependencies.deliverySendTimeoutMs ?? SPX_DELIVERY_SEND_TIMEOUT_MS, SPX_DELIVERY_SEND_TIMEOUT_MS));
+      }),
+    ]);
+    if (!result.messageId?.trim()) throw new Error("Telegram delivery returned no message ID; receipt is unknown.");
     const deliveredAt = nowIso(dependencies);
-    const delivered = await dependencies.store.markDelivered(runId, result.messageId, deliveredAt);
+    const delivered = await dependencies.store.markDelivered(runId, result.messageId, deliveredAt, attempting.attemptCount);
+    if (delivered.status !== "DELIVERED" || delivered.attemptCount !== attempting.attemptCount) return delivered;
     await appendLifecycle(dependencies, runId, "DELIVERED", {
       telegramMessageId: result.messageId,
     }, null, attempting.attemptCount);
@@ -1110,13 +1152,28 @@ export async function retrySpxDelivery(
     const nextAttemptAt = new Date(
       dependencies.clock.now().getTime() + (dependencies.deliveryRetryDelayMs ?? 60_000),
     ).toISOString();
+    const rejected = error instanceof SpxTelegramRejectedError;
+    const failed = rejected
+      ? await dependencies.store.markDeliveryFailed(runId, message, nextAttemptAt, failedAt, attempting.attemptCount)
+      : await dependencies.store.markDeliveryUnknown(runId, message, failedAt, attempting.attemptCount);
+    if (failed.attemptCount !== attempting.attemptCount || failed.status === "DELIVERED") return failed;
     await appendLifecycle(dependencies, runId, "DELIVERY_FAILED", {
       error: message,
-      retryable: true,
-      nextAttemptAt,
+      retryable: rejected,
+      outcome: failed.status,
+      nextAttemptAt: rejected ? nextAttemptAt : null,
     }, null, attempting.attemptCount);
-    return dependencies.store.markDeliveryFailed(runId, message, nextAttemptAt, failedAt);
-  }
+    return failed;
+  } finally { if (timeout !== undefined) clearTimeout(timeout); }
+}
+
+export const SPX_DELIVERY_SEND_TIMEOUT_MS = 20_000;
+export const SPX_DELIVERY_LEASE_MS = 60_000;
+export const SPX_DELIVERY_TTL_MS = 15 * 60_000;
+
+/** A verified provider rejection proves this attempt did not deliver a message. */
+export class SpxTelegramRejectedError extends Error {
+  constructor(message: string) { super(message); this.name = "SpxTelegramRejectedError"; }
 }
 
 export function findMissingScheduledRuns(expectedRunIds: string[], store: SpxDecisionStore) {
@@ -1176,18 +1233,21 @@ export class InMemorySpxDecisionStore implements SpxDecisionStore {
     return record ? structuredClone(record) : null;
   }
 
-  markDeliveryAttempt(runId: string, at: string) {
+  markDeliveryAttempt(runId: string, at: string, expectedAttempt: number, allowUnknown = false) {
     const record = this.requireOutbox(runId);
     if (record.status === "DELIVERED") return structuredClone(record);
-    if (record.status === "SENDING") throw new Error(`outbox delivery already in progress for run ${runId}`);
+    if (record.attemptCount !== expectedAttempt || !["PENDING", "FAILED", ...(allowUnknown ? ["UNKNOWN"] : [])].includes(record.status)) {
+      throw new Error(`outbox delivery already in progress or not retryable for run ${runId}`);
+    }
     record.status = "SENDING";
     record.attemptCount += 1;
     record.updatedAt = at;
     return structuredClone(record);
   }
 
-  markDeliveryFailed(runId: string, error: string, nextAttemptAt: string, at: string) {
+  markDeliveryFailed(runId: string, error: string, nextAttemptAt: string, at: string, expectedAttempt: number) {
     const record = this.requireOutbox(runId);
+    if (record.status !== "SENDING" || record.attemptCount !== expectedAttempt) return structuredClone(record);
     record.status = "FAILED";
     record.lastError = error;
     record.nextAttemptAt = nextAttemptAt;
@@ -1195,8 +1255,29 @@ export class InMemorySpxDecisionStore implements SpxDecisionStore {
     return structuredClone(record);
   }
 
-  markDelivered(runId: string, telegramMessageId: string, at: string) {
+  markDeliveryUnknown(runId: string, error: string, at: string, expectedAttempt: number) {
     const record = this.requireOutbox(runId);
+    if (record.status !== "SENDING" || record.attemptCount !== expectedAttempt) return structuredClone(record);
+    record.status = "UNKNOWN";
+    record.lastError = error;
+    record.nextAttemptAt = null;
+    record.updatedAt = at;
+    return structuredClone(record);
+  }
+
+  markDeliveryExpired(runId: string, at: string, expectedAttempt: number) {
+    const record = this.requireOutbox(runId);
+    if (record.attemptCount !== expectedAttempt || !["PENDING", "FAILED", "UNKNOWN"].includes(record.status)) return structuredClone(record);
+    record.status = "EXPIRED";
+    record.lastError = "Original decision expired or was superseded; do not resend it as a live signal.";
+    record.nextAttemptAt = null;
+    record.updatedAt = at;
+    return structuredClone(record);
+  }
+
+  markDelivered(runId: string, telegramMessageId: string, at: string, expectedAttempt: number) {
+    const record = this.requireOutbox(runId);
+    if (record.attemptCount !== expectedAttempt || !["SENDING", "UNKNOWN"].includes(record.status)) return structuredClone(record);
     record.status = "DELIVERED";
     record.telegramMessageId = telegramMessageId;
     record.lastError = null;
@@ -1207,6 +1288,10 @@ export class InMemorySpxDecisionStore implements SpxDecisionStore {
 
   hasRun(runId: string) {
     return this.runs.has(runId);
+  }
+
+  hasNewerDecision(runId: string, scheduledAt: string) {
+    return [...this.runs.values()].some(run => run.runId !== runId && run.scheduledAt > scheduledAt && run.finalAction !== null);
   }
 
   private requireOutbox(runId: string) {

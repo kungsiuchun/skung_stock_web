@@ -5,8 +5,7 @@ import {
   type PortfolioRebalancePolicy,
 } from "./portfolio-backtest";
 
-export interface PortfolioBacktestShareConfigV1 {
-  version: 1;
+interface PortfolioBacktestShareFields {
   startingCapital: number;
   startDate: string;
   endDate: string;
@@ -14,6 +13,9 @@ export interface PortfolioBacktestShareConfigV1 {
   dividendPolicy: PortfolioDividendPolicy;
   positions: PortfolioPositionInput[];
 }
+export interface PortfolioBacktestShareConfigV1 extends PortfolioBacktestShareFields { version: 1; }
+export interface PortfolioBacktestShareConfigV2 extends PortfolioBacktestShareFields { version: 2; }
+export type PortfolioBacktestShareConfig = PortfolioBacktestShareConfigV1 | PortfolioBacktestShareConfigV2;
 
 const ROUTE = "#/work/portfolio-backtest";
 const ALLOWED_KEYS = new Set(["v", "capital", "start", "end", "rebalance", "dividend", "asset"]);
@@ -31,8 +33,8 @@ const parseCanonicalCapital = (text: string) => {
   return value;
 };
 
-const validate = (config: PortfolioBacktestShareConfigV1): PortfolioBacktestShareConfigV1 => {
-  if (config.version !== 1) throw new Error("Unsupported shared backtest setup version.");
+const validate = (config: PortfolioBacktestShareConfig): PortfolioBacktestShareConfig => {
+  if (config.version !== 1 && config.version !== 2) throw new Error("Unsupported shared backtest setup version.");
   if (!config.startDate || !config.endDate) throw new Error("Shared backtest setup requires a complete date range.");
   const normalized = {
     ...config,
@@ -52,7 +54,7 @@ const validate = (config: PortfolioBacktestShareConfigV1): PortfolioBacktestShar
   return normalized;
 };
 
-export const decodePortfolioBacktestShareConfig = (hash: string): PortfolioBacktestShareConfigV1 | null => {
+export const decodePortfolioBacktestShareConfig = (hash: string): PortfolioBacktestShareConfig | null => {
   const question = hash.indexOf("?");
   if (question < 0 || hash.slice(question + 1).length === 0) return null;
   if (hash.slice(0, question) !== ROUTE) return null;
@@ -64,7 +66,7 @@ export const decodePortfolioBacktestShareConfig = (hash: string): PortfolioBackt
   for (const key of SINGLE_VALUE_KEYS) {
     if (params.getAll(key).length !== 1) throw new Error(`Shared backtest parameter ${key} must appear exactly once.`);
   }
-  if (params.get("v") !== "1") throw new Error("Unsupported shared backtest setup version.");
+  if (params.get("v") !== "1" && params.get("v") !== "2") throw new Error("Unsupported shared backtest setup version.");
 
   const capitalText = params.get("capital") || "";
   const assets = params.getAll("asset");
@@ -75,7 +77,7 @@ export const decodePortfolioBacktestShareConfig = (hash: string): PortfolioBackt
   });
 
   return validate({
-    version: 1,
+    version: Number(params.get("v")) as 1 | 2,
     startingCapital: parseCanonicalCapital(capitalText),
     startDate: params.get("start") || "",
     endDate: params.get("end") || "",
@@ -85,10 +87,11 @@ export const decodePortfolioBacktestShareConfig = (hash: string): PortfolioBackt
   });
 };
 
-export const encodePortfolioBacktestShareConfig = (input: PortfolioBacktestShareConfigV1): string => {
+export const encodePortfolioBacktestShareConfig = (input: PortfolioBacktestShareConfigV2): string => {
+  if (input.version !== 2) throw new Error("New shared setups require methodology v2. Review and migrate the legacy setup first.");
   const config = validate(input);
   const params = new URLSearchParams();
-  params.set("v", "1");
+  params.set("v", "2");
   params.set("capital", canonicalCapitalText(config.startingCapital));
   params.set("start", config.startDate);
   params.set("end", config.endDate);

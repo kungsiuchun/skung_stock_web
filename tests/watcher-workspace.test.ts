@@ -137,6 +137,31 @@ test("Refresh cancels active and queued requests and prevents late responses res
   }
 });
 
+test("options deadline is a visible timeout while caller cancellation remains AbortError", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  let expire: () => void = () => { throw new Error("Deadline was not registered"); };
+  Object.defineProperty(globalThis, "window", { configurable: true, value: {
+    setTimeout: (callback: () => void) => { expire = callback; return 1; }, clearTimeout: () => undefined,
+  } });
+  globalThis.fetch = ((_url, init) => new Promise<Response>((_resolve, reject) => {
+    init!.signal!.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+  })) as typeof fetch;
+  try {
+    const client = createWorkspaceClient();
+    const timeout = assert.rejects(client.optionsSnapshot("NVDA"), error => error instanceof Error && error.name !== "AbortError" && /timed out/.test(error.message));
+    expire(); await timeout;
+    const controller = new AbortController();
+    const cancelled = assert.rejects(client.optionsSnapshot("NVDA", controller.signal), { name: "AbortError" });
+    controller.abort(); await cancelled;
+    const invalidated = assert.rejects(client.optionsSnapshot("NVDA"), { name: "AbortError" });
+    client.invalidate(); await invalidated;
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow); else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
 test("atomic counters enforce concurrent reservations, monotonic UTC resets and corrupt-state fail closed", async () => {
   const { db, sql } = sqliteD1();
   const now = new Date("2026-10-24T12:00:00Z");

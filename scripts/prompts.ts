@@ -62,15 +62,17 @@ Decision framework:
 10. Targets must respect repeated intraday support/resistance; do not set far targets through defended levels without acceptance beyond them.
 11. This is advisory only. Do not mention broker routing, fills, auto-trading, or direct execution.
 12. Do not hold overnight. At or after 15:45 ET (12:45 ET early close), any open position must be CLOSED. The deterministic Risk Gate enforces this independently of your answer.
+13. Execution fields are typed underlying SPX index points, never option premiums. OPEN_CALL requires stop_loss.price below buy_zone.low and every target above buy_zone.high; OPEN_PUT requires the reverse. No minimum reward/risk ratio is imposed.
+14. A touch stop uses trigger="touch", timeframe=null. A candle-close stop uses trigger="bar_close" with timeframe="5m" or "15m" and a numeric price; it fires only from a completed candle of that exact timeframe, not a temporary touch. Never encode timing or prices in prose for execution. If the existing position has an unknown exit rule, flag manual review; do not claim that a stop or target was hit.
 
 Output ONLY one valid JSON object with exactly these nine keys in this exact order and no additional keys:
 {
   "trade_action": "OPEN_CALL" | "OPEN_PUT" | "CLOSE" | "HOLD",
   "confidence_score": 65,
   "logic": "concise CIO synthesis",
-  "buy_zone": "exact entry condition or null",
-  "stop_loss": "strict invalidation level and reason or null",
-  "targets": ["snapshot-backed target"],
+  "buy_zone": {"low": 7520.25, "high": 7522.75},
+  "stop_loss": {"price": 7517.5, "trigger": "touch", "timeframe": null},
+  "targets": [7526, 7530],
   "no_trade_conditions": ["exact invalidating condition"],
   "evidence_refs": ["exact.snapshot.fact.key"],
   "claims": [{"text": "one auditable claim", "evidence_refs": ["exact.snapshot.fact.key"]}]
@@ -80,7 +82,7 @@ Keep logic concise and high-impact. ${OUTPUT_LANGUAGE_RULE}
 For HOLD, buy_zone and stop_loss MUST be null and targets MUST be empty.
 Every claim and HOLD conflict MUST cite an exact key from allowedEvidenceRefs only; never invent or reuse a Council-only key outside that list.
 confidence_score must be an integer from 1 to 100. Zero is reserved for pipeline-generated invalid/degraded results and is not valid AI output.
-Contract shapes: HOLD uses {"trade_action":"HOLD","confidence_score":65,"logic":"...","buy_zone":null,"stop_loss":null,"targets":[],"no_trade_conditions":["..."],"evidence_refs":["exact.key"],"claims":[{"text":"...","evidence_refs":["exact.key"]}]}. OPEN_CALL or OPEN_PUT requires buy_zone as exactly two plain SPX numbers (example "7520.25 - 7522.75"), stop_loss containing exactly one plain SPX number, and targets as one or more plain-number strings (example ["7526.00","7530.00"]); do not add prose, labels, inequalities, or extra prices to these execution fields. CLOSE never opens the opposite direction.
+Contract shapes: HOLD uses {"trade_action":"HOLD","confidence_score":65,"logic":"...","buy_zone":null,"stop_loss":null,"targets":[],"no_trade_conditions":["..."],"evidence_refs":["exact.key"],"claims":[{"text":"...","evidence_refs":["exact.key"]}]}. CLOSE also uses null buy_zone, null stop_loss, empty targets and never opens the opposite direction. OPEN_CALL or OPEN_PUT requires buy_zone={"low":number,"high":number}, stop_loss={"price":number,"trigger":"touch"|"bar_close","timeframe":null|"5m"|"15m"}, and targets as nonempty positive numbers. low must be below high. Every nested object has exactly the displayed keys. Use only "5m" or "15m" for a bar_close stop, and null timeframe for touch. Human-readable rationale belongs only in logic/claims.
 Use literal \\n for newlines inside JSON strings. Never use actual multiline line breaks inside JSON strings.`;
 
 export const SYSTEM_PROMPT_PREFIX = `Based on the following market data, output ONLY valid JSON:
